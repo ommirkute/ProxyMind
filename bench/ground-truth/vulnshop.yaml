@@ -1,0 +1,29 @@
+# Known vulnerabilities in VulnShop (proxymind demo-target).
+# Used by `proxymind bench score` to measure what a run found and proved.
+app: VulnShop
+vulns:
+  - id: VS-1
+    class: idor
+    method: GET
+    path: /api/orders/{id}
+    description: Any logged-in user can read any order (no ownership check).
+  - id: VS-2
+    class: bfla
+    method: GET
+    path: /api/admin/users
+    description: Admin user list only checks login, not role.
+  - id: VS-3
+    class: sqli
+    method: GET
+    path: /api/products/search
+    description: Time-based SQL injection in q.
+  - id: VS-4
+    class: ssrf
+    method: GET
+    path: /api/fetch
+    description: url parameter fetched server-side without an allow-list.
+# Correctly protected look-alikes. A finding here is a false positive.
+secure:
+  - GET /api/invoices/{id}
+  - GET /api/admin/stats
+  - GET /api/orders

@@ -1,5 +1,7 @@
 //! `proxymind`: command-line entry point.
 
+mod bench;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +60,11 @@ enum Command {
         /// Only show hosts containing this text.
         #[arg(long)]
         host: Option<String>,
+        /// Only show paths containing this text.
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        method: Option<String>,
         /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -131,6 +138,11 @@ enum Command {
         #[command(subcommand)]
         action: ProofAction,
     },
+    /// Benchmarks: score this project's findings against an app's known vulnerabilities.
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
+    },
     /// Write a Markdown report of the findings.
     Report {
         /// Output file (default: print)
@@ -160,7 +172,34 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum BenchAction {
+    /// Compare findings with ground truth (default: VulnShop's).
+    Score {
+        /// Ground-truth YAML (see bench/ground-truth/vulnshop.yaml)
+        #[arg(long)]
+        truth: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum FindingAction {
+    /// Record a suspected finding.
+    Add {
+        #[arg(long)]
+        title: String,
+        /// idor, bfla, sqli, ssrf, xss, …
+        #[arg(long)]
+        class: String,
+        #[arg(long, default_value = "medium")]
+        severity: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Evidence exchange ids, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        evidence: Vec<i64>,
+    },
     /// List findings.
     List {
         #[arg(long)]
@@ -178,6 +217,27 @@ enum FindingAction {
 
 #[derive(Subcommand)]
 enum ProofAction {
+    /// Prove broken access control: replay the owner's GET as another identity.
+    Authz {
+        exchange_id: i64,
+        #[arg(long)]
+        attacker: String,
+        /// Owner identity (default: the one the exchange was made as)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Mark this finding proven if it succeeds
+        #[arg(long)]
+        finding: Option<i64>,
+    },
+    /// Prove time-based injection: compare the exchange's request with a delay payload.
+    Timing {
+        exchange_id: i64,
+        /// File with the raw payload request
+        #[arg(long)]
+        payload_file: PathBuf,
+        #[arg(long)]
+        finding: Option<i64>,
+    },
     /// Show a proof.
     Show { id: i64 },
     /// Run a proof again with the same inputs (e.g. during a retest).
@@ -446,9 +506,15 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::History { limit, host, json } => {
+        Command::History { limit, host, path, method, json } => {
             let store = Store::open(&cli.project)?;
-            let rows = store.list_exchanges(*limit, host.as_deref())?;
+            let rows = store.search_exchanges(&pm_store::HistoryFilter {
+                host: host.clone(),
+                path: path.clone(),
+                method: method.clone(),
+                limit: Some(*limit),
+                ..Default::default()
+            })?;
             if *json {
                 out!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
@@ -621,6 +687,21 @@ async fn run() -> Result<()> {
                 )
             };
             match action {
+                FindingAction::Add { title, class, severity, description, evidence } => {
+                    let f = service.finding_create(
+                        &me,
+                        pm_service::NewFinding {
+                            title: title.clone(),
+                            vuln_class: class.clone(),
+                            severity: severity.clone(),
+                            description: description.clone(),
+                            url: None,
+                            evidence: evidence.clone(),
+                            hypothesis_id: None,
+                        },
+                    )?;
+                    out!("✓ finding #{} recorded as {}", f["id"], f["status"]);
+                }
                 FindingAction::List { status } => {
                     for f in service.finding_list(status.as_deref())? {
                         out!(
@@ -643,11 +724,84 @@ async fn run() -> Result<()> {
         }
         Command::Proof { action } => {
             let service = open_service(&cli.project, None)?;
+            let print_result = |r: &pm_service::ProofResult| -> Result<()> {
+                match r {
+                    pm_service::ProofResult::Completed { proof_id, proven, confidence, reasons, .. } => {
+                        out!(
+                            "{} (proof #{proof_id}, {confidence} confidence)",
+                            if *proven { "✓ PROVEN" } else { "✗ not proven" }
+                        );
+                        for r in reasons {
+                            out!("  - {r}");
+                        }
+                    }
+                    other => out!("{}", serde_json::to_string_pretty(other)?),
+                }
+                Ok(())
+            };
             match action {
+                ProofAction::Authz { exchange_id, attacker, owner, finding } => {
+                    let r = service
+                        .proof_run(
+                            &human_actor(None)?,
+                            pm_service::ProofRequest {
+                                oracle: "differential_authz".into(),
+                                exchange_id: Some(*exchange_id),
+                                attacker: Some(attacker.clone()),
+                                owner: owner.clone(),
+                                finding_id: *finding,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    print_result(&r)?;
+                }
+                ProofAction::Timing { exchange_id, payload_file, finding } => {
+                    let payload = std::fs::read_to_string(payload_file)?;
+                    let r = service
+                        .proof_run(
+                            &human_actor(None)?,
+                            pm_service::ProofRequest {
+                                oracle: "timing".into(),
+                                exchange_id: Some(*exchange_id),
+                                payload_raw: Some(payload),
+                                finding_id: *finding,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    print_result(&r)?;
+                }
                 ProofAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.proof_get(*id)?)?),
                 ProofAction::Rerun { id } => {
                     let r = service.proof_rerun(&human_actor(None)?, *id).await?;
                     out!("{}", serde_json::to_string_pretty(&r)?);
+                }
+            }
+        }
+        Command::Bench { action: BenchAction::Score { truth, json } } => {
+            let service = open_service(&cli.project, None)?;
+            let truth = bench::load_truth(truth.as_deref())?;
+            let score = bench::score(&truth, &service.finding_list(None)?);
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&score)?);
+            } else {
+                out!("{}: found {}/{}, proven {}/{}", score.app, score.found, score.total, score.proven, score.total);
+                for v in &score.vulns {
+                    let mark = if v.proven {
+                        "✓ proven"
+                    } else if v.found {
+                        "~ found "
+                    } else {
+                        "✗ missed"
+                    };
+                    out!("  {mark}  {:<5} {:<6} {}  findings {:?}", v.id, v.class, v.endpoint, v.findings);
+                }
+                if !score.findings_on_secure_endpoints.is_empty() {
+                    out!("  false positives on secure endpoints: {:?}", score.findings_on_secure_endpoints);
+                }
+                if !score.unmatched_findings.is_empty() {
+                    out!("  findings matching no known vulnerability: {:?}", score.unmatched_findings);
                 }
             }
         }
@@ -810,7 +964,12 @@ async fn run() -> Result<()> {
                     if *json {
                         out!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
-                        out!("{} {} (baseline status {:?})", report.method, report.url, report.baseline_status);
+                        out!(
+                            "{} {} (owner's request re-sent: {})",
+                            report.method,
+                            report.url,
+                            report.baseline_status.map_or("no response".to_string(), |s| s.to_string())
+                        );
                         print(&report.results)?;
                     }
                 }

@@ -93,9 +93,27 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `identity_check` | Check a session, logging in again automatically if a login recipe exists |
 | `authz_check` | Re-send a recorded GET as other identities and anonymously; compare with the owner's response |
 | `authz_results` | Latest authorization-check results |
+| `model_get` | The app model: operations (`GET /api/orders/{id}`), params, identities seen, objects and owners |
+| `authz_candidates` | Suggested access-control tests: objects owned by one identity, to try as others |
+| `hypothesis_create` / `hypothesis_update` / `hypothesis_list` | The shared ledger of what is being tested and what was ruled out |
+| `coverage` | Each operation × relevant vulnerability class, untested and high-priority first |
+| `finding_create` / `finding_update` / `finding_list` | Record findings with evidence; agents can't mark them proven or confirmed |
+| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing` or `oast` |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
+
+## Proofs: "no proof, no finding"
+
+A finding only becomes **proven** when ProxyMind checks it itself:
+
+| Oracle | Proves | Proven when |
+|---|---|---|
+| `differential_authz` | IDOR/BOLA, missing role checks | the owner's request works twice, an anonymous request is refused, and a different, not more privileged identity gets the same data (noise ignored; owner details such as emails raise confidence) |
+| `timing` | time-based injection | payload responses are slower than interleaved baseline responses with p < 0.01 (Mann-Whitney U) *and* by at least `min_effect_ms` |
+| `oast` | SSRF, blind injection | the target calls back with a unique token. Run `proxymind oast-server`, or start the MCP server with `--oast-listen 127.0.0.1:8085` (use a public URL the target can reach) |
+
+Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`) count as intrusive, so agents need approval by default.
 
 ## What the agent sees
 

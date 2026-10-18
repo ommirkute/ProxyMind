@@ -4,20 +4,31 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: early development (pre-alpha).** Working today: the HTTP/1.1 intercepting proxy with TLS interception, project history, the policy gate (scope, rules of engagement, approvals, tamper-evident audit log), an MCP server so AI agents can search traffic and send requests under those rules, and multi-identity authorization checks (replay any request as another user and compare the results). Everything else below is planned. See [`docs/plan.md`](docs/plan.md).
+> **Status: pre-alpha.** The engine and agent interface work end to end (see the demo); there is no desktop UI yet and the proxy speaks HTTP/1.1 only. See [What's done and what's next](docs/plan.md#status).
 
 ## Why ProxyMind
 
 | | What it means |
 |---|---|
 | 🧠 **Live app model** | Builds a map of the app from traffic: objects, IDs, who owns them, and operations. Agents ask questions like "which endpoints accept another user's order ID?" instead of reading raw logs. |
-| 👥 **Multi-identity by default** | Keeps several user sessions alive, replays any request as any user, and fills in an authorization matrix while you browse. |
-| ✅ **No proof, no finding** | Findings count only when ProxyMind proves them itself (differential authz, OAST callbacks, statistical timing). Every proof can be re-run with one click. |
+| 👥 **Multi-identity by default** | Keeps several user sessions alive (automatic re-login), replays any request as any user, and compares the responses while ignoring timestamps and tokens. |
+| ✅ **No proof, no finding** | Findings count only when ProxyMind proves them itself (differential authz, OAST callbacks, statistical timing). Every proof can be re-run with one command. |
 | 📒 **Hypothesis ledger & coverage** | Shared memory of what was tested, by whom, and what's still untested, for humans and agents alike. |
 | 🛡️ **Rules of engagement as code** | Scope, rate limits, time windows and approvals are enforced by the core, outside the model, with a tamper-evident audit log. |
-| 🔌 **Any model, any agent, offline** | MCP server and REST API for Claude Code, Cursor or your own agents. Works with cloud models or fully local ones. |
+| 🔌 **Any model, any agent, offline** | MCP server for Claude Code, Cursor or your own agents, including ones running local models (REST API planned). ProxyMind never sends your data to a model itself, and agents see secrets only as placeholders. |
 
-## Quick start (current spike)
+## Try it in two minutes
+
+```bash
+cargo build --release
+PROXYMIND=./target/release/proxymind bench/demo.sh
+```
+
+The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a Markdown report.
+
+Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining two bugs.
+
+## Quick start
 
 Requires Rust 1.88+.
 

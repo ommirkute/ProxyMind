@@ -315,8 +315,10 @@ pub fn build(observations: &[Observation<'_>]) -> AppModel {
         }
         let Some(resp) = o.response.filter(|_| ok) else { continue };
         let Some(json) = body_json(resp) else { continue };
-        // Objects listed in a collection response belong to the caller.
-        if template.ends_with(|c: char| c != '}') && (method == "GET") {
+        // Objects listed in a collection response belong to the caller, except
+        // in admin views, which list everyone's objects.
+        let admin_view = ["admin", "manage", "internal"].iter().any(|w| template.to_ascii_lowercase().contains(w));
+        if template.ends_with(|c: char| c != '}') && method == "GET" && !admin_view {
             let last = template.trim_end_matches('/').rsplit('/').next().unwrap_or("");
             for (ty, id) in listed_ids(&json, &type_name(last)) {
                 let k = touch(&ty, &id, o.exchange_id);

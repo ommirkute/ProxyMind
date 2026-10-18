@@ -33,6 +33,11 @@ pub struct DifferentialInputs {
     pub markers_found: Vec<String>,
 }
 
+/// `Some(401)` → "401", `None` → "no response".
+pub fn status_text(s: Option<u16>) -> String {
+    s.map_or_else(|| "no response".to_string(), |x| x.to_string())
+}
+
 fn ok(s: Option<u16>) -> bool {
     s.is_some_and(|s| (200..300).contains(&s))
 }
@@ -59,16 +64,23 @@ pub fn differential_authz(i: &DifferentialInputs) -> Verdict {
         proven = fail(format!("{} is an admin; access is expected", i.attacker), &mut reasons);
     }
     if !(ok(i.owner_statuses[0]) && ok(i.owner_statuses[1])) {
-        proven = fail(format!("owner request did not succeed twice ({:?})", i.owner_statuses), &mut reasons);
+        proven = fail(
+            format!(
+                "owner request did not succeed twice ({}, {})",
+                status_text(i.owner_statuses[0]),
+                status_text(i.owner_statuses[1])
+            ),
+            &mut reasons,
+        );
     }
     if !refused(i.anonymous_status) {
         proven = fail(
-            format!("anonymous request was not refused ({:?}); the data may be public", i.anonymous_status),
+            format!("anonymous request was not refused ({}); the data may be public", status_text(i.anonymous_status)),
             &mut reasons,
         );
     }
     if !ok(i.attacker_status) {
-        proven = fail(format!("{} was refused ({:?})", i.attacker, i.attacker_status), &mut reasons);
+        proven = fail(format!("{} was refused ({})", i.attacker, status_text(i.attacker_status)), &mut reasons);
     }
     if i.similarity < 0.9 {
         proven = fail(
@@ -78,12 +90,12 @@ pub fn differential_authz(i: &DifferentialInputs) -> Verdict {
     }
     if proven {
         reasons.push(format!(
-            "{} ({}) received {}'s data ({:.0}% similar, noise ignored) while anonymous access is refused ({:?})",
+            "{} ({}) received {}'s data ({:.0}% similar, noise ignored) while anonymous access is refused ({})",
             i.attacker,
             i.attacker_role,
             i.owner,
             i.similarity * 100.0,
-            i.anonymous_status
+            status_text(i.anonymous_status)
         ));
         if !i.markers_found.is_empty() {
             reasons.push(format!(

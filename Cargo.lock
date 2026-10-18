@@ -985,15 +985,19 @@ dependencies = [
  "jiff",
  "pm-demo",
  "pm-mcp",
+ "pm-model",
  "pm-oast",
  "pm-proxy",
  "pm-service",
  "pm-store",
  "pm-tls",
+ "serde",
+ "serde-saphyr",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

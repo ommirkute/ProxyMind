@@ -13,6 +13,28 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 5. **Open, reproducible benchmarks.**
 6. **No licence or AI-credit costs.**
 
+## Status
+
+**Done** (all with automated tests, CI on Linux/macOS/Windows):
+
+- Proxy core: HTTP/1.1, CONNECT + TLS interception, byte-exact forwarding, WebSocket pass-through, history in a SQLite project file
+- Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
+- Agent interface: MCP server (22 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
+- Authorization checks; app model (operations, objects, ownership) with suggested tests
+- Hypothesis ledger and coverage map
+- Proof engine (differential authz, timing, OAST) with re-runnable proofs; findings workflow; Markdown report
+- VulnShop demo target, ground truth, `bench score`, demo script, and an end-to-end test where an agent finds and proves bugs purely over MCP
+
+**Next, in order:**
+
+1. **Desktop/web UI** (M2): history, viewer, intercept, Repeater, approvals, authz matrix, coverage, findings
+2. **Proxy depth** (M1): HTTP/2, intercept queue, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
+3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
+4. **Built-in AI assistant** in pm-ai (Anthropic, OpenAI-compatible, Ollama), honouring `allow_cloud_models`
+5. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
+6. Project encryption, signed releases, installers
+
 ## Team roles
 
 - **A:** proxy and networking

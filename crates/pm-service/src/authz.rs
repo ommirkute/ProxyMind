@@ -140,7 +140,11 @@ impl Service {
                     row.verdict =
                         if baseline_ok { classify(row.status, row.similarity) } else { "inconclusive" }.into();
                     if !baseline_ok {
-                        row.summary = format!("baseline returned {baseline_status:?}; {}", row.summary);
+                        row.summary = format!(
+                            "owner's request returned {}; {}",
+                            baseline_status.map_or("no response".to_string(), |s| s.to_string()),
+                            row.summary
+                        );
                     }
                 }
                 Authorization::PendingApproval { approval_id, .. } => {
