@@ -1,0 +1,22 @@
+[package]
+name = "pm-tls"
+description = "CA management, per-host leaf certificates and upstream TLS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+parking_lot = "0.12.5"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+time = "0.3.55"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing = "0.1.44"
+webpki-roots = "1.0.9"
+
+[lints]
+workspace = true

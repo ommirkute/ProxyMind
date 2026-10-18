@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=../schemas/roe.schema.json
+#
+# Rules of engagement for a ProxyMind project.
+# Enforced by the ProxyMind core for every actor (humans, agents, plugins).
+# Out-of-scope requests are always refused, whatever the tier settings.
+
+version: 1
+
+engagement:
+  name: "Example Corp web app test"
+  client: "Example Corp"
+  reference: "SOW-2026-042"
+  starts: 2026-11-02
+  ends: 2026-11-13
+
+scope:
+  include:
+    - "https://app.example.com/"
+    - "https://api.example.com/"
+  exclude:
+    - "https://app.example.com/logout"
+    - "https://api.example.com/v1/billing/*"
+  # Refuse requests whose host resolves to these networks (stops DNS tricks
+  # that point an in-scope name at internal systems).
+  deny_networks:
+    - "169.254.0.0/16"
+    - "10.0.0.0/8"
+
+windows:
+  timezone: "Europe/London"
+  allowed:
+    - "Mon-Fri 09:00-18:00"
+
+limits:
+  max_rps_per_host: 10
+  max_concurrency: 5
+
+# What each kind of actor may do without asking.
+# Values: allow | approve | deny
+tiers:
+  human:
+    read: allow
+    passive: allow
+    active_safe: allow
+    active_intrusive: allow
+    destructive: approve
+  agent:
+    read: allow
+    passive: allow
+    active_safe: allow
+    active_intrusive: approve
+    destructive: deny
+  plugin:
+    read: allow
+    passive: allow
+    active_safe: approve
+    active_intrusive: deny
+    destructive: deny
+
+data:
+  # Replace secrets (cookies, tokens, passwords) with placeholders before
+  # any content is sent to a model.
+  redact_before_llm: true
+  # false = only local models (e.g. Ollama) may see project data.
+  allow_cloud_models: false

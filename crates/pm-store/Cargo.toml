@@ -1,0 +1,20 @@
+[package]
+name = "pm-store"
+description = "Project storage: SQLite schema, blob store, search."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+zstd = "0.14.3"
+
+[lints]
+workspace = true

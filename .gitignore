@@ -1,0 +1,5 @@
+/target
+*.pmproj
+*.pmproj-*
+.proxymind/
+.DS_Store

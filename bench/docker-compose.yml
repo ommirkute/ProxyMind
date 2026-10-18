@@ -1,0 +1,23 @@
+# Deliberately vulnerable apps used to benchmark ProxyMind and the agents
+# that drive it. Run only on an isolated machine or network.
+#
+#   docker compose -f bench/docker-compose.yml up -d
+#
+# Juice Shop: http://127.0.0.1:3000
+# crAPI:      see bench/README.md (uses its own compose file)
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest  # pin a version tag before publishing benchmark results
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  vampi:
+    image: erev0s/vampi:latest
+    environment:
+      vulnerable: "1"
+      tokentimetolive: "3600"
+    ports:
+      - "127.0.0.1:5002:5000"
+    restart: unless-stopped

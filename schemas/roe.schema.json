@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ommirkute/proxymind/schemas/roe.schema.json",
+  "title": "ProxyMind rules of engagement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "scope"],
+  "properties": {
+    "version": { "const": 1 },
+    "engagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "client": { "type": "string" },
+        "reference": { "type": "string" },
+        "starts": { "type": "string", "format": "date" },
+        "ends": { "type": "string", "format": "date" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["include"],
+      "properties": {
+        "include": { "$ref": "#/$defs/urlPatterns", "minItems": 1 },
+        "exclude": { "$ref": "#/$defs/urlPatterns" },
+        "deny_networks": {
+          "type": "array",
+          "items": { "type": "string", "description": "CIDR, e.g. 10.0.0.0/8" }
+        }
+      }
+    },
+    "windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timezone": { "type": "string", "description": "IANA time zone, e.g. Europe/London" },
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(-(Mon|Tue|Wed|Thu|Fri|Sat|Sun))? ([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-4]):[0-5][0-9]$"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_rps_per_host": { "type": "number", "exclusiveMinimum": 0 },
+        "max_concurrency": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "human": { "$ref": "#/$defs/tierPolicy" },
+        "agent": { "$ref": "#/$defs/tierPolicy" },
+        "plugin": { "$ref": "#/$defs/tierPolicy" }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "redact_before_llm": { "type": "boolean", "default": true },
+        "allow_cloud_models": { "type": "boolean", "default": false }
+      }
+    }
+  },
+  "$defs": {
+    "urlPatterns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "URL prefix; '*' matches any characters within a path segment or host label",
+        "pattern": "^https?://"
+      }
+    },
+    "decision": { "enum": ["allow", "approve", "deny"] },
+    "tierPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "read": { "$ref": "#/$defs/decision" },
+        "passive": { "$ref": "#/$defs/decision" },
+        "active_safe": { "$ref": "#/$defs/decision" },
+        "active_intrusive": { "$ref": "#/$defs/decision" },
+        "destructive": { "$ref": "#/$defs/decision" }
+      }
+    }
+  }
+}
