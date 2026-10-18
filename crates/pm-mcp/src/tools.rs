@@ -74,6 +74,26 @@ pub fn tool_definitions() -> Vec<Value> {
             &["exchange_id"],
         ),
         tool(
+            "race_send",
+            "Race-condition test: send count copies of a request so they reach the server at the same moment (HTTP/2 \
+             single-packet attack when the server supports it, else last-byte sync). Use it on actions that should \
+             work once: redeeming a code, transferring money, voting, signing up. Returns responses grouped by status \
+             and body length; more than one success for a one-time action suggests a race condition. Always needs \
+             approval by default: ask the user, then call again with identical arguments plus approval_id.",
+            json!({
+                "exchange_id": {"type":"integer","description":"Recorded request to race"},
+                "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
+                "raw": {"type":"string","description":"The request (default: the recorded one)"},
+                "count": {"type":"integer","minimum":2,"maximum":50,"description":"Copies to send (default 10)"},
+                "mode": {"type":"string","enum":["auto","single_packet","last_byte"],"description":"Default auto"},
+                "identity": {"type":"string"},
+                "fix_content_length": {"type":"boolean"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &[],
+        ),
+        tool(
             "ws_send",
             "Open a new WebSocket like a recorded one (exchange_id of a status-101 upgrade), send messages in order and \
              get every message both ways. ProxyMind listens wait_ms after opening and after each message, answers pings \
@@ -377,6 +397,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
                 .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
                 .map(to_json)
                 .map_err(|e| e.to_string())
+        }
+        "race_send" => {
+            let r: pm_service::RaceRequest = args(a)?;
+            service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "ws_send" => {
             let r: pm_service::WsReplayRequest = args(a)?;

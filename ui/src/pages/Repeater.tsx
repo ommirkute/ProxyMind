@@ -2,6 +2,19 @@ import { useEffect, useState } from "react";
 import { api, originOf, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
 import { Chip, ErrorBox, ExchangeLink, Panel, Raw, StatusCode, useAction, useLoad, useNav } from "../components";
 
+interface RaceGroup {
+  status?: number;
+  body_length: number;
+  count: number;
+  exchange_ids: number[];
+  error?: string;
+}
+
+type RaceResult =
+  | { status: "done"; mode: "single_packet" | "last_byte"; count: number; groups: RaceGroup[]; successes: number; fastest_ms: number; slowest_ms: number; exchange_ids: number[] }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
 interface Sent {
   result: ReplayResult;
   response?: string | null;
@@ -16,6 +29,10 @@ export default function Repeater() {
   const [fixCl, setFixCl] = useState(true);
   const [sent, setSent] = useState<Sent | null>(null);
   const [approval, setApproval] = useState<string | null>(null);
+  const [raceCount, setRaceCount] = useState(10);
+  const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
+  const [race, setRace] = useState<RaceResult | null>(null);
+  const [raceApproval, setRaceApproval] = useState<string | null>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
 
@@ -51,6 +68,23 @@ export default function Repeater() {
       }
       setApproval(result.status === "pending_approval" ? result.approval_id : null);
       setSent({ result, response, status });
+      setRace(null);
+    });
+
+  const runRace = () =>
+    action.run(async () => {
+      const r = await api.post<RaceResult>("/race", {
+        url,
+        raw,
+        count: raceCount,
+        mode: raceMode,
+        identity: identity || undefined,
+        fix_content_length: fixCl,
+        approval_id: raceApproval || undefined,
+      });
+      setRaceApproval(r.status === "pending_approval" ? r.approval_id : null);
+      setRace(r);
+      setSent(null);
     });
 
   return (
@@ -84,6 +118,7 @@ export default function Repeater() {
             onChange={(e) => {
               setRaw(e.target.value);
               setApproval(null);
+              setRaceApproval(null);
             }}
             spellCheck={false}
           />
@@ -91,10 +126,25 @@ export default function Repeater() {
             Sent exactly as written (bare line breaks in the head become CRLF). Choosing an identity swaps in its
             cookies and auth headers. Everything goes through the rules of engagement.
           </p>
+          <div className="row small race-bar">
+            <strong>Race</strong>
+            <label>
+              send <input aria-label="Race count" type="number" min={2} max={50} value={raceCount} onChange={(e) => { setRaceCount(Number(e.target.value)); setRaceApproval(null); }} style={{ width: 60 }} /> copies at once
+            </label>
+            <select aria-label="Race mode" value={raceMode} onChange={(e) => { setRaceMode(e.target.value as typeof raceMode); setRaceApproval(null); }}>
+              <option value="auto">auto (HTTP/2 single packet if possible)</option>
+              <option value="single_packet">HTTP/2 single packet</option>
+              <option value="last_byte">last-byte sync</option>
+            </select>
+            <button className="btn" data-testid="race" onClick={runRace} disabled={action.busy || !url}>
+              {raceApproval ? "Race approved" : "Race"}
+            </button>
+          </div>
         </Panel>
         <Panel title="Response">
           <ErrorBox error={action.error} />
-          {!sent && <p className="muted">Nothing sent yet.</p>}
+          {!sent && !race && <p className="muted">Nothing sent yet.</p>}
+          {race && !sent && <RaceView race={race} goApprovals={() => go("approvals")} />}
           {sent?.result.status === "sent" && (
             <>
               <div className="row small" style={{ marginBottom: 8 }} data-testid="replay-result">
@@ -116,6 +166,46 @@ export default function Repeater() {
           )}
         </Panel>
       </div>
+    </div>
+  );
+}
+
+function RaceView({ race, goApprovals }: { race: RaceResult; goApprovals: () => void }) {
+  if (race.status === "denied") return <div className="error">Denied by the rules of engagement: {race.reasons.join("; ")}</div>;
+  if (race.status === "pending_approval") {
+    return (
+      <div className="notice">
+        {race.summary} needs approval ({race.reasons.join("; ")}). Approve <strong>{race.approval_id}</strong> on the{" "}
+        <a href="#" onClick={(e) => { e.preventDefault(); goApprovals(); }}>Approvals</a> page, then press Race again.
+      </div>
+    );
+  }
+  return (
+    <div data-testid="race-result">
+      <div className="row small" style={{ marginBottom: 8 }}>
+        <strong>{race.count} requests</strong>
+        <Chip value={race.mode === "single_packet" ? "HTTP/2 single packet" : "last-byte sync"} />
+        <span className="muted">responses in {race.fastest_ms}–{race.slowest_ms} ms</span>
+        <span className={race.successes > 1 ? "bad" : "muted"}>{race.successes} succeeded (2xx)</span>
+      </div>
+      {race.successes > 1 && (
+        <div className="notice">More than one request succeeded. If this action should only work once, that's a race condition: open the exchanges to compare.</div>
+      )}
+      <table className="grid">
+        <thead>
+          <tr><th>Status</th><th>Body</th><th>Count</th><th>Exchanges</th></tr>
+        </thead>
+        <tbody>
+          {race.groups.map((g, i) => (
+            <tr key={i}>
+              <td>{g.error ? <span className="bad">error</span> : <StatusCode status={g.status ?? null} />}</td>
+              <td className="small">{g.error ?? `${g.body_length} bytes`}</td>
+              <td>{g.count}</td>
+              <td className="small">{g.exchange_ids.slice(0, 8).map((id) => <span key={id} style={{ marginRight: 6 }}><ExchangeLink id={id} /></span>)}{g.exchange_ids.length > 8 ? "…" : ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

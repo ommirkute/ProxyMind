@@ -77,6 +77,7 @@ pub fn api() -> Router<AppState> {
         .route("/exchanges/{id}", get(exchange))
         .route("/exchanges/{id}/ws", get(ws_messages))
         .route("/ws/replay", post(ws_replay))
+        .route("/race", post(race))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -331,6 +332,10 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {
+    ok(st.service.race_send(&st.actor, r).await?)
 }
 
 async fn ws_replay(State(st): State<AppState>, Json(r): Json<pm_service::WsReplayRequest>) -> ApiResult {

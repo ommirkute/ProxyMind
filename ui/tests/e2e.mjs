@@ -321,6 +321,20 @@ try {
   await page.getByTestId("intercept-toggle").click();
   await page.waitForSelector("text=Intercept is OFF");
 
+  console.log("Race condition (Repeater races VulnShop's one-time gift card)");
+  await page.getByRole("button", { name: "Repeater" }).click();
+  await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
+  const card = '{"code":"WELCOME10"}';
+  await page.getByLabel("Raw request").fill(
+    `POST /api/giftcard/redeem HTTP/1.1\nHost: 127.0.0.1:${shop}\nCookie: session=${session}\nContent-Type: application/json\nContent-Length: ${card.length}\n\n${card}`,
+  );
+  await page.getByLabel("Race count").fill("6");
+  await page.getByTestId("race").click();
+  const raceText = await page.getByTestId("race-result").textContent({ timeout: 15000 }).catch(() => "");
+  const wins = Number((raceText.match(/(\d+) succeeded/) ?? [])[1] ?? 0);
+  check(wins > 1, `racing 6 redemptions credits the card ${wins} times`);
+  await page.screenshot({ path: join(SHOTS, "6g-race.png") });
+
   console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
     "-keyout", join(dir, "h2.key"), "-out", join(dir, "h2.crt")], { stdio: "ignore" });

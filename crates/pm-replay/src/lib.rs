@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 
 mod h2send;
 pub mod net;
+pub mod race;
 
 pub use net::{ClientCert, NetConfig, Network, ProxyKind, UpstreamProxy};
 

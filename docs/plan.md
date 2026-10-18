@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Race-condition testing (`race_send`, Repeater → Race): HTTP/2 single-packet attack (all final frames in one TCP packet) with last-byte sync for HTTP/1.1 servers; at least active-intrusive; responses grouped. VulnShop gained VS-5 (gift card race)
 - Transparent (invisible) mode: origin-form HTTP routed by Host, TLS without CONNECT recognised by SNI; requests back to the proxy itself refused
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
 - WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
@@ -36,11 +37,10 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Next, in order:**
 
-1. **Proxy depth** (M1/M2): HTTP/2 frame-level tools (single-packet attack)
-2. **Desktop shell** (Tauri) around the web UI
-3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
-4. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
-5. Project encryption, signed releases, installers
+1. **Desktop shell** (Tauri) around the web UI
+2. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
+3. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
+4. Project encryption, signed releases, installers
 
 ## Team roles
 
@@ -68,7 +68,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 ## Component notes
 
 ### Proxy core (`pm-http`, `pm-tls`, `pm-proxy`)
-Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2 frame-level tools.
+Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Race testing uses the HTTP/2 single-packet attack.
 
 ### Policy gate (`pm-policy`): built before any agent API
 ROE file (`examples/roe.yaml`, `schemas/roe.schema.json`), action tiers, token-bucket rate limits per host and actor, approvals, blake3 hash-chained audit log, kill switch. Must resist scope-bypass tricks: encoded hosts, redirects, `Host` header mismatch, IP vs name, DNS rebinding.

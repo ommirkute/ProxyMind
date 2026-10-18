@@ -58,6 +58,14 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/fetch",
         description: "The url parameter is fetched server-side without any allow-list.",
     },
+    Vuln {
+        id: "VS-5",
+        class: "race_condition",
+        method: "POST",
+        path: "/api/giftcard/redeem",
+        description: "A one-per-user gift card is checked, then credited after a pause, without a lock: \
+                      requests sent together are all credited.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -89,6 +97,9 @@ struct State {
     orders: Vec<Order>,
     invoices: Vec<(u32, u32, f64)>,
     next_order: u32,
+    /// Users who redeemed the WELCOME10 gift card, and their store credit.
+    redeemed: std::collections::HashSet<u32>,
+    credit: HashMap<u32, u32>,
 }
 
 #[derive(Clone)]
@@ -215,6 +226,8 @@ impl VulnShop {
                 orders,
                 invoices: vec![(5001, 1, 49.90), (6001, 2, 120.00)],
                 next_order: 3000,
+                redeemed: Default::default(),
+                credit: HashMap::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
         }
@@ -500,6 +513,30 @@ impl VulnShop {
                 Some(_) => json_resp(403, json!({"error": "admins only"})),
                 None => unauthorized(),
             },
+            ("POST", ["api", "giftcard", "redeem"]) => {
+                let Some(user) = self.user(req) else { return unauthorized() };
+                if req.params().get("code").map(String::as_str) != Some("WELCOME10") {
+                    return json_resp(404, json!({"error": "unknown gift card"}));
+                }
+                // VS-5: race condition. Check, pause (a slow payment call), then
+                // write, with no lock held across the gap.
+                let used = self.state.lock().map(|s| s.redeemed.contains(&user.id)).unwrap_or(true);
+                if used {
+                    return json_resp(409, json!({"error": "gift card already redeemed"}));
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let credit = self
+                    .state
+                    .lock()
+                    .map(|mut s| {
+                        s.redeemed.insert(user.id);
+                        let c = s.credit.entry(user.id).or_default();
+                        *c += 10;
+                        *c
+                    })
+                    .unwrap_or(0);
+                json_resp(200, json!({"redeemed": "WELCOME10", "credit": credit, "meta": self.meta()}))
+            }
             ("GET", ["api", "fetch"]) => {
                 // VS-4: SSRF. Fetches any http:// URL.
                 let url = req.query.get("url").cloned().unwrap_or_default();

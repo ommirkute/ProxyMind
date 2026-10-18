@@ -186,3 +186,5 @@ table.grid input.wide { width: 100%; min-width: 160px; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; text-align: left; }
 @media (max-width: 800px) { .assistant-layout { grid-template-columns: 1fr; } }
 .ws-replay { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; }
+.race-bar { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; flex-wrap: wrap; }
+span.bad { color: var(--bad); font-weight: 600; }
