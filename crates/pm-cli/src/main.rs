@@ -88,6 +88,88 @@ enum Command {
         #[command(subcommand)]
         action: ApprovalAction,
     },
+    /// Manage test identities (users/roles and their sessions).
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
+    /// Authorization checks: replay a request as other identities.
+    Authz {
+        #[command(subcommand)]
+        action: AuthzAction,
+    },
+    /// Run VulnShop, a deliberately vulnerable demo API, on localhost.
+    DemoTarget {
+        #[arg(long, short, default_value = "127.0.0.1:8899")]
+        listen: SocketAddr,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityAction {
+    /// List identities (credential names only, never values).
+    List,
+    /// Create or update an identity from the cookies/auth headers of a recorded request.
+    Capture {
+        name: String,
+        #[arg(long)]
+        from: i64,
+        #[arg(long, default_value = "user")]
+        role: String,
+    },
+    /// Use a recorded GET (e.g. /api/me) as the identity's session health check.
+    Health {
+        name: String,
+        #[arg(long)]
+        from: i64,
+        /// Text the response must contain while logged in (e.g. the user's email)
+        #[arg(long)]
+        expect_contains: Option<String>,
+        #[arg(long)]
+        expect_status: Option<u16>,
+    },
+    /// Use a recorded login request as the identity's login recipe.
+    Login {
+        name: String,
+        #[arg(long)]
+        from: i64,
+        /// JSON pointer to a token in the login response, e.g. /token (sent as Authorization: Bearer)
+        #[arg(long)]
+        token_pointer: Option<String>,
+    },
+    /// Define an identity from a JSON file (name, role, auth, health, login).
+    Set {
+        file: PathBuf,
+    },
+    /// Check an identity's session (logs in again if needed).
+    Check {
+        name: String,
+    },
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthzAction {
+    /// Re-send a recorded GET as other identities and compare with the owner's response.
+    Check {
+        exchange_id: i64,
+        /// Comma-separated identity names, e.g. bob,admin
+        #[arg(long = "as", value_delimiter = ',')]
+        identities: Vec<String>,
+        #[arg(long)]
+        no_anonymous: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the latest results.
+    Results {
+        #[arg(long)]
+        exchange: Option<i64>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -408,6 +490,128 @@ async fn run() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::Identity { action } => {
+            let service = open_service(&cli.project, None)?;
+            let me = human_actor(None)?;
+            let show = |i: &pm_service::IdentityInfo| -> Result<()> {
+                out!(
+                    "{:<12} role={:<8} status={:<10} cookies=[{}] headers=[{}] health={} login={}",
+                    i.name,
+                    i.role,
+                    i.status,
+                    i.cookies.join(","),
+                    i.headers.join(","),
+                    if i.has_health_check { "yes" } else { "no" },
+                    if i.has_login { "yes" } else { "no" }
+                );
+                Ok(())
+            };
+            match action {
+                IdentityAction::List => {
+                    let list = service.identity_list()?;
+                    if list.is_empty() {
+                        out!(
+                            "No identities. Capture one with `proxymind identity capture <name> --from <exchange-id>`."
+                        );
+                    }
+                    for i in &list {
+                        show(i)?;
+                    }
+                }
+                IdentityAction::Capture { name, from, role } => {
+                    show(&service.identity_capture(&me, name, role, *from)?)?
+                }
+                IdentityAction::Health { name, from, expect_contains, expect_status } => show(
+                    &service.identity_set_health_from(&me, name, *from, expect_contains.clone(), *expect_status)?,
+                )?,
+                IdentityAction::Login { name, from, token_pointer } => {
+                    show(&service.identity_set_login_from(&me, name, *from, token_pointer.clone())?)?
+                }
+                IdentityAction::Set { file } => {
+                    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+                    let ident: pm_service::pm_identity::Identity = serde_json::from_str(&text)?;
+                    show(&service.identity_set(&me, ident)?)?
+                }
+                IdentityAction::Check { name } => {
+                    let c = service.identity_check(&me, name).await?;
+                    out!("{}: {}", c.name, c.status);
+                    for n in c.notes {
+                        out!("  - {n}");
+                    }
+                }
+                IdentityAction::Delete { name } => {
+                    let deleted = service.identity_delete(&me, name)?;
+                    out!("{}", if deleted { format!("deleted {name}") } else { format!("no identity {name}") });
+                }
+            }
+        }
+        Command::Authz { action } => {
+            let service = open_service(&cli.project, None)?;
+            let print = |rows: &[pm_service::pm_store::AuthzRow]| -> Result<()> {
+                out!(
+                    "{:>6}  {:<12} {:<18} {:>6}  {:>6}  {:>8}  SUMMARY",
+                    "EXCH",
+                    "IDENTITY",
+                    "VERDICT",
+                    "STATUS",
+                    "SIM",
+                    "EVIDENCE"
+                );
+                for r in rows {
+                    out!(
+                        "{:>6}  {:<12} {:<18} {:>6}  {:>6}  {:>8}  {} {}  {}",
+                        r.exchange_id,
+                        r.identity,
+                        r.verdict,
+                        r.status.map_or("-".into(), |s| s.to_string()),
+                        r.similarity.map_or("-".into(), |s| format!("{s:.2}")),
+                        r.evidence_id.map_or("-".into(), |s| s.to_string()),
+                        r.method,
+                        r.url,
+                        r.summary
+                    );
+                }
+                Ok(())
+            };
+            match action {
+                AuthzAction::Check { exchange_id, identities, no_anonymous, json } => {
+                    let report = service
+                        .authz_check(
+                            &human_actor(None)?,
+                            pm_service::AuthzCheckRequest {
+                                exchange_id: *exchange_id,
+                                identities: identities.clone(),
+                                include_anonymous: Some(!no_anonymous),
+                            },
+                        )
+                        .await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        out!("{} {} (baseline status {:?})", report.method, report.url, report.baseline_status);
+                        print(&report.results)?;
+                    }
+                }
+                AuthzAction::Results { exchange, json } => {
+                    let rows = service.authz_results(*exchange)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        print(&rows)?;
+                    }
+                }
+            }
+        }
+        Command::DemoTarget { listen } => {
+            anyhow::ensure!(
+                listen.ip().is_loopback(),
+                "VulnShop is deliberately vulnerable; bind it to 127.0.0.1 only"
+            );
+            let l = tokio::net::TcpListener::bind(listen).await?;
+            eprintln!("VulnShop (deliberately vulnerable) on http://{listen}");
+            eprintln!("Users: alice/alice123, bob/bob123, admin/admin123. Log in with POST /api/login.");
+            pm_demo::VulnShop::new().serve(l).await;
         }
         Command::Audit { action: AuditAction::Verify } => {
             let store = Store::open(&cli.project)?;

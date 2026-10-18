@@ -5,10 +5,14 @@
 //! allowed, sent for approval or denied.
 
 mod approvals;
+mod authz;
 mod history;
+mod identity;
 mod replay;
 
+pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use history::ExchangePage;
+pub use identity::{IdentityCheck, IdentityInfo};
 pub use pm_store::ApprovalRow;
 pub use replay::{ReplayRequest, ReplayResult};
 
@@ -22,7 +26,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use {pm_ai, pm_policy, pm_store};
+pub use {pm_ai, pm_diff, pm_identity, pm_policy, pm_store};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {

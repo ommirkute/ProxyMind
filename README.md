@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: early development (pre-alpha).** Working today: the HTTP/1.1 intercepting proxy with TLS interception, project history, the policy gate (scope, rules of engagement, approvals, tamper-evident audit log), and an MCP server so AI agents can search traffic and send requests under those rules. Everything else below is planned. See [`docs/plan.md`](docs/plan.md).
+> **Status: early development (pre-alpha).** Working today: the HTTP/1.1 intercepting proxy with TLS interception, project history, the policy gate (scope, rules of engagement, approvals, tamper-evident audit log), an MCP server so AI agents can search traffic and send requests under those rules, and multi-identity authorization checks (replay any request as another user and compare the results). Everything else below is planned. See [`docs/plan.md`](docs/plan.md).
 
 ## Why ProxyMind
 
@@ -76,10 +76,11 @@ crates/
   pm-store     SQLite project file and compressed blob store    ✅ working
   pm-proxy     intercepting proxy                               ✅ working (HTTP/1.1)
   pm-cli       the `proxymind` binary                           ✅ working
+  pm-demo      VulnShop, a deliberately vulnerable demo API     ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working
   pm-replay    send engine (incl. single-packet parallel sends) ✅ working
-  pm-identity  multi-identity sessions                          ⏳ planned (M3)
-  pm-diff      semantic diff                                    ⏳ planned (M3)
+  pm-identity  multi-identity sessions, auto re-login           ✅ working
+  pm-diff      semantic diff with learned noise masks           ✅ working
   pm-model     live app model                                   ⏳ planned (M4)
   pm-ledger    hypotheses and coverage                          ⏳ planned (M4)
   pm-proof     proof oracles and findings                       ⏳ planned (M5)

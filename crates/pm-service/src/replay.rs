@@ -1,4 +1,5 @@
-//! Sending requests (Repeater-style replays) through the policy gate.
+//! Sending requests (Repeater-style replays) through the policy gate, as
+//! recorded or as any test identity.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,9 @@ pub struct ReplayRequest {
     pub exchange_id: Option<i64>,
     /// Target as scheme://host[:port], used when there is no `exchange_id`.
     pub url: Option<String>,
+    /// Send with this test identity's credentials instead of the request's own
+    /// (use "anonymous" for none).
+    pub identity: Option<String>,
     /// Update Content-Length to match the body (default true).
     pub fix_content_length: Option<bool>,
     /// Convert bare "\n" line endings in the head to "\r\n" (default true).
@@ -44,6 +48,8 @@ pub enum ReplayResult {
     Sent {
         exchange_id: i64,
         elapsed_ms: u64,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
         view: Box<ExchangeView>,
     },
     /// The send failed (e.g. connection refused); recorded as `exchange_id`.
@@ -60,6 +66,31 @@ pub enum ReplayResult {
     Denied {
         reasons: Vec<String>,
     },
+}
+
+/// A request ready to go through the gate.
+#[derive(Debug, Clone)]
+pub(crate) struct Outgoing {
+    pub endpoint: Endpoint,
+    /// Bytes as the actor sees them (may contain placeholders).
+    pub raw: Vec<u8>,
+    pub method: String,
+    pub path: String,
+}
+
+impl Outgoing {
+    pub fn url(&self) -> String {
+        pm_core::url(&self.endpoint.scheme, &self.endpoint.host, self.endpoint.port, &self.path)
+    }
+}
+
+/// What actually happened on the wire.
+pub(crate) struct Sent {
+    pub exchange_id: i64,
+    pub response: Option<Vec<u8>>,
+    pub status: Option<u16>,
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
 }
 
 /// Normalizes bare LF line endings in the head only (the body is untouched).
@@ -84,7 +115,7 @@ fn crlf_head(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn parse_url_endpoint(url: &str) -> Result<Endpoint> {
+pub(crate) fn parse_url_endpoint(url: &str) -> Result<Endpoint> {
     let u = url::Url::parse(url).map_err(|e| ServiceError::Invalid(format!("bad url {url:?}: {e}")))?;
     let host = u.host_str().ok_or_else(|| ServiceError::Invalid("url has no host".into()))?;
     let port = u.port_or_known_default().ok_or_else(|| ServiceError::Invalid("url has no port".into()))?;
@@ -92,9 +123,23 @@ fn parse_url_endpoint(url: &str) -> Result<Endpoint> {
 }
 
 impl Service {
-    /// Sends a request on behalf of `actor`, if the policy allows it.
-    pub async fn replay_send(&self, actor: &Actor, req: ReplayRequest) -> Result<ReplayResult> {
-        // 1. Work out the bytes and the endpoint.
+    pub(crate) fn outgoing(&self, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
+        let raw = if normalize { crlf_head(raw) } else { raw.to_vec() };
+        let unknown = self.redactor.unknown_placeholders(&raw);
+        if !unknown.is_empty() {
+            return Err(ServiceError::Invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
+        }
+        let (head, _) = pm_http::split_message(&raw);
+        let head = pm_http::parse_request_head(head)
+            .map_err(|e| ServiceError::Invalid(format!("request is not valid HTTP: {e}")))?;
+        let path = match pm_http::split_absolute_target(&head.target) {
+            Some((_, _, p)) => p.to_string(),
+            None => head.target.clone(),
+        };
+        Ok(Outgoing { endpoint, raw, method: head.method, path })
+    }
+
+    pub(crate) fn outgoing_from_request(&self, req: &ReplayRequest) -> Result<Outgoing> {
         let (endpoint, base_raw) = match req.exchange_id {
             Some(id) => {
                 let ex = self
@@ -113,102 +158,169 @@ impl Service {
                 (parse_url_endpoint(url)?, raw.as_bytes().to_vec())
             }
         };
-        let mut raw = match &req.raw {
+        let raw = match &req.raw {
             Some(r) => r.as_bytes().to_vec(),
             None => base_raw,
         };
-        if req.normalize_newlines.unwrap_or(true) {
-            raw = crlf_head(&raw);
-        }
-        let unknown = self.redactor.unknown_placeholders(&raw);
-        if !unknown.is_empty() {
-            return Err(ServiceError::Invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
-        }
-        let (head, _) = pm_http::split_message(&raw);
-        let head = pm_http::parse_request_head(head)
-            .map_err(|e| ServiceError::Invalid(format!("request is not valid HTTP: {e}")))?;
-        let path = match pm_http::split_absolute_target(&head.target) {
-            Some((_, _, p)) => p.to_string(),
-            None => head.target.clone(),
-        };
+        self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))
+    }
 
-        // 2. Ask the gate. Parameters cover exactly what will be sent.
-        let target = Target::from_parts(&endpoint.scheme, &endpoint.host, endpoint.port, &path)
+    /// Asks the gate whether `actor` may send `out`. The approval (if any)
+    /// covers exactly these bytes, this identity and this action name.
+    pub(crate) fn gate_send(
+        &self,
+        actor: &Actor,
+        action: &str,
+        out: &Outgoing,
+        identity: Option<&str>,
+        fix_cl: bool,
+        approval_id: Option<&str>,
+    ) -> Result<Authorization> {
+        let target = Target::from_parts(&out.endpoint.scheme, &out.endpoint.host, out.endpoint.port, &out.path)
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        let tier = Tier::for_http_method(&head.method);
-        let url = pm_core::url(&endpoint.scheme, &endpoint.host, endpoint.port, &path);
         let params = json!({
-            "endpoint": format!("{}://{}:{}", endpoint.scheme, endpoint.host, endpoint.port),
-            "request": String::from_utf8_lossy(&raw),
-            "fix_content_length": req.fix_content_length.unwrap_or(true),
+            "endpoint": format!("{}://{}:{}", out.endpoint.scheme, out.endpoint.host, out.endpoint.port),
+            "request": String::from_utf8_lossy(&out.raw),
+            "identity": identity,
+            "fix_content_length": fix_cl,
         });
+        let summary = match identity {
+            Some(i) => format!("{} {} as {i}", out.method, out.url()),
+            None => format!("{} {}", out.method, out.url()),
+        };
         let action = ActionRequest {
             actor: actor.clone(),
-            action: "replay_send".into(),
-            tier,
+            action: action.into(),
+            tier: Tier::for_http_method(&out.method),
             target: Some(target),
-            summary: format!("{} {url}", head.method),
+            summary,
         };
-        let auth = match &req.approval_id {
-            Some(id) => self.run_approved(id, &params)?,
-            None => self.authorize(action, &params)?,
+        match approval_id {
+            Some(id) => self.run_approved(id, &params),
+            None => self.authorize(action, &params),
+        }
+    }
+
+    /// Sends now (the caller has already passed the gate) and records the
+    /// exchange. Applies rate limits, secrets, identity credentials and the
+    /// DNS check.
+    pub(crate) async fn send_now(
+        &self,
+        actor: &Actor,
+        out: &Outgoing,
+        identity: Option<&pm_identity::Identity>,
+        fix_cl: bool,
+        source: &str,
+    ) -> Result<Sent> {
+        let _permit = self.acquire_slot(&out.endpoint.host).await?;
+        let mut wire = self.redactor.unredact(&out.raw);
+        if let Some(id) = identity {
+            wire = pm_identity::apply(&wire, &id.auth);
+        }
+        if fix_cl {
+            wire = pm_http::fix_content_length(&wire);
+        }
+        let check = |ips: &[std::net::IpAddr]| self.policy.check_resolved(ips);
+        let started = Instant::now();
+        let result = self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await;
+        let mut record = NewExchange {
+            ts_ms: now_ms(),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            source: source.into(),
+            actor_id: actor.id(),
+            scheme: out.endpoint.scheme.clone(),
+            host: out.endpoint.host.clone(),
+            port: out.endpoint.port,
+            method: out.method.clone(),
+            path: out.path.clone(),
+            status: None,
+            request: wire,
+            response: None,
+            error: None,
+            identity: identity.map(|i| i.name.clone()),
         };
-        match auth {
+        let (status, error, elapsed_ms) = match result {
+            Ok(resp) => {
+                record.status = Some(resp.head.status);
+                record.response = Some(resp.raw);
+                (Some(resp.head.status), None, resp.elapsed.as_millis() as u64)
+            }
+            Err(e) => {
+                record.error = Some(format!("{e:#}"));
+                (None, record.error.clone(), started.elapsed().as_millis() as u64)
+            }
+        };
+        let response = record.response.clone();
+        let exchange_id = self.store.lock().insert_exchange(&record)?;
+        Ok(Sent { exchange_id, response, status, error, elapsed_ms })
+    }
+
+    /// Sends as an identity, logging it in again once if the response says
+    /// the session expired and the identity has a login recipe.
+    pub(crate) async fn send_as(
+        &self,
+        actor: &Actor,
+        out: &Outgoing,
+        identity: Option<&str>,
+        fix_cl: bool,
+        source: &str,
+    ) -> Result<(Sent, Vec<String>)> {
+        let mut notes = Vec::new();
+        let ident = identity.map(|n| self.load_identity(n)).transpose()?;
+        let sent = self.send_now(actor, out, ident.as_ref(), fix_cl, source).await?;
+        if let (Some(id), Some(resp)) = (&ident, &sent.response)
+            && id.login.is_some()
+            && pm_identity::looks_logged_out(resp)
+        {
+            notes.push(format!("{} looked logged out; logging in again", id.name));
+            match self.identity_login(&id.name).await {
+                Ok(learned) => {
+                    notes.push(format!("login ok ({})", learned.join(", ")));
+                    let fresh = self.load_identity(&id.name)?;
+                    let retry = self.send_now(actor, out, Some(&fresh), fix_cl, source).await?;
+                    return Ok((retry, notes));
+                }
+                Err(e) => notes.push(format!("login failed: {e}")),
+            }
+        }
+        Ok((sent, notes))
+    }
+
+    /// Sends a request on behalf of `actor`, if the policy allows it.
+    pub async fn replay_send(&self, actor: &Actor, req: ReplayRequest) -> Result<ReplayResult> {
+        let out = self.outgoing_from_request(&req)?;
+        let fix_cl = req.fix_content_length.unwrap_or(true);
+        if let Some(name) = &req.identity {
+            self.load_identity(name)?; // fail early on unknown identities
+        }
+        match self.gate_send(actor, "replay_send", &out, req.identity.as_deref(), fix_cl, req.approval_id.as_deref())? {
             Authorization::Allowed { .. } => {}
             Authorization::Denied { reasons } => return Ok(ReplayResult::Denied { reasons }),
             Authorization::PendingApproval { approval_id, summary, reasons } => {
                 return Ok(ReplayResult::PendingApproval { approval_id, summary, reasons });
             }
         }
-
-        // 3. Rate limits, then send with real secrets and DNS check.
-        let _permit = self.acquire_slot(&endpoint.host).await?;
-        let mut wire = self.redactor.unredact(&raw);
-        if req.fix_content_length.unwrap_or(true) {
-            wire = pm_http::fix_content_length(&wire);
+        let (sent, notes) = self.send_as(actor, &out, req.identity.as_deref(), fix_cl, "replay").await?;
+        if let Some(error) = sent.error {
+            return Ok(ReplayResult::Failed { exchange_id: sent.exchange_id, error });
         }
-        let check = |ips: &[std::net::IpAddr]| self.policy.check_resolved(ips);
-        let started = Instant::now();
-        let result = self.sender.send(&endpoint, &wire, &head.method, Some(&check)).await;
-
-        // 4. Record and answer.
-        let mut record = NewExchange {
-            ts_ms: now_ms(),
-            duration_ms: Some(started.elapsed().as_millis() as i64),
-            source: "replay".into(),
-            actor_id: actor.id(),
-            scheme: endpoint.scheme.clone(),
-            host: endpoint.host.clone(),
-            port: endpoint.port,
-            method: head.method.clone(),
-            path,
-            status: None,
-            request: wire,
-            response: None,
-            error: None,
-        };
-        match result {
-            Ok(resp) => {
-                let elapsed_ms = resp.elapsed.as_millis() as u64;
-                record.status = Some(resp.head.status);
-                record.response = Some(resp.raw);
-                let id = self.store.lock().insert_exchange(&record)?;
-                let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(id.to_string()))?;
-                let view = render_exchange(
-                    &ex,
-                    req.view.unwrap_or_default(),
-                    req.max_tokens.unwrap_or(1500),
-                    self.redactor_for(actor),
-                );
-                Ok(ReplayResult::Sent { exchange_id: id, elapsed_ms, view: Box::new(view) })
-            }
-            Err(e) => {
-                let error = format!("{e:#}");
-                record.error = Some(error.clone());
-                let id = self.store.lock().insert_exchange(&record)?;
-                Ok(ReplayResult::Failed { exchange_id: id, error })
-            }
-        }
+        let ex = self
+            .store
+            .lock()
+            .get_exchange(sent.exchange_id)?
+            .ok_or_else(|| ServiceError::NotFound(sent.exchange_id.to_string()))?;
+        let view = render_exchange(
+            &ex,
+            req.view.unwrap_or_default(),
+            req.max_tokens.unwrap_or(1500),
+            self.redactor_for(actor),
+        );
+        Ok(ReplayResult::Sent {
+            exchange_id: sent.exchange_id,
+            elapsed_ms: sent.elapsed_ms,
+            notes,
+            view: Box::new(view),
+        })
     }
 
     async fn acquire_slot(&self, host: &str) -> Result<pm_policy::Permit> {

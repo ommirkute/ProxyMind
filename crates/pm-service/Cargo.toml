@@ -14,7 +14,9 @@ jiff = "0.2.38"
 parking_lot = "0.12.5"
 pm-ai = { version = "0.0.1", path = "../pm-ai" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
+pm-diff = { version = "0.0.1", path = "../pm-diff" }
 pm-http = { version = "0.0.1", path = "../pm-http" }
+pm-identity = { version = "0.0.1", path = "../pm-identity" }
 pm-policy = { version = "0.0.1", path = "../pm-policy" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
 pm-store = { version = "0.0.1", path = "../pm-store" }
@@ -28,4 +30,5 @@ url = "2.5.8"
 workspace = true
 
 [dev-dependencies]
+pm-demo = { path = "../pm-demo" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

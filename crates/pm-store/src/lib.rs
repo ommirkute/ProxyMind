@@ -86,7 +86,64 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 "#,
+    r#"
+-- Test identities (users/roles) and their credentials.
+CREATE TABLE identities (
+    name       TEXT PRIMARY KEY,
+    role       TEXT NOT NULL,
+    data       TEXT NOT NULL,      -- JSON: auth material, health check, login recipe
+    created_by TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'unknown',  -- unknown | ok | logged_out
+    updated_ms INTEGER NOT NULL
+);
+-- Which identity's credentials an exchange was sent with.
+ALTER TABLE exchanges ADD COLUMN identity TEXT;
+-- Results of authorization checks: one row per (exchange, identity) test.
+CREATE TABLE authz_results (
+    id            INTEGER PRIMARY KEY,
+    exchange_id   INTEGER NOT NULL,
+    method        TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    identity      TEXT NOT NULL,
+    verdict       TEXT NOT NULL,   -- denied | same_as_owner | allowed_different | inconclusive | error
+    status        INTEGER,
+    similarity    REAL,
+    evidence_id   INTEGER,
+    summary       TEXT NOT NULL,
+    checked_by    TEXT NOT NULL,
+    checked_ms    INTEGER NOT NULL
+);
+CREATE INDEX authz_results_exchange ON authz_results(exchange_id);
+"#,
 ];
+
+/// A stored test identity. `data` holds credentials: never show it to agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityRow {
+    pub name: String,
+    pub role: String,
+    pub data: String,
+    pub created_by: String,
+    pub status: String,
+    pub updated_ms: i64,
+}
+
+/// One authorization-check result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AuthzRow {
+    pub id: i64,
+    pub exchange_id: i64,
+    pub method: String,
+    pub url: String,
+    pub identity: String,
+    pub verdict: String,
+    pub status: Option<u16>,
+    pub similarity: Option<f64>,
+    pub evidence_id: Option<i64>,
+    pub summary: String,
+    pub checked_by: String,
+    pub checked_ms: i64,
+}
 
 /// An action waiting for, or decided by, a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -143,6 +200,8 @@ pub struct NewExchange {
     pub request: Vec<u8>,
     pub response: Option<Vec<u8>>,
     pub error: Option<String>,
+    /// Identity whose credentials were used (None = as recorded / as given).
+    pub identity: Option<String>,
 }
 
 /// One row of history, without the raw bytes.
@@ -162,6 +221,8 @@ pub struct ExchangeSummary {
     pub req_len: i64,
     pub resp_len: Option<i64>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
 }
 
 /// A full exchange including the raw bytes.
@@ -259,8 +320,8 @@ impl Store {
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
-                                    status, req_hash, resp_hash, req_len, resp_len, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                    status, req_hash, resp_hash, req_len, resp_len, error, identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -277,6 +338,7 @@ impl Store {
                 ex.request.len() as i64,
                 ex.response.as_ref().map(|r| r.len() as i64),
                 ex.error,
+                ex.identity,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -285,7 +347,7 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error";
+                                        status, req_len, resp_len, error, identity";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -303,6 +365,7 @@ impl Store {
             req_len: r.get(11)?,
             resp_len: r.get(12)?,
             error: r.get(13)?,
+            identity: r.get(14)?,
         })
     }
 
@@ -346,7 +409,7 @@ impl Store {
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(14)?, r.get::<_, Option<Vec<u8>>>(15)?))
+                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(15)?, r.get::<_, Option<Vec<u8>>>(16)?))
             })
             .optional()?;
         let Some((summary, req_hash, resp_hash)) = row else {
@@ -497,6 +560,102 @@ impl Store {
         Ok(())
     }
 
+    pub fn upsert_identity(&mut self, row: &IdentityRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO identities (name, role, data, created_by, status, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET role = excluded.role, data = excluded.data,
+                 status = excluded.status, updated_ms = excluded.updated_ms",
+            params![row.name, row.role, row.data, row.created_by, row.status, row.updated_ms],
+        )?;
+        Ok(())
+    }
+
+    fn identity_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRow> {
+        Ok(IdentityRow {
+            name: r.get(0)?,
+            role: r.get(1)?,
+            data: r.get(2)?,
+            created_by: r.get(3)?,
+            status: r.get(4)?,
+            updated_ms: r.get(5)?,
+        })
+    }
+
+    pub fn get_identity(&self, name: &str) -> Result<Option<IdentityRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT name, role, data, created_by, status, updated_ms FROM identities WHERE name = ?1",
+                [name],
+                Self::identity_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_identities(&self) -> Result<Vec<IdentityRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, role, data, created_by, status, updated_ms FROM identities ORDER BY name")?;
+        let rows = stmt.query_map([], Self::identity_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_identity(&mut self, name: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM identities WHERE name = ?1", [name])? == 1)
+    }
+
+    pub fn insert_authz(&mut self, r: &AuthzRow) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO authz_results (exchange_id, method, url, identity, verdict, status, similarity, evidence_id,
+                                        summary, checked_by, checked_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                r.exchange_id,
+                r.method,
+                r.url,
+                r.identity,
+                r.verdict,
+                r.status,
+                r.similarity,
+                r.evidence_id,
+                r.summary,
+                r.checked_by,
+                r.checked_ms
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Latest result per (exchange, identity), optionally for one exchange.
+    pub fn authz_results(&self, exchange_id: Option<i64>) -> Result<Vec<AuthzRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, exchange_id, method, url, identity, verdict, status, similarity, evidence_id, summary,
+                    checked_by, checked_ms
+             FROM authz_results a
+             WHERE (?1 IS NULL OR exchange_id = ?1)
+               AND id = (SELECT max(id) FROM authz_results b
+                         WHERE b.exchange_id = a.exchange_id AND b.identity = a.identity)
+             ORDER BY exchange_id, identity",
+        )?;
+        let rows = stmt.query_map([exchange_id], |r| {
+            Ok(AuthzRow {
+                id: r.get(0)?,
+                exchange_id: r.get(1)?,
+                method: r.get(2)?,
+                url: r.get(3)?,
+                identity: r.get(4)?,
+                verdict: r.get(5)?,
+                status: r.get(6)?,
+                similarity: r.get(7)?,
+                evidence_id: r.get(8)?,
+                summary: r.get(9)?,
+                checked_by: r.get(10)?,
+                checked_ms: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn count_exchanges(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM exchanges", [], |r| r.get(0))?)
     }
@@ -521,6 +680,7 @@ mod tests {
             request: format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n").into_bytes(),
             response: Some(body.to_vec()),
             error: None,
+            identity: None,
         }
     }
 

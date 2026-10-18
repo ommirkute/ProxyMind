@@ -208,6 +208,7 @@ async fn resending_a_recorded_exchange_uses_its_target() {
             request: b"GET /orig HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_vec(),
             response: None,
             error: None,
+            identity: None,
         })
         .unwrap();
     let s = Service::new(store, Policy::new(Roe::parse(ROE).unwrap())).unwrap();

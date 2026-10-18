@@ -69,6 +69,7 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({
                 "exchange_id": {"type":"integer","description":"Recorded exchange to resend or base this on"},
                 "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
+                "identity": {"type":"string","description":"Send with this identity's credentials (see identity_list), or 'anonymous'"},
                 "raw": {"type":"string","description":"Full raw request (request line, headers, blank line, body)"},
                 "fix_content_length": {"type":"boolean","description":"Set Content-Length to the body length (default true)"},
                 "normalize_newlines": {"type":"boolean","description":"Turn \\n into \\r\\n in the head (default true)"},
@@ -76,6 +77,48 @@ pub fn tool_definitions() -> Vec<Value> {
                 "view": view,
                 "max_tokens": {"type":"integer","minimum":200,"maximum":20000},
             }),
+            &[],
+        ),
+        tool(
+            "identity_list",
+            "Test identities (users/roles) whose credentials ProxyMind holds. Shows names, roles, cookie and header \
+             names and session status, never secret values.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "identity_capture",
+            "Create or update an identity from the cookies and auth headers of a recorded request (e.g. a request the \
+             user made while logged in as that user). You never see the values.",
+            json!({
+                "name": {"type":"string","description":"Short name, e.g. alice or admin"},
+                "role": {"type":"string","description":"e.g. user, admin, guest"},
+                "exchange_id": {"type":"integer"},
+            }),
+            &["name", "exchange_id"],
+        ),
+        tool(
+            "identity_check",
+            "Check an identity's session with its health check, logging in again automatically if it has a login recipe.",
+            json!({ "name": {"type":"string"} }),
+            &["name"],
+        ),
+        tool(
+            "authz_check",
+            "Authorization test: re-send a recorded GET (made by the data's owner) as other identities and as an \
+             anonymous user, and compare each response with the owner's while ignoring noise such as timestamps. \
+             Verdicts: denied, same_as_owner (possible broken access control), allowed_different, inconclusive.",
+            json!({
+                "exchange_id": {"type":"integer","description":"A GET/HEAD/OPTIONS exchange made by the owner"},
+                "identities": {"type":"array","items":{"type":"string"},"description":"Identity names to try"},
+                "include_anonymous": {"type":"boolean","description":"Also try without credentials (default true)"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
+            "authz_results",
+            "Latest authorization-check results, per exchange and identity.",
+            json!({ "exchange_id": {"type":"integer","description":"Only this exchange"} }),
             &[],
         ),
         tool(
@@ -168,6 +211,43 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "replay_send" => {
             let r: ReplayRequest = args(a)?;
             service.replay_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "identity_list" => service.identity_list().map(to_json).map_err(|e| e.to_string()),
+        "identity_capture" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                name: String,
+                role: Option<String>,
+                exchange_id: i64,
+            }
+            let g: A = args(a)?;
+            service
+                .identity_capture(actor, &g.name, g.role.as_deref().unwrap_or("user"), g.exchange_id)
+                .map(to_json)
+                .map_err(|e| e.to_string())
+        }
+        "identity_check" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                name: String,
+            }
+            let g: A = args(a)?;
+            service.identity_check(actor, &g.name).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "authz_check" => {
+            let r: pm_service::AuthzCheckRequest = args(a)?;
+            service.authz_check(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "authz_results" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                exchange_id: Option<i64>,
+            }
+            let g: A = args(a)?;
+            service.authz_results(g.exchange_id).map(to_json).map_err(|e| e.to_string())
         }
         "approval_status" => {
             let g: ApprovalArgs = args(a)?;

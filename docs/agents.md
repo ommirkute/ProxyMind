@@ -54,6 +54,31 @@ proxymind -p engagement.pmproj approvals approve apr_1a2b3c4d5e6f
 
 Each approval covers exactly one action with exactly the parameters shown, and can be used once.
 
+## Identities and authorization checks
+
+Broken access control is the most common serious web bug, so ProxyMind makes testing it routine.
+
+```bash
+# Browse once as each user through the proxy, then capture their sessions from history:
+proxymind identity capture alice --from 3        # exchange 3 was made as alice
+proxymind identity capture bob --from 6
+# Optional: keep sessions alive automatically
+proxymind identity health alice --from 3 --expect-contains alice@example.com   # a GET that proves you're logged in
+proxymind identity login alice --from 1                                         # the recorded login request
+# Replay alice's request as bob and as an anonymous user:
+proxymind authz check 4 --as bob
+```
+
+Verdicts: `denied`, `same_as_owner` (bob got alice's data: possible IDOR/BOLA), `allowed_different`, `inconclusive`. Timestamps, request IDs and other values that change on every response are learned and ignored, so the comparison is about meaning, not bytes. Agents can do the same with `identity_capture`, `authz_check` and `replay_send` with `identity`.
+
+## Try it on the demo target
+
+```bash
+proxymind demo-target                 # VulnShop on http://127.0.0.1:8899 (deliberately vulnerable)
+```
+
+Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains planted bugs (IDOR, missing admin check, time-based SQL injection, SSRF) next to correctly protected endpoints, so you can see both true findings and correct denials.
+
 ## Tools
 
 | Tool | What it does |
@@ -63,6 +88,11 @@ Each approval covers exactly one action with exactly the parameters shown, and c
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `replay_send` | Send a request (new, resent or edited) through the policy gate |
+| `identity_list` | Test identities and their session status (names only, never values) |
+| `identity_capture` | Create an identity from the cookies/auth headers of a recorded request |
+| `identity_check` | Check a session, logging in again automatically if a login recipe exists |
+| `authz_check` | Re-send a recorded GET as other identities and anonymously; compare with the owner's response |
+| `authz_results` | Latest authorization-check results |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.

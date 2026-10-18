@@ -143,6 +143,7 @@ impl Proxy {
                 request,
                 response: None,
                 error: None,
+                identity: None,
             };
 
             match result {

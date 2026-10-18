@@ -983,6 +983,7 @@ dependencies = [
  "anyhow",
  "clap",
  "jiff",
+ "pm-demo",
  "pm-mcp",
  "pm-proxy",
  "pm-service",
@@ -999,8 +1000,23 @@ name = "pm-core"
 version = "0.0.1"
 
 [[package]]
+name = "pm-demo"
+version = "0.0.1"
+dependencies = [
+ "pm-http",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pm-diff"
 version = "0.0.1"
+dependencies = [
+ "pm-ai",
+ "pm-http",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-http"
@@ -1013,6 +1029,12 @@ dependencies = [
 [[package]]
 name = "pm-identity"
 version = "0.0.1"
+dependencies = [
+ "pm-http",
+ "regex",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-ledger"
@@ -1096,7 +1118,10 @@ dependencies = [
  "parking_lot",
  "pm-ai",
  "pm-core",
+ "pm-demo",
+ "pm-diff",
  "pm-http",
+ "pm-identity",
  "pm-policy",
  "pm-replay",
  "pm-store",
