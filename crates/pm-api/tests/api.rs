@@ -16,12 +16,9 @@ async fn start() -> (u16, u16) {
     let shop = pm_demo::VulnShop::start_local().await.unwrap().port();
     let roe = format!("version: 1\nscope:\n  include: [\"http://127.0.0.1:{shop}/\"]\n");
     let svc = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
-    let state = pm_api::AppState {
-        service: Arc::new(svc),
-        actor: Actor::parse("human:tester").unwrap(),
-        token: Arc::new(TOKEN.into()),
-        project: Arc::new("test.pmproj".into()),
-    };
+    let state =
+        pm_api::AppState::new(Arc::new(svc), Actor::parse("human:tester").unwrap(), TOKEN.into(), "test.pmproj".into())
+            .unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(l, pm_api::router(state)).await.unwrap() });
@@ -191,4 +188,23 @@ async fn network_settings_hide_the_password() {
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad)).await.0, 400);
     let unknown = json!({"upstream": {"host": "x", "port": 1, "typo": true}});
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(unknown)).await.0, 422);
+}
+
+#[tokio::test]
+async fn assistant_settings_and_refusals() {
+    let (port, _) = start().await;
+    let (st, _, body) = http(port, "GET", "/api/v1/assistant", &[AUTH], None).await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st, 200);
+    assert_eq!(v["acts_as"], "agent:assistant");
+    assert!(v["problem"].as_str().unwrap().contains("choose a model"));
+    // A cloud model without permission in the ROE is refused before anything is sent.
+    let cloud = json!({"provider": "anthropic", "base_url": "https://api.anthropic.com/v1", "model": "m"});
+    assert_eq!(http(port, "PUT", "/api/v1/assistant/config", &[AUTH, CHANGE], Some(cloud)).await.0, 200);
+    let (st, _, body) =
+        http(port, "POST", "/api/v1/assistant/send", &[AUTH, CHANGE], Some(json!({"text": "hi"}))).await;
+    assert_eq!(st, 403, "{body}");
+    assert!(body.contains("allow_cloud_models"));
+    let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
+    assert!(audit.contains("assistant_model_call") && audit.contains("assistant_settings"));
 }

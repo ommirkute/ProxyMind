@@ -170,3 +170,18 @@ table.grid input.wide { width: 100%; min-width: 160px; }
 .form-grid { display: grid; grid-template-columns: 170px 1fr; gap: 8px 12px; align-items: center; max-width: 760px; }
 .form-grid > label:not(.row) { color: var(--muted); font-size: 13px; }
 @media (max-width: 700px) { .form-grid { grid-template-columns: 1fr; } }
+.assistant-layout { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
+.assistant .chats .chat-list { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; max-height: 70vh; overflow: auto; }
+.assistant .convo { display: flex; flex-direction: column; min-height: 70vh; }
+.transcript { flex: 1; overflow: auto; max-height: 62vh; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+.bubble { white-space: pre-wrap; padding: 8px 12px; border-radius: 10px; max-width: 85%; line-height: 1.45; overflow-wrap: anywhere; }
+.bubble.user { align-self: flex-end; background: var(--accent-soft); }
+.bubble.assistant { align-self: flex-start; background: var(--panel-2, rgba(127,127,127,.08)); border: 1px solid var(--border); }
+.tool-call { font-size: 13px; color: var(--muted); padding-left: 4px; overflow-wrap: anywhere; }
+.tool-result { margin-left: 16px; }
+.tool-result.bad summary { color: var(--bad, #b91c1c); }
+.tool-result pre.raw { max-height: 220px; }
+.composer { margin-top: 8px; align-items: flex-end; }
+.assistant-settings { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; text-align: left; }
+@media (max-width: 800px) { .assistant-layout { grid-template-columns: 1fr; } }

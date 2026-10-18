@@ -5,6 +5,7 @@
 //! allowed, sent for approval or denied.
 
 mod approvals;
+mod assistant;
 mod authz;
 mod findings;
 mod history;
@@ -17,6 +18,7 @@ mod replay;
 mod rules;
 mod ws;
 
+pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;

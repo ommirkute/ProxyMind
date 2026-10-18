@@ -188,6 +188,16 @@ CREATE TABLE ws_messages (
 );
 CREATE INDEX ws_messages_exchange ON ws_messages(exchange_id, id);
 "#,
+    r#"
+-- Conversations with the built-in assistant (messages as JSON).
+CREATE TABLE assistant_chats (
+    id         INTEGER PRIMARY KEY,
+    title      TEXT NOT NULL,
+    messages   TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -725,6 +735,42 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT count(*) FROM ws_messages WHERE exchange_id = ?1", [exchange_id], |r| r.get(0))?)
+    }
+
+    pub fn create_chat(&mut self, title: &str, now_ms: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO assistant_chats (title, messages, created_ms, updated_ms) VALUES (?1, '[]', ?2, ?2)",
+            params![title, now_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn save_chat(&mut self, id: i64, messages: &str, now_ms: i64) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE assistant_chats SET messages = ?2, updated_ms = ?3 WHERE id = ?1",
+            params![id, messages, now_ms],
+        )?;
+        anyhow::ensure!(n == 1, "no chat {id}");
+        Ok(())
+    }
+
+    /// (title, messages JSON, created_ms, updated_ms)
+    pub fn get_chat(&self, id: i64) -> Result<Option<(String, String, i64, i64)>> {
+        Ok(self
+            .conn
+            .query_row("SELECT title, messages, created_ms, updated_ms FROM assistant_chats WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?)
+    }
+
+    /// Newest first: (id, title, updated_ms).
+    pub fn list_chats(&self, limit: usize) -> Result<Vec<(i64, String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, title, updated_ms FROM assistant_chats ORDER BY updated_ms DESC, id DESC LIMIT ?1")?;
+        let rows = stmt.query_map([limit.clamp(1, 500) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {

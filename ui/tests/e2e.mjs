@@ -329,6 +329,42 @@ try {
   check(upstreamSeen.length === n, "turning it off connects directly again");
   upstream.close();
 
+  console.log("Assistant (mock OpenAI-compatible model server)");
+  const { createServer } = await import("node:http");
+  const modelCalls = [];
+  const model = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      const parsed = JSON.parse(body);
+      modelCalls.push(parsed);
+      const toolMsg = parsed.messages.find((m) => m.role === "tool");
+      const reply = toolMsg
+        ? { choices: [{ message: { role: "assistant", content: "Alice opened /api/orders/1001 (her own order)." } }] }
+        : { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "history_search", arguments: JSON.stringify({ path: "/api/orders/", limit: 5 }) } }] } }] };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply));
+    });
+  });
+  await new Promise((r) => model.listen(0, "127.0.0.1", r));
+  await page.getByRole("button", { name: "Assistant", exact: true }).click();
+  await page.waitForSelector('[data-testid="assistant-problem"]');
+  check(true, "without a model the page explains what to set up");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Ollama (local)" }).click();
+  await page.getByLabel("Base URL").fill(`http://127.0.0.1:${model.address().port}/v1`);
+  await page.getByLabel("Model").fill("mock-model");
+  await page.getByTestId("assistant-save").click();
+  await page.waitForSelector('[data-testid="assistant-problem"]', { state: "detached" });
+  await page.getByLabel("Message").fill("Which orders did alice look at?");
+  await page.getByTestId("assistant-send").click();
+  await page.locator('[data-testid="assistant-transcript"] .bubble.assistant', { hasText: "Alice opened /api/orders/1001" }).waitFor({ timeout: 15000 });
+  check(await page.getByTestId("tool-call").first().textContent().then((t) => t.includes("history_search")), "the assistant called a tool and answered");
+  const toolResult = modelCalls[1]?.messages.find((m) => m.role === "tool")?.content ?? "";
+  check(toolResult.includes("/api/orders/1001"), "the tool ran against real history (through the policy gate)");
+  await page.screenshot({ path: join(SHOTS, "6f-assistant.png") });
+  model.close();
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

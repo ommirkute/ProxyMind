@@ -6,6 +6,7 @@ import Intercept from "./pages/Intercept";
 import Repeater from "./pages/Repeater";
 import Rules from "./pages/Rules";
 import Approvals from "./pages/Approvals";
+import Assistant from "./pages/Assistant";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
 import Network from "./pages/Network";
@@ -14,6 +15,7 @@ import Audit from "./pages/Audit";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "history", label: "History" },
+  { id: "assistant", label: "Assistant" },
   { id: "intercept", label: "Intercept" },
   { id: "rules", label: "Match & replace" },
   { id: "repeater", label: "Repeater" },
@@ -91,6 +93,7 @@ export default function App() {
 
   const PageView = {
     history: History,
+    assistant: Assistant,
     intercept: Intercept,
     rules: Rules,
     repeater: Repeater,

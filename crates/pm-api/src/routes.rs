@@ -21,23 +21,45 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 
-pub struct ApiError(ServiceError);
+pub enum ApiError {
+    Service(ServiceError),
+    Assistant(pm_assistant::AssistantError),
+}
 
 impl From<ServiceError> for ApiError {
     fn from(e: ServiceError) -> Self {
-        Self(e)
+        Self::Service(e)
+    }
+}
+
+impl From<pm_assistant::AssistantError> for ApiError {
+    fn from(e: pm_assistant::AssistantError) -> Self {
+        match e {
+            pm_assistant::AssistantError::Service(s) => Self::Service(s),
+            other => Self::Assistant(other),
+        }
+    }
+}
+
+fn service_status(e: &ServiceError) -> StatusCode {
+    match e {
+        ServiceError::NotFound(_) => StatusCode::NOT_FOUND,
+        ServiceError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ServiceError::Approval(_) | ServiceError::ApprovalMismatch(_) => StatusCode::CONFLICT,
+        ServiceError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match &self.0 {
-            ServiceError::NotFound(_) => StatusCode::NOT_FOUND,
-            ServiceError::Invalid(_) => StatusCode::BAD_REQUEST,
-            ServiceError::Approval(_) | ServiceError::ApprovalMismatch(_) => StatusCode::CONFLICT,
-            ServiceError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        use pm_assistant::AssistantError as A;
+        let (status, msg) = match &self {
+            Self::Service(e) => (service_status(e), e.to_string()),
+            Self::Assistant(e @ A::Refused(_)) => (StatusCode::FORBIDDEN, e.to_string()),
+            Self::Assistant(e @ A::Setup(_)) => (StatusCode::BAD_REQUEST, e.to_string()),
+            Self::Assistant(e) => (StatusCode::BAD_GATEWAY, e.to_string()),
         };
-        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
+        (status, Json(json!({ "error": msg }))).into_response()
     }
 }
 
@@ -81,6 +103,10 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
+        .route("/assistant", get(assistant_state))
+        .route("/assistant/config", axum::routing::put(assistant_config))
+        .route("/assistant/chats/{id}", get(assistant_chat))
+        .route("/assistant/send", post(assistant_send))
 }
 
 #[derive(Deserialize)]
@@ -308,6 +334,40 @@ struct WsQuery {
 
 async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
     ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
+}
+
+async fn assistant_state(State(st): State<AppState>) -> ApiResult {
+    let config = st.service.assistant_config()?;
+    let ready = st.assistant.check(&config).map(|_| ()).map_err(|e| e.to_string()).err();
+    ok(json!({
+        "config": config,
+        "local": pm_assistant::is_local_url(&config.base_url),
+        "cloud_models_allowed": st.service.cloud_models_allowed(),
+        "problem": ready,
+        "acts_as": st.assistant.actor().id(),
+        "chats": st.service.chat_list(50)?,
+    }))
+}
+
+async fn assistant_config(State(st): State<AppState>, Json(cfg): Json<pm_service::AssistantConfig>) -> ApiResult {
+    ok(st.service.assistant_config_set(&st.actor, cfg)?)
+}
+
+async fn assistant_chat(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.chat_get(id)?)
+}
+
+#[derive(Deserialize)]
+struct SendBody {
+    chat_id: Option<i64>,
+    text: String,
+}
+
+async fn assistant_send(State(st): State<AppState>, Json(b): Json<SendBody>) -> ApiResult {
+    if b.text.trim().is_empty() {
+        return Err(ServiceError::Invalid("write a message".into()).into());
+    }
+    ok(st.assistant.send(b.chat_id, &b.text).await?)
 }
 
 async fn network_get(State(st): State<AppState>) -> ApiResult {

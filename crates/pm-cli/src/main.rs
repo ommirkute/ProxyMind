@@ -84,6 +84,11 @@ enum Command {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// The built-in AI assistant (local model by default).
+    Assistant {
+        #[command(subcommand)]
+        action: AssistantAction,
+    },
     /// Upstream proxy and client certificates for outgoing connections.
     Network {
         #[command(subcommand)]
@@ -365,6 +370,37 @@ enum ApprovalAction {
     Watch {
         #[arg(long = "as")]
         approver: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssistantAction {
+    /// Show the settings and whether they can be used.
+    Show,
+    /// Change the settings (options not given stay as they are).
+    Set {
+        /// anthropic, or openai (also Ollama, LM Studio, vLLM)
+        #[arg(long)]
+        provider: Option<String>,
+        /// e.g. http://127.0.0.1:11434/v1 or https://api.anthropic.com/v1
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// NAME of the environment variable holding the API key ("" for none)
+        #[arg(long)]
+        key_env: Option<String>,
+        #[arg(long)]
+        max_steps: Option<u32>,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Ask a question; the assistant may look at traffic and use tools.
+    Ask {
+        text: String,
+        /// Continue this chat instead of starting a new one
+        #[arg(long)]
+        chat: Option<i64>,
     },
 }
 
@@ -714,6 +750,65 @@ async fn run() -> Result<()> {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
         }
+        Command::Assistant { action: AssistantAction::Show } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let cfg = service.assistant_config()?;
+            out!("{}", serde_json::to_string_pretty(&cfg)?);
+            let local = pm_assistant::is_local_url(&cfg.base_url);
+            out!("Model server: {}", if local { "local" } else { "cloud" });
+            match pm_assistant::Assistant::new(service)?.check(&cfg) {
+                Ok(_) => out!("✓ ready"),
+                Err(e) => out!("✗ {e}"),
+            }
+        }
+        Command::Assistant {
+            action: AssistantAction::Set { provider, base_url, model, key_env, max_steps, actor },
+        } => {
+            let service = open_service(&cli.project, None)?;
+            let mut cfg = service.assistant_config()?;
+            if let Some(p) = provider {
+                cfg.provider = serde_json::from_value(serde_json::json!(p))
+                    .with_context(|| format!("unknown provider {p:?}: use anthropic or openai"))?;
+            }
+            if let Some(v) = base_url {
+                cfg.base_url = v.clone();
+            }
+            if let Some(v) = model {
+                cfg.model = v.clone();
+            }
+            if let Some(v) = key_env {
+                cfg.api_key_env = v.clone();
+            }
+            if let Some(v) = max_steps {
+                cfg.max_steps = *v;
+            }
+            let saved = service.assistant_config_set(&human_actor(actor.as_deref())?, cfg)?;
+            out!("✓ assistant settings saved");
+            out!("{}", serde_json::to_string_pretty(&saved)?);
+        }
+        Command::Assistant { action: AssistantAction::Ask { text, chat } } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let assistant = pm_assistant::Assistant::new(service)?;
+            let turn = assistant.send(*chat, text).await?;
+            for m in &turn.messages {
+                for b in &m.content {
+                    match b {
+                        pm_assistant::llm::Block::Text { text } if m.role == pm_assistant::llm::Role::Assistant => {
+                            out!("{text}\n")
+                        }
+                        pm_assistant::llm::Block::ToolUse { name, input, .. } => out!("  → {name} {input}"),
+                        pm_assistant::llm::Block::ToolResult { is_error: true, content, .. } => {
+                            out!("  ✗ {}", content.chars().take(200).collect::<String>())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(n) = turn.note {
+                out!("({n})");
+            }
+            out!("(chat {}; continue with --chat {})", turn.chat_id, turn.chat_id);
+        }
         Command::Network { action: NetworkAction::Show } => {
             let cfg = pm_service::load_network(&Store::open(&cli.project)?)?.masked();
             out!("{}", serde_json::to_string_pretty(&cfg)?);
@@ -795,12 +890,7 @@ async fn run() -> Result<()> {
             } else {
                 watch_project(&cli.project, None, service.network().clone())?;
             }
-            let state = pm_api::AppState {
-                service,
-                actor: me.clone(),
-                token: Arc::new(token.clone()),
-                project: Arc::new(cli.project.display().to_string()),
-            };
+            let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
             eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
             out!("Open: http://{listen}/auth?token={token}");

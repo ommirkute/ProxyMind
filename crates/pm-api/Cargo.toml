@@ -12,6 +12,7 @@ publish = false
 anyhow = "1.0.104"
 axum = "0.8.9"
 futures-util = "0.3.34"
+pm-assistant = { version = "0.0.1", path = "../pm-assistant" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
 pm-service = { version = "0.0.1", path = "../pm-service" }
 serde = { version = "1.0.229", features = ["derive"] }

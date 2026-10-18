@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-pub use tools::tool_definitions;
+pub use tools::{call as call_tool, tool_definitions};
 
 /// Protocol versions this server can speak, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];

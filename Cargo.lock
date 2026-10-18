@@ -1195,6 +1195,7 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "pm-assistant",
  "pm-core",
  "pm-demo",
  "pm-service",
@@ -1202,6 +1203,23 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "pm-assistant"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "pm-core",
+ "pm-http",
+ "pm-mcp",
+ "pm-service",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1213,6 +1231,7 @@ dependencies = [
  "clap",
  "jiff",
  "pm-api",
+ "pm-assistant",
  "pm-demo",
  "pm-mcp",
  "pm-model",

@@ -1,0 +1,26 @@
+[package]
+name = "pm-assistant"
+description = "Built-in AI assistant: talks to a language model and uses ProxyMind's agent tools under the policy gate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+pm-core = { version = "0.0.1", path = "../pm-core" }
+thiserror = "2.0.21"
+pm-http = { version = "0.0.1", path = "../pm-http" }
+pm-mcp = { version = "0.0.1", path = "../pm-mcp" }
+pm-service = { version = "0.0.1", path = "../pm-service" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[lints]
+workspace = true
+

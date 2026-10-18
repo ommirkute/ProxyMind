@@ -35,6 +35,15 @@ pub struct AppState {
     pub actor: Actor,
     pub token: Arc<String>,
     pub project: Arc<String>,
+    /// The built-in assistant (acts as agent:assistant, not as `actor`).
+    pub assistant: Arc<pm_assistant::Assistant>,
+}
+
+impl AppState {
+    pub fn new(service: Arc<Service>, actor: Actor, token: String, project: String) -> anyhow::Result<Self> {
+        let assistant = Arc::new(pm_assistant::Assistant::new(service.clone()).map_err(|e| anyhow::anyhow!("{e}"))?);
+        Ok(Self { service, actor, token: Arc::new(token), project: Arc::new(project), assistant })
+    }
 }
 
 /// Creates a random API token.
