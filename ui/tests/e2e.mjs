@@ -107,8 +107,12 @@ try {
   const order = await rowFor("/api/orders/1001", 0);
   const orderId = Number((await order.getAttribute("data-testid")).replace("row-", ""));
   await order.click();
-  await page.waitForSelector('[data-testid="exchange-detail"]');
-  check(await page.locator('[data-testid="exchange-detail"] pre.raw').first().textContent().then((t) => t.includes("alice@vulnshop.test")), "viewer shows the response");
+  const shown = await page
+    .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "alice@vulnshop.test" })
+    .first()
+    .waitFor({ timeout: 5000 })
+    .then(() => true, () => false);
+  check(shown, "viewer shows the response");
   await page.screenshot({ path: join(SHOTS, "2-history-detail.png") });
 
   console.log("Authorization check");

@@ -98,7 +98,7 @@ export default function History() {
             </div>
           )}
         </div>
-        {selected && <Detail id={selected} />}
+        {selected && <Detail key={selected} id={selected} />}
       </div>
     </div>
   );
