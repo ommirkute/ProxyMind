@@ -14,6 +14,7 @@ use pm_tls::TlsConnector;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+mod h2send;
 pub mod net;
 
 pub use net::{ClientCert, NetConfig, Network, ProxyKind, UpstreamProxy};
@@ -115,6 +116,9 @@ pub struct Response {
     pub conn: AfterResponse,
     /// Time from starting to connect until the full response was read.
     pub elapsed: Duration,
+    /// The bytes actually sent, when they differ from the request given
+    /// (an HTTP/2 request downgraded to HTTP/1.1).
+    pub sent: Option<Vec<u8>>,
 }
 
 /// What happens to the connection after the response.
@@ -159,6 +163,13 @@ impl Sender {
     /// The bytes to write for `request`: unchanged, except when plain HTTP
     /// goes through an HTTP proxy (absolute-form target, proxy login).
     fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        // Parallel sends speak HTTP/1.1: HTTP/2 text is downgraded for them.
+        if pm_http::h2text::is_http2_request(request)
+            && let Ok(r) = pm_http::h2text::h2_request(request)
+        {
+            let h1 = pm_http::h2text::downgrade_request(&r, &pm_core::authority(&ep.scheme, &ep.host, ep.port));
+            return std::borrow::Cow::Owned(self.wire_bytes(ep, &h1).into_owned());
+        }
         match self.net.upstream_for(&ep.host) {
             Some(p) if p.kind == ProxyKind::Http && ep.scheme != "https" => {
                 std::borrow::Cow::Owned(net::for_http_proxy(request, &ep.host, ep.port, &p))
@@ -177,6 +188,17 @@ impl Sender {
     /// applies. With a check, names are always resolved here so the check
     /// sees the addresses in use (except with SOCKS5 remote DNS).
     pub async fn connect(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        Ok(self.connect_with(ep, check, false).await?.0)
+    }
+
+    /// Like [`Sender::connect`]; with `h2`, offers HTTP/2 over TLS (or assumes
+    /// it for plain HTTP). Returns whether HTTP/2 is in use.
+    pub(crate) async fn connect_with(
+        &self,
+        ep: &Endpoint,
+        check: Option<AddrCheck<'_>>,
+        h2: bool,
+    ) -> Result<(Box<dyn Io>, bool)> {
         let upstream = self.net.upstream_for(&ep.host);
         let remote_dns = upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
             || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http);
@@ -231,14 +253,20 @@ impl Sender {
         };
         if ep.scheme == "https" {
             let name = pm_tls::server_name(&ep.host)?;
-            let tls = self.net.tls_for(&ep.host, self.verify).unwrap_or_else(|| self.tls.clone());
+            let mut tls = self.net.tls_for(&ep.host, self.verify).unwrap_or_else(|| self.tls.clone());
+            if h2 {
+                let mut cfg = (**tls.config()).clone();
+                cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                tls = TlsConnector::from(std::sync::Arc::new(cfg));
+            }
             let tls = tokio::time::timeout(self.connect_timeout, tls.connect(name, tcp))
                 .await
                 .context("TLS handshake timed out")?
                 .context("TLS handshake with server")?;
-            Ok(Box::new(tls))
+            let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
+            Ok((Box::new(tls), is_h2))
         } else {
-            Ok(Box::new(tcp))
+            Ok((Box::new(tcp), h2))
         }
     }
 
@@ -267,6 +295,9 @@ impl Sender {
         method: &str,
         check: Option<AddrCheck<'_>>,
     ) -> Result<Response> {
+        if pm_http::h2text::is_http2_request(request) {
+            return self.send_h2(ep, request, method, check).await;
+        }
         let started = Instant::now();
         let io = self.connect(ep, check).await?;
         let mut conn = Conn::new(io);
@@ -349,7 +380,13 @@ async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Insta
         let head = pm_http::parse_response_head(&head_raw)?;
         raw.extend_from_slice(&head_raw);
         if head.status == 101 {
-            return Ok(Response { raw, head, conn: AfterResponse::Upgraded(conn), elapsed: started.elapsed() });
+            return Ok(Response {
+                raw,
+                head,
+                conn: AfterResponse::Upgraded(conn),
+                elapsed: started.elapsed(),
+                sent: None,
+            });
         }
         if (100..200).contains(&head.status) {
             continue;
@@ -357,7 +394,7 @@ async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Insta
         let kind = head.body_kind(method)?;
         raw.extend_from_slice(&conn.read_body(kind).await?);
         let after = if kind == BodyKind::UntilClose { AfterResponse::ClosedAfterBody } else { AfterResponse::Done };
-        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed() });
+        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed(), sent: None });
     }
 }
 

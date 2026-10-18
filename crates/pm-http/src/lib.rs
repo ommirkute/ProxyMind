@@ -5,6 +5,7 @@
 //! original bytes are never rewritten, so malformed or unusual messages
 //! (the interesting ones in pentesting) pass through untouched.
 
+pub mod h2text;
 pub mod ws;
 
 use thiserror::Error;
@@ -403,6 +404,40 @@ pub fn fix_content_length(raw: &[u8]) -> Vec<u8> {
     out.extend_from_slice(rest);
     out.extend_from_slice(body);
     out
+}
+
+/// The usual reason phrase for a status code ("" if unknown).
+pub fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "",
+    }
 }
 
 #[cfg(test)]

@@ -248,6 +248,9 @@ impl Service {
         };
         let (status, error, elapsed_ms) = match result {
             Ok(resp) => {
+                if let Some(sent) = resp.sent {
+                    record.request = sent; // e.g. HTTP/2 downgraded for an HTTP/1.1-only server
+                }
                 record.status = Some(resp.head.status);
                 record.response = Some(resp.raw);
                 (Some(resp.head.status), None, resp.elapsed.as_millis() as u64)

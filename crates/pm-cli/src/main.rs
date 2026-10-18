@@ -47,6 +47,9 @@ enum Command {
         /// Verify upstream TLS certificates (off by default for pentesting).
         #[arg(long)]
         verify_upstream: bool,
+        /// Speak only HTTP/1.1 to browsers (HTTP/2 is offered by default).
+        #[arg(long)]
+        no_http2: bool,
     },
     /// Manage the interception CA.
     Ca {
@@ -116,6 +119,9 @@ enum Command {
         proxy: SocketAddr,
         #[arg(long)]
         no_proxy: bool,
+        /// Speak only HTTP/1.1 to browsers (HTTP/2 is offered by default).
+        #[arg(long)]
+        no_http2: bool,
         /// Who you are in the audit log (default: human:<your username>)
         #[arg(long = "as")]
         actor: Option<String>,
@@ -585,7 +591,7 @@ async fn run() -> Result<()> {
 
     let cli = Cli::parse();
     match &cli.command {
-        Command::Proxy { listen, verify_upstream } => {
+        Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
             let store = Store::open(&cli.project)?;
             let (recorder, writer) = Recorder::spawn(store);
@@ -598,7 +604,12 @@ async fn run() -> Result<()> {
             }
             let network = pm_service::pm_replay::Network::new();
             watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
-            let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), network: Some(network), ..Default::default() };
+            let hooks = pm_proxy::Hooks {
+                rewrite: Some(rewriter),
+                network: Some(network),
+                http2: !*no_http2,
+                ..Default::default()
+            };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             eprintln!("ProxyMind listening on http://{listen}");
@@ -756,7 +767,7 @@ async fn run() -> Result<()> {
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
-        Command::Ui { listen, proxy, no_proxy, actor } => {
+        Command::Ui { listen, proxy, no_proxy, no_http2, actor } => {
             anyhow::ensure!(listen.ip().is_loopback(), "the UI/API must listen on a loopback address");
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
@@ -774,6 +785,7 @@ async fn run() -> Result<()> {
                     rewrite: Some(rewriter),
                     intercept: Some(queue),
                     network: Some(service.network().clone()),
+                    http2: !*no_http2,
                 };
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let l =

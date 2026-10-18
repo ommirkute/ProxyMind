@@ -4,6 +4,7 @@
 //! match-and-replace rules, an intercept queue, and recording of every
 //! exchange. One upstream connection per request; pooling and HTTP/2 come next.
 
+mod h2_server;
 pub mod intercept;
 pub mod rewrite;
 mod ws_relay;
@@ -94,6 +95,8 @@ impl Recorder {
     }
 }
 
+const DROPPED_MSG: &str = "Request dropped in ProxyMind's intercept queue.";
+
 pub struct ProxyConfig {
     pub listen: SocketAddr,
     /// Verify upstream TLS certificates. Off by default for pentesting.
@@ -116,6 +119,8 @@ pub struct Hooks {
     pub intercept: Option<Arc<InterceptQueue>>,
     /// Shared network settings (upstream proxy, client certificates).
     pub network: Option<pm_replay::Network>,
+    /// Offer HTTP/2 to browsers on intercepted TLS connections.
+    pub http2: bool,
 }
 
 impl Proxy {
@@ -173,12 +178,82 @@ impl Proxy {
             return Ok(());
         }
         if first[0] == 0x16 {
-            let acceptor = TlsAcceptor::from(self.ca.server_config(&host)?);
-            let tls = acceptor.accept(tcp).await.context("TLS handshake with client")?;
+            let mut cfg = self.ca.server_config(&host)?;
+            if self.hooks.http2 {
+                let mut c = (*cfg).clone();
+                c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                cfg = Arc::new(c);
+            }
+            let tls = TlsAcceptor::from(cfg).accept(tcp).await.context("TLS handshake with client")?;
+            if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+                return self.serve_h2(tls, host, port).await;
+            }
             self.serve_http(Conn::new(tls), "https", Some((host, port)), None).await
         } else {
             self.serve_http(Conn::new(tcp), "http", Some((host, port)), None).await
         }
+    }
+
+    /// Match-and-replace rules, then the intercept queue, where a human may
+    /// forward, edit or drop the request. Returns the request to send with
+    /// its method and path, or None if it was dropped.
+    async fn before_send(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        request: Vec<u8>,
+        method: &str,
+        path: &str,
+    ) -> Option<(Vec<u8>, String, String)> {
+        let mut edited = None;
+        if let Some(r) = &self.hooks.rewrite {
+            edited = r.apply_request(scheme, host, port, path, &request);
+        }
+        if let Some(q) = &self.hooks.intercept {
+            let current = edited.as_deref().unwrap_or(&request);
+            match q.hold(Kind::Request, scheme, host, port, method, path, current).await {
+                Decision::Forward(None) => {}
+                Decision::Forward(Some(e)) => edited = Some(e),
+                Decision::Drop => return None,
+            }
+        }
+        let Some(edited) = edited else { return Some((request, method.to_string(), path.to_string())) };
+        let (mut method, mut path) = (method.to_string(), path.to_string());
+        if let Ok(Some(end)) = pm_http::find_head_end(&edited)
+            && let Ok(h) = pm_http::parse_request_head(&edited[..end])
+        {
+            path =
+                pm_http::split_absolute_target(&h.target).map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
+            method = h.method;
+        }
+        Some((edited, method, path))
+    }
+
+    /// Rules and the intercept queue for a response. `Some(None)`: send the
+    /// original; `Some(Some(bytes))`: send these instead; None: dropped.
+    async fn before_respond(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+        raw: &[u8],
+    ) -> Option<Option<Vec<u8>>> {
+        let mut to_client = None;
+        if let Some(r) = &self.hooks.rewrite {
+            to_client = r.apply_response(scheme, host, port, path, raw);
+        }
+        if let Some(q) = &self.hooks.intercept {
+            let current = to_client.as_deref().unwrap_or(raw);
+            match q.hold(Kind::Response, scheme, host, port, method, path, current).await {
+                Decision::Forward(None) => {}
+                Decision::Forward(Some(edited)) => to_client = Some(edited),
+                Decision::Drop => return None,
+            }
+        }
+        Some(to_client)
     }
 
     /// Serves requests on one client connection until it closes.
@@ -203,41 +278,22 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
-            // Match-and-replace rules, then the intercept queue, where a
-            // human may forward, edit or drop the request.
-            let mut method = head.method.clone();
-            let mut path = target.path.clone();
-            let mut edited_request = None;
-            if let Some(r) = &self.hooks.rewrite {
-                edited_request = r.apply_request(&target.scheme, &target.host, target.port, &path, &request);
-            }
-            if let Some(q) = &self.hooks.intercept {
-                let current = edited_request.as_deref().unwrap_or(&request);
-                match q.hold(Kind::Request, &target.scheme, &target.host, target.port, &method, &path, current).await {
-                    Decision::Forward(None) => {}
-                    Decision::Forward(Some(edited)) => edited_request = Some(edited),
-                    Decision::Drop => {
-                        let msg = "Request dropped in ProxyMind's intercept queue.";
-                        let resp = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
-                            msg.len()
-                        );
-                        let _ = client.io.write_all(resp.as_bytes()).await;
-                        let _ = client.io.shutdown().await;
-                        return Ok(());
-                    }
+            let (request, method, path) = match self
+                .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
+                .await
+            {
+                Some(r) => r,
+                None => {
+                    let msg = DROPPED_MSG;
+                    let resp = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                        msg.len()
+                    );
+                    let _ = client.io.write_all(resp.as_bytes()).await;
+                    let _ = client.io.shutdown().await;
+                    return Ok(());
                 }
-            }
-            if let Some(edited) = edited_request {
-                if let Ok(Some(end)) = pm_http::find_head_end(&edited)
-                    && let Ok(h) = pm_http::parse_request_head(&edited[..end])
-                {
-                    path = pm_http::split_absolute_target(&h.target)
-                        .map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
-                    method = h.method;
-                }
-                request = edited;
-            }
+            };
 
             let started = Instant::now();
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
@@ -262,26 +318,20 @@ impl Proxy {
 
             match result {
                 Ok(resp) => {
+                    if let Some(sent) = &resp.sent {
+                        record.request = sent.clone();
+                    }
                     // Rules and intercept apply to responses too. The project
                     // keeps the server's original; the browser gets the edit.
-                    let mut to_client: Option<Vec<u8>> = None;
                     let upgraded = matches!(resp.conn, AfterResponse::Upgraded(_));
-                    if let Some(r) = &self.hooks.rewrite
-                        && !upgraded
-                    {
-                        to_client = r.apply_response(&target.scheme, &target.host, target.port, &path, &resp.raw);
-                    }
-                    if let Some(q) = &self.hooks.intercept
-                        && !upgraded
-                    {
-                        let current = to_client.as_deref().unwrap_or(&resp.raw);
-                        match q
-                            .hold(Kind::Response, &target.scheme, &target.host, target.port, &method, &path, current)
+                    let mut to_client = None;
+                    if !upgraded {
+                        match self
+                            .before_respond(&target.scheme, &target.host, target.port, &method, &path, &resp.raw)
                             .await
                         {
-                            Decision::Forward(None) => {}
-                            Decision::Forward(Some(edited)) => to_client = Some(edited),
-                            Decision::Drop => {
+                            Some(edited) => to_client = edited,
+                            None => {
                                 record.status = Some(resp.head.status);
                                 record.response = Some(resp.raw);
                                 self.recorder.record(record);
@@ -289,6 +339,11 @@ impl Proxy {
                                 return Ok(());
                             }
                         }
+                    }
+                    // An HTTP/1.1 client can't read an HTTP/2 response (the
+                    // request was edited to HTTP/2 in the intercept queue).
+                    if pm_http::h2text::is_http2_response(to_client.as_deref().unwrap_or(&resp.raw)) {
+                        to_client = pm_http::h2text::to_http1_response(to_client.as_deref().unwrap_or(&resp.raw));
                     }
                     client.io.write_all(to_client.as_deref().unwrap_or(&resp.raw)).await?;
                     client.io.flush().await?;

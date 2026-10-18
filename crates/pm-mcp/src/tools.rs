@@ -75,7 +75,8 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "replay_send",
-            "Send an HTTP/1.1 request to the target and get the response. Give exchange_id to resend or edit a recorded \
+            "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 in the request line for HTTP/2, \
+             with a host: header for :authority). Give exchange_id to resend or edit a recorded \
              request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
              to you. GET/HEAD/OPTIONS usually run directly; other methods may return status=pending_approval: ask the \
              user to approve, then call again with identical arguments plus approval_id.",

@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 only (HTTP/2 is next). See [What's done and what's next](docs/plan.md#status).
+> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 and HTTP/2. See [What's done and what's next](docs/plan.md#status).
 
 ## Why ProxyMind
 
@@ -108,10 +108,10 @@ Scope rules resist the usual bypass tricks (encoded paths, `../`, `;params`, loo
 
 ```
 crates/
-  pm-http      raw HTTP/1.x parsing that keeps exact bytes      ✅ working
+  pm-http      raw HTTP/1.x parsing, HTTP/2 text form           ✅ working
   pm-tls       CA and per-host certificates, upstream TLS       ✅ working
   pm-store     SQLite project file and compressed blob store    ✅ working
-  pm-proxy     proxy, intercept, match/replace, WebSocket log   ✅ working (HTTP/1.1)
+  pm-proxy     proxy, intercept, match/replace, WebSocket log   ✅ working (HTTP/1.1, HTTP/2)
   pm-cli       the `proxymind` binary                           ✅ working
   pm-demo      VulnShop, a deliberately vulnerable demo API     ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working

@@ -12,3 +12,4 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0006](0006-ui-tauri.md) | Tauri 2 + React + TypeScript for the UI | Amended by 0008 |
 | [0007](0007-license.md) | AGPL-3.0 core, Apache-2.0 SDKs | Accepted |
 | [0008](0008-web-ui-first.md) | Web UI served by the binary first; Tauri shell later | Accepted |
+| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Accepted |

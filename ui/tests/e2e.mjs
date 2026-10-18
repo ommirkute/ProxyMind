@@ -254,6 +254,39 @@ try {
   check(wsLogged, "History shows the WebSocket messages both ways");
   await page.screenshot({ path: join(SHOTS, "6d-websocket.png") });
 
+  console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
+  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
+    "-keyout", join(dir, "h2.key"), "-out", join(dir, "h2.crt")], { stdio: "ignore" });
+  const { createSecureServer } = await import("node:http2");
+  const { readFileSync } = await import("node:fs");
+  const h2srv = createSecureServer({ key: readFileSync(join(dir, "h2.key")), cert: readFileSync(join(dir, "h2.crt")) }, (req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(`<title>h2</title><p id="v">server saw HTTP/${req.httpVersion} ${req.url}</p>`);
+  });
+  await new Promise((r) => h2srv.listen(0, "127.0.0.1", r));
+  const h2port = h2srv.address().port;
+  const viaPm2 = await browser.newContext({
+    proxy: { server: `http://127.0.0.1:${proxy}`, bypass: "<-loopback>" },
+    ignoreHTTPSErrors: true, // trust ProxyMind's interception certificate
+  });
+  const h2page = await viaPm2.newPage();
+  await h2page.goto(`https://localhost:${h2port}/h2-check`);
+  const seen = await h2page.locator("#v").textContent();
+  const hop = await h2page.evaluate(() => performance.getEntriesByType("navigation")[0].nextHopProtocol);
+  check(hop === "h2" && seen === "server saw HTTP/2.0 /h2-check", `browser and server both speak HTTP/2 through ProxyMind (${hop}; ${seen})`);
+  await viaPm2.close();
+  h2srv.close();
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByLabel("Path", { exact: true }).fill("/h2-check");
+  await sleep(500);
+  await page.locator('[data-testid^="row-"]').first().click();
+  await page.getByRole("tab", { name: "request" }).click();
+  const h2text = await page
+    .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "GET /h2-check HTTP/2" })
+    .waitFor({ timeout: 5000 })
+    .then(() => true, () => false);
+  check(h2text, "History shows the request in HTTP/2 text form");
+
   console.log("Network: upstream proxy");
   // A minimal upstream HTTP proxy that records request lines and forwards.
   const upstreamSeen = [];
