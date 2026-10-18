@@ -1,0 +1,187 @@
+// Browser end-to-end test of the ProxyMind UI against VulnShop.
+//
+//   npm run build && (cd .. && cargo build) && npm run test:e2e
+//
+// Uses the real `proxymind` binary (PROXYMIND, default ../target/debug/proxymind)
+// and Chromium (CHROMIUM, default: Playwright's bundled path).
+import { spawn, execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import net from "node:net";
+import { chromium } from "playwright-core";
+
+const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
+const SHOTS = process.env.SCREENSHOTS ?? join(tmpdir(), "proxymind-ui-shots");
+const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
+const project = join(dir, "ui.pmproj");
+const children = [];
+let failures = 0;
+
+const freePort = () =>
+  new Promise((res) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => res(p));
+    });
+  });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pm = (...args) => execFileSync(BIN, ["-p", project, "--home", join(dir, "home"), ...args], { encoding: "utf8" });
+function start(args, onLine) {
+  const c = spawn(BIN, ["-p", project, "--home", join(dir, "home"), ...args], { stdio: ["pipe", "pipe", "pipe"] });
+  c.stdout.on("data", (d) => onLine?.(String(d)));
+  children.push(c);
+  return c;
+}
+function check(cond, msg) {
+  if (cond) console.log(`  ✓ ${msg}`);
+  else {
+    console.log(`  ✗ ${msg}`);
+    failures++;
+  }
+}
+/** One request through the proxy (absolute-form), returns the raw response. */
+function viaProxy(proxyPort, shopPort, raw) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect(proxyPort, "127.0.0.1", () => s.write(raw.replace(" /", ` http://127.0.0.1:${shopPort}/`)));
+    let out = "";
+    s.on("data", (d) => (out += d));
+    s.on("end", () => resolve(out));
+    s.on("error", reject);
+    setTimeout(() => s.destroy(), 5000);
+  });
+}
+async function browseAs(proxy, shop, user, paths) {
+  const body = JSON.stringify({ username: user, password: `${user}123` });
+  const login = await viaProxy(proxy, shop, `POST /api/login HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
+  const session = login.split("session=")[1].split(";")[0];
+  for (const p of paths) await viaProxy(proxy, shop, `GET ${p} HTTP/1.1\r\nHost: shop\r\nCookie: session=${session}\r\n\r\n`);
+}
+
+try {
+  mkdirSync(SHOTS, { recursive: true });
+  const [shop, proxy, ui] = [await freePort(), await freePort(), await freePort()];
+  start(["demo-target", "--listen", `127.0.0.1:${shop}`]);
+  writeFileSync(join(dir, "roe.yaml"), `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
+  pm("roe", "use", join(dir, "roe.yaml"));
+  let link = "";
+  start(["ui", "--listen", `127.0.0.1:${ui}`, "--proxy", `127.0.0.1:${proxy}`, "--as", "human:tester"], (l) => {
+    const m = l.match(/Open: (\S+)/);
+    if (m) link = m[1];
+  });
+  for (let i = 0; i < 50 && !link; i++) await sleep(100);
+  if (!link) throw new Error("proxymind ui did not print a login link");
+
+  await browseAs(proxy, shop, "alice", ["/api/me", "/api/orders", "/api/orders/1001", "/api/invoices/5001"]);
+  await browseAs(proxy, shop, "bob", ["/api/me"]);
+
+  const exe = process.env.CHROMIUM ?? ["/opt/pw-browsers/chromium-1194/chrome-linux/chrome"].find(existsSync);
+  const browser = await chromium.launch({ executablePath: exe });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const consoleErrors = [];
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+  page.on("pageerror", (e) => consoleErrors.push(String(e)));
+
+  console.log("History");
+  await page.goto(link);
+  await page.waitForSelector('[role="row"][data-testid^="row-"]');
+  check((await page.locator('[data-testid^="row-"]').count()) === 7, "history lists the 7 proxied requests");
+  await page.screenshot({ path: join(SHOTS, "1-history.png") });
+
+  // Capture alice from her /api/me request and bob from his.
+  const rowFor = async (path, nth) => {
+    await page.getByLabel("Path").fill(path);
+    await sleep(500);
+    const rows = page.locator('[data-testid^="row-"]');
+    const n = await rows.count();
+    return rows.nth(n - 1 - nth); // newest first, so count from the end
+  };
+  for (const [who, nth] of [["alice", 0], ["bob", 1]]) {
+    await (await rowFor("/api/me", nth)).click();
+    await page.getByRole("button", { name: "Capture identity…" }).click();
+    await page.getByLabel("Identity name").fill(who);
+    await page.getByRole("button", { name: "Capture", exact: true }).click();
+    await page.waitForSelector(`text=Identity "${who}" captured`);
+  }
+  check(true, "captured alice and bob from history");
+  const order = await rowFor("/api/orders/1001", 0);
+  const orderId = Number((await order.getAttribute("data-testid")).replace("row-", ""));
+  await order.click();
+  await page.waitForSelector('[data-testid="exchange-detail"]');
+  check(await page.locator('[data-testid="exchange-detail"] pre.raw').first().textContent().then((t) => t.includes("alice@vulnshop.test")), "viewer shows the response");
+  await page.screenshot({ path: join(SHOTS, "2-history-detail.png") });
+
+  console.log("Authorization check");
+  await page.getByRole("button", { name: "Authorization check…" }).click();
+  await page.getByRole("checkbox", { name: "bob" }).check();
+  await page.getByTestId("run-authz").click();
+  await page.waitForSelector('[data-testid="authz-results"] >> text=same as owner');
+  check(true, "bob gets alice's order: same as owner");
+  check(await page.locator('[data-testid="authz-results"]').first().textContent().then((t) => t.includes("denied")), "anonymous is denied");
+  await page.screenshot({ path: join(SHOTS, "3-authz.png") });
+
+  console.log("Findings and proof");
+  await page.getByRole("button", { name: "Findings" }).click();
+  await page.getByRole("button", { name: "New finding" }).click();
+  await page.getByLabel("Title").fill("Any user can read any order");
+  await page.getByLabel("Severity").selectOption("high");
+  await page.getByLabel("Evidence").fill(String(orderId));
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByLabel("Attacker").selectOption("bob");
+  await page.getByTestId("prove").click();
+  await page.waitForSelector('[data-testid="proof-result"]');
+  check(await page.getByTestId("proof-result").textContent().then((t) => t.startsWith("Proven")), "ProxyMind proves the IDOR");
+  await page.waitForSelector('[data-testid="findings"] >> text=proven');
+  check(true, "finding status becomes proven");
+  await page.screenshot({ path: join(SHOTS, "4-findings.png") });
+
+  console.log("Repeater");
+  await page.goto(link.replace(/\/auth.*/, `/#/repeater/${orderId}`));
+  await page.getByLabel("Send as").selectOption("anonymous");
+  await page.getByTestId("send").click();
+  await page.waitForSelector('[data-testid="replay-result"]');
+  check(await page.getByTestId("replay-result").textContent().then((t) => t.includes("401")), "anonymous replay gets 401");
+  await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
+
+  console.log("Approvals (an agent asks over MCP)");
+  const mcp = start(["mcp", "--actor", "agent:claude"]);
+  const replies = [];
+  mcp.stdout.on("data", (d) => replies.push(...String(d).split("\n").filter(Boolean)));
+  const rpc = (id, method, params) => mcp.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } });
+  rpc(2, "tools/call", { name: "replay_send", arguments: { url: `http://127.0.0.1:${shop}`, raw: "POST /api/orders HTTP/1.1\nHost: x\n\n{\"product_id\":1,\"qty\":-5}" } });
+  for (let i = 0; i < 50 && replies.length < 2; i++) await sleep(100);
+  await page.getByRole("button", { name: /^Approvals/ }).click();
+  await page.waitForSelector('[data-testid="approvals-badge"]');
+  check(true, "sidebar shows a pending approval badge (live update)");
+  await page.screenshot({ path: join(SHOTS, "6-approvals.png") });
+  await page.getByRole("button", { name: "Approve" }).click();
+  await page.waitForSelector("text=Nothing is waiting for approval.");
+  check(true, "approved from the UI");
+
+  console.log("Model, coverage and audit");
+  await page.getByRole("button", { name: "Model & Coverage" }).click();
+  await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();
+  check(true, "model shows /api/orders/{id}");
+  await page.screenshot({ path: join(SHOTS, "7-model.png"), fullPage: true });
+  await page.getByRole("button", { name: "Audit log" }).click();
+  await page.waitForSelector('[data-testid="audit-verify"]');
+  check(await page.getByTestId("audit-verify").textContent().then((t) => t.includes("intact")), "audit log verified intact");
+  await page.screenshot({ path: join(SHOTS, "8-audit.png") });
+
+  // A fresh browser without the cookie is refused.
+  const other = await browser.newPage();
+  await other.goto(link.replace(/\/auth.*/, "/"));
+  await other.waitForSelector("text=Not signed in");
+  check(true, "a browser without the token sees 'Not signed in'");
+
+  check(consoleErrors.length === 0, `no console errors${consoleErrors.length ? ": " + consoleErrors.join(" | ") : ""}`);
+  await browser.close();
+} catch (e) {
+  console.error(e);
+  failures++;
+} finally {
+  for (const c of children) c.kill();
+}
+console.log(failures ? `\n${failures} check(s) failed` : `\nAll UI checks passed. Screenshots: ${SHOTS}`);
+process.exit(failures ? 1 : 0);

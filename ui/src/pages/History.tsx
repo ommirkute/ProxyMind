@@ -1,0 +1,234 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, fmtBytes, fmtTime, qs, type ExchangeDetail, type ExchangePage, type ExchangeSummary } from "../api";
+import { Chip, Empty, ErrorBox, Raw, StatusCode, useAction, useNav } from "../components";
+
+const ROW = 30;
+
+interface Filters {
+  host: string;
+  path: string;
+  method: string;
+  status: string;
+  source: string;
+}
+
+export default function History() {
+  const { arg, counters, go } = useNav();
+  const [filters, setFilters] = useState<Filters>({ host: "", path: "", method: "", status: "", source: "" });
+  const [rows, setRows] = useState<ExchangeSummary[]>([]);
+  const [olderFrom, setOlderFrom] = useState<number | undefined>();
+  const [error, setError] = useState<string | null>(null);
+  const selected = arg ? Number(arg) : undefined;
+
+  const query = useMemo(
+    () => ({
+      host: filters.host,
+      path: filters.path,
+      method: filters.method,
+      status: filters.status,
+      source: filters.source,
+    }),
+    [filters],
+  );
+
+  // (Re)load when filters change.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      api
+        .get<ExchangePage>(`/exchanges${qs({ ...query, limit: 500 })}`)
+        .then((p) => {
+          setRows(p.exchanges);
+          setOlderFrom(p.next_before_id);
+          setError(null);
+        })
+        .catch((e) => setError(e.message));
+    }, 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Live: fetch newer rows when the server says there are some.
+  const newest = rows[0]?.id ?? 0;
+  useEffect(() => {
+    if (!counters || counters.last_exchange_id <= newest) return;
+    api
+      .get<ExchangePage>(`/exchanges${qs({ ...query, after_id: newest, limit: 500 })}`)
+      .then((p) => p.exchanges.length && setRows((r) => [...p.exchanges, ...r]))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [counters?.last_exchange_id]);
+
+  const loadOlder = () =>
+    api
+      .get<ExchangePage>(`/exchanges${qs({ ...query, before_id: olderFrom, limit: 500 })}`)
+      .then((p) => {
+        setRows((r) => [...r, ...p.exchanges]);
+        setOlderFrom(p.next_before_id);
+      })
+      .catch((e) => setError(e.message));
+
+  const set = (k: keyof Filters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setFilters((f) => ({ ...f, [k]: e.target.value }));
+
+  return (
+    <div className="content flush">
+      <div className={`history ${selected ? "" : "single"}`}>
+        <div className="history-list">
+          <div className="filters" role="search">
+            <input aria-label="Host" placeholder="host" value={filters.host} onChange={set("host")} />
+            <input className="wide" aria-label="Path" placeholder="path contains…" value={filters.path} onChange={set("path")} />
+            <select aria-label="Method" value={filters.method} onChange={set("method")}>
+              <option value="">any method</option>
+              {["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"].map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+            <input aria-label="Status" placeholder="status" value={filters.status} onChange={set("status")} style={{ width: 70 }} />
+            <select aria-label="Source" value={filters.source} onChange={set("source")}>
+              <option value="">any source</option>
+              {["proxy", "replay", "authz", "proof", "login", "health"].map((m) => (
+                <option key={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <ErrorBox error={error} />
+          <VirtualRows rows={rows} selected={selected} onSelect={(id) => go("history", id)} />
+          {olderFrom && (
+            <div style={{ padding: 8, borderTop: "1px solid var(--border)" }}>
+              <button className="btn" onClick={loadOlder}>Load older</button>
+            </div>
+          )}
+        </div>
+        {selected && <Detail id={selected} />}
+      </div>
+    </div>
+  );
+}
+
+function VirtualRows({ rows, selected, onSelect }: { rows: ExchangeSummary[]; selected?: number; onSelect: (id: number) => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scroll, setScroll] = useState(0);
+  const [height, setHeight] = useState(600);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setHeight(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  if (rows.length === 0) return <Empty>No traffic yet. Point your browser at the proxy, or use the Repeater.</Empty>;
+  const first = Math.max(0, Math.floor(scroll / ROW) - 10);
+  const last = Math.min(rows.length, Math.ceil((scroll + height) / ROW) + 10);
+  return (
+    <div className="vlist" ref={ref} onScroll={(e) => setScroll(e.currentTarget.scrollTop)} role="table" aria-label="History">
+      <div className="vrow vhead" role="row">
+        <span>#</span><span>Time</span><span>Method</span><span>Host</span><span>Path</span><span>Status</span><span>Size</span>
+      </div>
+      <div style={{ height: rows.length * ROW, position: "relative" }}>
+        {rows.slice(first, last).map((r, i) => (
+          <div
+            key={r.id}
+            role="row"
+            data-testid={`row-${r.id}`}
+            className={`vrow ${selected === r.id ? "selected" : ""}`}
+            style={{ top: (first + i) * ROW }}
+            onClick={() => onSelect(r.id)}
+            title={`${r.source} · ${r.actor_id}${r.identity ? ` as ${r.identity}` : ""}`}
+          >
+            <span className="muted">{r.id}</span>
+            <span className="muted">{fmtTime(r.ts_ms)}</span>
+            <span>{r.method}</span>
+            <span>{r.host}</span>
+            <span>{r.path}</span>
+            <span><StatusCode status={r.status} error={r.error} /></span>
+            <span className="muted">{fmtBytes(r.resp_len)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Detail({ id }: { id: number }) {
+  const { go } = useNav();
+  const [ex, setEx] = useState<ExchangeDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"request" | "response" | "summary">("response");
+  const [capture, setCapture] = useState({ open: false, name: "", role: "user" });
+  const action = useAction();
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEx(null);
+    setNote(null);
+    api.get<ExchangeDetail>(`/exchanges/${id}`).then(setEx).catch((e) => setError(e.message));
+  }, [id]);
+
+  if (error) return <div className="detail"><ErrorBox error={error} /></div>;
+  if (!ex) return <div className="detail muted">Loading…</div>;
+  const s = ex.summary;
+  const resp = ex.view.response?.body;
+
+  const doCapture = () =>
+    action.run(async () => {
+      await api.post("/identities/capture", { name: capture.name, role: capture.role, exchange_id: id });
+      setCapture({ open: false, name: "", role: "user" });
+      setNote(`Identity "${capture.name}" captured from #${id}.`);
+    });
+
+  return (
+    <div className="detail" data-testid="exchange-detail">
+      <div className="row">
+        <strong className="mono grow" style={{ wordBreak: "break-all" }}>
+          {s.method} {ex.view.url}
+        </strong>
+        <StatusCode status={s.status} error={s.error} />
+      </div>
+      <div className="row small muted" style={{ marginTop: 4 }}>
+        <span>#{s.id}</span>
+        <span>{s.source}</span>
+        <span>{s.actor_id}</span>
+        {s.identity && <Chip value={`as ${s.identity}`} />}
+        {s.duration_ms != null && <span>{s.duration_ms} ms</span>}
+        {s.hypothesis_id && <span>hypothesis #{s.hypothesis_id}</span>}
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="btn" onClick={() => go("repeater", id)}>Send to Repeater</button>
+        <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
+        <button className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>
+      </div>
+      {capture.open && (
+        <div className="row" style={{ marginTop: 8 }}>
+          <input aria-label="Identity name" placeholder="name, e.g. alice" value={capture.name} onChange={(e) => setCapture((c) => ({ ...c, name: e.target.value }))} />
+          <input aria-label="Role" placeholder="role" value={capture.role} onChange={(e) => setCapture((c) => ({ ...c, role: e.target.value }))} style={{ width: 90 }} />
+          <button className="btn primary" disabled={!capture.name || action.busy} onClick={doCapture}>Capture</button>
+        </div>
+      )}
+      <ErrorBox error={action.error} />
+      {note && <div className="notice">{note}</div>}
+      {ex.view.possible_prompt_injection?.length ? (
+        <div className="error">Possible prompt injection in the response: {ex.view.possible_prompt_injection.join(" · ")}</div>
+      ) : null}
+      <div className="tabs" role="tablist">
+        {(["response", "request", "summary"] as const).map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
+            {t[0].toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+      </div>
+      {tab === "request" && <Raw text={ex.request} />}
+      {tab === "response" && <Raw text={ex.response ?? s.error} label="No response" />}
+      {tab === "summary" && (
+        <dl className="kv">
+          <dt>Response type</dt>
+          <dd>{resp?.content_type ?? resp?.kind ?? "–"}</dd>
+          <dt>Body size</dt>
+          <dd>{fmtBytes(resp?.size)}</dd>
+          <dt>Outline</dt>
+          <dd className="mono">{resp?.outline ?? "–"}</dd>
+          <dt>Notes</dt>
+          <dd>{resp?.notes?.join("; ") || "–"}</dd>
+        </dl>
+      )}
+    </div>
+  );
+}

@@ -26,10 +26,12 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Proof engine (differential authz, timing, OAST) with re-runnable proofs; findings workflow; Markdown report
 - VulnShop demo target, ground truth, `bench score`, demo script, and an end-to-end test where an agent finds and proves bugs purely over MCP
 
+- REST API with live events, hardened for browsers; web UI (history, viewer, Repeater, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
+
 **Next, in order:**
 
-1. **Desktop/web UI** (M2): history, viewer, intercept, Repeater, approvals, authz matrix, coverage, findings
-2. **Proxy depth** (M1): HTTP/2, intercept queue, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
+1. **Proxy depth** (M1/M2): intercept-and-edit queue, HTTP/2, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
+2. **Desktop shell** (Tauri) around the web UI
 3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
 4. **Built-in AI assistant** in pm-ai (Anthropic, OpenAI-compatible, Ollama), honouring `allow_cloud_models`
 5. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers

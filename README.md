@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: pre-alpha.** The engine and agent interface work end to end (see the demo); there is no desktop UI yet and the proxy speaks HTTP/1.1 only. See [What's done and what's next](docs/plan.md#status).
+> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 only and there is no intercept-and-edit queue yet. See [What's done and what's next](docs/plan.md#status).
 
 ## Why ProxyMind
 
@@ -27,6 +27,18 @@ PROXYMIND=./target/release/proxymind bench/demo.sh
 The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a Markdown report.
 
 Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining two bugs.
+
+## The UI
+
+```bash
+(cd ui && npm ci && npm run build) && cargo build --release
+./target/release/proxymind roe use examples/roe.yaml
+./target/release/proxymind ui        # prints a login link: open it in your browser
+```
+
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+
+![Findings with a proven IDOR](docs/images/ui-findings.png)
 
 ## Quick start
 
@@ -98,8 +110,9 @@ crates/
   pm-oast      out-of-band callback listener (HTTP)             ✅ working (DNS planned)
   pm-ai        LLM views, redaction, untrusted tagging          ✅ working (providers planned)
   pm-service   the one service layer every client uses          ✅ working
-  pm-api       REST API and event stream                        ⏳ planned (M2)
+  pm-api       REST API, live events, serves the web UI         ✅ working
   pm-mcp       MCP server                                       ✅ working
+ui/           web UI (React + TypeScript), built into the binary
 docs/          plan, decision records (ADRs), RFCs
 examples/      example rules-of-engagement file
 schemas/       JSON schemas
