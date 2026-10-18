@@ -1420,6 +1420,7 @@ dependencies = [
  "pm-proxy",
  "pm-replay",
  "pm-store",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

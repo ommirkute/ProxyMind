@@ -17,6 +17,7 @@ mod proof;
 mod replay;
 mod rules;
 mod ws;
+mod ws_replay;
 
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
@@ -31,6 +32,7 @@ pub use proof::{ProofRequest, ProofResult};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use ws::{WsMessageView, WsPage};
+pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
 use parking_lot::Mutex;
 use pm_ai::Redactor;

@@ -25,6 +25,7 @@ pm-policy = { version = "0.0.1", path = "../pm-policy" }
 pm-proof = { version = "0.0.1", path = "../pm-proof" }
 pm-proxy = { version = "0.0.1", path = "../pm-proxy" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
+ring = "0.17.14"
 pm-store = { version = "0.0.1", path = "../pm-store" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

@@ -253,6 +253,18 @@ try {
     .then(() => true, () => false);
   check(wsLogged, "History shows the WebSocket messages both ways");
   await page.screenshot({ path: join(SHOTS, "6d-websocket.png") });
+  await page.getByRole("button", { name: "Replay on a new connection…" }).click();
+  await page.getByLabel("Messages to send").fill("replayed from the UI");
+  await page.getByLabel("Wait (ms)").fill("400");
+  await page.getByTestId("ws-replay-send").click();
+  const replayed = await page.getByTestId("ws-replay-result").textContent({ timeout: 10000 }).catch(() => "");
+  check(/recorded as exchange #\d+/.test(replayed), `WebSocket replay opens a new connection and records it (${replayed.trim()})`);
+  await page.getByTestId("ws-replay-result").getByRole("link", { name: "Open it" }).click();
+  const replyShown = await page
+    .locator('[data-testid="ws-messages"]', { hasText: "we got: replayed from the UI" })
+    .waitFor({ timeout: 8000 })
+    .then(() => true, () => false);
+  check(replyShown, "the replayed session shows the server's answer");
 
   console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",

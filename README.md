@@ -36,7 +36,7 @@ Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find t
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages), an intercept queue (hold, edit, forward or drop requests and responses), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests and responses), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 

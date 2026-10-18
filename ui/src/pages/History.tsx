@@ -221,7 +221,12 @@ function Detail({ id }: { id: number }) {
           </button>
         ))}
       </div>
-      {tab === "websocket" && <WsMessages id={id} />}
+      {tab === "websocket" && (
+        <>
+          <WsReplay id={id} />
+          <WsMessages id={id} />
+        </>
+      )}
       {tab === "request" && <Raw text={ex.request} />}
       {tab === "response" && <Raw text={ex.response ?? s.error} label="No response" />}
       {tab === "summary" && (
@@ -236,6 +241,74 @@ function Detail({ id }: { id: number }) {
           <dd>{resp?.notes?.join("; ") || "–"}</dd>
         </dl>
       )}
+    </div>
+  );
+}
+
+type WsReplayResult =
+  | { status: "done"; exchange_id: number; closed_by: string; note?: string; messages: WsPage }
+  | { status: "not_upgraded"; exchange_id: number; http_status?: number; error?: string }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
+/** Opens a new WebSocket like this one and sends messages (one per line). */
+function WsReplay({ id }: { id: number }) {
+  const { go } = useNav();
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [wait, setWait] = useState(1000);
+  const [result, setResult] = useState<WsReplayResult | null>(null);
+  const action = useAction();
+  const send = () =>
+    action.run(async () => {
+      const messages = text
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => ({ text: l }));
+      setResult(await api.post<WsReplayResult>("/ws/replay", { exchange_id: id, messages, wait_ms: wait }));
+    });
+  if (!open) {
+    return (
+      <div className="row" style={{ margin: "8px 0" }}>
+        <button className="btn" onClick={() => setOpen(true)}>Replay on a new connection…</button>
+      </div>
+    );
+  }
+  return (
+    <div className="ws-replay" data-testid="ws-replay">
+      <textarea
+        aria-label="Messages to send"
+        rows={3}
+        placeholder="Messages to send, one per line (leave empty to just open and listen)"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        style={{ width: "100%" }}
+      />
+      <div className="row small" style={{ marginTop: 6 }}>
+        <label>
+          Listen after each message{" "}
+          <input aria-label="Wait (ms)" type="number" min={0} max={10000} step={250} value={wait} onChange={(e) => setWait(Number(e.target.value))} style={{ width: 80 }} /> ms
+        </label>
+        <span className="grow muted">A fresh connection with the same headers; ProxyMind answers pings and closes at the end.</span>
+        <button className="btn primary" data-testid="ws-replay-send" disabled={action.busy} onClick={send}>
+          {action.busy ? "Running…" : "Open and send"}
+        </button>
+      </div>
+      <ErrorBox error={action.error} />
+      {result?.status === "done" && (
+        <div className="notice" data-testid="ws-replay-result">
+          {result.messages.total} message(s) recorded as exchange #{result.exchange_id}, closed by {result.closed_by}
+          {result.note ? ` (${result.note})` : ""}.{" "}
+          <a href="#" onClick={(e) => { e.preventDefault(); go("history", result.exchange_id); }}>Open it</a>
+        </div>
+      )}
+      {result?.status === "not_upgraded" && (
+        <div className="error">
+          The server didn't open a WebSocket{result.http_status ? ` (HTTP ${result.http_status})` : ""}{result.error ? `: ${result.error}` : ""}. Recorded as #{result.exchange_id}.
+        </div>
+      )}
+      {result?.status === "pending_approval" && <div className="notice">Waiting for approval: {result.summary}</div>}
+      {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
     </div>
   );
 }

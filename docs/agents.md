@@ -88,6 +88,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
+| `ws_send` | Open a new WebSocket like a recorded one, send messages and get every message both ways (sending needs approval by default) |
 | `replay_send` | Send a request (new, resent or edited) through the policy gate. Write `HTTP/2` in the request line to send it over HTTP/2 |
 | `identity_list` | Test identities and their session status (names only, never values) |
 | `identity_capture` | Create an identity from the cookies/auth headers of a recorded request |

@@ -74,6 +74,27 @@ pub fn tool_definitions() -> Vec<Value> {
             &["exchange_id"],
         ),
         tool(
+            "ws_send",
+            "Open a new WebSocket like a recorded one (exchange_id of a status-101 upgrade), send messages in order and \
+             get every message both ways. ProxyMind listens wait_ms after opening and after each message, answers pings \
+             and closes at the end; the session is recorded as a new exchange. Opening only is usually allowed; sending \
+             messages may return status=pending_approval: ask the user, then call again with identical arguments plus \
+             approval_id. Use {{secret:...}} placeholders as shown to you.",
+            json!({
+                "exchange_id": {"type":"integer","description":"Recorded WebSocket upgrade (status 101)"},
+                "raw": {"type":"string","description":"Edited upgrade request (HTTP/1.1); default: the recorded one"},
+                "messages": {"type":"array","maxItems":50,"description":"Sent in order","items":{"type":"object",
+                    "properties":{"text":{"type":"string"},"hex":{"type":"string","description":"Binary payload as hex"}},
+                    "additionalProperties":false}},
+                "wait_ms": {"type":"integer","minimum":0,"maximum":10000,"description":"Listen time after each message (default 1000)"},
+                "identity": {"type":"string","description":"Open the socket as this identity"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+                "max_chars": {"type":"integer","minimum":100,"maximum":20000,"description":"Per message shown; default 2000"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
             "replay_send",
             "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 in the request line for HTTP/2, \
              with a host: header for :authority). Give exchange_id to resend or edit a recorded \
@@ -356,6 +377,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
                 .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
                 .map(to_json)
                 .map_err(|e| e.to_string())
+        }
+        "ws_send" => {
+            let r: pm_service::WsReplayRequest = args(a)?;
+            service.ws_replay(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "replay_send" => {
             let r: ReplayRequest = args(a)?;

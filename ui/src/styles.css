@@ -185,3 +185,4 @@ table.grid input.wide { width: 100%; min-width: 160px; }
 .assistant-settings { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; text-align: left; }
 @media (max-width: 800px) { .assistant-layout { grid-template-columns: 1fr; } }
+.ws-replay { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 8px 0; }

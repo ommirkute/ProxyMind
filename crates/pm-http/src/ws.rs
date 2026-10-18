@@ -214,6 +214,40 @@ impl Decoder {
     }
 }
 
+/// Encodes one unfragmented frame (FIN set, no RSV bits). Clients must
+/// pass a mask (RFC 6455 section 5.3); servers must not.
+pub fn encode_frame(opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 14);
+    out.push(0x80 | (opcode & 0x0f));
+    let m = if mask.is_some() { 0x80 } else { 0 };
+    match payload.len() {
+        n if n < 126 => out.push(m | n as u8),
+        n if n <= 0xffff => {
+            out.push(m | 126);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            out.push(m | 127);
+            out.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    match mask {
+        Some(k) => {
+            out.extend_from_slice(&k);
+            out.extend(payload.iter().enumerate().map(|(i, b)| b ^ k[i % 4]));
+        }
+        None => out.extend_from_slice(payload),
+    }
+    out
+}
+
+/// Payload of a close frame: the status code, then a UTF-8 reason.
+pub fn close_payload(code: u16, reason: &str) -> Vec<u8> {
+    let mut p = code.to_be_bytes().to_vec();
+    p.extend_from_slice(reason.as_bytes());
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +341,23 @@ mod tests {
         assert_eq!(d.feed(&frame(true, PING, None, &[0; 126]), &mut vec![]), Err(WsError::BadControlFrame));
         let mut d = Decoder::new(10);
         assert_eq!(d.feed(&[0x82, 0x7F, 0x80, 0, 0, 0, 0, 0, 0, 0], &mut vec![]), Err(WsError::BadLength));
+    }
+
+    #[test]
+    fn encoded_frames_decode() {
+        let mut out = Vec::new();
+        let mut d = Decoder::new(1 << 20);
+        let big = vec![b'x'; 70_000];
+        let mut wire = encode_frame(TEXT, b"hi", Some([1, 2, 3, 4]));
+        wire.extend(encode_frame(BINARY, &big, Some([9, 8, 7, 6])));
+        wire.extend(encode_frame(BINARY, &big[..300], None));
+        wire.extend(encode_frame(CLOSE, &close_payload(1000, "bye"), Some([0, 0, 0, 1])));
+        assert_eq!(&wire[..2], &[0x81, 0x82], "FIN+text, masked length 2");
+        d.feed(&wire, &mut out).unwrap();
+        assert_eq!(out.len(), 4);
+        assert_eq!((out[0].opcode, out[0].payload.as_slice()), (TEXT, &b"hi"[..]));
+        assert_eq!((out[1].len, out[1].payload == big), (70_000, true));
+        assert_eq!(out[2].payload.len(), 300);
+        assert_eq!(out[3].payload, b"\x03\xe8bye");
     }
 }
