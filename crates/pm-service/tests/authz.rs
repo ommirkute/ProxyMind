@@ -101,7 +101,7 @@ async fn authz_check_finds_the_idor_and_respects_secure_endpoints() {
         .unwrap();
     assert_eq!(verdict(&order, "bob"), "same_as_owner", "{order:#?}");
     assert_eq!(verdict(&order, "anonymous"), "denied");
-    assert!(order.noise.json_paths.contains("/meta/generated_at"), "{:?}", order.noise);
+    assert!(order.noise.json_paths.contains("/meta/request_id"), "{:?}", order.noise);
 
     let invoice = s
         .authz_check(

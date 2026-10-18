@@ -166,12 +166,83 @@ pub fn diff(a: &[u8], b: &[u8], noise: &NoiseMask) -> Diff {
     diff_features(&features(a), &features(b), noise)
 }
 
+/// Field names that usually hold per-response values.
+fn volatile_name(path: &str) -> bool {
+    let key = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+    let key = key.replace(['-', '_'], "");
+    [
+        "time",
+        "date",
+        "timestamp",
+        "ts",
+        "createdat",
+        "updatedat",
+        "generatedat",
+        "expires",
+        "expiry",
+        "expiresat",
+        "nonce",
+        "requestid",
+        "traceid",
+        "spanid",
+        "correlationid",
+        "csrf",
+        "xsrf",
+        "csrftoken",
+        "now",
+        "servertime",
+    ]
+    .iter()
+    .any(|w| key == *w || (w.len() > 4 && key.ends_with(w)))
+}
+
+/// Values that look like timestamps: ISO-8601 date-times, or Unix times
+/// (seconds or milliseconds) within twenty years of now.
+fn timestamp_like(v: &str) -> bool {
+    let v = v.trim_matches('"');
+    let b = v.as_bytes();
+    let iso = b.len() >= 19
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && b[13] == b':'
+        && b[..4].iter().all(u8::is_ascii_digit);
+    if iso {
+        return true;
+    }
+    let Ok(n) = v.parse::<u64>() else { return false };
+    let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let window = 20 * 365 * 24 * 3600;
+    let near = |x: u64| x + window > now_s && x < now_s + window;
+    near(n) || (n > 1_000_000_000_000 && near(n / 1000))
+}
+
+/// A JSON path whose values differ only because responses are generated at
+/// different moments. Learned noise can miss these when two baseline
+/// responses happen to share a value (e.g. the same millisecond).
+fn volatile_change(path: &str, a: Option<&String>, b: Option<&String>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => volatile_name(path) || (timestamp_like(x) && timestamp_like(y)),
+        _ => false,
+    }
+}
+
 pub fn diff_features(fa: &Features, fb: &Features, noise: &NoiseMask) -> Diff {
     let mut differences = Vec::new();
+    let mut volatile_ignored = 0usize;
     let similarity = match (&fa.json, &fb.json) {
         (Some(ja), Some(jb)) => {
-            let keys: BTreeSet<&String> =
-                ja.keys().chain(jb.keys()).filter(|k| !noise.json_paths.contains(*k)).collect();
+            let keys: BTreeSet<&String> = ja
+                .keys()
+                .chain(jb.keys())
+                .filter(|k| !noise.json_paths.contains(*k))
+                .filter(|k| {
+                    let (x, y) = (ja.get(*k), jb.get(*k));
+                    let skip = x != y && volatile_change(k, x, y);
+                    volatile_ignored += usize::from(skip);
+                    !skip
+                })
+                .collect();
             let same = keys.iter().filter(|k| ja.get(**k) == jb.get(**k)).count();
             for k in keys.iter().filter(|k| ja.get(**k) != jb.get(**k)).take(20) {
                 differences.push((*k).clone());
@@ -207,7 +278,7 @@ pub fn diff_features(fa: &Features, fb: &Features, noise: &NoiseMask) -> Diff {
     } else {
         format!("status {} vs {}", fa.status, fb.status)
     };
-    let noise_n = noise.json_paths.len() + noise.words.len();
+    let noise_n = noise.json_paths.len() + noise.words.len() + volatile_ignored;
     let summary = format!(
         "{status_part}; {:.0}% similar{}{}",
         similarity * 100.0,
@@ -241,6 +312,26 @@ mod tests {
         let d = diff(&a1, &bob, &noise);
         assert!(d.similarity < 0.1, "{d:?}");
         assert!(d.differences.contains(&"/owner".to_string()));
+    }
+
+    #[test]
+    fn timestamps_are_ignored_even_when_baselines_share_one() {
+        // On a fast machine both baselines can carry the same timestamp, so
+        // learning alone misses it (this flaked in CI).
+        let a1 = json(200, r#"{"id":7,"owner":"alice","meta":{"generated_at":1792311929104,"request_id":1}}"#);
+        let a2 = json(200, r#"{"id":7,"owner":"alice","meta":{"generated_at":1792311929104,"request_id":2}}"#);
+        let noise = learn_noise(&a1, &a2);
+        let bob = json(200, r#"{"id":7,"owner":"alice","meta":{"generated_at":1792311929188,"request_id":3}}"#);
+        assert_eq!(diff(&a1, &bob, &noise).similarity, 1.0);
+        let iso = |t: &str| json(200, &format!(r#"{{"id":7,"when":"{t}"}}"#));
+        assert_eq!(
+            diff(&iso("2026-10-18T08:25:29Z"), &iso("2026-10-18T08:25:30Z"), &NoiseMask::default()).similarity,
+            1.0
+        );
+        // Real differences are still seen, including ids that are just numbers.
+        assert!(
+            diff(&json(200, r#"{"id":1001}"#), &json(200, r#"{"id":2001}"#), &NoiseMask::default()).similarity < 0.5
+        );
     }
 
     #[test]
