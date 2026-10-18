@@ -254,6 +254,48 @@ try {
   check(wsLogged, "History shows the WebSocket messages both ways");
   await page.screenshot({ path: join(SHOTS, "6d-websocket.png") });
 
+  console.log("Network: upstream proxy");
+  // A minimal upstream HTTP proxy that records request lines and forwards.
+  const upstreamSeen = [];
+  const upstream = net.createServer((c) => {
+    let buf = Buffer.alloc(0);
+    const onData = (d) => {
+      buf = Buffer.concat([buf, d]);
+      const end = buf.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      c.off("data", onData);
+      const line = buf.subarray(0, buf.indexOf("\r\n")).toString();
+      upstreamSeen.push(line);
+      const u = new URL(line.split(" ")[1]);
+      const s = net.connect(Number(u.port), u.hostname, () => {
+        // Like a real proxy: origin-form towards the server.
+        s.write(Buffer.concat([Buffer.from(line.replace(`${u.protocol}//${u.host}`, "")), buf.subarray(buf.indexOf("\r\n"))]));
+        c.pipe(s).pipe(c);
+      });
+      s.on("error", () => c.destroy());
+    };
+    c.on("data", onData);
+    c.on("error", () => {});
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  await page.getByRole("button", { name: "Network" }).click();
+  await page.getByTestId("upstream-toggle").check();
+  await page.getByLabel("Proxy host").fill("127.0.0.1");
+  await page.getByLabel("Proxy port").fill(String(upstream.address().port));
+  await page.getByLabel("Bypass list").fill("");
+  await page.getByTestId("network-save").click();
+  await page.waitForSelector("text=Saved. The proxy");
+  await page.screenshot({ path: join(SHOTS, "6e-network.png") });
+  const viaUpstream = await search("via-upstream");
+  check(viaUpstream.startsWith("HTTP/1.1 200") && upstreamSeen.some((l) => l.includes("q=via-upstream")), "traffic goes through the upstream proxy");
+  await page.getByTestId("upstream-toggle").uncheck();
+  await page.getByTestId("network-save").click();
+  await page.waitForSelector("text=Saved. The proxy");
+  const n = upstreamSeen.length;
+  await search("direct-again");
+  check(upstreamSeen.length === n, "turning it off connects directly again");
+  upstream.close();
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

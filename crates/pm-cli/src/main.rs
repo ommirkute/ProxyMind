@@ -81,6 +81,11 @@ enum Command {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// Upstream proxy and client certificates for outgoing connections.
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
     /// Inspect the project's tamper-evident audit log.
     Audit {
         #[command(subcommand)]
@@ -358,6 +363,23 @@ enum ApprovalAction {
 }
 
 #[derive(Subcommand)]
+enum NetworkAction {
+    /// Print the saved settings (password hidden).
+    Show,
+    /// Replace the settings with a YAML or JSON file (see examples/network.yaml).
+    Set {
+        file: PathBuf,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Connect directly, with no client certificates.
+    Clear {
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum RulesAction {
     /// Print the saved rules (JSON).
     Show,
@@ -506,24 +528,47 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Keeps the proxy's match-and-replace rules in step with the project, so
-/// `proxymind rules load` or another UI takes effect without a restart.
-fn watch_rules(project: &std::path::Path, rewriter: Arc<pm_proxy::Rewriter>) -> Result<()> {
+/// Keeps match-and-replace rules and network settings in step with the
+/// project, so changes from the CLI or another UI apply without a restart.
+fn watch_project(
+    project: &std::path::Path,
+    rewriter: Option<Arc<pm_proxy::Rewriter>>,
+    network: pm_service::pm_replay::Network,
+) -> Result<()> {
     let store = Store::open(project)?;
-    if let Err(e) = pm_service::sync_rules(&store, &rewriter) {
-        eprintln!("Match-and-replace rules not loaded: {e}");
+    if let Some(r) = &rewriter {
+        if let Err(e) = pm_service::sync_rules(&store, r) {
+            eprintln!("Match-and-replace rules not loaded: {e}");
+        }
+        let n = r.rules().iter().filter(|r| r.enabled).count();
+        if n > 0 {
+            eprintln!("{n} match-and-replace rule(s) active");
+        }
     }
-    let n = rewriter.rules().iter().filter(|r| r.enabled).count();
-    if n > 0 {
-        eprintln!("{n} match-and-replace rule(s) active");
+    if let Err(e) = pm_service::sync_network(&store, &network) {
+        eprintln!("Network settings not applied: {e}");
+    }
+    let net = network.config();
+    if let Some(u) = &net.upstream {
+        eprintln!("Upstream proxy: {:?} {}:{}", u.kind, u.host, u.port);
+    }
+    if !net.client_certs.is_empty() {
+        eprintln!("{} client certificate(s) configured", net.client_certs.len());
     }
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            match pm_service::sync_rules(&store, &rewriter) {
-                Ok(true) => eprintln!("Match-and-replace rules reloaded"),
+            if let Some(r) = &rewriter {
+                match pm_service::sync_rules(&store, r) {
+                    Ok(true) => eprintln!("Match-and-replace rules reloaded"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("match-and-replace rules: {e}"),
+                }
+            }
+            match pm_service::sync_network(&store, &network) {
+                Ok(true) => eprintln!("Network settings reloaded"),
                 Ok(false) => {}
-                Err(e) => tracing::warn!("match-and-replace rules: {e}"),
+                Err(e) => tracing::warn!("network settings: {e}"),
             }
         }
     });
@@ -551,8 +596,9 @@ async fn run() -> Result<()> {
                 Ok(service) => service.attach_rewriter(rewriter.clone())?,
                 Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
             }
-            watch_rules(&cli.project, rewriter.clone())?;
-            let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), ..Default::default() };
+            let network = pm_service::pm_replay::Network::new();
+            watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
+            let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), network: Some(network), ..Default::default() };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             eprintln!("ProxyMind listening on http://{listen}");
@@ -657,6 +703,24 @@ async fn run() -> Result<()> {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
         }
+        Command::Network { action: NetworkAction::Show } => {
+            let cfg = pm_service::load_network(&Store::open(&cli.project)?)?.masked();
+            out!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        Command::Network { action: NetworkAction::Set { file, actor } } => {
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            let cfg: pm_service::pm_replay::NetConfig =
+                serde_saphyr::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let service = open_service(&cli.project, None)?;
+            let saved = service.network_set(&human_actor(actor.as_deref())?, cfg)?;
+            out!("✓ network settings saved; running proxies pick them up within seconds");
+            out!("{}", serde_json::to_string_pretty(&saved)?);
+        }
+        Command::Network { action: NetworkAction::Clear { actor } } => {
+            let service = open_service(&cli.project, None)?;
+            service.network_set(&human_actor(actor.as_deref())?, Default::default())?;
+            out!("✓ direct connections, no client certificates");
+        }
         Command::Rules { action: RulesAction::Show } => {
             let rules = pm_service::load_rules(&Store::open(&cli.project)?)?;
             out!("{}", serde_json::to_string_pretty(&rules)?);
@@ -688,6 +752,7 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
+            watch_project(&cli.project, None, service.network().clone())?;
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
@@ -704,13 +769,19 @@ async fn run() -> Result<()> {
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());
                 service.attach_rewriter(rewriter.clone())?;
-                watch_rules(&cli.project, rewriter.clone())?;
-                let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), intercept: Some(queue) };
+                watch_project(&cli.project, Some(rewriter.clone()), service.network().clone())?;
+                let hooks = pm_proxy::Hooks {
+                    rewrite: Some(rewriter),
+                    intercept: Some(queue),
+                    network: Some(service.network().clone()),
+                };
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
+            } else {
+                watch_project(&cli.project, None, service.network().clone())?;
             }
             let state = pm_api::AppState {
                 service,

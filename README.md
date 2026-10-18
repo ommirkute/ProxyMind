@@ -36,7 +36,7 @@ Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find t
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages), an intercept queue (hold, edit, forward or drop requests and responses), match-and-replace rules, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages), an intercept queue (hold, edit, forward or drop requests and responses), match-and-replace rules, network settings (upstream proxy, client certificates), Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 
@@ -93,6 +93,13 @@ Match-and-replace rules (add or strip headers, rewrite bodies) live in the proje
 ```bash
 ./target/release/proxymind rules load examples/match-replace.yaml
 ./target/release/proxymind rules show
+```
+
+Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Repeater, agents and proofs all use them.
+
+```bash
+./target/release/proxymind network set examples/network.yaml
+./target/release/proxymind network show      # the password is never shown
 ```
 
 Scope rules resist the usual bypass tricks (encoded paths, `../`, `;params`, look-alike hosts, odd IP formats, IPv4-mapped IPv6). The full list is in [`crates/pm-policy/tests/scope_bypass.rs`](crates/pm-policy/tests/scope_bypass.rs).

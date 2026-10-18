@@ -42,8 +42,13 @@ async fn setup_with(name: &str, rewrite: Option<Arc<Rewriter>>) -> (u16, Arc<Int
     let (recorder, _w) = Recorder::spawn(Store::open(&project).unwrap());
     let q = Arc::new(InterceptQueue::new());
     q.set_settings(InterceptSettings { enabled: true, in_scope_only: false, ..Default::default() });
-    let proxy =
-        Proxy::with_hooks(ca, recorder, false, pm_proxy::Hooks { intercept: Some(q.clone()), rewrite }).unwrap();
+    let proxy = Proxy::with_hooks(
+        ca,
+        recorder,
+        false,
+        pm_proxy::Hooks { intercept: Some(q.clone()), rewrite, ..Default::default() },
+    )
+    .unwrap();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(proxy.run(l));

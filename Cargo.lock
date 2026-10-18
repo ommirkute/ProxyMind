@@ -1332,9 +1332,13 @@ name = "pm-replay"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "parking_lot",
  "pm-core",
  "pm-http",
  "pm-tls",
+ "rcgen",
+ "rustls",
+ "serde",
  "tokio",
  "tracing",
 ]
@@ -1365,6 +1369,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
  "url",
 ]
 

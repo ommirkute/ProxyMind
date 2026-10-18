@@ -11,6 +11,7 @@ mod history;
 mod identity;
 mod intercept;
 mod model;
+mod network;
 mod proof;
 mod replay;
 mod rules;
@@ -22,6 +23,7 @@ pub use history::ExchangePage;
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
+pub use network::{NETWORK_SETTING, load_network, sync_network};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use replay::{ReplayRequest, ReplayResult};
@@ -38,7 +40,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use {pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_store};
+pub use {
+    pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_replay, pm_store,
+};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -85,6 +89,11 @@ impl Service {
 
     pub fn with_sender(store: Store, policy: Policy, sender: Sender) -> Result<Self> {
         let limits = policy.roe().limits;
+        // Saved network settings apply from the start; a bad entry (say, a
+        // moved certificate file) is reported but doesn't stop the project opening.
+        if let Err(e) = network::sync_network(&store, sender.network()) {
+            tracing::warn!("network settings not applied: {e}");
+        }
         Ok(Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy,

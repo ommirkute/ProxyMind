@@ -114,6 +114,8 @@ pub struct Hooks {
     pub rewrite: Option<Arc<Rewriter>>,
     /// The intercept queue; a human sees messages after the rules ran.
     pub intercept: Option<Arc<InterceptQueue>>,
+    /// Shared network settings (upstream proxy, client certificates).
+    pub network: Option<pm_replay::Network>,
 }
 
 impl Proxy {
@@ -127,7 +129,11 @@ impl Proxy {
         verify_upstream: bool,
         hooks: Hooks,
     ) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder, hooks }))
+        let mut sender = Sender::new(verify_upstream)?;
+        if let Some(n) = &hooks.network {
+            sender = sender.with_network(n.clone());
+        }
+        Ok(Arc::new(Self { ca, sender, recorder, hooks }))
     }
 
     /// Accepts connections until the task is cancelled.

@@ -174,3 +174,21 @@ async fn match_and_replace_rules() {
     let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
     assert!(audit.contains("match_replace_rules"), "changes are audited");
 }
+
+#[tokio::test]
+async fn network_settings_hide_the_password() {
+    let (port, _) = start().await;
+    let cfg = json!({"upstream": {"kind": "socks5", "host": "127.0.0.1", "port": 1080, "username": "u", "password": "hunter2"}});
+    let (st, _, body) = http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(cfg)).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("********") && !body.contains("hunter2"));
+    // Sending the masked value back keeps the saved password.
+    let again = json!({"upstream": {"kind": "socks5", "host": "127.0.0.1", "port": 1081, "username": "u", "password": "********"}});
+    assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(again)).await.0, 200);
+    let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
+    assert!(audit.contains("network_settings") && !audit.contains("hunter2"), "audited without the password");
+    let bad = json!({"client_certs": [{"host": "*", "cert_file": "/nope.pem", "key_file": "/nope.key"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad)).await.0, 400);
+    let unknown = json!({"upstream": {"host": "x", "port": 1, "typo": true}});
+    assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(unknown)).await.0, 422);
+}

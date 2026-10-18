@@ -8,6 +8,7 @@ import Rules from "./pages/Rules";
 import Approvals from "./pages/Approvals";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
+import Network from "./pages/Network";
 import Findings from "./pages/Findings";
 import Audit from "./pages/Audit";
 
@@ -21,6 +22,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "model", label: "Model & Coverage" },
   { id: "findings", label: "Findings" },
   { id: "audit", label: "Audit log" },
+  { id: "network", label: "Network" },
 ];
 
 function parseHash(): { page: Page; arg?: string } {
@@ -97,6 +99,7 @@ export default function App() {
     model: Model,
     findings: Findings,
     audit: Audit,
+    network: Network,
   }[route.page];
 
   return (

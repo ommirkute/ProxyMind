@@ -80,6 +80,7 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/forward", post(intercept_forward))
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
+        .route("/network", get(network_get).put(network_put))
 }
 
 #[derive(Deserialize)]
@@ -307,6 +308,14 @@ struct WsQuery {
 
 async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
     ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
+}
+
+async fn network_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.network_get()?)
+}
+
+async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
+    ok(st.service.network_set(&st.actor, cfg)?)
 }
 
 #[derive(Deserialize)]

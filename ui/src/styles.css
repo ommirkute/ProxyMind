@@ -95,7 +95,7 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .error { color: var(--bad); background: var(--bad-soft); padding: 8px 10px; border-radius: 6px; margin: 8px 0; white-space: pre-wrap; }
 .notice { background: var(--info-soft); color: var(--info); padding: 8px 10px; border-radius: 6px; margin: 8px 0; }
 
-input[type="text"], input[type="number"], select, textarea, input:not([type]) {
+input[type="text"], input[type="number"], input[type="password"], select, textarea, input:not([type]) {
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0;
 }
 textarea { width: 100%; font-family: var(--mono); font-size: 12.5px; resize: vertical; }
@@ -167,3 +167,6 @@ table.grid input.wide { width: 100%; min-width: 160px; }
 .ws-msg.client { border-left-color: var(--accent); }
 .ws-msg.server { border-left-color: var(--info); }
 .ws-msg pre.raw { margin: 4px 0 0; max-height: 240px; }
+.form-grid { display: grid; grid-template-columns: 170px 1fr; gap: 8px 12px; align-items: center; max-width: 760px; }
+.form-grid > label:not(.row) { color: var(--muted); font-size: 13px; }
+@media (max-width: 700px) { .form-grid { grid-template-columns: 1fr; } }

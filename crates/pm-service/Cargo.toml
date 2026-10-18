@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+tracing = "0.1.44"
 jiff = "0.2.38"
 parking_lot = "0.12.5"
 pm-ai = { version = "0.0.1", path = "../pm-ai" }
