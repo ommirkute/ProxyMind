@@ -96,6 +96,20 @@ enum Command {
         #[arg(long)]
         oast_public_url: Option<String>,
     },
+    /// Start the web UI, the proxy and the API together.
+    Ui {
+        /// Where the UI and API listen (loopback only)
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        listen: SocketAddr,
+        /// Where the proxy listens; use --no-proxy to run without it
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        proxy: SocketAddr,
+        #[arg(long)]
+        no_proxy: bool,
+        /// Who you are in the audit log (default: human:<your username>)
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
     /// Run an out-of-band (OAST) callback listener that records interactions in the project.
     OastServer {
         #[arg(long, short, default_value = "127.0.0.1:8085")]
@@ -603,6 +617,35 @@ async fn run() -> Result<()> {
             }
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
+        }
+        Command::Ui { listen, proxy, no_proxy, actor } => {
+            anyhow::ensure!(listen.ip().is_loopback(), "the UI/API must listen on a loopback address");
+            let home = home_dir(&cli)?;
+            let token = pm_api::load_or_create_token(&home.join("api-token"))?;
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let me = human_actor(actor.as_deref())?;
+            if !*no_proxy {
+                let ca = Arc::new(CertAuthority::load_or_create(&home)?);
+                let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
+                let p = Proxy::new(ca.clone(), recorder, false)?;
+                let l =
+                    tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
+                tokio::spawn(p.run(l));
+                eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
+            }
+            let state = pm_api::AppState {
+                service,
+                actor: me.clone(),
+                token: Arc::new(token.clone()),
+                project: Arc::new(cli.project.display().to_string()),
+            };
+            let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
+            eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
+            out!("Open: http://{listen}/auth?token={token}");
+            tokio::select! {
+                r = axum::serve(l, pm_api::router(state)) => r?,
+                _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
+            }
         }
         Command::OastServer { listen, public_url } => {
             let service = Arc::new(open_service(&cli.project, None)?);

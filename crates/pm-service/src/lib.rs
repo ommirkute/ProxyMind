@@ -161,6 +161,47 @@ impl Service {
     }
 }
 
+/// Counters the UI watches for live updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct Counters {
+    pub exchanges: i64,
+    pub last_exchange_id: i64,
+    pub pending_approvals: usize,
+    pub findings: usize,
+    pub audit_records: usize,
+}
+
+impl Service {
+    pub fn counters(&self) -> Result<Counters> {
+        let store = self.store.lock();
+        let last = store.search_exchanges(&pm_store::HistoryFilter { limit: Some(1), ..Default::default() })?;
+        Ok(Counters {
+            exchanges: store.count_exchanges()?,
+            last_exchange_id: last.first().map_or(0, |e| e.id),
+            pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
+            findings: store.rows("findings", None, 10_000)?.len(),
+            audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
+        })
+    }
+
+    /// Audit records, newest first.
+    pub fn audit_list(&self, limit: usize) -> Result<Vec<pm_store::AuditRecord>> {
+        let mut r = self.store.lock().audit_records()?;
+        r.reverse();
+        r.truncate(limit);
+        Ok(r)
+    }
+
+    pub fn audit_verify(&self) -> Result<usize> {
+        verify_audit(&self.store.lock())
+    }
+
+    /// The raw bytes of an exchange as text, for humans (no redaction).
+    pub fn exchange_raw(&self, id: i64) -> Result<pm_store::Exchange> {
+        self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
+    }
+}
+
 fn blake3_hex(s: &str) -> String {
     pm_policy::audit::content_hash(s.as_bytes())
 }

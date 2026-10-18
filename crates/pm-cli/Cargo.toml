@@ -31,6 +31,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = "1.1.0"
 pm-model = { version = "0.0.1", path = "../pm-model" }
 url = "2.5.8"
+pm-api = { version = "0.0.1", path = "../pm-api" }
+axum = "0.8.9"
 
 [lints]
 workspace = true
