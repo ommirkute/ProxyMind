@@ -9,16 +9,23 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ring = "0.17.14"
 anyhow = "1.0.104"
 bytes = "1.12.1"
 tokio = { version = "1.53.3", features = ["full"] }
 tracing = "0.1.44"
 
-pm-http = { path = "../pm-http" }
+pm-http = { version = "0.0.1", path = "../pm-http" }
 pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
+parking_lot = "0.12.5"
+serde = { version = "1.0.229", features = ["derive"] }
+regex = "1.13.1"
+flate2 = "1.1.10"
+h2 = "0.4.20"
+http = "1.5.0"
 
 [lints]
 workspace = true
@@ -26,3 +33,4 @@ workspace = true
 [dev-dependencies]
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }

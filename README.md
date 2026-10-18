@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: pre-alpha.** The engine and agent interface work end to end (see the demo); there is no desktop UI yet and the proxy speaks HTTP/1.1 only. See [What's done and what's next](docs/plan.md#status).
+> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 and HTTP/2. See [What's done and what's next](docs/plan.md#status).
 
 ## Why ProxyMind
 
@@ -27,6 +27,18 @@ PROXYMIND=./target/release/proxymind bench/demo.sh
 The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a Markdown report.
 
 Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining two bugs.
+
+## The UI
+
+```bash
+(cd ui && npm ci && npm run build) && cargo build --release
+./target/release/proxymind roe use examples/roe.yaml
+./target/release/proxymind ui        # prints a login link: open it in your browser
+```
+
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests, responses and WebSocket messages), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity, or race a request with the HTTP/2 single-packet attack), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+
+![Findings with a proven IDOR](docs/images/ui-findings.png)
 
 ## Quick start
 
@@ -51,6 +63,19 @@ curl --cacert ~/.proxymind/proxymind-ca.pem -x http://127.0.0.1:8080 https://exa
 
 Traffic is stored in `proxymind.pmproj` (a SQLite file) in the current directory. Use `--project <file>` to choose another.
 
+### Apps that ignore proxy settings (transparent mode)
+
+Mobile apps, thick clients and devices often ignore proxy settings. Send their traffic to ProxyMind with DNS (a hosts-file entry pointing the app's host at the proxy machine) or a port redirect, and ProxyMind handles it without any setup:
+
+```bash
+./target/release/proxymind proxy --listen 0.0.0.0:8080
+# On a Linux gateway, redirect a device's web traffic to the proxy:
+sudo iptables -t nat -A PREROUTING -i <device-interface> -p tcp --dport 80  -j REDIRECT --to-port 8080
+sudo iptables -t nat -A PREROUTING -i <device-interface> -p tcp --dport 443 -j REDIRECT --to-port 8080
+```
+
+Plain HTTP goes to the request's `Host` header. HTTPS without a CONNECT is recognised from the TLS handshake: ProxyMind presents a certificate for the server name the client asked for (SNI), so install the ProxyMind CA on the device, and sends the request to its `Host` (port 443 unless the header says otherwise). Clients that send no server name can't be intercepted this way. A request that would reach ProxyMind itself is refused instead of looping.
+
 ### Use it with AI agents (MCP)
 
 ```bash
@@ -60,6 +85,15 @@ claude mcp add proxymind -- "$PWD/target/release/proxymind" -p "$PWD/proxymind.p
 ```
 
 Agents can search history, read exchanges in token-budgeted views with secrets hidden, and send requests through the policy gate. See [docs/agents.md](docs/agents.md).
+
+### Built-in assistant
+
+No agent set up? Use the assistant in the UI (Assistant page) or the terminal. It works with a local model (Ollama, LM Studio, vLLM) by default; Anthropic and OpenAI need `allow_cloud_models: true` in the rules of engagement and an API key in an environment variable (never stored in the project). It acts as `agent:assistant` with the same tools and the same policy gate as any other agent, so scope, approvals, redaction and the audit log all apply.
+
+```bash
+./target/release/proxymind assistant set --provider openai --base-url http://127.0.0.1:11434/v1 --model <model>
+./target/release/proxymind assistant ask "Which endpoints take an object id, and have we tested them for IDOR?"
+```
 
 ### Rules of engagement
 
@@ -76,16 +110,30 @@ Describe what's in scope and what each kind of actor may do in a YAML file (see 
 ./target/release/proxymind audit list
 ```
 
+Match-and-replace rules (add or strip headers, rewrite bodies) live in the project too; edit them in the UI or load a file, and a running proxy picks them up within seconds. See [`examples/match-replace.yaml`](examples/match-replace.yaml).
+
+```bash
+./target/release/proxymind rules load examples/match-replace.yaml
+./target/release/proxymind rules show
+```
+
+Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Repeater, agents and proofs all use them.
+
+```bash
+./target/release/proxymind network set examples/network.yaml
+./target/release/proxymind network show      # the password is never shown
+```
+
 Scope rules resist the usual bypass tricks (encoded paths, `../`, `;params`, look-alike hosts, odd IP formats, IPv4-mapped IPv6). The full list is in [`crates/pm-policy/tests/scope_bypass.rs`](crates/pm-policy/tests/scope_bypass.rs).
 
 ## Repository layout
 
 ```
 crates/
-  pm-http      raw HTTP/1.x parsing that keeps exact bytes      ✅ working
+  pm-http      raw HTTP/1.x parsing, HTTP/2 text form           ✅ working
   pm-tls       CA and per-host certificates, upstream TLS       ✅ working
   pm-store     SQLite project file and compressed blob store    ✅ working
-  pm-proxy     intercepting proxy                               ✅ working (HTTP/1.1)
+  pm-proxy     proxy, intercept, match/replace, WebSocket log   ✅ working (HTTP/1.1, HTTP/2)
   pm-cli       the `proxymind` binary                           ✅ working
   pm-demo      VulnShop, a deliberately vulnerable demo API     ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working
@@ -96,10 +144,12 @@ crates/
   pm-ledger    hypotheses and coverage                          ✅ working
   pm-proof     proof oracles (authz, timing, OAST)              ✅ working
   pm-oast      out-of-band callback listener (HTTP)             ✅ working (DNS planned)
-  pm-ai        LLM views, redaction, untrusted tagging          ✅ working (providers planned)
+  pm-ai        LLM views, redaction, untrusted tagging          ✅ working
   pm-service   the one service layer every client uses          ✅ working
-  pm-api       REST API and event stream                        ⏳ planned (M2)
+  pm-api       REST API, live events, serves the web UI         ✅ working
   pm-mcp       MCP server                                       ✅ working
+  pm-assistant built-in assistant (local or cloud models)       ✅ working
+ui/           web UI (React + TypeScript), built into the binary
 docs/          plan, decision records (ADRs), RFCs
 examples/      example rules-of-engagement file
 schemas/       JSON schemas

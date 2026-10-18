@@ -98,7 +98,7 @@ pub(crate) struct Sent {
 }
 
 /// Normalizes bare LF line endings in the head only (the body is untouched).
-fn crlf_head(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn crlf_head(raw: &[u8]) -> Vec<u8> {
     let end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -182,14 +182,34 @@ impl Service {
         fix_cl: bool,
         approval_id: Option<&str>,
     ) -> Result<Authorization> {
+        self.gate_send_with(actor, action, out, identity, fix_cl, approval_id, None, serde_json::Value::Null)
+    }
+
+    /// [`Service::gate_send`] with a tier other than the method's, and extra
+    /// parameters the approval must cover (e.g. WebSocket messages).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn gate_send_with(
+        &self,
+        actor: &Actor,
+        action: &str,
+        out: &Outgoing,
+        identity: Option<&str>,
+        fix_cl: bool,
+        approval_id: Option<&str>,
+        tier: Option<Tier>,
+        extra: serde_json::Value,
+    ) -> Result<Authorization> {
         let target = Target::from_parts(&out.endpoint.scheme, &out.endpoint.host, out.endpoint.port, &out.path)
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        let params = json!({
+        let mut params = json!({
             "endpoint": format!("{}://{}:{}", out.endpoint.scheme, out.endpoint.host, out.endpoint.port),
             "request": String::from_utf8_lossy(&out.raw),
             "identity": identity,
             "fix_content_length": fix_cl,
         });
+        if !extra.is_null() {
+            params["extra"] = extra;
+        }
         let summary = match identity {
             Some(i) => format!("{} {} as {i}", out.method, out.url()),
             None => format!("{} {}", out.method, out.url()),
@@ -197,7 +217,7 @@ impl Service {
         let action = ActionRequest {
             actor: actor.clone(),
             action: action.into(),
-            tier: Tier::for_http_method(&out.method),
+            tier: tier.unwrap_or_else(|| Tier::for_http_method(&out.method)),
             target: Some(target),
             summary,
         };
@@ -248,6 +268,9 @@ impl Service {
         };
         let (status, error, elapsed_ms) = match result {
             Ok(resp) => {
+                if let Some(sent) = resp.sent {
+                    record.request = sent; // e.g. HTTP/2 downgraded for an HTTP/1.1-only server
+                }
                 record.status = Some(resp.head.status);
                 record.response = Some(resp.raw);
                 (Some(resp.head.status), None, resp.elapsed.as_millis() as u64)
@@ -330,7 +353,7 @@ impl Service {
         })
     }
 
-    async fn acquire_slot(&self, host: &str) -> Result<pm_policy::Permit> {
+    pub(crate) async fn acquire_slot(&self, host: &str) -> Result<pm_policy::Permit> {
         let deadline = Instant::now() + MAX_LIMIT_WAIT;
         loop {
             match self.limiter.try_acquire(host, Instant::now()) {

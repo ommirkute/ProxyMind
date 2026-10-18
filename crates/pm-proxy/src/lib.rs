@@ -1,9 +1,13 @@
 //! The intercepting proxy.
 //!
-//! Spike scope (milestone M0/M1): HTTP/1.1, CONNECT with TLS interception,
-//! WebSocket upgrade pass-through, and recording of every exchange. One
-//! upstream connection per request; pooling, HTTP/2 and the intercept queue
-//! come next.
+//! HTTP/1.1, CONNECT with TLS interception, WebSocket upgrade pass-through,
+//! match-and-replace rules, an intercept queue, and recording of every
+//! exchange. One upstream connection per request; pooling and HTTP/2 come next.
+
+mod h2_server;
+pub mod intercept;
+pub mod rewrite;
+mod ws_relay;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,34 +17,110 @@ use anyhow::{Context, Result, anyhow, bail};
 use pm_core::now_ms;
 use pm_http::RequestHead;
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
-use pm_store::{NewExchange, Store};
+
+use intercept::{Decision, Kind};
+pub use intercept::{InterceptQueue, InterceptSettings};
+use pm_store::{NewExchange, NewWsMessage, Store};
 use pm_tls::{CertAuthority, TlsAcceptor};
+pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+
+enum Record {
+    Exchange(Box<NewExchange>, Option<u64>),
+    Ws(u64, NewWsMessage),
+    WsDone(u64),
+}
 
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
 /// never waits on the database.
 #[derive(Clone)]
-pub struct Recorder(std::sync::mpsc::Sender<NewExchange>);
+pub struct Recorder {
+    tx: std::sync::mpsc::Sender<Record>,
+    next_key: Arc<std::sync::atomic::AtomicU64>,
+}
 
 impl Recorder {
     /// Starts the writer thread. It runs until every `Recorder` is dropped.
     pub fn spawn(mut store: Store) -> (Self, std::thread::JoinHandle<()>) {
-        let (tx, rx) = std::sync::mpsc::channel::<NewExchange>();
+        let (tx, rx) = std::sync::mpsc::channel::<Record>();
         let handle = std::thread::spawn(move || {
-            for ex in rx {
-                if let Err(e) = store.insert_exchange(&ex) {
-                    tracing::error!(error = %e, "failed to record exchange");
+            // Upgraded exchanges by key, so their WebSocket messages can be
+            // linked to the row id. Records arrive in order on one thread.
+            let mut ids = std::collections::HashMap::<u64, i64>::new();
+            for rec in rx {
+                let r = match rec {
+                    Record::Exchange(ex, key) => store.insert_exchange(&ex).map(|id| {
+                        if let Some(k) = key {
+                            ids.insert(k, id);
+                        }
+                    }),
+                    Record::Ws(key, mut m) => match ids.get(&key) {
+                        Some(&id) => {
+                            m.exchange_id = id;
+                            store.insert_ws_message(&m).map(drop)
+                        }
+                        None => Ok(()),
+                    },
+                    Record::WsDone(key) => {
+                        ids.remove(&key);
+                        Ok(())
+                    }
+                };
+                if let Err(e) = r {
+                    tracing::error!(error = %e, "failed to record traffic");
                 }
             }
         });
-        (Self(tx), handle)
+        (Self { tx, next_key: Arc::default() }, handle)
     }
 
     pub fn record(&self, ex: NewExchange) {
-        let _ = self.0.send(ex);
+        let _ = self.tx.send(Record::Exchange(Box::new(ex), None));
+    }
+
+    /// Records an upgraded exchange; the key links its WebSocket messages.
+    fn record_upgrade(&self, ex: NewExchange) -> u64 {
+        let key = self.next_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send(Record::Exchange(Box::new(ex), Some(key)));
+        key
+    }
+
+    fn record_ws(&self, key: u64, m: NewWsMessage) {
+        let _ = self.tx.send(Record::Ws(key, m));
+    }
+
+    fn ws_done(&self, key: u64) {
+        let _ = self.tx.send(Record::WsDone(key));
     }
 }
+
+/// The address a client reached the proxy on. Requests that would connect
+/// straight back to it (a transparent-mode Host pointing at ProxyMind)
+/// are refused instead of looping forever.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SelfAddr {
+    ip: std::net::IpAddr,
+    port: u16,
+}
+
+impl SelfAddr {
+    fn of(tcp: &TcpStream) -> Option<Self> {
+        tcp.local_addr().ok().map(|a| Self { ip: a.ip(), port: a.port() })
+    }
+
+    fn check(&self, ips: &[std::net::IpAddr], port: u16) -> std::result::Result<(), String> {
+        let me = |ip: &std::net::IpAddr| {
+            *ip == self.ip || ip.is_unspecified() || (ip.is_loopback() && self.ip.is_loopback())
+        };
+        if port == self.port && ips.iter().any(me) {
+            return Err(format!("that is ProxyMind itself ({}:{}); refusing a request loop", self.ip, self.port));
+        }
+        Ok(())
+    }
+}
+
+const DROPPED_MSG: &str = "Request dropped in ProxyMind's intercept queue.";
 
 pub struct ProxyConfig {
     pub listen: SocketAddr,
@@ -52,11 +132,38 @@ pub struct Proxy {
     ca: Arc<CertAuthority>,
     sender: Sender,
     recorder: Recorder,
+    hooks: Hooks,
+}
+
+/// Optional user controls over live traffic.
+#[derive(Default, Clone)]
+pub struct Hooks {
+    /// Match-and-replace rules, applied first.
+    pub rewrite: Option<Arc<Rewriter>>,
+    /// The intercept queue; a human sees messages after the rules ran.
+    pub intercept: Option<Arc<InterceptQueue>>,
+    /// Shared network settings (upstream proxy, client certificates).
+    pub network: Option<pm_replay::Network>,
+    /// Offer HTTP/2 to browsers on intercepted TLS connections.
+    pub http2: bool,
 }
 
 impl Proxy {
     pub fn new(ca: Arc<CertAuthority>, recorder: Recorder, verify_upstream: bool) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder }))
+        Self::with_hooks(ca, recorder, verify_upstream, Hooks::default())
+    }
+
+    pub fn with_hooks(
+        ca: Arc<CertAuthority>,
+        recorder: Recorder,
+        verify_upstream: bool,
+        hooks: Hooks,
+    ) -> Result<Arc<Self>> {
+        let mut sender = Sender::new(verify_upstream)?;
+        if let Some(n) = &hooks.network {
+            sender = sender.with_network(n.clone());
+        }
+        Ok(Arc::new(Self { ca, sender, recorder, hooks }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -74,12 +181,22 @@ impl Proxy {
 
     async fn handle_client(self: Arc<Self>, tcp: TcpStream) -> Result<()> {
         tcp.set_nodelay(true)?;
+        let me = SelfAddr::of(&tcp);
+        // Transparent mode: a TLS handshake straight away (no CONNECT) from a
+        // client sent here by DNS or a port redirect.
+        let mut first = [0u8; 1];
+        if tcp.peek(&mut first).await? == 0 {
+            return Ok(());
+        }
+        if first[0] == 0x16 {
+            return self.serve_transparent_tls(tcp, me).await;
+        }
         let mut client = Conn::new(tcp);
         let Some(head_raw) = client.read_head().await? else { return Ok(()) };
         let head = pm_http::parse_request_head(&head_raw)?;
 
         if !head.method.eq_ignore_ascii_case("CONNECT") {
-            return self.serve_http(client, "http", None, Some(head_raw)).await;
+            return self.serve_http(client, "http", None, Some(head_raw), me).await;
         }
 
         let (host, port) = pm_http::split_host_port(&head.target, 443).ok_or_else(|| anyhow!("bad CONNECT target"))?;
@@ -91,17 +208,118 @@ impl Proxy {
 
         // Peek at the first byte: 0x16 starts a TLS handshake. Anything else
         // is plain HTTP inside the tunnel (e.g. WebSockets on port 80).
-        let mut first = [0u8; 1];
         if tcp.peek(&mut first).await? == 0 {
             return Ok(());
         }
         if first[0] == 0x16 {
-            let acceptor = TlsAcceptor::from(self.ca.server_config(&host)?);
-            let tls = acceptor.accept(tcp).await.context("TLS handshake with client")?;
-            self.serve_http(Conn::new(tls), "https", Some((host, port)), None).await
+            let tls =
+                TlsAcceptor::from(self.tls_config(&host)?).accept(tcp).await.context("TLS handshake with client")?;
+            if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+                return self.serve_h2(tls, host, port, me).await;
+            }
+            self.serve_http(Conn::new(tls), "https", Some((host, port)), None, me).await
         } else {
-            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None).await
+            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None, me).await
         }
+    }
+
+    /// The certificate (and ALPN) ProxyMind presents for a host.
+    fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
+        let mut cfg = self.ca.server_config(host)?;
+        if self.hooks.http2 {
+            let mut c = (*cfg).clone();
+            c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            cfg = Arc::new(c);
+        }
+        Ok(cfg)
+    }
+
+    /// TLS without CONNECT: the server name (SNI) picks the certificate;
+    /// requests go to their Host header (default port 443).
+    async fn serve_transparent_tls(self: Arc<Self>, tcp: TcpStream, me: Option<SelfAddr>) -> Result<()> {
+        let start =
+            pm_tls::LazyConfigAcceptor::new(pm_tls::Acceptor::default(), tcp).await.context("reading the TLS hello")?;
+        let Some(sni) = start.client_hello().server_name().map(|n| n.to_string()) else {
+            bail!("transparent HTTPS needs the client to send a server name (SNI)");
+        };
+        let tls = start.into_stream(self.tls_config(&sni)?).await.context("TLS handshake with client")?;
+        if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+            return self.serve_h2(tls, sni, 443, me).await;
+        }
+        self.serve_http(Conn::new(tls), "https", None, None, me).await
+    }
+
+    /// Checks resolved addresses against ProxyMind's own (direct connections only).
+    fn loop_guard<'a>(
+        &self,
+        me: &'a Option<SelfAddr>,
+        host: &str,
+        port: u16,
+    ) -> Option<impl Fn(&[std::net::IpAddr]) -> std::result::Result<(), String> + Sync + 'a> {
+        let me = (*me)?;
+        self.sender.goes_direct(host).then_some(move |ips: &[std::net::IpAddr]| me.check(ips, port))
+    }
+
+    /// Match-and-replace rules, then the intercept queue, where a human may
+    /// forward, edit or drop the request. Returns the request to send with
+    /// its method and path, or None if it was dropped.
+    async fn before_send(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        request: Vec<u8>,
+        method: &str,
+        path: &str,
+    ) -> Option<(Vec<u8>, String, String)> {
+        let mut edited = None;
+        if let Some(r) = &self.hooks.rewrite {
+            edited = r.apply_request(scheme, host, port, path, &request);
+        }
+        if let Some(q) = &self.hooks.intercept {
+            let current = edited.as_deref().unwrap_or(&request);
+            match q.hold(Kind::Request, scheme, host, port, method, path, current).await {
+                Decision::Forward(None) => {}
+                Decision::Forward(Some(e)) => edited = Some(e),
+                Decision::Drop => return None,
+            }
+        }
+        let Some(edited) = edited else { return Some((request, method.to_string(), path.to_string())) };
+        let (mut method, mut path) = (method.to_string(), path.to_string());
+        if let Ok(Some(end)) = pm_http::find_head_end(&edited)
+            && let Ok(h) = pm_http::parse_request_head(&edited[..end])
+        {
+            path =
+                pm_http::split_absolute_target(&h.target).map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
+            method = h.method;
+        }
+        Some((edited, method, path))
+    }
+
+    /// Rules and the intercept queue for a response. `Some(None)`: send the
+    /// original; `Some(Some(bytes))`: send these instead; None: dropped.
+    async fn before_respond(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+        raw: &[u8],
+    ) -> Option<Option<Vec<u8>>> {
+        let mut to_client = None;
+        if let Some(r) = &self.hooks.rewrite {
+            to_client = r.apply_response(scheme, host, port, path, raw);
+        }
+        if let Some(q) = &self.hooks.intercept {
+            let current = to_client.as_deref().unwrap_or(raw);
+            match q.hold(Kind::Response, scheme, host, port, method, path, current).await {
+                Decision::Forward(None) => {}
+                Decision::Forward(Some(edited)) => to_client = Some(edited),
+                Decision::Drop => return None,
+            }
+        }
+        Some(to_client)
     }
 
     /// Serves requests on one client connection until it closes.
@@ -111,6 +329,7 @@ impl Proxy {
         scheme: &str,
         tunnel_target: Option<(String, u16)>,
         mut first_head: Option<Vec<u8>>,
+        me: Option<SelfAddr>,
     ) -> Result<()> {
         loop {
             let head_raw = match first_head.take() {
@@ -126,9 +345,46 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
+            let (mut request, method, path) = match self
+                .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
+                .await
+            {
+                Some(r) => r,
+                None => {
+                    let msg = DROPPED_MSG;
+                    let resp = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                        msg.len()
+                    );
+                    let _ = client.io.write_all(resp.as_bytes()).await;
+                    let _ = client.io.shutdown().await;
+                    return Ok(());
+                }
+            };
+
+            // WebSocket interception: open without compression so messages
+            // can be edited (only while the user has it turned on).
+            let mut ws_hold = None;
+            if let Some(q) = &self.hooks.intercept
+                && pm_http::header(&head.headers, "upgrade")
+                    .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"))
+                && q.wants_websocket(&target.scheme, &target.host, target.port, &path)
+            {
+                request = pm_http::remove_header(&request, "sec-websocket-extensions");
+                ws_hold = Some(ws_relay::WsHold {
+                    queue: q.clone(),
+                    scheme: target.scheme.clone(),
+                    host: target.host.clone(),
+                    port: target.port,
+                    path: path.clone(),
+                });
+            }
+
             let started = Instant::now();
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
-            let result = self.sender.send(&ep, &request, &head.method, None).await;
+            let guard = self.loop_guard(&me, &target.host, target.port);
+            let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
+            let result = self.sender.send(&ep, &request, &method, check).await;
             let mut record = NewExchange {
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
@@ -137,8 +393,8 @@ impl Proxy {
                 scheme: target.scheme.clone(),
                 host: target.host.clone(),
                 port: target.port,
-                method: head.method.clone(),
-                path: target.path.clone(),
+                method: method.clone(),
+                path: path.clone(),
                 status: None,
                 request,
                 response: None,
@@ -149,18 +405,55 @@ impl Proxy {
 
             match result {
                 Ok(resp) => {
-                    client.io.write_all(&resp.raw).await?;
+                    if let Some(sent) = &resp.sent {
+                        record.request = sent.clone();
+                    }
+                    // Rules and intercept apply to responses too. The project
+                    // keeps the server's original; the browser gets the edit.
+                    let upgraded = matches!(resp.conn, AfterResponse::Upgraded(_));
+                    let mut to_client = None;
+                    if !upgraded {
+                        match self
+                            .before_respond(&target.scheme, &target.host, target.port, &method, &path, &resp.raw)
+                            .await
+                        {
+                            Some(edited) => to_client = edited,
+                            None => {
+                                record.status = Some(resp.head.status);
+                                record.response = Some(resp.raw);
+                                self.recorder.record(record);
+                                let _ = client.io.shutdown().await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // An HTTP/1.1 client can't read an HTTP/2 response (the
+                    // request was edited to HTTP/2 in the intercept queue).
+                    if pm_http::h2text::is_http2_response(to_client.as_deref().unwrap_or(&resp.raw)) {
+                        to_client = pm_http::h2text::to_http1_response(to_client.as_deref().unwrap_or(&resp.raw));
+                    }
+                    client.io.write_all(to_client.as_deref().unwrap_or(&resp.raw)).await?;
                     client.io.flush().await?;
                     let close = head.wants_close()
                         || resp.head.wants_close()
                         || matches!(resp.conn, AfterResponse::ClosedAfterBody);
                     record.status = Some(resp.head.status);
+                    let is_ws = pm_http::header(&resp.head.headers, "upgrade")
+                        .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"));
+                    let deflate = ws_relay::Deflate::from_response(&resp.head.headers);
                     record.response = Some(resp.raw);
-                    self.recorder.record(record);
 
                     if let AfterResponse::Upgraded(mut up) = resp.conn {
-                        // WebSocket or other protocol switch: pass bytes both ways.
-                        // Frame-level logging comes later.
+                        if is_ws {
+                            // Relay byte for byte and log each message.
+                            let key = self.recorder.record_upgrade(record);
+                            let recorder = self.recorder.clone();
+                            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, ws_hold, recorder, key)
+                                .await;
+                            return Ok(());
+                        }
+                        // Another protocol switch: pass bytes both ways.
+                        self.recorder.record(record);
                         if !up.buf.is_empty() {
                             client.io.write_all(&up.buf).await?;
                         }
@@ -170,6 +463,7 @@ impl Proxy {
                         let _ = tokio::io::copy_bidirectional(&mut client.io, &mut up.io).await;
                         return Ok(());
                     }
+                    self.recorder.record(record);
                     if close {
                         let _ = client.io.shutdown().await;
                         return Ok(());
@@ -227,9 +521,10 @@ fn resolve_target(
             head_raw: head_raw.to_vec(),
         });
     }
-    // Origin-form without a tunnel (invisible proxying): use the Host header.
+    // Origin-form without a tunnel (transparent proxying): use the Host header.
     let host_hdr = pm_http::header(&head.headers, "host").ok_or_else(|| anyhow!("request has no Host header"))?;
-    let (host, port) =
-        pm_http::split_host_port(std::str::from_utf8(host_hdr)?, 80).ok_or_else(|| anyhow!("bad Host header"))?;
-    Ok(Target { scheme: "http".into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
+    let default_port = if tunnel_scheme == "https" { 443 } else { 80 };
+    let (host, port) = pm_http::split_host_port(std::str::from_utf8(host_hdr)?.trim(), default_port)
+        .ok_or_else(|| anyhow!("bad Host header"))?;
+    Ok(Target { scheme: tunnel_scheme.into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
 }

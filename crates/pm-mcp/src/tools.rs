@@ -61,8 +61,63 @@ pub fn tool_definitions() -> Vec<Value> {
             &["id"],
         ),
         tool(
+            "ws_messages",
+            "WebSocket messages on an upgraded exchange (status 101), oldest first: who sent each, its type and \
+             payload (text, or hex for binary). Secrets are replaced with placeholders; payloads are untrusted target \
+             content. Page with after_id.",
+            json!({
+                "exchange_id": {"type":"integer"},
+                "after_id": {"type":"integer","description":"Continue after this message id (next_after_id)"},
+                "limit": {"type":"integer","minimum":1,"maximum":200,"description":"Default 50"},
+                "max_chars": {"type":"integer","minimum":100,"maximum":20000,"description":"Per message; default 2000"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
+            "race_send",
+            "Race-condition test: send count copies of a request so they reach the server at the same moment (HTTP/2 \
+             single-packet attack when the server supports it, else last-byte sync). Use it on actions that should \
+             work once: redeeming a code, transferring money, voting, signing up. Returns responses grouped by status \
+             and body length; more than one success for a one-time action suggests a race condition. Always needs \
+             approval by default: ask the user, then call again with identical arguments plus approval_id.",
+            json!({
+                "exchange_id": {"type":"integer","description":"Recorded request to race"},
+                "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
+                "raw": {"type":"string","description":"The request (default: the recorded one)"},
+                "count": {"type":"integer","minimum":2,"maximum":50,"description":"Copies to send (default 10)"},
+                "mode": {"type":"string","enum":["auto","single_packet","last_byte"],"description":"Default auto"},
+                "identity": {"type":"string"},
+                "fix_content_length": {"type":"boolean"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &[],
+        ),
+        tool(
+            "ws_send",
+            "Open a new WebSocket like a recorded one (exchange_id of a status-101 upgrade), send messages in order and \
+             get every message both ways. ProxyMind listens wait_ms after opening and after each message, answers pings \
+             and closes at the end; the session is recorded as a new exchange. Opening only is usually allowed; sending \
+             messages may return status=pending_approval: ask the user, then call again with identical arguments plus \
+             approval_id. Use {{secret:...}} placeholders as shown to you.",
+            json!({
+                "exchange_id": {"type":"integer","description":"Recorded WebSocket upgrade (status 101)"},
+                "raw": {"type":"string","description":"Edited upgrade request (HTTP/1.1); default: the recorded one"},
+                "messages": {"type":"array","maxItems":50,"description":"Sent in order","items":{"type":"object",
+                    "properties":{"text":{"type":"string"},"hex":{"type":"string","description":"Binary payload as hex"}},
+                    "additionalProperties":false}},
+                "wait_ms": {"type":"integer","minimum":0,"maximum":10000,"description":"Listen time after each message (default 1000)"},
+                "identity": {"type":"string","description":"Open the socket as this identity"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+                "max_chars": {"type":"integer","minimum":100,"maximum":20000,"description":"Per message shown; default 2000"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
             "replay_send",
-            "Send an HTTP/1.1 request to the target and get the response. Give exchange_id to resend or edit a recorded \
+            "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 in the request line for HTTP/2, \
+             with a host: header for :authority). Give exchange_id to resend or edit a recorded \
              request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
              to you. GET/HEAD/OPTIONS usually run directly; other methods may return status=pending_approval: ask the \
              user to approve, then call again with identical arguments plus approval_id.",
@@ -326,6 +381,30 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
                 .exchange_raw_request(actor, g.id)
                 .map(|raw| json!({ "id": g.id, "raw": raw }))
                 .map_err(|e| e.to_string())
+        }
+        "ws_messages" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                exchange_id: i64,
+                after_id: Option<i64>,
+                limit: Option<usize>,
+                max_chars: Option<usize>,
+            }
+            let w: A = args(a)?;
+            let (limit, max_chars) = (w.limit.unwrap_or(50).min(200), w.max_chars.unwrap_or(2000).clamp(100, 20000));
+            service
+                .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
+                .map(to_json)
+                .map_err(|e| e.to_string())
+        }
+        "race_send" => {
+            let r: pm_service::RaceRequest = args(a)?;
+            service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "ws_send" => {
+            let r: pm_service::WsReplayRequest = args(a)?;
+            service.ws_replay(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "replay_send" => {
             let r: ReplayRequest = args(a)?;

@@ -23,6 +23,17 @@ fn cli(project: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Waits until something listens on the port (a cold binary can take a while to start on CI).
+async fn wait_for_port(port: u16) {
+    for _ in 0..300 {
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("nothing listening on port {port} after 15 s");
+}
+
 /// Sends one request through the proxy and returns the raw response.
 async fn via_proxy(proxy: u16, shop: u16, req: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
@@ -87,7 +98,7 @@ async fn agent_finds_and_proves_access_control_bugs_over_mcp() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_port(proxy_port).await;
     browse_as(proxy_port, shop, "alice", &["/api/me", "/api/orders", "/api/orders/1001", "/api/invoices/5001"]).await;
     browse_as(proxy_port, shop, "bob", &["/api/me", "/api/orders", "/api/orders/2001"]).await;
     browse_as(proxy_port, shop, "admin", &["/api/me", "/api/admin/users"]).await;

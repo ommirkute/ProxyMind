@@ -17,23 +17,30 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
-- Proxy core: HTTP/1.1, CONNECT + TLS interception, byte-exact forwarding, WebSocket pass-through, history in a SQLite project file
+- Race-condition testing (`race_send`, Repeater → Race): HTTP/2 single-packet attack (all final frames in one TCP packet) with last-byte sync for HTTP/1.1 servers; at least active-intrusive; responses grouped. VulnShop gained VS-5 (gift card race)
+- Transparent (invisible) mode: origin-form HTTP routed by Host, TLS without CONNECT recognised by SNI; requests back to the proxy itself refused
+- Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
+- WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (22 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (23 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map
 - Proof engine (differential authz, timing, OAST) with re-runnable proofs; findings workflow; Markdown report
 - VulnShop demo target, ground truth, `bench score`, demo script, and an end-to-end test where an agent finds and proves bugs purely over MCP
 
+- REST API with live events, hardened for browsers; web UI (history, viewer, Repeater, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
+- Intercept-and-edit queue: hold requests and responses by scope, host, path and type; edit, forward or drop from the UI; edits and drops are audited, and the project keeps the server's original responses. Humans only: agents use Repeater through the policy gate
+- Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Repeater, agents and proofs; policy address checks still apply
+- Built-in assistant (`pm-assistant`): Anthropic and OpenAI-compatible APIs (Ollama, LM Studio, vLLM), local by default, cloud only with `allow_cloud_models`; acts as `agent:assistant` through the same MCP tools and policy gate; chats saved in the project; every model call audited; UI page and `proxymind assistant ask`
+- Match-and-replace rules for first line, headers and bodies (literal or regex), in scope only by default, saved in the project, audited, live-reloaded by a running proxy
+
 **Next, in order:**
 
-1. **Desktop/web UI** (M2): history, viewer, intercept, Repeater, approvals, authz matrix, coverage, findings
-2. **Proxy depth** (M1): HTTP/2, intercept queue, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
-3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
-4. **Built-in AI assistant** in pm-ai (Anthropic, OpenAI-compatible, Ollama), honouring `allow_cloud_models`
-5. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
-6. Project encryption, signed releases, installers
+1. **Desktop shell** (Tauri) around the web UI
+2. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
+3. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
+4. Project encryption, signed releases, installers
 
 ## Team roles
 
@@ -61,7 +68,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 ## Component notes
 
 ### Proxy core (`pm-http`, `pm-tls`, `pm-proxy`)
-Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2, WebSocket frames, intercept queue, match-and-replace rules, upstream proxy, invisible mode, client certificates.
+Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Race testing uses the HTTP/2 single-packet attack.
 
 ### Policy gate (`pm-policy`): built before any agent API
 ROE file (`examples/roe.yaml`, `schemas/roe.schema.json`), action tiers, token-bucket rate limits per host and actor, approvals, blake3 hash-chained audit log, kill switch. Must resist scope-bypass tricks: encoded hosts, redirects, `Host` header mismatch, IP vs name, DNS rebinding.

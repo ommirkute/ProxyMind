@@ -1,0 +1,23 @@
+# Network settings:  proxymind network set examples/network.yaml
+# They apply to the proxy, Repeater, agents and proofs, and running
+# processes pick up changes within seconds.
+
+# Send traffic through an upstream proxy (omit for direct connections).
+upstream:
+  kind: http            # http (CONNECT for HTTPS) or socks5
+  host: proxy.corp.example
+  port: 3128
+  username: ""          # optional login
+  password: ""
+  # remote_dns: true    # socks5 only: let the proxy resolve names (socks5h)
+  bypass:               # reached directly: name, *.domain or *
+    - localhost
+    - 127.0.0.1
+    - "*.internal.example"
+
+# Client certificates for servers that require mutual TLS (PEM files;
+# convert a .p12 with: openssl pkcs12 -in cert.p12 -out cert.pem -nodes).
+# client_certs:
+#   - host: "api.example.com"     # name, *.domain or *
+#     cert_file: /path/to/client.pem
+#     key_file: /path/to/client.key

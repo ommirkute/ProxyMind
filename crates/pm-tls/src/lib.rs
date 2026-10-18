@@ -15,13 +15,15 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+pub use rustls::ServerConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use time::{Duration, OffsetDateTime};
 
-pub use tokio_rustls::{TlsAcceptor, TlsConnector};
+pub use tokio_rustls::rustls::server::Acceptor;
+pub use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
 
 const CA_CERT_FILE: &str = "proxymind-ca.pem";
 const CA_KEY_FILE: &str = "proxymind-ca.key";
@@ -150,12 +152,38 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 /// Client config for talking to targets. When `verify` is false, any
 /// server certificate is accepted (the usual choice for pentesting).
 pub fn upstream_client_config(verify: bool) -> Result<Arc<ClientConfig>> {
+    client_config(verify, None)
+}
+
+/// Like [`upstream_client_config`], presenting a client certificate (mutual
+/// TLS). `cert_pem` holds the certificate chain, leaf first; `key_pem` the
+/// private key (PKCS#8, PKCS#1 or SEC1).
+pub fn upstream_client_config_with_cert(verify: bool, cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<ClientConfig>> {
+    use rustls::pki_types::pem::PemObject;
+    let chain = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .context("reading the client certificate PEM")?;
+    anyhow::ensure!(!chain.is_empty(), "no certificate found in the client certificate PEM");
+    let key = PrivateKeyDer::from_pem_slice(key_pem).context("reading the client private key PEM")?;
+    client_config(verify, Some((chain, key)))
+}
+
+fn client_config(
+    verify: bool,
+    client_auth: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+) -> Result<Arc<ClientConfig>> {
     let builder = ClientConfig::builder_with_provider(provider()).with_safe_default_protocol_versions()?;
-    let mut cfg = if verify {
+    let builder = if verify {
         let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        builder.with_root_certificates(roots).with_no_client_auth()
+        builder.with_root_certificates(roots)
     } else {
-        builder.dangerous().with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider()))).with_no_client_auth()
+        builder.dangerous().with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider())))
+    };
+    let mut cfg = match client_auth {
+        Some((chain, key)) => {
+            builder.with_client_auth_cert(chain, key).context("the client certificate and key don't match")?
+        }
+        None => builder.with_no_client_auth(),
     };
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(cfg))

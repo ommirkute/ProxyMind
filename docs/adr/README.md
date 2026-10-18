@@ -9,5 +9,8 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0003](0003-tls-backend.md) | rustls (ring), with optional OpenSSL later for legacy targets | Accepted |
 | [0004](0004-storage.md) | SQLite project file + compressed, deduplicated blobs | Accepted |
 | [0005](0005-single-service-layer.md) | One service layer behind a policy gate for every client | Accepted |
-| [0006](0006-ui-tauri.md) | Tauri 2 + React + TypeScript for the UI | Accepted |
+| [0006](0006-ui-tauri.md) | Tauri 2 + React + TypeScript for the UI | Amended by 0008 |
 | [0007](0007-license.md) | AGPL-3.0 core, Apache-2.0 SDKs | Accepted |
+| [0008](0008-web-ui-first.md) | Web UI served by the binary first; Tauri shell later | Accepted |
+| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Accepted |
+| [0010](0010-assistant-is-an-agent.md) | The built-in assistant is an agent like any other | Accepted |

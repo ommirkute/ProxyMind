@@ -47,6 +47,9 @@ enum Command {
         /// Verify upstream TLS certificates (off by default for pentesting).
         #[arg(long)]
         verify_upstream: bool,
+        /// Speak only HTTP/1.1 to browsers (HTTP/2 is offered by default).
+        #[arg(long)]
+        no_http2: bool,
     },
     /// Manage the interception CA.
     Ca {
@@ -76,6 +79,21 @@ enum Command {
         #[command(subcommand)]
         action: RoeAction,
     },
+    /// Match-and-replace rules the proxy applies to live traffic.
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
+    /// The built-in AI assistant (local model by default).
+    Assistant {
+        #[command(subcommand)]
+        action: AssistantAction,
+    },
+    /// Upstream proxy and client certificates for outgoing connections.
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
     /// Inspect the project's tamper-evident audit log.
     Audit {
         #[command(subcommand)]
@@ -95,6 +113,23 @@ enum Command {
         /// URL targets should call back (default: http://<oast-listen>)
         #[arg(long)]
         oast_public_url: Option<String>,
+    },
+    /// Start the web UI, the proxy and the API together.
+    Ui {
+        /// Where the UI and API listen (loopback only)
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        listen: SocketAddr,
+        /// Where the proxy listens; use --no-proxy to run without it
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        proxy: SocketAddr,
+        #[arg(long)]
+        no_proxy: bool,
+        /// Speak only HTTP/1.1 to browsers (HTTP/2 is offered by default).
+        #[arg(long)]
+        no_http2: bool,
+        /// Who you are in the audit log (default: human:<your username>)
+        #[arg(long = "as")]
+        actor: Option<String>,
     },
     /// Run an out-of-band (OAST) callback listener that records interactions in the project.
     OastServer {
@@ -339,6 +374,72 @@ enum ApprovalAction {
 }
 
 #[derive(Subcommand)]
+enum AssistantAction {
+    /// Show the settings and whether they can be used.
+    Show,
+    /// Change the settings (options not given stay as they are).
+    Set {
+        /// anthropic, or openai (also Ollama, LM Studio, vLLM)
+        #[arg(long)]
+        provider: Option<String>,
+        /// e.g. http://127.0.0.1:11434/v1 or https://api.anthropic.com/v1
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// NAME of the environment variable holding the API key ("" for none)
+        #[arg(long)]
+        key_env: Option<String>,
+        #[arg(long)]
+        max_steps: Option<u32>,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Ask a question; the assistant may look at traffic and use tools.
+    Ask {
+        text: String,
+        /// Continue this chat instead of starting a new one
+        #[arg(long)]
+        chat: Option<i64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkAction {
+    /// Print the saved settings (password hidden).
+    Show,
+    /// Replace the settings with a YAML or JSON file (see examples/network.yaml).
+    Set {
+        file: PathBuf,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Connect directly, with no client certificates.
+    Clear {
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RulesAction {
+    /// Print the saved rules (JSON).
+    Show,
+    /// Replace the rules with a YAML or JSON list; a running proxy picks them up within seconds.
+    Load {
+        file: PathBuf,
+        /// Who is changing them: human:<name> (default: your user name)
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Remove all rules.
+    Clear {
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum RoeAction {
     /// Validate an ROE file and print a summary.
     Check { file: PathBuf },
@@ -469,6 +570,53 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// Keeps match-and-replace rules and network settings in step with the
+/// project, so changes from the CLI or another UI apply without a restart.
+fn watch_project(
+    project: &std::path::Path,
+    rewriter: Option<Arc<pm_proxy::Rewriter>>,
+    network: pm_service::pm_replay::Network,
+) -> Result<()> {
+    let store = Store::open(project)?;
+    if let Some(r) = &rewriter {
+        if let Err(e) = pm_service::sync_rules(&store, r) {
+            eprintln!("Match-and-replace rules not loaded: {e}");
+        }
+        let n = r.rules().iter().filter(|r| r.enabled).count();
+        if n > 0 {
+            eprintln!("{n} match-and-replace rule(s) active");
+        }
+    }
+    if let Err(e) = pm_service::sync_network(&store, &network) {
+        eprintln!("Network settings not applied: {e}");
+    }
+    let net = network.config();
+    if let Some(u) = &net.upstream {
+        eprintln!("Upstream proxy: {:?} {}:{}", u.kind, u.host, u.port);
+    }
+    if !net.client_certs.is_empty() {
+        eprintln!("{} client certificate(s) configured", net.client_certs.len());
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Some(r) = &rewriter {
+                match pm_service::sync_rules(&store, r) {
+                    Ok(true) => eprintln!("Match-and-replace rules reloaded"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("match-and-replace rules: {e}"),
+                }
+            }
+            match pm_service::sync_network(&store, &network) {
+                Ok(true) => eprintln!("Network settings reloaded"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("network settings: {e}"),
+            }
+        }
+    });
+    Ok(())
+}
+
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -479,11 +627,26 @@ async fn run() -> Result<()> {
 
     let cli = Cli::parse();
     match &cli.command {
-        Command::Proxy { listen, verify_upstream } => {
+        Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
             let store = Store::open(&cli.project)?;
             let (recorder, writer) = Recorder::spawn(store);
-            let proxy = Proxy::new(ca.clone(), recorder, *verify_upstream)?;
+            // In-scope-only rules need the rules of engagement; without
+            // them only rules marked "any host" apply.
+            let rewriter = Arc::new(pm_proxy::Rewriter::new());
+            match open_service(&cli.project, None) {
+                Ok(service) => service.attach_rewriter(rewriter.clone())?,
+                Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
+            }
+            let network = pm_service::pm_replay::Network::new();
+            watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
+            let hooks = pm_proxy::Hooks {
+                rewrite: Some(rewriter),
+                network: Some(network),
+                http2: !*no_http2,
+                ..Default::default()
+            };
+            let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             eprintln!("ProxyMind listening on http://{listen}");
             eprintln!("Project: {}", cli.project.display());
@@ -587,6 +750,100 @@ async fn run() -> Result<()> {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
         }
+        Command::Assistant { action: AssistantAction::Show } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let cfg = service.assistant_config()?;
+            out!("{}", serde_json::to_string_pretty(&cfg)?);
+            let local = pm_assistant::is_local_url(&cfg.base_url);
+            out!("Model server: {}", if local { "local" } else { "cloud" });
+            match pm_assistant::Assistant::new(service)?.check(&cfg) {
+                Ok(_) => out!("✓ ready"),
+                Err(e) => out!("✗ {e}"),
+            }
+        }
+        Command::Assistant {
+            action: AssistantAction::Set { provider, base_url, model, key_env, max_steps, actor },
+        } => {
+            let service = open_service(&cli.project, None)?;
+            let mut cfg = service.assistant_config()?;
+            if let Some(p) = provider {
+                cfg.provider = serde_json::from_value(serde_json::json!(p))
+                    .with_context(|| format!("unknown provider {p:?}: use anthropic or openai"))?;
+            }
+            if let Some(v) = base_url {
+                cfg.base_url = v.clone();
+            }
+            if let Some(v) = model {
+                cfg.model = v.clone();
+            }
+            if let Some(v) = key_env {
+                cfg.api_key_env = v.clone();
+            }
+            if let Some(v) = max_steps {
+                cfg.max_steps = *v;
+            }
+            let saved = service.assistant_config_set(&human_actor(actor.as_deref())?, cfg)?;
+            out!("✓ assistant settings saved");
+            out!("{}", serde_json::to_string_pretty(&saved)?);
+        }
+        Command::Assistant { action: AssistantAction::Ask { text, chat } } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let assistant = pm_assistant::Assistant::new(service)?;
+            let turn = assistant.send(*chat, text).await?;
+            for m in &turn.messages {
+                for b in &m.content {
+                    match b {
+                        pm_assistant::llm::Block::Text { text } if m.role == pm_assistant::llm::Role::Assistant => {
+                            out!("{text}\n")
+                        }
+                        pm_assistant::llm::Block::ToolUse { name, input, .. } => out!("  → {name} {input}"),
+                        pm_assistant::llm::Block::ToolResult { is_error: true, content, .. } => {
+                            out!("  ✗ {}", content.chars().take(200).collect::<String>())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(n) = turn.note {
+                out!("({n})");
+            }
+            out!("(chat {}; continue with --chat {})", turn.chat_id, turn.chat_id);
+        }
+        Command::Network { action: NetworkAction::Show } => {
+            let cfg = pm_service::load_network(&Store::open(&cli.project)?)?.masked();
+            out!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        Command::Network { action: NetworkAction::Set { file, actor } } => {
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            let cfg: pm_service::pm_replay::NetConfig =
+                serde_saphyr::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let service = open_service(&cli.project, None)?;
+            let saved = service.network_set(&human_actor(actor.as_deref())?, cfg)?;
+            out!("✓ network settings saved; running proxies pick them up within seconds");
+            out!("{}", serde_json::to_string_pretty(&saved)?);
+        }
+        Command::Network { action: NetworkAction::Clear { actor } } => {
+            let service = open_service(&cli.project, None)?;
+            service.network_set(&human_actor(actor.as_deref())?, Default::default())?;
+            out!("✓ direct connections, no client certificates");
+        }
+        Command::Rules { action: RulesAction::Show } => {
+            let rules = pm_service::load_rules(&Store::open(&cli.project)?)?;
+            out!("{}", serde_json::to_string_pretty(&rules)?);
+        }
+        Command::Rules { action: RulesAction::Load { file, actor } } => {
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            let rules: Vec<pm_proxy::RewriteRule> =
+                serde_saphyr::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let service = open_service(&cli.project, None)?;
+            let saved = service.set_match_replace_rules(&human_actor(actor.as_deref())?, rules)?;
+            out!("✓ {} match-and-replace rule(s) saved", saved.len());
+        }
+        Command::Rules { action: RulesAction::Clear { actor } } => {
+            let service = open_service(&cli.project, None)?;
+            service.set_match_replace_rules(&human_actor(actor.as_deref())?, vec![])?;
+            out!("✓ match-and-replace rules cleared");
+        }
         Command::Roe { action: RoeAction::Show } => {
             let store = Store::open(&cli.project)?;
             match store.get_setting(ROE_SETTING)? {
@@ -601,8 +858,46 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
+            watch_project(&cli.project, None, service.network().clone())?;
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
+        }
+        Command::Ui { listen, proxy, no_proxy, no_http2, actor } => {
+            anyhow::ensure!(listen.ip().is_loopback(), "the UI/API must listen on a loopback address");
+            let home = home_dir(&cli)?;
+            let token = pm_api::load_or_create_token(&home.join("api-token"))?;
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let me = human_actor(actor.as_deref())?;
+            if !*no_proxy {
+                let ca = Arc::new(CertAuthority::load_or_create(&home)?);
+                let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
+                let queue = Arc::new(pm_proxy::InterceptQueue::new());
+                service.attach_intercept(queue.clone());
+                let rewriter = Arc::new(pm_proxy::Rewriter::new());
+                service.attach_rewriter(rewriter.clone())?;
+                watch_project(&cli.project, Some(rewriter.clone()), service.network().clone())?;
+                let hooks = pm_proxy::Hooks {
+                    rewrite: Some(rewriter),
+                    intercept: Some(queue),
+                    network: Some(service.network().clone()),
+                    http2: !*no_http2,
+                };
+                let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
+                let l =
+                    tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
+                tokio::spawn(p.run(l));
+                eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
+            } else {
+                watch_project(&cli.project, None, service.network().clone())?;
+            }
+            let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
+            let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
+            eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
+            out!("Open: http://{listen}/auth?token={token}");
+            tokio::select! {
+                r = axum::serve(l, pm_api::router(state)) => r?,
+                _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
+            }
         }
         Command::OastServer { listen, public_url } => {
             let service = Arc::new(open_service(&cli.project, None)?);

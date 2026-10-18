@@ -22,3 +22,12 @@ Run all four before pushing; CI runs the same checks on Linux, macOS and Windows
 - Keep `pm-http` free of I/O so it stays easy to test and fuzz.
 - Migrations in `pm-store` are append-only; never edit a released one.
 - Line width is 120 (`rustfmt.toml`).
+
+## Web UI
+
+```bash
+cd ui && npm ci && npm run build      # then cargo build embeds ui/dist
+npm run test:e2e                      # browser test; needs a built binary (cargo build)
+```
+
+The UI talks only to `/api/v1` (pm-api). Keep it free of extra runtime dependencies.

@@ -5,22 +5,36 @@
 //! allowed, sent for approval or denied.
 
 mod approvals;
+mod assistant;
 mod authz;
 mod findings;
 mod history;
 mod identity;
+mod intercept;
 mod model;
+mod network;
 mod proof;
+mod race;
 mod replay;
+mod rules;
+mod ws;
+mod ws_replay;
 
+pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;
 pub use identity::{IdentityCheck, IdentityInfo};
+pub use intercept::InterceptState;
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
+pub use network::{NETWORK_SETTING, load_network, sync_network};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
+pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
+pub use rules::{RULES_SETTING, load_rules, sync_rules};
+pub use ws::{WsMessageView, WsPage};
+pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
 use parking_lot::Mutex;
 use pm_ai::Redactor;
@@ -32,7 +46,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use {pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_store};
+pub use {
+    pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_replay, pm_store,
+};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -68,6 +84,8 @@ pub struct Service {
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
+    intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
+    rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
 }
 
 impl Service {
@@ -77,12 +95,19 @@ impl Service {
 
     pub fn with_sender(store: Store, policy: Policy, sender: Sender) -> Result<Self> {
         let limits = policy.roe().limits;
+        // Saved network settings apply from the start; a bad entry (say, a
+        // moved certificate file) is reported but doesn't stop the project opening.
+        if let Err(e) = network::sync_network(&store, sender.network()) {
+            tracing::warn!("network settings not applied: {e}");
+        }
         Ok(Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy,
             store: Mutex::new(store),
             sender,
             redactor: Redactor::new(),
+            intercept: std::sync::OnceLock::new(),
+            rewriter: std::sync::OnceLock::new(),
         })
     }
 
@@ -158,6 +183,49 @@ impl Service {
         };
         self.audit(&actor, &action, detail, &decision)?;
         Ok(auth)
+    }
+}
+
+/// Counters the UI watches for live updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct Counters {
+    pub exchanges: i64,
+    pub last_exchange_id: i64,
+    pub pending_approvals: usize,
+    pub findings: usize,
+    pub audit_records: usize,
+    pub intercepted: usize,
+}
+
+impl Service {
+    pub fn counters(&self) -> Result<Counters> {
+        let store = self.store.lock();
+        let last = store.search_exchanges(&pm_store::HistoryFilter { limit: Some(1), ..Default::default() })?;
+        Ok(Counters {
+            exchanges: store.count_exchanges()?,
+            last_exchange_id: last.first().map_or(0, |e| e.id),
+            pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
+            findings: store.rows("findings", None, 10_000)?.len(),
+            audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
+            intercepted: self.intercept_held_count(),
+        })
+    }
+
+    /// Audit records, newest first.
+    pub fn audit_list(&self, limit: usize) -> Result<Vec<pm_store::AuditRecord>> {
+        let mut r = self.store.lock().audit_records()?;
+        r.reverse();
+        r.truncate(limit);
+        Ok(r)
+    }
+
+    pub fn audit_verify(&self) -> Result<usize> {
+        verify_audit(&self.store.lock())
+    }
+
+    /// The raw bytes of an exchange as text, for humans (no redaction).
+    pub fn exchange_raw(&self, id: i64) -> Result<pm_store::Exchange> {
+        self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
     }
 }
 

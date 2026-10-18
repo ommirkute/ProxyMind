@@ -14,6 +14,12 @@ use pm_tls::TlsConnector;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+mod h2send;
+pub mod net;
+pub mod race;
+
+pub use net::{ClientCert, NetConfig, Network, ProxyKind, UpstreamProxy};
+
 const READ_CHUNK: usize = 16 * 1024;
 
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -111,6 +117,9 @@ pub struct Response {
     pub conn: AfterResponse,
     /// Time from starting to connect until the full response was read.
     pub elapsed: Duration,
+    /// The bytes actually sent, when they differ from the request given
+    /// (an HTTP/2 request downgraded to HTTP/1.1).
+    pub sent: Option<Vec<u8>>,
 }
 
 /// What happens to the connection after the response.
@@ -125,6 +134,8 @@ pub enum AfterResponse {
 /// Sends requests to targets.
 pub struct Sender {
     tls: TlsConnector,
+    verify: bool,
+    net: Network,
     connect_timeout: Duration,
     read_timeout: Duration,
 }
@@ -133,9 +144,44 @@ impl Sender {
     pub fn new(verify_upstream: bool) -> Result<Self> {
         Ok(Self {
             tls: TlsConnector::from(pm_tls::upstream_client_config(verify_upstream)?),
+            verify: verify_upstream,
+            net: Network::default(),
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(60),
         })
+    }
+
+    /// Uses shared, live network settings (upstream proxy, client certificates).
+    pub fn with_network(mut self, net: Network) -> Self {
+        self.net = net;
+        self
+    }
+
+    pub fn network(&self) -> &Network {
+        &self.net
+    }
+
+    /// Whether connections to this host go directly (no upstream proxy).
+    pub fn goes_direct(&self, host: &str) -> bool {
+        self.net.upstream_for(host).is_none()
+    }
+
+    /// The bytes to write for `request`: unchanged, except when plain HTTP
+    /// goes through an HTTP proxy (absolute-form target, proxy login).
+    fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        // Parallel sends speak HTTP/1.1: HTTP/2 text is downgraded for them.
+        if pm_http::h2text::is_http2_request(request)
+            && let Ok(r) = pm_http::h2text::h2_request(request)
+        {
+            let h1 = pm_http::h2text::downgrade_request(&r, &pm_core::authority(&ep.scheme, &ep.host, ep.port));
+            return std::borrow::Cow::Owned(self.wire_bytes(ep, &h1).into_owned());
+        }
+        match self.net.upstream_for(&ep.host) {
+            Some(p) if p.kind == ProxyKind::Http && ep.scheme != "https" => {
+                std::borrow::Cow::Owned(net::for_http_proxy(request, &ep.host, ep.port, &p))
+            }
+            _ => std::borrow::Cow::Borrowed(request),
+        }
     }
 
     pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Self {
@@ -144,49 +190,125 @@ impl Sender {
         self
     }
 
-    /// Resolves, checks and connects.
+    /// Resolves, checks and connects, through the upstream proxy if one
+    /// applies. With a check, names are always resolved here so the check
+    /// sees the addresses in use (except with SOCKS5 remote DNS).
     pub async fn connect(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
-        let addrs: Vec<SocketAddr> =
-            tokio::time::timeout(self.connect_timeout, tokio::net::lookup_host((ep.host.as_str(), ep.port)))
+        Ok(self.connect_with(ep, check, false).await?.0)
+    }
+
+    /// Like [`Sender::connect`]; with `h2`, offers HTTP/2 over TLS (or assumes
+    /// it for plain HTTP). Returns whether HTTP/2 is in use.
+    pub(crate) async fn connect_with(
+        &self,
+        ep: &Endpoint,
+        check: Option<AddrCheck<'_>>,
+        h2: bool,
+    ) -> Result<(Box<dyn Io>, bool)> {
+        let upstream = self.net.upstream_for(&ep.host);
+        let remote_dns = upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
+            || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http);
+        // Direct connections and IP-based SOCKS need the target's addresses;
+        // checks need them in every case.
+        let addrs: Vec<SocketAddr> = if upstream.is_none() || check.is_some() || !remote_dns {
+            let addrs: Vec<SocketAddr> =
+                tokio::time::timeout(self.connect_timeout, tokio::net::lookup_host((ep.host.as_str(), ep.port)))
+                    .await
+                    .context("DNS lookup timed out")?
+                    .with_context(|| format!("cannot resolve {}", ep.host))?
+                    .collect();
+            if addrs.is_empty() {
+                bail!("{} did not resolve to any address", ep.host);
+            }
+            if let Some(check) = check {
+                let ips: Vec<IpAddr> = addrs.iter().map(SocketAddr::ip).collect();
+                check(&ips).map_err(|why| anyhow!("refused before connecting: {why}"))?;
+            }
+            addrs
+        } else {
+            vec![]
+        };
+        let tcp = match &upstream {
+            None => self.tcp_any(&addrs).await?,
+            Some(p) => {
+                let proxy_addrs: Vec<SocketAddr> =
+                    tokio::time::timeout(self.connect_timeout, tokio::net::lookup_host((p.host.as_str(), p.port)))
+                        .await
+                        .context("DNS lookup of the upstream proxy timed out")?
+                        .with_context(|| format!("cannot resolve the upstream proxy {}", p.host))?
+                        .collect();
+                // SOCKS5 with local DNS tries each checked address in turn,
+                // like a direct connection; everything else makes one attempt.
+                let targets: Vec<net::SocksTarget<'_>> = match p.kind {
+                    ProxyKind::Socks5 if !p.remote_dns && !addrs.is_empty() => {
+                        addrs.iter().map(|a| net::SocksTarget::Ip(a.ip())).collect()
+                    }
+                    _ => vec![net::SocksTarget::Name(&ep.host)],
+                };
+                let mut last_err = None;
+                let mut opened = None;
+                for target in targets {
+                    let attempt = async {
+                        let mut tcp = self.tcp_any(&proxy_addrs).await.context("connecting to the upstream proxy")?;
+                        match p.kind {
+                            ProxyKind::Socks5 => net::socks5_connect(&mut tcp, p, target, ep.port).await?,
+                            ProxyKind::Http if ep.scheme == "https" => {
+                                net::http_connect(&mut tcp, p, &ep.host, ep.port).await?
+                            }
+                            ProxyKind::Http => {} // plain HTTP: absolute-form requests
+                        }
+                        anyhow::Ok(tcp)
+                    };
+                    match tokio::time::timeout(self.connect_timeout, attempt).await {
+                        Ok(Ok(tcp)) => {
+                            opened = Some(tcp);
+                            break;
+                        }
+                        Ok(Err(e)) => last_err = Some(e),
+                        Err(_) => last_err = Some(anyhow!("upstream proxy timed out")),
+                    }
+                }
+                match opened {
+                    Some(tcp) => tcp,
+                    None => {
+                        return Err(last_err.unwrap_or_else(|| anyhow!("could not connect through the upstream proxy")));
+                    }
+                }
+            }
+        };
+        if ep.scheme == "https" {
+            let name = pm_tls::server_name(&ep.host)?;
+            let mut tls = self.net.tls_for(&ep.host, self.verify).unwrap_or_else(|| self.tls.clone());
+            if h2 {
+                let mut cfg = (**tls.config()).clone();
+                cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                tls = TlsConnector::from(std::sync::Arc::new(cfg));
+            }
+            let tls = tokio::time::timeout(self.connect_timeout, tls.connect(name, tcp))
                 .await
-                .context("DNS lookup timed out")?
-                .with_context(|| format!("cannot resolve {}", ep.host))?
-                .collect();
-        if addrs.is_empty() {
-            bail!("{} did not resolve to any address", ep.host);
+                .context("TLS handshake timed out")?
+                .context("TLS handshake with server")?;
+            let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
+            Ok((Box::new(tls), is_h2))
+        } else {
+            Ok((Box::new(tcp), h2))
         }
-        if let Some(check) = check {
-            let ips: Vec<IpAddr> = addrs.iter().map(SocketAddr::ip).collect();
-            check(&ips).map_err(|why| anyhow!("refused before connecting: {why}"))?;
-        }
-        // Connect only to the addresses that were checked (no second lookup).
+    }
+
+    /// Connects to the first address that answers.
+    async fn tcp_any(&self, addrs: &[SocketAddr]) -> Result<TcpStream> {
         let mut last_err = None;
-        let mut tcp = None;
-        for addr in &addrs {
+        for addr in addrs {
             match tokio::time::timeout(self.connect_timeout, TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => {
-                    tcp = Some(s);
-                    break;
+                    s.set_nodelay(true)?;
+                    return Ok(s);
                 }
                 Ok(Err(e)) => last_err = Some(anyhow!(e)),
                 Err(_) => last_err = Some(anyhow!("connect timed out")),
             }
         }
-        let tcp = match tcp {
-            Some(t) => t,
-            None => return Err(last_err.unwrap_or_else(|| anyhow!("could not connect"))),
-        };
-        tcp.set_nodelay(true)?;
-        if ep.scheme == "https" {
-            let name = pm_tls::server_name(&ep.host)?;
-            let tls = tokio::time::timeout(self.connect_timeout, self.tls.connect(name, tcp))
-                .await
-                .context("TLS handshake timed out")?
-                .context("TLS handshake with server")?;
-            Ok(Box::new(tls))
-        } else {
-            Ok(Box::new(tcp))
-        }
+        Err(last_err.unwrap_or_else(|| anyhow!("could not connect")))
     }
 
     /// Sends one raw request on a new connection and reads the response.
@@ -198,10 +320,13 @@ impl Sender {
         method: &str,
         check: Option<AddrCheck<'_>>,
     ) -> Result<Response> {
+        if pm_http::h2text::is_http2_request(request) {
+            return self.send_h2(ep, request, method, check).await;
+        }
         let started = Instant::now();
         let io = self.connect(ep, check).await?;
         let mut conn = Conn::new(io);
-        conn.io.write_all(request).await?;
+        conn.io.write_all(&self.wire_bytes(ep, request)).await?;
         conn.io.flush().await?;
         tokio::time::timeout(self.read_timeout, read_response(conn, method, started))
             .await
@@ -218,8 +343,9 @@ impl Sender {
         requests: &[(Vec<u8>, String)],
         check: Option<AddrCheck<'_>>,
     ) -> Vec<Result<Response>> {
+        let wire: Vec<Vec<u8>> = requests.iter().map(|(r, _)| self.wire_bytes(ep, r).into_owned()).collect();
         let mut conns = Vec::with_capacity(requests.len());
-        for (req, _) in requests {
+        for req in &wire {
             let r = async {
                 let mut c = Conn::new(self.connect(ep, check).await?);
                 if req.len() > 1 {
@@ -233,7 +359,7 @@ impl Sender {
         }
         let started = Instant::now();
         // Release the last bytes as close together as possible.
-        for (c, (req, _)) in conns.iter_mut().zip(requests) {
+        for (c, req) in conns.iter_mut().zip(&wire) {
             if let Ok(c) = c
                 && let Some(last) = req.last()
             {
@@ -279,7 +405,13 @@ async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Insta
         let head = pm_http::parse_response_head(&head_raw)?;
         raw.extend_from_slice(&head_raw);
         if head.status == 101 {
-            return Ok(Response { raw, head, conn: AfterResponse::Upgraded(conn), elapsed: started.elapsed() });
+            return Ok(Response {
+                raw,
+                head,
+                conn: AfterResponse::Upgraded(conn),
+                elapsed: started.elapsed(),
+                sent: None,
+            });
         }
         if (100..200).contains(&head.status) {
             continue;
@@ -287,7 +419,7 @@ async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Insta
         let kind = head.body_kind(method)?;
         raw.extend_from_slice(&conn.read_body(kind).await?);
         let after = if kind == BodyKind::UntilClose { AfterResponse::ClosedAfterBody } else { AfterResponse::Done };
-        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed() });
+        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed(), sent: None });
     }
 }
 

@@ -87,7 +87,10 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `history_search` | Search recorded traffic (host, path, method, status, source, actor; paging) |
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
-| `replay_send` | Send a request (new, resent or edited) through the policy gate |
+| `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
+| `race_send` | Race-condition test: send copies of a request so they arrive together (HTTP/2 single-packet or last-byte sync); responses grouped |
+| `ws_send` | Open a new WebSocket like a recorded one, send messages and get every message both ways (sending needs approval by default) |
+| `replay_send` | Send a request (new, resent or edited) through the policy gate. Write `HTTP/2` in the request line to send it over HTTP/2 |
 | `identity_list` | Test identities and their session status (names only, never values) |
 | `identity_capture` | Create an identity from the cookies/auth headers of a recorded request |
 | `identity_check` | Check a session, logging in again automatically if a login recipe exists |

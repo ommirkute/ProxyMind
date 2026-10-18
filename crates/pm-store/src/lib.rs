@@ -173,6 +173,31 @@ CREATE TABLE oast_interactions (
 );
 CREATE INDEX oast_interactions_token ON oast_interactions(token);
 "#,
+    r#"
+-- WebSocket messages seen on an upgraded exchange.
+CREATE TABLE ws_messages (
+    id          INTEGER PRIMARY KEY,
+    exchange_id INTEGER NOT NULL REFERENCES exchanges(id),
+    ts_ms       INTEGER NOT NULL,
+    from_client INTEGER NOT NULL,
+    opcode      INTEGER NOT NULL,
+    len         INTEGER NOT NULL,
+    payload     BLOB NOT NULL,
+    truncated   INTEGER NOT NULL,
+    compressed  INTEGER NOT NULL
+);
+CREATE INDEX ws_messages_exchange ON ws_messages(exchange_id, id);
+"#,
+    r#"
+-- Conversations with the built-in assistant (messages as JSON).
+CREATE TABLE assistant_chats (
+    id         INTEGER PRIMARY KEY,
+    title      TEXT NOT NULL,
+    messages   TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -266,6 +291,38 @@ pub struct NewExchange {
     pub identity: Option<String>,
     /// Hypothesis this exchange was sent to test.
     pub hypothesis_id: Option<i64>,
+}
+
+/// A WebSocket message to record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWsMessage {
+    pub exchange_id: i64,
+    pub ts_ms: i64,
+    /// Sent by the client (browser) rather than the server.
+    pub from_client: bool,
+    pub opcode: u8,
+    /// Full length (decompressed, when it could be inflated).
+    pub len: u64,
+    /// The payload, possibly cut short (see `truncated`).
+    pub payload: Vec<u8>,
+    pub truncated: bool,
+    /// Still compressed: permessage-deflate data that couldn't be inflated.
+    pub compressed: bool,
+}
+
+/// A stored WebSocket message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WsMessageRow {
+    pub id: i64,
+    pub exchange_id: i64,
+    pub ts_ms: i64,
+    pub from_client: bool,
+    pub opcode: u8,
+    pub len: u64,
+    #[serde(skip)]
+    pub payload: Vec<u8>,
+    pub truncated: bool,
+    pub compressed: bool,
 }
 
 /// One row of history, without the raw bytes.
@@ -632,6 +689,88 @@ impl Store {
             params![id, from, to, decided_by, params_hash, now_ms],
         )?;
         Ok(n == 1)
+    }
+
+    pub fn insert_ws_message(&mut self, m: &NewWsMessage) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO ws_messages (exchange_id, ts_ms, from_client, opcode, len, payload, truncated, compressed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                m.exchange_id,
+                m.ts_ms,
+                m.from_client,
+                m.opcode,
+                i64::try_from(m.len).unwrap_or(i64::MAX),
+                m.payload,
+                m.truncated,
+                m.compressed
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Messages of one exchange in order, starting after `after_id`.
+    pub fn ws_messages(&self, exchange_id: i64, after_id: Option<i64>, limit: usize) -> Result<Vec<WsMessageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, exchange_id, ts_ms, from_client, opcode, len, payload, truncated, compressed
+             FROM ws_messages WHERE exchange_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![exchange_id, after_id.unwrap_or(0), limit.clamp(1, 1000) as i64], |r| {
+            Ok(WsMessageRow {
+                id: r.get(0)?,
+                exchange_id: r.get(1)?,
+                ts_ms: r.get(2)?,
+                from_client: r.get(3)?,
+                opcode: r.get(4)?,
+                len: u64::try_from(r.get::<_, i64>(5)?).unwrap_or(0),
+                payload: r.get(6)?,
+                truncated: r.get(7)?,
+                compressed: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn ws_message_count(&self, exchange_id: i64) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM ws_messages WHERE exchange_id = ?1", [exchange_id], |r| r.get(0))?)
+    }
+
+    pub fn create_chat(&mut self, title: &str, now_ms: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO assistant_chats (title, messages, created_ms, updated_ms) VALUES (?1, '[]', ?2, ?2)",
+            params![title, now_ms],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn save_chat(&mut self, id: i64, messages: &str, now_ms: i64) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE assistant_chats SET messages = ?2, updated_ms = ?3 WHERE id = ?1",
+            params![id, messages, now_ms],
+        )?;
+        anyhow::ensure!(n == 1, "no chat {id}");
+        Ok(())
+    }
+
+    /// (title, messages JSON, created_ms, updated_ms)
+    pub fn get_chat(&self, id: i64) -> Result<Option<(String, String, i64, i64)>> {
+        Ok(self
+            .conn
+            .query_row("SELECT title, messages, created_ms, updated_ms FROM assistant_chats WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?)
+    }
+
+    /// Newest first: (id, title, updated_ms).
+    pub fn list_chats(&self, limit: usize) -> Result<Vec<(i64, String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, title, updated_ms FROM assistant_chats ORDER BY updated_ms DESC, id DESC LIMIT ?1")?;
+        let rows = stmt.query_map([limit.clamp(1, 500) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {

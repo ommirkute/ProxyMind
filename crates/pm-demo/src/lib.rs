@@ -58,6 +58,14 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/fetch",
         description: "The url parameter is fetched server-side without any allow-list.",
     },
+    Vuln {
+        id: "VS-5",
+        class: "race_condition",
+        method: "POST",
+        path: "/api/giftcard/redeem",
+        description: "A one-per-user gift card is checked, then credited after a pause, without a lock: \
+                      requests sent together are all credited.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -89,6 +97,9 @@ struct State {
     orders: Vec<Order>,
     invoices: Vec<(u32, u32, f64)>,
     next_order: u32,
+    /// Users who redeemed the WELCOME10 gift card, and their store credit.
+    redeemed: std::collections::HashSet<u32>,
+    credit: HashMap<u32, u32>,
 }
 
 #[derive(Clone)]
@@ -215,6 +226,8 @@ impl VulnShop {
                 orders,
                 invoices: vec![(5001, 1, 49.90), (6001, 2, 120.00)],
                 next_order: 3000,
+                redeemed: Default::default(),
+                credit: HashMap::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
         }
@@ -256,6 +269,7 @@ impl VulnShop {
             }
         };
         let Ok(head) = pm_http::parse_request_head(&buf[..head_end]) else { return Ok(()) };
+        let wants_ws = pm_http::header(&head.headers, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case(b"websocket"));
         let len = pm_http::header(&head.headers, "content-length")
             .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<usize>().ok())
             .unwrap_or(0)
@@ -279,6 +293,9 @@ impl VulnShop {
                 .collect(),
             body: buf[head_end..(head_end + len).min(buf.len())].to_vec(),
         };
+        if wants_ws && req.method == "GET" && req.path == "/ws/support" {
+            return self.support_socket(s, &req, buf[head_end..].to_vec()).await;
+        }
         let resp = self.route(&req).await;
         let mut out = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nX-Request-Id: {}\r\nConnection: close\r\n",
@@ -296,6 +313,58 @@ impl VulnShop {
         s.write_all(out.as_bytes()).await?;
         let _ = s.shutdown().await;
         Ok(())
+    }
+
+    /// A WebSocket support chat for logged-in users: it greets you and
+    /// answers each message.
+    async fn support_socket(&self, mut s: TcpStream, req: &Request, mut pending: Vec<u8>) -> std::io::Result<()> {
+        let (Some(user), Some(key)) = (self.user(req), req.header("sec-websocket-key")) else {
+            let body = r#"{"error":"login required"}"#;
+            let out = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            s.write_all(out.as_bytes()).await?;
+            return Ok(());
+        };
+        let accept = ws_accept(key.trim());
+        s.write_all(
+            format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await?;
+        let hello = json!({"from": "support", "text": format!("Hi {}, how can we help?", user.name)}).to_string();
+        s.write_all(&ws_frame(pm_http::ws::TEXT, hello.as_bytes())).await?;
+        let mut decoder = pm_http::ws::Decoder::new(64 * 1024);
+        let mut tmp = [0u8; 8192];
+        loop {
+            let mut msgs = Vec::new();
+            if decoder.feed(&pending, &mut msgs).is_err() {
+                return Ok(());
+            }
+            pending.clear();
+            for m in msgs {
+                match m.opcode {
+                    pm_http::ws::TEXT => {
+                        let text = String::from_utf8_lossy(&m.payload);
+                        let reply = json!({"from": "support", "text": format!("Thanks {}, we got: {text}", user.name)});
+                        s.write_all(&ws_frame(pm_http::ws::TEXT, reply.to_string().as_bytes())).await?;
+                    }
+                    pm_http::ws::PING => s.write_all(&ws_frame(pm_http::ws::PONG, &m.payload)).await?,
+                    pm_http::ws::CLOSE => {
+                        s.write_all(&ws_frame(pm_http::ws::CLOSE, &m.payload)).await?;
+                        let _ = s.shutdown().await;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            let n = s.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            pending.extend_from_slice(&tmp[..n]);
+        }
     }
 
     fn user(&self, req: &Request) -> Option<&'static User> {
@@ -444,6 +513,30 @@ impl VulnShop {
                 Some(_) => json_resp(403, json!({"error": "admins only"})),
                 None => unauthorized(),
             },
+            ("POST", ["api", "giftcard", "redeem"]) => {
+                let Some(user) = self.user(req) else { return unauthorized() };
+                if req.params().get("code").map(String::as_str) != Some("WELCOME10") {
+                    return json_resp(404, json!({"error": "unknown gift card"}));
+                }
+                // VS-5: race condition. Check, pause (a slow payment call), then
+                // write, with no lock held across the gap.
+                let used = self.state.lock().map(|s| s.redeemed.contains(&user.id)).unwrap_or(true);
+                if used {
+                    return json_resp(409, json!({"error": "gift card already redeemed"}));
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let credit = self
+                    .state
+                    .lock()
+                    .map(|mut s| {
+                        s.redeemed.insert(user.id);
+                        let c = s.credit.entry(user.id).or_default();
+                        *c += 10;
+                        *c
+                    })
+                    .unwrap_or(0);
+                json_resp(200, json!({"redeemed": "WELCOME10", "credit": credit, "meta": self.meta()}))
+            }
             ("GET", ["api", "fetch"]) => {
                 // VS-4: SSRF. Fetches any http:// URL.
                 let url = req.query.get("url").cloned().unwrap_or_default();
@@ -474,8 +567,50 @@ async fn fetch(url: &str) -> Result<String, String> {
     tokio::time::timeout(Duration::from_secs(3), fut).await.map_err(|_| "timeout".to_string())?
 }
 
+/// An unmasked server frame.
+fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x80 | opcode];
+    match payload.len() {
+        n if n < 126 => v.push(n as u8),
+        n if n <= 0xFFFF => {
+            v.push(126);
+            v.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            v.push(127);
+            v.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    v.extend_from_slice(payload);
+    v
+}
+
+/// `Sec-WebSocket-Accept` for a client key (RFC 6455 section 4.2.2).
+fn ws_accept(key: &str) -> String {
+    let digest = sha1_smol::Sha1::from(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).digest().bytes();
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in digest.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn websocket_accept_matches_the_rfc_example() {
+        assert_eq!(super::ws_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
     use super::*;
 
     async fn call(addr: SocketAddr, raw: String) -> String {

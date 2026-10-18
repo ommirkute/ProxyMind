@@ -22,6 +22,11 @@ vulns:
     method: GET
     path: /api/fetch
     description: url parameter fetched server-side without an allow-list.
+  - id: VS-5
+    class: race_condition
+    method: POST
+    path: /api/giftcard/redeem
+    description: One-per-user gift card checked then credited without a lock; concurrent requests all succeed.
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}
