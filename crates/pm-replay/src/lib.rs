@@ -231,24 +231,43 @@ impl Sender {
                         .context("DNS lookup of the upstream proxy timed out")?
                         .with_context(|| format!("cannot resolve the upstream proxy {}", p.host))?
                         .collect();
-                let mut tcp = self.tcp_any(&proxy_addrs).await.context("connecting to the upstream proxy")?;
-                let setup = async {
-                    match p.kind {
-                        ProxyKind::Socks5 => {
-                            let target = match addrs.first() {
-                                Some(a) if !p.remote_dns => net::SocksTarget::Ip(a.ip()),
-                                _ => net::SocksTarget::Name(&ep.host),
-                            };
-                            net::socks5_connect(&mut tcp, p, target, ep.port).await
-                        }
-                        ProxyKind::Http if ep.scheme == "https" => {
-                            net::http_connect(&mut tcp, p, &ep.host, ep.port).await
-                        }
-                        ProxyKind::Http => Ok(()), // plain HTTP: absolute-form requests
+                // SOCKS5 with local DNS tries each checked address in turn,
+                // like a direct connection; everything else makes one attempt.
+                let targets: Vec<net::SocksTarget<'_>> = match p.kind {
+                    ProxyKind::Socks5 if !p.remote_dns && !addrs.is_empty() => {
+                        addrs.iter().map(|a| net::SocksTarget::Ip(a.ip())).collect()
                     }
+                    _ => vec![net::SocksTarget::Name(&ep.host)],
                 };
-                tokio::time::timeout(self.connect_timeout, setup).await.context("upstream proxy timed out")??;
-                tcp
+                let mut last_err = None;
+                let mut opened = None;
+                for target in targets {
+                    let attempt = async {
+                        let mut tcp = self.tcp_any(&proxy_addrs).await.context("connecting to the upstream proxy")?;
+                        match p.kind {
+                            ProxyKind::Socks5 => net::socks5_connect(&mut tcp, p, target, ep.port).await?,
+                            ProxyKind::Http if ep.scheme == "https" => {
+                                net::http_connect(&mut tcp, p, &ep.host, ep.port).await?
+                            }
+                            ProxyKind::Http => {} // plain HTTP: absolute-form requests
+                        }
+                        anyhow::Ok(tcp)
+                    };
+                    match tokio::time::timeout(self.connect_timeout, attempt).await {
+                        Ok(Ok(tcp)) => {
+                            opened = Some(tcp);
+                            break;
+                        }
+                        Ok(Err(e)) => last_err = Some(e),
+                        Err(_) => last_err = Some(anyhow!("upstream proxy timed out")),
+                    }
+                }
+                match opened {
+                    Some(tcp) => tcp,
+                    None => {
+                        return Err(last_err.unwrap_or_else(|| anyhow!("could not connect through the upstream proxy")));
+                    }
+                }
             }
         };
         if ep.scheme == "https" {

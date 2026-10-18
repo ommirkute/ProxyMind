@@ -118,6 +118,11 @@ async fn socks5_proxy() -> (u16, Seen) {
                         c.read_exact(&mut a).await.unwrap();
                         IpAddr::from(a).to_string()
                     }
+                    4 => {
+                        let mut a = [0u8; 16];
+                        c.read_exact(&mut a).await.unwrap();
+                        format!("[{}]", IpAddr::from(a))
+                    }
                     3 => {
                         let mut n = [0u8; 1];
                         c.read_exact(&mut n).await.unwrap();
@@ -131,7 +136,10 @@ async fn socks5_proxy() -> (u16, Seen) {
                 c.read_exact(&mut p).await.unwrap();
                 let port = u16::from_be_bytes(p);
                 seen.lock().unwrap().push(format!("{host}:{port}"));
-                let mut up = TcpStream::connect((host.as_str(), port)).await.unwrap();
+                let Ok(mut up) = TcpStream::connect(format!("{host}:{port}")).await else {
+                    let _ = c.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await; // connection refused
+                    return;
+                };
                 c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
                 let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
             });
@@ -207,13 +215,17 @@ async fn socks5_with_login_local_or_remote_dns_and_bypass() {
     let s = sender(NetConfig { upstream: Some(up.clone()), client_certs: vec![] });
     let r = s.send(&Endpoint::new("http", "localhost", echo), GET, "GET", None).await.unwrap();
     assert_eq!(body(&r), "GET /path?x=1 HTTP/1.1", "request bytes unchanged through SOCKS");
-    let first = seen.lock().unwrap()[0].clone();
-    assert!(first.ends_with(&format!(":{echo}")) && !first.starts_with("localhost"), "resolved locally: {first}");
+    let tried = seen.lock().unwrap().clone();
+    assert!(
+        tried.iter().all(|t| t.ends_with(&format!(":{echo}")) && !t.starts_with("localhost")),
+        "resolved locally: {tried:?}"
+    );
+    let before = tried.len();
 
     let remote =
         sender(NetConfig { upstream: Some(UpstreamProxy { remote_dns: true, ..up.clone() }), client_certs: vec![] });
     remote.send(&Endpoint::new("http", "localhost", echo), GET, "GET", None).await.unwrap();
-    assert_eq!(seen.lock().unwrap()[1], format!("localhost:{echo}"), "the proxy resolves the name");
+    assert_eq!(seen.lock().unwrap()[before], format!("localhost:{echo}"), "the proxy resolves the name");
 
     // Bypassed hosts connect directly (the proxy port is wrong on purpose).
     let direct = sender(NetConfig {
@@ -221,7 +233,7 @@ async fn socks5_with_login_local_or_remote_dns_and_bypass() {
         client_certs: vec![],
     });
     direct.send(&Endpoint::new("http", "127.0.0.1", echo), GET, "GET", None).await.unwrap();
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), before + 1);
 }
 
 #[tokio::test]
