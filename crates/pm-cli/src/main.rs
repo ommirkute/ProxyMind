@@ -236,7 +236,7 @@ async fn run() -> Result<()> {
                 target: Some(Target::from_url(url)?),
                 summary: format!("{method} {url}"),
             };
-            let service = Service::new(Store::open_in_memory()?, Policy::new(roe));
+            let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
             let v = service.dry_run(&req);
             let label = match v.decision {
                 Decision::Allow => "ALLOW",

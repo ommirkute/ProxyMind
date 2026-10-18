@@ -328,6 +328,81 @@ pub fn replace_request_target(raw: &[u8], new_target: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Splits a raw message into (head, body) at the blank line.
+pub fn split_message(raw: &[u8]) -> (&[u8], &[u8]) {
+    match find_head_end(raw) {
+        Ok(Some(end)) => raw.split_at(end),
+        _ => (raw, &[]),
+    }
+}
+
+/// Decodes a chunked body into its payload, for display and analysis only.
+/// Never use the result to forward traffic. Returns `None` if malformed.
+pub fn decode_chunked(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let nl = memchr::memchr(b'\n', &body[i..])?;
+        let line = &body[i..i + nl];
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let hex = line.split(|&b| b == b';').next()?.trim_ascii();
+        let size = usize::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+        i += nl + 1;
+        if size == 0 {
+            return Some(out);
+        }
+        out.extend_from_slice(body.get(i..i + size)?);
+        i += size;
+        if body[i..].starts_with(b"\r\n") {
+            i += 2;
+        } else if body[i..].starts_with(b"\n") {
+            i += 1;
+        }
+    }
+}
+
+/// Sets `Content-Length` to the actual body length (adding it if a body is
+/// present and the header is missing). Leaves chunked messages and every
+/// other byte untouched. Only call this when the user or agent asked for it.
+pub fn fix_content_length(raw: &[u8]) -> Vec<u8> {
+    let Ok(Some(end)) = find_head_end(raw) else { return raw.to_vec() };
+    let (head, body) = raw.split_at(end);
+    let Ok(parsed) = parse_request_head(head) else { return raw.to_vec() };
+    if is_chunked(&parsed.headers) {
+        return raw.to_vec();
+    }
+    let new_value = body.len().to_string();
+    let mut out = Vec::with_capacity(raw.len() + 24);
+    let mut replaced = false;
+    let mut rest = head;
+    while let Some(nl) = memchr::memchr(b'\n', rest) {
+        let line = &rest[..=nl];
+        rest = &rest[nl + 1..];
+        let colon = memchr::memchr(b':', line);
+        let is_cl = colon.is_some_and(|c| line[..c].trim_ascii().eq_ignore_ascii_case(b"content-length"));
+        if is_cl && !replaced {
+            let c = colon.unwrap_or(0);
+            let eol: &[u8] = if line.ends_with(b"\r\n") { b"\r\n" } else { b"\n" };
+            out.extend_from_slice(&line[..=c]);
+            out.extend_from_slice(b" ");
+            out.extend_from_slice(new_value.as_bytes());
+            out.extend_from_slice(eol);
+            replaced = true;
+        } else if is_cl {
+            // Drop duplicate Content-Length headers; they would conflict.
+        } else if !replaced && !body.is_empty() && (line == b"\r\n" || line == b"\n") {
+            out.extend_from_slice(format!("Content-Length: {new_value}\r\n").as_bytes());
+            out.extend_from_slice(line);
+            replaced = true;
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(rest);
+    out.extend_from_slice(body);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +458,24 @@ mod tests {
         assert_eq!(split_absolute_target("/x"), None);
         assert_eq!(split_host_port("a.com", 80), Some(("a.com".into(), 80)));
         assert_eq!(split_host_port("[::1]:8443", 443), Some(("::1".into(), 8443)));
+    }
+
+    #[test]
+    fn decodes_chunked_for_display() {
+        assert_eq!(decode_chunked(b"4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\n\r\n").unwrap(), b"Wikipedia");
+        assert_eq!(decode_chunked(b"zz\r\n"), None);
+    }
+
+    #[test]
+    fn fixes_content_length_only_where_needed() {
+        let out = fix_content_length(b"POST / HTTP/1.1\r\nHost: a\r\ncontent-length: 1\r\n\r\nhello");
+        assert_eq!(out, b"POST / HTTP/1.1\r\nHost: a\r\ncontent-length: 5\r\n\r\nhello");
+        let out = fix_content_length(b"POST / HTTP/1.1\r\nHost: a\r\n\r\nhi");
+        assert_eq!(out, b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\n\r\nhi");
+        let get = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        assert_eq!(fix_content_length(get), get);
+        let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert_eq!(fix_content_length(chunked), chunked);
     }
 
     #[test]

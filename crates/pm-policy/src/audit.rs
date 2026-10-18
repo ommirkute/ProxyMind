@@ -11,6 +11,11 @@ use crate::PolicyError;
 
 pub const GENESIS: [u8; 32] = [0; 32];
 
+/// Hex blake3 hash of arbitrary content (used to reference large audit details).
+pub fn content_hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 fn field(h: &mut blake3::Hasher, bytes: &[u8]) {
     h.update(&(bytes.len() as u64).to_le_bytes());
     h.update(bytes);

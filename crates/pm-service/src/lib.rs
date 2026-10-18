@@ -4,16 +4,25 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+mod history;
+mod replay;
+
+pub use history::ExchangePage;
+pub use replay::{ReplayRequest, ReplayResult};
 
 use parking_lot::Mutex;
-use pm_policy::{ActionRequest, Actor, Approval, ApprovalError, ApprovalQueue, Decision, Policy, Verdict, audit};
+use pm_ai::Redactor;
+use pm_core::now_ms;
+use pm_policy::{
+    ActionRequest, Actor, Approval, ApprovalError, ApprovalQueue, Decision, Policy, RateLimiter, Verdict, audit,
+};
+use pm_replay::Sender;
 use pm_store::Store;
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use pm_policy;
+pub use {pm_ai, pm_policy, pm_store};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -21,7 +30,11 @@ pub enum ServiceError {
     Approval(#[from] ApprovalError),
     #[error("approval {0} is not approved, was already used, or does not cover these parameters")]
     ApprovalMismatch(String),
-    #[error("storage: {0:#}")]
+    #[error("{0}")]
+    Invalid(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("{0:#}")]
     Store(#[from] anyhow::Error),
 }
 
@@ -43,15 +56,36 @@ pub struct Service {
     policy: Policy,
     approvals: ApprovalQueue,
     store: Mutex<Store>,
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    sender: Sender,
+    limiter: RateLimiter,
+    redactor: Redactor,
 }
 
 impl Service {
-    pub fn new(store: Store, policy: Policy) -> Self {
-        Self { policy, approvals: ApprovalQueue::new(), store: Mutex::new(store) }
+    pub fn new(store: Store, policy: Policy) -> Result<Self> {
+        Self::with_sender(store, policy, Sender::new(false)?)
+    }
+
+    pub fn with_sender(store: Store, policy: Policy, sender: Sender) -> Result<Self> {
+        let limits = policy.roe().limits;
+        Ok(Self {
+            limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
+            policy,
+            approvals: ApprovalQueue::new(),
+            store: Mutex::new(store),
+            sender,
+            redactor: Redactor::new(),
+        })
+    }
+
+    /// Whether content shown to this actor should have secrets replaced.
+    /// Agents follow the ROE setting; humans see real values.
+    pub fn redacts_for(&self, actor: &Actor) -> bool {
+        actor.kind != pm_policy::ActorKind::Human && self.policy.roe().data.redact_before_llm
+    }
+
+    fn redactor_for(&self, actor: &Actor) -> Option<&Redactor> {
+        self.redacts_for(actor).then_some(&self.redactor)
     }
 
     pub fn policy(&self) -> &Policy {
@@ -73,6 +107,15 @@ impl Service {
     }
 
     fn detail(req: &ActionRequest, params: &Value, verdict: &Verdict) -> Value {
+        // Keep audit records small: large parameters (e.g. request bodies)
+        // are cut, and the full hash is kept so they can still be matched.
+        let text = params.to_string();
+        let params = if text.len() > 4096 {
+            let cut = text.char_indices().take_while(|(i, _)| *i < 4096).map(|(_, c)| c).collect::<String>();
+            json!({ "preview": cut, "blake3": blake3_hex(&text) })
+        } else {
+            params.clone()
+        };
         json!({
             "tier": req.tier,
             "target": req.target.as_ref().map(|t| format!("{}://{}:{}{}", t.scheme, t.host, t.port, t.path)),
@@ -154,6 +197,10 @@ impl Service {
     }
 }
 
+fn blake3_hex(s: &str) -> String {
+    pm_policy::audit::content_hash(s.as_bytes())
+}
+
 /// Checks the audit chain of a project. Returns the number of records.
 pub fn verify_audit(store: &Store) -> Result<usize> {
     let records = store.audit_records()?;
@@ -172,7 +219,7 @@ scope:
 "#;
 
     fn service() -> Service {
-        Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(ROE).unwrap()))
+        Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(ROE).unwrap())).unwrap()
     }
 
     fn req(actor: &str, tier: Tier, url: &str) -> ActionRequest {
@@ -224,7 +271,7 @@ scope:
         let path = std::env::temp_dir().join(format!("pm-service-tamper-{}.pmproj", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
-            let s = Service::new(Store::open(&path).unwrap(), Policy::new(Roe::parse(ROE).unwrap()));
+            let s = Service::new(Store::open(&path).unwrap(), Policy::new(Roe::parse(ROE).unwrap())).unwrap();
             for url in ["https://app.example.com/a", "https://evil.com/", "https://app.example.com/b"] {
                 s.authorize(req("agent:a", Tier::ActiveSafe, url), &json!({})).unwrap();
             }

@@ -127,6 +127,28 @@ pub struct Exchange {
     pub response: Option<Vec<u8>>,
 }
 
+/// Filters for searching history. All set fields must match.
+#[derive(Debug, Clone, Default, serde::Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryFilter {
+    /// Host contains this text (case-insensitive).
+    pub host: Option<String>,
+    /// Path (including query) contains this text (case-insensitive).
+    pub path: Option<String>,
+    pub method: Option<String>,
+    pub status: Option<u16>,
+    /// e.g. proxy, replay
+    pub source: Option<String>,
+    /// e.g. agent:claude-1
+    pub actor: Option<String>,
+    /// Only exchanges with an id greater than this (for paging forward).
+    pub after_id: Option<i64>,
+    /// Only exchanges with an id less than this (for paging back).
+    pub before_id: Option<i64>,
+    /// Maximum rows (default 50, max 500).
+    pub limit: Option<usize>,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -248,6 +270,30 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Searches history, newest first.
+    pub fn search_exchanges(&self, f: &HistoryFilter) -> Result<Vec<ExchangeSummary>> {
+        let sql = format!(
+            "SELECT {} FROM exchanges WHERE
+                (?1 IS NULL OR instr(lower(host), lower(?1)) > 0) AND
+                (?2 IS NULL OR instr(lower(path), lower(?2)) > 0) AND
+                (?3 IS NULL OR upper(method) = upper(?3)) AND
+                (?4 IS NULL OR status = ?4) AND
+                (?5 IS NULL OR source = ?5) AND
+                (?6 IS NULL OR actor_id = ?6) AND
+                (?7 IS NULL OR id > ?7) AND
+                (?8 IS NULL OR id < ?8)
+             ORDER BY id DESC LIMIT ?9",
+            Self::SUMMARY_COLS
+        );
+        let limit = f.limit.unwrap_or(50).clamp(1, 500) as i64;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![f.host, f.path, f.method, f.status, f.source, f.actor, f.after_id, f.before_id, limit],
+            Self::summary_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn get_exchange(&self, id: i64) -> Result<Option<Exchange>> {
         let sql = format!("SELECT {}, req_hash, resp_hash FROM exchanges WHERE id = ?1", Self::SUMMARY_COLS);
         let row = self
@@ -351,6 +397,21 @@ mod tests {
         assert_eq!(blobs, 3, "two requests + one shared response");
         assert_eq!(s.list_exchanges(10, Some("example")).unwrap().len(), 2);
         assert_eq!(s.list_exchanges(10, Some("nope")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn search_filters_combine() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_exchange(&sample("/api/Orders/1", b"x")).unwrap();
+        let mut post = sample("/api/orders", b"y");
+        post.method = "POST".into();
+        post.status = Some(201);
+        s.insert_exchange(&post).unwrap();
+        let f = |f: HistoryFilter| s.search_exchanges(&f).unwrap().len();
+        assert_eq!(f(HistoryFilter { path: Some("orders".into()), ..Default::default() }), 2);
+        assert_eq!(f(HistoryFilter { method: Some("post".into()), ..Default::default() }), 1);
+        assert_eq!(f(HistoryFilter { status: Some(200), host: Some("EXAMPLE".into()), ..Default::default() }), 1);
+        assert_eq!(f(HistoryFilter { after_id: Some(1), ..Default::default() }), 1);
     }
 
     #[test]

@@ -346,6 +346,67 @@ impl ApprovalQueue {
     }
 }
 
+/// Hash of the parameters with object keys sorted, so the same parameters
+/// always hash the same whatever order a client sent them in.
 fn params_hash(params: &serde_json::Value) -> String {
-    blake3::hash(params.to_string().as_bytes()).to_hex().to_string()
+    fn canonical(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(o) => {
+                let mut keys: Vec<&String> = o.keys().collect();
+                keys.sort();
+                let mut m = serde_json::Map::new();
+                for k in keys {
+                    m.insert(k.clone(), canonical(&o[k]));
+                }
+                serde_json::Value::Object(m)
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(canonical).collect()),
+            other => other.clone(),
+        }
+    }
+    // Serialize sorted keys explicitly: Map may preserve insertion order.
+    fn write(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::Object(o) => {
+                let mut keys: Vec<&String> = o.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String((*k).clone()).to_string());
+                    out.push(':');
+                    write(&o[*k], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(x, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut s = String::new();
+    write(&canonical(params), &mut s);
+    blake3::hash(s.as_bytes()).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn params_hash_ignores_key_order() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"b":1,"a":{"y":2,"x":[3,{"q":1,"p":2}]}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"a":{"x":[3,{"p":2,"q":1}],"y":2},"b":1}"#).unwrap();
+        assert_eq!(super::params_hash(&a), super::params_hash(&b));
+        let c: serde_json::Value = serde_json::from_str(r#"{"a":{"x":[{"p":2,"q":1},3],"y":2},"b":1}"#).unwrap();
+        assert_ne!(super::params_hash(&a), super::params_hash(&c), "array order matters");
+    }
 }

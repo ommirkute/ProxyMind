@@ -9,6 +9,15 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+brotli-decompressor = "6.1.0"
+flate2 = "1.1.10"
+parking_lot = "0.12.5"
+pm-core = { version = "0.0.1", path = "../pm-core" }
+pm-http = { version = "0.0.1", path = "../pm-http" }
+pm-store = { version = "0.0.1", path = "../pm-store" }
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 
 [lints]
 workspace = true
