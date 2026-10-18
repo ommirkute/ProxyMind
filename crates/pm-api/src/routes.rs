@@ -53,6 +53,7 @@ pub fn api() -> Router<AppState> {
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
         .route("/exchanges/{id}", get(exchange))
+        .route("/exchanges/{id}/ws", get(ws_messages))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -296,6 +297,16 @@ async fn intercept_forward(State(st): State<AppState>, Path(id): Path<u64>, Json
 async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiResult {
     st.service.intercept_drop(&st.actor, id)?;
     ok(json!({ "dropped": id }))
+}
+
+#[derive(Deserialize)]
+struct WsQuery {
+    after_id: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
+    ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
 }
 
 #[derive(Deserialize)]

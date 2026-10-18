@@ -6,6 +6,7 @@
 
 pub mod intercept;
 pub mod rewrite;
+mod ws_relay;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,33 +19,78 @@ use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
 use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings};
-use pm_store::{NewExchange, Store};
+use pm_store::{NewExchange, NewWsMessage, Store};
 use pm_tls::{CertAuthority, TlsAcceptor};
 pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
+enum Record {
+    Exchange(Box<NewExchange>, Option<u64>),
+    Ws(u64, NewWsMessage),
+    WsDone(u64),
+}
+
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
 /// never waits on the database.
 #[derive(Clone)]
-pub struct Recorder(std::sync::mpsc::Sender<NewExchange>);
+pub struct Recorder {
+    tx: std::sync::mpsc::Sender<Record>,
+    next_key: Arc<std::sync::atomic::AtomicU64>,
+}
 
 impl Recorder {
     /// Starts the writer thread. It runs until every `Recorder` is dropped.
     pub fn spawn(mut store: Store) -> (Self, std::thread::JoinHandle<()>) {
-        let (tx, rx) = std::sync::mpsc::channel::<NewExchange>();
+        let (tx, rx) = std::sync::mpsc::channel::<Record>();
         let handle = std::thread::spawn(move || {
-            for ex in rx {
-                if let Err(e) = store.insert_exchange(&ex) {
-                    tracing::error!(error = %e, "failed to record exchange");
+            // Upgraded exchanges by key, so their WebSocket messages can be
+            // linked to the row id. Records arrive in order on one thread.
+            let mut ids = std::collections::HashMap::<u64, i64>::new();
+            for rec in rx {
+                let r = match rec {
+                    Record::Exchange(ex, key) => store.insert_exchange(&ex).map(|id| {
+                        if let Some(k) = key {
+                            ids.insert(k, id);
+                        }
+                    }),
+                    Record::Ws(key, mut m) => match ids.get(&key) {
+                        Some(&id) => {
+                            m.exchange_id = id;
+                            store.insert_ws_message(&m).map(drop)
+                        }
+                        None => Ok(()),
+                    },
+                    Record::WsDone(key) => {
+                        ids.remove(&key);
+                        Ok(())
+                    }
+                };
+                if let Err(e) = r {
+                    tracing::error!(error = %e, "failed to record traffic");
                 }
             }
         });
-        (Self(tx), handle)
+        (Self { tx, next_key: Arc::default() }, handle)
     }
 
     pub fn record(&self, ex: NewExchange) {
-        let _ = self.0.send(ex);
+        let _ = self.tx.send(Record::Exchange(Box::new(ex), None));
+    }
+
+    /// Records an upgraded exchange; the key links its WebSocket messages.
+    fn record_upgrade(&self, ex: NewExchange) -> u64 {
+        let key = self.next_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.tx.send(Record::Exchange(Box::new(ex), Some(key)));
+        key
+    }
+
+    fn record_ws(&self, key: u64, m: NewWsMessage) {
+        let _ = self.tx.send(Record::Ws(key, m));
+    }
+
+    fn ws_done(&self, key: u64) {
+        let _ = self.tx.send(Record::WsDone(key));
     }
 }
 
@@ -244,12 +290,21 @@ impl Proxy {
                         || resp.head.wants_close()
                         || matches!(resp.conn, AfterResponse::ClosedAfterBody);
                     record.status = Some(resp.head.status);
+                    let is_ws = pm_http::header(&resp.head.headers, "upgrade")
+                        .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"));
+                    let deflate = ws_relay::Deflate::from_response(&resp.head.headers);
                     record.response = Some(resp.raw);
-                    self.recorder.record(record);
 
                     if let AfterResponse::Upgraded(mut up) = resp.conn {
-                        // WebSocket or other protocol switch: pass bytes both ways.
-                        // Frame-level logging comes later.
+                        if is_ws {
+                            // Relay byte for byte and log each message.
+                            let key = self.recorder.record_upgrade(record);
+                            let recorder = self.recorder.clone();
+                            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, recorder, key).await;
+                            return Ok(());
+                        }
+                        // Another protocol switch: pass bytes both ways.
+                        self.recorder.record(record);
                         if !up.buf.is_empty() {
                             client.io.write_all(&up.buf).await?;
                         }
@@ -259,6 +314,7 @@ impl Proxy {
                         let _ = tokio::io::copy_bidirectional(&mut client.io, &mut up.io).await;
                         return Ok(());
                     }
+                    self.recorder.record(record);
                     if close {
                         let _ = client.io.shutdown().await;
                         return Ok(());

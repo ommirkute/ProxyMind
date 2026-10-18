@@ -5,6 +5,8 @@
 //! original bytes are never rewritten, so malformed or unusual messages
 //! (the interesting ones in pentesting) pass through untouched.
 
+pub mod ws;
+
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]

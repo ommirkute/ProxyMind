@@ -14,6 +14,7 @@ mod model;
 mod proof;
 mod replay;
 mod rules;
+mod ws;
 
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use findings::{FindingUpdate, NewFinding};
@@ -25,6 +26,7 @@ pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
+pub use ws::{WsMessageView, WsPage};
 
 use parking_lot::Mutex;
 use pm_ai::Redactor;

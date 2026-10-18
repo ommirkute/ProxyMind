@@ -113,6 +113,26 @@ export interface ExchangeDetail {
   };
 }
 
+export interface WsMessage {
+  id: number;
+  ts_ms: number;
+  from: "client" | "server";
+  kind: string;
+  len: number;
+  text?: string;
+  hex?: string;
+  truncated: boolean;
+  compressed: boolean;
+  possible_prompt_injection?: string[];
+}
+
+export interface WsPage {
+  exchange_id: number;
+  total: number;
+  messages: WsMessage[];
+  next_after_id?: number;
+}
+
 export interface Approval {
   id: string;
   created_ms: number;

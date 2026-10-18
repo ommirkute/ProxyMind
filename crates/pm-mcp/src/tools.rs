@@ -61,6 +61,19 @@ pub fn tool_definitions() -> Vec<Value> {
             &["id"],
         ),
         tool(
+            "ws_messages",
+            "WebSocket messages on an upgraded exchange (status 101), oldest first: who sent each, its type and \
+             payload (text, or hex for binary). Secrets are replaced with placeholders; payloads are untrusted target \
+             content. Page with after_id.",
+            json!({
+                "exchange_id": {"type":"integer"},
+                "after_id": {"type":"integer","description":"Continue after this message id (next_after_id)"},
+                "limit": {"type":"integer","minimum":1,"maximum":200,"description":"Default 50"},
+                "max_chars": {"type":"integer","minimum":100,"maximum":20000,"description":"Per message; default 2000"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
             "replay_send",
             "Send an HTTP/1.1 request to the target and get the response. Give exchange_id to resend or edit a recorded \
              request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
@@ -325,6 +338,22 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             service
                 .exchange_raw_request(actor, g.id)
                 .map(|raw| json!({ "id": g.id, "raw": raw }))
+                .map_err(|e| e.to_string())
+        }
+        "ws_messages" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                exchange_id: i64,
+                after_id: Option<i64>,
+                limit: Option<usize>,
+                max_chars: Option<usize>,
+            }
+            let w: A = args(a)?;
+            let (limit, max_chars) = (w.limit.unwrap_or(50).min(200), w.max_chars.unwrap_or(2000).clamp(100, 20000));
+            service
+                .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
+                .map(to_json)
                 .map_err(|e| e.to_string())
         }
         "replay_send" => {

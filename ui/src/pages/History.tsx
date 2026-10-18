@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtBytes, fmtTime, qs, type ExchangeDetail, type ExchangePage, type ExchangeSummary } from "../api";
+import { api, fmtBytes, fmtTime, qs, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
 import { Chip, Empty, ErrorBox, Raw, StatusCode, useAction, useNav } from "../components";
 
 const ROW = 30;
@@ -152,7 +152,7 @@ function Detail({ id }: { id: number }) {
   const { go } = useNav();
   const [ex, setEx] = useState<ExchangeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"request" | "response" | "summary">("response");
+  const [tab, setTab] = useState<"request" | "response" | "summary" | "websocket">("response");
   const [capture, setCapture] = useState({ open: false, name: "", role: "user" });
   const action = useAction();
   const [note, setNote] = useState<string | null>(null);
@@ -160,7 +160,13 @@ function Detail({ id }: { id: number }) {
   useEffect(() => {
     setEx(null);
     setNote(null);
-    api.get<ExchangeDetail>(`/exchanges/${id}`).then(setEx).catch((e) => setError(e.message));
+    api
+      .get<ExchangeDetail>(`/exchanges/${id}`)
+      .then((d) => {
+        setEx(d);
+        if (d.summary.status === 101) setTab("websocket");
+      })
+      .catch((e) => setError(e.message));
   }, [id]);
 
   if (error) return <div className="detail"><ErrorBox error={error} /></div>;
@@ -209,12 +215,13 @@ function Detail({ id }: { id: number }) {
         <div className="error">Possible prompt injection in the response: {ex.view.possible_prompt_injection.join(" · ")}</div>
       ) : null}
       <div className="tabs" role="tablist">
-        {(["response", "request", "summary"] as const).map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t[0].toUpperCase() + t.slice(1)}
+        {([...(s.status === 101 ? ["websocket"] : []), "response", "request", "summary"] as const).map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t as typeof tab)}>
+            {t === "websocket" ? "WebSocket" : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
+      {tab === "websocket" && <WsMessages id={id} />}
       {tab === "request" && <Raw text={ex.request} />}
       {tab === "response" && <Raw text={ex.response ?? s.error} label="No response" />}
       {tab === "summary" && (
@@ -229,6 +236,54 @@ function Detail({ id }: { id: number }) {
           <dd>{resp?.notes?.join("; ") || "–"}</dd>
         </dl>
       )}
+    </div>
+  );
+}
+
+/** WebSocket messages of an upgraded exchange; refreshes while open. */
+function WsMessages({ id }: { id: number }) {
+  const [page, setPage] = useState<WsPage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      api
+        .get<WsPage>(`/exchanges/${id}/ws?limit=500`)
+        .then((p) => live && setPage(p))
+        .catch((e) => live && setError(e.message));
+    load();
+    const t = setInterval(load, 3000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [id]);
+  if (error) return <ErrorBox error={error} />;
+  if (!page) return <div className="muted">Loading…</div>;
+  if (page.total === 0) return <Empty>No WebSocket messages recorded yet.</Empty>;
+  return (
+    <div data-testid="ws-messages">
+      <div className="small muted" style={{ margin: "6px 0" }}>
+        {page.total} message(s){page.total > page.messages.length ? `, showing the first ${page.messages.length}` : ""}
+      </div>
+      {page.messages.map((m) => (
+        <div key={m.id} className={`ws-msg ${m.from}`}>
+          <div className="row small muted">
+            <strong title={m.from === "client" ? "browser to server" : "server to browser"}>
+              {m.from === "client" ? "→ to server" : "← from server"}
+            </strong>
+            <Chip value={m.kind} />
+            <span>{fmtBytes(m.len)}</span>
+            <span>{fmtTime(m.ts_ms)}</span>
+            {m.truncated && <span>(cut short)</span>}
+            {m.compressed && <span title="permessage-deflate data that could not be inflated">(compressed)</span>}
+          </div>
+          {m.possible_prompt_injection?.length ? (
+            <div className="error">Possible prompt injection: {m.possible_prompt_injection.join(" · ")}</div>
+          ) : null}
+          <pre className="raw">{m.text ?? m.hex}</pre>
+        </div>
+      ))}
     </div>
   );
 }

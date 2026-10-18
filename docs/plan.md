@@ -17,9 +17,10 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
-- Proxy core: HTTP/1.1, CONNECT + TLS interception, byte-exact forwarding, WebSocket pass-through, history in a SQLite project file
+- Proxy core: HTTP/1.1, CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
+- WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (22 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (23 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map
@@ -32,7 +33,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Next, in order:**
 
-1. **Proxy depth** (M1/M2): HTTP/2, WebSocket frame logging, upstream/SOCKS proxy, client certificates
+1. **Proxy depth** (M1/M2): HTTP/2, WebSocket replay/intercept, upstream/SOCKS proxy, client certificates
 2. **Desktop shell** (Tauri) around the web UI
 3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
 4. **Built-in AI assistant** in pm-ai (Anthropic, OpenAI-compatible, Ollama), honouring `allow_cloud_models`
@@ -65,7 +66,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 ## Component notes
 
 ### Proxy core (`pm-http`, `pm-tls`, `pm-proxy`)
-Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2, WebSocket frames, upstream proxy, invisible mode, client certificates.
+Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2, WebSocket replay and intercept, upstream proxy, invisible mode, client certificates.
 
 ### Policy gate (`pm-policy`): built before any agent API
 ROE file (`examples/roe.yaml`, `schemas/roe.schema.json`), action tiers, token-bucket rate limits per host and actor, approvals, blake3 hash-chained audit log, kill switch. Must resist scope-bypass tricks: encoded hosts, redirects, `Host` header mismatch, IP vs name, DNS rebinding.

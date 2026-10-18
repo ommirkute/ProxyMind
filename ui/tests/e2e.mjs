@@ -216,6 +216,44 @@ try {
     .then(() => true, () => false);
   check(sent, "history shows the request as sent, with the added header");
 
+  console.log("WebSocket (a real browser chats through the proxy)");
+  const loginBody = JSON.stringify({ username: "alice", password: "alice123" });
+  const login = await viaProxy(proxy, shop, `POST /api/login HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${loginBody.length}\r\n\r\n${loginBody}`);
+  const session = login.split("session=")[1].split(";")[0];
+  // "<-loopback>" makes Chromium use the proxy for 127.0.0.1 too.
+  const viaPm = await browser.newContext({ proxy: { server: `http://127.0.0.1:${proxy}`, bypass: "<-loopback>" } });
+  await viaPm.addCookies([{ name: "session", value: session, domain: "127.0.0.1", path: "/" }]);
+  const chat = await viaPm.newPage();
+  await chat.goto(`http://127.0.0.1:${shop}/api/products`);
+  const chatReplies = await chat.evaluate(
+    (url) =>
+      new Promise((resolve, reject) => {
+        const got = [];
+        const ws = new WebSocket(url);
+        ws.onmessage = (e) => {
+          got.push(JSON.parse(e.data).text);
+          if (got.length === 1) ws.send("Where is order 1001?");
+          if (got.length === 2) ws.close(1000, "bye");
+        };
+        ws.onclose = () => resolve(got);
+        ws.onerror = () => reject(new Error("WebSocket error"));
+        setTimeout(() => reject(new Error("WebSocket timeout")), 5000);
+      }),
+    `ws://127.0.0.1:${shop}/ws/support`,
+  );
+  check(chatReplies.length === 2 && chatReplies[1].includes("Where is order 1001?"), "browser WebSocket works through the proxy");
+  await viaPm.close();
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByLabel("Path", { exact: true }).fill("/ws/support");
+  await sleep(500);
+  await page.locator('[data-testid^="row-"]').first().click();
+  const wsLogged = await page
+    .locator('[data-testid="ws-messages"]', { hasText: "Where is order 1001?" })
+    .waitFor({ timeout: 8000 })
+    .then(() => true, () => false);
+  check(wsLogged, "History shows the WebSocket messages both ways");
+  await page.screenshot({ path: join(SHOTS, "6d-websocket.png") });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();
