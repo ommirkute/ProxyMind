@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "history" | "repeater" | "approvals" | "authz" | "model" | "findings" | "audit";
+export type Page = "history" | "intercept" | "repeater" | "approvals" | "authz" | "model" | "findings" | "audit";
 
 export interface Nav {
   page: Page;
@@ -87,6 +87,7 @@ const CHIP: Record<string, string> = {
   refuted: "ok",
   allow: "ok",
   deny: "",
+  response: "accent",
   // severities
   critical: "bad",
   high: "bad",

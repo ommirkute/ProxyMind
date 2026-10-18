@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 only and there is no intercept-and-edit queue yet. See [What's done and what's next](docs/plan.md#status).
+> **Status: pre-alpha.** The engine, the agent interface and the web UI work end to end (see the demo); the proxy speaks HTTP/1.1 only (HTTP/2 is next). See [What's done and what's next](docs/plan.md#status).
 
 ## Why ProxyMind
 
@@ -36,7 +36,7 @@ Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find t
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, an intercept queue (hold, edit, forward or drop requests and responses), Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 
@@ -97,7 +97,7 @@ crates/
   pm-http      raw HTTP/1.x parsing that keeps exact bytes      ✅ working
   pm-tls       CA and per-host certificates, upstream TLS       ✅ working
   pm-store     SQLite project file and compressed blob store    ✅ working
-  pm-proxy     intercepting proxy                               ✅ working (HTTP/1.1)
+  pm-proxy     intercepting proxy, intercept queue              ✅ working (HTTP/1.1)
   pm-cli       the `proxymind` binary                           ✅ working
   pm-demo      VulnShop, a deliberately vulnerable demo API     ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working

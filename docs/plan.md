@@ -27,10 +27,11 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - VulnShop demo target, ground truth, `bench score`, demo script, and an end-to-end test where an agent finds and proves bugs purely over MCP
 
 - REST API with live events, hardened for browsers; web UI (history, viewer, Repeater, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
+- Intercept-and-edit queue: hold requests and responses by scope, host, path and type; edit, forward or drop from the UI; edits and drops are audited, and the project keeps the server's original responses. Humans only: agents use Repeater through the policy gate
 
 **Next, in order:**
 
-1. **Proxy depth** (M1/M2): intercept-and-edit queue, HTTP/2, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
+1. **Proxy depth** (M1/M2): HTTP/2, match-and-replace, WebSocket frame logging, upstream/SOCKS proxy, client certificates
 2. **Desktop shell** (Tauri) around the web UI
 3. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
 4. **Built-in AI assistant** in pm-ai (Anthropic, OpenAI-compatible, Ollama), honouring `allow_cloud_models`
@@ -63,7 +64,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 ## Component notes
 
 ### Proxy core (`pm-http`, `pm-tls`, `pm-proxy`)
-Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2, WebSocket frames, intercept queue, match-and-replace rules, upstream proxy, invisible mode, client certificates.
+Raw bytes preserved (ADR-0002). CA per install (ADR-0003). Next: HTTP/2, WebSocket frames, match-and-replace rules, upstream proxy, invisible mode, client certificates.
 
 ### Policy gate (`pm-policy`): built before any agent API
 ROE file (`examples/roe.yaml`, `schemas/roe.schema.json`), action tiers, token-bucket rate limits per host and actor, approvals, blake3 hash-chained audit log, kill switch. Must resist scope-bypass tricks: encoded hosts, redirects, `Host` header mismatch, IP vs name, DNS rebinding.

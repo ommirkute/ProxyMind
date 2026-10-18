@@ -73,6 +73,11 @@ pub fn api() -> Router<AppState> {
         .route("/audit", get(audit))
         .route("/audit/verify", get(audit_verify))
         .route("/report", get(report))
+        .route("/intercept", get(intercept_state))
+        .route("/intercept/settings", axum::routing::put(intercept_settings))
+        .route("/intercept/forward-all", post(intercept_forward_all))
+        .route("/intercept/{id}/forward", post(intercept_forward))
+        .route("/intercept/{id}/drop", post(intercept_drop))
 }
 
 #[derive(Deserialize)]
@@ -261,4 +266,37 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
 async fn report(State(st): State<AppState>) -> Result<Response, ApiError> {
     let md = st.service.report_markdown()?;
     Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+}
+
+async fn intercept_state(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.intercept_state())
+}
+
+async fn intercept_settings(
+    State(st): State<AppState>,
+    Json(s): Json<pm_service::pm_proxy::InterceptSettings>,
+) -> ApiResult {
+    ok(st.service.intercept_settings(&st.actor, s)?)
+}
+
+#[derive(Deserialize)]
+struct ForwardBody {
+    #[serde(default)]
+    raw: Option<String>,
+    #[serde(default)]
+    fix_content_length: Option<bool>,
+}
+
+async fn intercept_forward(State(st): State<AppState>, Path(id): Path<u64>, Json(b): Json<ForwardBody>) -> ApiResult {
+    st.service.intercept_forward(&st.actor, id, b.raw, b.fix_content_length.unwrap_or(true))?;
+    ok(json!({ "forwarded": id }))
+}
+
+async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiResult {
+    st.service.intercept_drop(&st.actor, id)?;
+    ok(json!({ "dropped": id }))
+}
+
+async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
+    ok(json!({ "forwarded": st.service.intercept_forward_all(&st.actor)? }))
 }

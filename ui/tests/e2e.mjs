@@ -90,7 +90,7 @@ try {
 
   // Capture alice from her /api/me request and bob from his.
   const rowFor = async (path, nth) => {
-    await page.getByLabel("Path").fill(path);
+    await page.getByLabel("Path", { exact: true }).fill(path);
     await sleep(500);
     const rows = page.locator('[data-testid^="row-"]');
     const n = await rows.count();
@@ -162,6 +162,34 @@ try {
   await page.getByRole("button", { name: "Approve" }).click();
   await page.waitForSelector("text=Nothing is waiting for approval.");
   check(true, "approved from the UI");
+
+  console.log("Intercept");
+  await page.getByRole("button", { name: /^Intercept/ }).click();
+  await page.getByLabel("Path filter").fill("/api/products/search");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await page.getByTestId("intercept-toggle").click();
+  await page.waitForSelector("text=Intercept is ON");
+  const search = (q) => viaProxy(proxy, shop, `GET /api/products/search?q=${q} HTTP/1.1\r\nHost: shop\r\n\r\n`);
+  const edited = search("held-original"); // waits in the queue until forwarded
+  await page.waitForSelector('[data-testid="intercept-badge"]');
+  await page.locator('[data-testid="intercept-queue"]', { hasText: "held-original" }).waitFor();
+  check(true, "request is held and the sidebar shows a badge");
+  const editor = page.getByLabel("Held message");
+  await editor.fill((await editor.inputValue()).replace("held-original", "held-edited"));
+  await page.screenshot({ path: join(SHOTS, "6b-intercept.png") });
+  await page.getByTestId("intercept-forward").click();
+  check((await edited).startsWith("HTTP/1.1 200"), "edited request is forwarded and answered");
+  const dropped = search("held-drop");
+  await page.locator('[data-testid="intercept-queue"]', { hasText: "held-drop" }).waitFor();
+  await page.getByTestId("intercept-drop").click();
+  check((await dropped).startsWith("HTTP/1.1 403"), "dropped request gets 403 from ProxyMind");
+  await page.getByTestId("intercept-toggle").click();
+  await page.waitForSelector("text=Intercept is OFF");
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByLabel("Path", { exact: true }).fill("held-");
+  await sleep(500);
+  const heldRows = await page.locator('[data-testid^="row-"]').allTextContents();
+  check(heldRows.length === 1 && heldRows[0].includes("held-edited"), "history records the edited request only");
 
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();

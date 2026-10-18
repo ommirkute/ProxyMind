@@ -627,7 +627,9 @@ async fn run() -> Result<()> {
             if !*no_proxy {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
                 let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
-                let p = Proxy::new(ca.clone(), recorder, false)?;
+                let queue = Arc::new(pm_proxy::InterceptQueue::new());
+                service.attach_intercept(queue.clone());
+                let p = Proxy::with_intercept(ca.clone(), recorder, false, Some(queue))?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 tokio::spawn(p.run(l));

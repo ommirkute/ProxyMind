@@ -98,7 +98,7 @@ pub(crate) struct Sent {
 }
 
 /// Normalizes bare LF line endings in the head only (the body is untouched).
-fn crlf_head(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn crlf_head(raw: &[u8]) -> Vec<u8> {
     let end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")

@@ -5,6 +5,8 @@
 //! upstream connection per request; pooling, HTTP/2 and the intercept queue
 //! come next.
 
+pub mod intercept;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +15,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use pm_core::now_ms;
 use pm_http::RequestHead;
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
+
+use intercept::{Decision, Kind};
+pub use intercept::{InterceptQueue, InterceptSettings};
 use pm_store::{NewExchange, Store};
 use pm_tls::{CertAuthority, TlsAcceptor};
 use tokio::io::AsyncWriteExt;
@@ -52,11 +57,22 @@ pub struct Proxy {
     ca: Arc<CertAuthority>,
     sender: Sender,
     recorder: Recorder,
+    intercept: Option<Arc<InterceptQueue>>,
 }
 
 impl Proxy {
     pub fn new(ca: Arc<CertAuthority>, recorder: Recorder, verify_upstream: bool) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder }))
+        Self::with_intercept(ca, recorder, verify_upstream, None)
+    }
+
+    /// A proxy that consults `intercept` for every request and response.
+    pub fn with_intercept(
+        ca: Arc<CertAuthority>,
+        recorder: Recorder,
+        verify_upstream: bool,
+        intercept: Option<Arc<InterceptQueue>>,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder, intercept }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -126,9 +142,38 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
+            // Intercept: a human may forward, edit or drop the request.
+            let mut method = head.method.clone();
+            let mut path = target.path.clone();
+            if let Some(q) = &self.intercept {
+                match q.hold(Kind::Request, &target.scheme, &target.host, target.port, &method, &path, &request).await {
+                    Decision::Forward(None) => {}
+                    Decision::Forward(Some(edited)) => {
+                        if let Ok(Some(end)) = pm_http::find_head_end(&edited)
+                            && let Ok(h) = pm_http::parse_request_head(&edited[..end])
+                        {
+                            path = pm_http::split_absolute_target(&h.target)
+                                .map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
+                            method = h.method;
+                        }
+                        request = edited;
+                    }
+                    Decision::Drop => {
+                        let msg = "Request dropped in ProxyMind's intercept queue.";
+                        let resp = format!(
+                            "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                            msg.len()
+                        );
+                        let _ = client.io.write_all(resp.as_bytes()).await;
+                        let _ = client.io.shutdown().await;
+                        return Ok(());
+                    }
+                }
+            }
+
             let started = Instant::now();
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
-            let result = self.sender.send(&ep, &request, &head.method, None).await;
+            let result = self.sender.send(&ep, &request, &method, None).await;
             let mut record = NewExchange {
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
@@ -137,8 +182,8 @@ impl Proxy {
                 scheme: target.scheme.clone(),
                 host: target.host.clone(),
                 port: target.port,
-                method: head.method.clone(),
-                path: target.path.clone(),
+                method: method.clone(),
+                path: path.clone(),
                 status: None,
                 request,
                 response: None,
@@ -149,7 +194,28 @@ impl Proxy {
 
             match result {
                 Ok(resp) => {
-                    client.io.write_all(&resp.raw).await?;
+                    // Intercept the response too, if asked. The project keeps
+                    // the server's original; the browser gets the edit.
+                    let mut to_client: Option<Vec<u8>> = None;
+                    if let Some(q) = &self.intercept
+                        && !matches!(resp.conn, AfterResponse::Upgraded(_))
+                    {
+                        match q
+                            .hold(Kind::Response, &target.scheme, &target.host, target.port, &method, &path, &resp.raw)
+                            .await
+                        {
+                            Decision::Forward(None) => {}
+                            Decision::Forward(Some(edited)) => to_client = Some(edited),
+                            Decision::Drop => {
+                                record.status = Some(resp.head.status);
+                                record.response = Some(resp.raw);
+                                self.recorder.record(record);
+                                let _ = client.io.shutdown().await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    client.io.write_all(to_client.as_deref().unwrap_or(&resp.raw)).await?;
                     client.io.flush().await?;
                     let close = head.wants_close()
                         || resp.head.wants_close()

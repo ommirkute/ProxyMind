@@ -14,11 +14,13 @@ bytes = "1.12.1"
 tokio = { version = "1.53.3", features = ["full"] }
 tracing = "0.1.44"
 
-pm-http = { path = "../pm-http" }
+pm-http = { version = "0.0.1", path = "../pm-http" }
 pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
+parking_lot = "0.12.5"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [lints]
 workspace = true

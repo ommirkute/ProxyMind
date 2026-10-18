@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type Counters, type Status } from "./api";
 import { NavContext, type Page } from "./components";
 import History from "./pages/History";
+import Intercept from "./pages/Intercept";
 import Repeater from "./pages/Repeater";
 import Approvals from "./pages/Approvals";
 import Authz from "./pages/Authz";
@@ -11,6 +12,7 @@ import Audit from "./pages/Audit";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "history", label: "History" },
+  { id: "intercept", label: "Intercept" },
   { id: "repeater", label: "Repeater" },
   { id: "approvals", label: "Approvals" },
   { id: "authz", label: "Identities & Authz" },
@@ -85,6 +87,7 @@ export default function App() {
 
   const PageView = {
     history: History,
+    intercept: Intercept,
     repeater: Repeater,
     approvals: Approvals,
     authz: Authz,
@@ -108,6 +111,9 @@ export default function App() {
               aria-current={route.page === p.id ? "page" : undefined}
             >
               <span>{p.label}</span>
+              {p.id === "intercept" && (counters?.intercepted ?? 0) > 0 && (
+                <span className="badge" data-testid="intercept-badge">{counters?.intercepted}</span>
+              )}
               {p.id === "approvals" && (counters?.pending_approvals ?? 0) > 0 && (
                 <span className="badge" data-testid="approvals-badge">{counters?.pending_approvals}</span>
               )}

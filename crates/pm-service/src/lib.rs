@@ -9,6 +9,7 @@ mod authz;
 mod findings;
 mod history;
 mod identity;
+mod intercept;
 mod model;
 mod proof;
 mod replay;
@@ -17,6 +18,7 @@ pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;
 pub use identity::{IdentityCheck, IdentityInfo};
+pub use intercept::InterceptState;
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
@@ -32,7 +34,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use {pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_store};
+pub use {pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_store};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
@@ -68,6 +70,7 @@ pub struct Service {
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
+    intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
 }
 
 impl Service {
@@ -83,6 +86,7 @@ impl Service {
             store: Mutex::new(store),
             sender,
             redactor: Redactor::new(),
+            intercept: std::sync::OnceLock::new(),
         })
     }
 
@@ -169,6 +173,7 @@ pub struct Counters {
     pub pending_approvals: usize,
     pub findings: usize,
     pub audit_records: usize,
+    pub intercepted: usize,
 }
 
 impl Service {
@@ -181,6 +186,7 @@ impl Service {
             pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
             findings: store.rows("findings", None, 10_000)?.len(),
             audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
+            intercepted: self.intercept_held_count(),
         })
     }
 

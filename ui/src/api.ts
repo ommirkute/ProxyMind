@@ -35,6 +35,7 @@ export const api = {
   get: <T>(path: string) => call<T>("GET", path),
   post: <T>(path: string, body?: unknown) => call<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body: unknown) => call<T>("PATCH", path, body),
+  put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
 };
 
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -54,6 +55,7 @@ export interface Counters {
   pending_approvals: number;
   findings: number;
   audit_records: number;
+  intercepted: number;
 }
 
 export interface Status {
