@@ -13,6 +13,9 @@ engagement:
   starts: 2026-11-02
   ends: 2026-11-13
 
+# Host wildcards: "*.example.com" = one level of subdomain,
+# "**.example.com" = any depth. Without a port only the default port
+# matches; use ":*" for any port. Paths match by prefix.
 scope:
   include:
     - "https://app.example.com/"

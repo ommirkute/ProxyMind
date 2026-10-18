@@ -12,7 +12,8 @@ use serde::Serialize;
 
 /// Schema migrations, applied in order. Never edit a released entry;
 /// add a new one instead.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE blobs (
     hash      BLOB PRIMARY KEY,
     raw_len   INTEGER NOT NULL,
@@ -41,7 +42,45 @@ CREATE TABLE exchanges (
 );
 CREATE INDEX exchanges_host ON exchanges(host);
 CREATE INDEX exchanges_ts ON exchanges(ts_ms);
-"#];
+"#,
+    r#"
+-- Append-only, hash-chained audit log (see pm-policy::audit).
+CREATE TABLE audit_log (
+    seq       INTEGER PRIMARY KEY,
+    ts_ms     INTEGER NOT NULL,
+    actor     TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    detail    TEXT NOT NULL,
+    decision  TEXT NOT NULL,
+    prev_hash BLOB NOT NULL,
+    hash      BLOB NOT NULL
+);
+CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+"#,
+];
+
+/// One audit log entry. Hashing and verification live in `pm-policy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditRecord {
+    pub seq: i64,
+    pub ts_ms: i64,
+    pub actor: String,
+    pub action: String,
+    /// JSON text describing the action.
+    pub detail: String,
+    pub decision: String,
+    #[serde(serialize_with = "hex_bytes")]
+    pub prev_hash: Vec<u8>,
+    #[serde(serialize_with = "hex_bytes")]
+    pub hash: Vec<u8>,
+}
+
+fn hex_bytes<S: serde::Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+}
 
 /// A finished (or failed) request/response pair to record.
 #[derive(Debug, Clone)]
@@ -227,6 +266,51 @@ impl Store {
         }))
     }
 
+    /// Appends an audit record. `rec.seq` must be one more than the last.
+    pub fn append_audit(&mut self, rec: &AuditRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![rec.seq, rec.ts_ms, rec.actor, rec.action, rec.detail, rec.decision, rec.prev_hash, rec.hash],
+        )?;
+        Ok(())
+    }
+
+    fn audit_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
+        Ok(AuditRecord {
+            seq: r.get(0)?,
+            ts_ms: r.get(1)?,
+            actor: r.get(2)?,
+            action: r.get(3)?,
+            detail: r.get(4)?,
+            decision: r.get(5)?,
+            prev_hash: r.get(6)?,
+            hash: r.get(7)?,
+        })
+    }
+
+    pub fn last_audit(&self) -> Result<Option<AuditRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash
+                 FROM audit_log ORDER BY seq DESC LIMIT 1",
+                [],
+                Self::audit_from_row,
+            )
+            .optional()?)
+    }
+
+    /// All audit records in order. Loads everything; fine for verification
+    /// of logs up to a few million entries.
+    pub fn audit_records(&self) -> Result<Vec<AuditRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash FROM audit_log ORDER BY seq",
+        )?;
+        let rows = stmt.query_map([], Self::audit_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn count_exchanges(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM exchanges", [], |r| r.get(0))?)
     }
@@ -267,5 +351,25 @@ mod tests {
         assert_eq!(blobs, 3, "two requests + one shared response");
         assert_eq!(s.list_exchanges(10, Some("example")).unwrap().len(), 2);
         assert_eq!(s.list_exchanges(10, Some("nope")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn audit_log_is_append_only() {
+        let mut s = Store::open_in_memory().unwrap();
+        let rec = AuditRecord {
+            seq: 1,
+            ts_ms: 1,
+            actor: "agent:a".into(),
+            action: "replay_send".into(),
+            detail: "{}".into(),
+            decision: "allow".into(),
+            prev_hash: vec![0; 32],
+            hash: vec![1; 32],
+        };
+        s.append_audit(&rec).unwrap();
+        assert_eq!(s.last_audit().unwrap(), Some(rec.clone()));
+        assert!(s.append_audit(&rec).is_err(), "duplicate seq");
+        assert!(s.conn.execute("UPDATE audit_log SET decision = 'deny'", []).is_err());
+        assert!(s.conn.execute("DELETE FROM audit_log", []).is_err());
     }
 }
