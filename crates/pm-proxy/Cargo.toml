@@ -17,6 +17,12 @@ tracing = "0.1.44"
 pm-http = { path = "../pm-http" }
 pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }
+pm-replay = { version = "0.0.1", path = "../pm-replay" }
+pm-core = { version = "0.0.1", path = "../pm-core" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }

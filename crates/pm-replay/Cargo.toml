@@ -9,6 +9,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+anyhow = "1.0.104"
+pm-core = { version = "0.0.1", path = "../pm-core" }
+pm-http = { version = "0.0.1", path = "../pm-http" }
+pm-tls = { version = "0.0.1", path = "../pm-tls" }
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
 
 [lints]
 workspace = true

@@ -967,16 +967,28 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
+ "pm-core",
  "pm-http",
+ "pm-replay",
  "pm-store",
  "pm-tls",
+ "rustls",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
 [[package]]
 name = "pm-replay"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "pm-core",
+ "pm-http",
+ "pm-tls",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pm-service"
