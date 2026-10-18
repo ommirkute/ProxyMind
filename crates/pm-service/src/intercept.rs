@@ -76,7 +76,13 @@ impl Service {
                 if !held.editable {
                     return Err(ServiceError::Invalid("this message is binary and can't be edited as text".into()));
                 }
-                let mut bytes = crate::replay::crlf_head(text.as_bytes());
+                // WebSocket payloads are sent exactly as typed; HTTP heads
+                // get CRLF line endings.
+                let mut bytes = if held.kind.is_websocket() {
+                    text.as_bytes().to_vec()
+                } else {
+                    crate::replay::crlf_head(text.as_bytes())
+                };
                 if fix_content_length && held.kind == Kind::Request {
                     bytes = pm_http::fix_content_length(&bytes);
                 }

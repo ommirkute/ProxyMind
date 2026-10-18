@@ -406,6 +406,27 @@ pub fn fix_content_length(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Removes every header with this name from a message's head; the rest
+/// of the bytes (other headers, line endings, body) stay exactly as they were.
+pub fn remove_header(raw: &[u8], name: &str) -> Vec<u8> {
+    let Ok(Some(end)) = find_head_end(raw) else { return raw.to_vec() };
+    let mut out = Vec::with_capacity(raw.len());
+    let mut first = true;
+    for line in raw[..end].split_inclusive(|&b| b == b'\n') {
+        let is_match = !first
+            && line
+                .iter()
+                .position(|&b| b == b':')
+                .is_some_and(|c| line[..c].trim_ascii().eq_ignore_ascii_case(name.as_bytes()));
+        first = false;
+        if !is_match {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(&raw[end..]);
+    out
+}
+
 /// The usual reason phrase for a status code ("" if unknown).
 pub fn reason_phrase(status: u16) -> &'static str {
     match status {
@@ -520,5 +541,14 @@ mod tests {
         let raw = b"GET http://a.com/x HTTP/1.1\r\nHost: a.com\r\n\r\n";
         let out = replace_request_target(raw, "/x").unwrap();
         assert_eq!(out, b"GET /x HTTP/1.1\r\nHost: a.com\r\n\r\n");
+    }
+
+    #[test]
+    fn remove_header_keeps_everything_else() {
+        let raw = b"GET /ws HTTP/1.1\r\nHost: a\r\nSec-WebSocket-Extensions: permessage-deflate\r\nX: 1\r\n\r\nbody";
+        assert_eq!(remove_header(raw, "sec-websocket-extensions"), b"GET /ws HTTP/1.1\r\nHost: a\r\nX: 1\r\n\r\nbody");
+        assert_eq!(remove_header(raw, "absent"), raw.to_vec());
+        let lf = b"GET / HTTP/1.1\nA: 1\nB: 2\n\n";
+        assert_eq!(remove_header(lf, "a"), b"GET / HTTP/1.1\nB: 2\n\n");
     }
 }

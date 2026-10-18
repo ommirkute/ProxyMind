@@ -25,6 +25,10 @@ pub struct InterceptSettings {
     pub enabled: bool,
     pub requests: bool,
     pub responses: bool,
+    /// Hold WebSocket messages (both directions) on connections opened while
+    /// this is on. Those connections are opened without compression so
+    /// messages can be edited.
+    pub websocket: bool,
     /// Only hold traffic the rules of engagement put in scope.
     pub in_scope_only: bool,
     /// Only hold when the host contains this text.
@@ -41,6 +45,7 @@ impl Default for InterceptSettings {
             enabled: false,
             requests: true,
             responses: false,
+            websocket: false,
             in_scope_only: true,
             host_contains: String::new(),
             path_contains: String::new(),
@@ -54,6 +59,16 @@ impl Default for InterceptSettings {
 pub enum Kind {
     Request,
     Response,
+    /// A WebSocket message from the browser.
+    WsToServer,
+    /// A WebSocket message from the server.
+    WsToClient,
+}
+
+impl Kind {
+    pub fn is_websocket(self) -> bool {
+        matches!(self, Kind::WsToServer | Kind::WsToClient)
+    }
 }
 
 /// A message waiting for a decision.
@@ -155,7 +170,12 @@ impl InterceptQueue {
 
     fn matches(&self, kind: Kind, scheme: &str, host: &str, port: u16, path: &str) -> bool {
         let s = self.settings.read();
-        if !s.enabled || (kind == Kind::Request && !s.requests) || (kind == Kind::Response && !s.responses) {
+        let wanted = match kind {
+            Kind::Request => s.requests,
+            Kind::Response => s.responses,
+            Kind::WsToServer | Kind::WsToClient => s.websocket,
+        };
+        if !s.enabled || !wanted {
             return false;
         }
         if !s.host_contains.is_empty() && !host.to_lowercase().contains(&s.host_contains.to_lowercase()) {
@@ -176,6 +196,12 @@ impl InterceptQueue {
             return self.scope.read().as_ref().is_some_and(|f| f(scheme, host, port, path));
         }
         true
+    }
+
+    /// Whether WebSocket messages on a connection to this target would be
+    /// held right now (checked when the connection opens).
+    pub fn wants_websocket(&self, scheme: &str, host: &str, port: u16, path: &str) -> bool {
+        self.matches(Kind::WsToServer, scheme, host, port, path)
     }
 
     /// Holds a message if the settings say so, and waits for a decision.
@@ -270,5 +296,16 @@ mod tests {
         q.set_scope(Arc::new(|_, host, _, _| host == "in.scope"));
         assert!(q.matches(Kind::Request, "https", "in.scope", 443, "/"));
         assert!(!q.matches(Kind::Request, "https", "other", 443, "/"));
+    }
+
+    #[test]
+    fn websocket_messages_have_their_own_switch() {
+        let q = InterceptQueue::new();
+        q.set_settings(on());
+        assert!(!q.wants_websocket("https", "a", 443, "/ws"));
+        q.set_settings(InterceptSettings { websocket: true, requests: false, ..on() });
+        assert!(q.wants_websocket("https", "a", 443, "/ws"));
+        assert!(q.matches(Kind::WsToClient, "https", "a", 443, "/ws"));
+        assert!(!q.matches(Kind::Request, "https", "a", 443, "/ws"));
     }
 }

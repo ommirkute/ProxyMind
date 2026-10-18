@@ -278,7 +278,7 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
-            let (request, method, path) = match self
+            let (mut request, method, path) = match self
                 .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
                 .await
             {
@@ -294,6 +294,24 @@ impl Proxy {
                     return Ok(());
                 }
             };
+
+            // WebSocket interception: open without compression so messages
+            // can be edited (only while the user has it turned on).
+            let mut ws_hold = None;
+            if let Some(q) = &self.hooks.intercept
+                && pm_http::header(&head.headers, "upgrade")
+                    .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"))
+                && q.wants_websocket(&target.scheme, &target.host, target.port, &path)
+            {
+                request = pm_http::remove_header(&request, "sec-websocket-extensions");
+                ws_hold = Some(ws_relay::WsHold {
+                    queue: q.clone(),
+                    scheme: target.scheme.clone(),
+                    host: target.host.clone(),
+                    port: target.port,
+                    path: path.clone(),
+                });
+            }
 
             let started = Instant::now();
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
@@ -361,7 +379,8 @@ impl Proxy {
                             // Relay byte for byte and log each message.
                             let key = self.recorder.record_upgrade(record);
                             let recorder = self.recorder.clone();
-                            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, recorder, key).await;
+                            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, ws_hold, recorder, key)
+                                .await;
                             return Ok(());
                         }
                         // Another protocol switch: pass bytes both ways.

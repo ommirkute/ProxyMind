@@ -266,6 +266,61 @@ try {
     .then(() => true, () => false);
   check(replyShown, "the replayed session shows the server's answer");
 
+  console.log("WebSocket intercept (edit a browser's message in the queue)");
+  await page.getByRole("button", { name: /^Intercept/ }).click();
+  await page.getByLabel("Path filter").fill("/ws/support");
+  await page.getByLabel("WebSocket messages").check();
+  await page.getByRole("button", { name: "Apply" }).click();
+  await page.getByTestId("intercept-toggle").click();
+  await page.waitForSelector("text=Intercept is ON");
+  const viaPm3 = await browser.newContext({ proxy: { server: `http://127.0.0.1:${proxy}`, bypass: "<-loopback>" } });
+  await viaPm3.addCookies([{ name: "session", value: session, domain: "127.0.0.1", path: "/" }]);
+  const chat3 = await viaPm3.newPage();
+  await chat3.goto(`http://127.0.0.1:${shop}/api/products`);
+  const intercepted = chat3.evaluate(
+    (url) =>
+      new Promise((resolve, reject) => {
+        const got = [];
+        const ws = new WebSocket(url);
+        ws.onmessage = (e) => {
+          got.push(JSON.parse(e.data).text);
+          if (got.length === 1) ws.send("typed in the browser");
+          if (got.length === 2) ws.close(1000, "bye");
+        };
+        ws.onclose = () => resolve(got);
+        ws.onerror = () => reject(new Error("WebSocket error"));
+        setTimeout(() => resolve(got), 20000);
+      }),
+    `ws://127.0.0.1:${shop}/ws/support`,
+  );
+  const queue = page.getByTestId("intercept-queue");
+  // "requests" is on too, so the upgrade request itself is held first.
+  await queue.locator("tr", { hasText: "/ws/support" }).first().waitFor({ timeout: 10000 });
+  await queue.locator("tr", { hasText: "request" }).first().click();
+  await page.getByTestId("intercept-forward").click();
+  // The server's greeting is held on its way to the browser.
+  await queue.locator("tr", { hasText: "WS ← server" }).first().waitFor({ timeout: 10000 });
+  await queue.locator("tr", { hasText: "WS ← server" }).first().click();
+  await page.getByTestId("intercept-forward").click();
+  // The browser's message is held on its way to the server: edit it.
+  await queue.locator("tr", { hasText: "WS → server" }).first().waitFor({ timeout: 10000 });
+  await queue.locator("tr", { hasText: "WS → server" }).first().click();
+  check((await page.getByLabel("Held message").inputValue()) === "typed in the browser", "the browser's WebSocket message is held");
+  await page.getByLabel("Held message").fill("edited in ProxyMind");
+  await page.screenshot({ path: join(SHOTS, "6e-ws-intercept.png") });
+  await page.getByTestId("intercept-forward").click();
+  await queue.locator("tr", { hasText: "WS ← server" }).first().waitFor({ timeout: 10000 });
+  await queue.locator("tr", { hasText: "WS ← server" }).first().click();
+  await page.getByTestId("intercept-forward").click();
+  const wsGot = await intercepted;
+  check(wsGot.length === 2 && wsGot[1].includes("we got: edited in ProxyMind"), `the server answered the edited message (${wsGot[1] ?? "nothing"})`);
+  await viaPm3.close();
+  await page.getByLabel("WebSocket messages").uncheck();
+  await page.getByLabel("Path filter").fill("");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await page.getByTestId("intercept-toggle").click();
+  await page.waitForSelector("text=Intercept is OFF");
+
   console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
     "-keyout", join(dir, "h2.key"), "-out", join(dir, "h2.crt")], { stdio: "ignore" });

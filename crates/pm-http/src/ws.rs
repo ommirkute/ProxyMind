@@ -214,6 +214,76 @@ impl Decoder {
     }
 }
 
+/// The header of one frame on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHead {
+    pub fin: bool,
+    /// RSV1-3 bits (RSV1 = compressed with permessage-deflate).
+    pub rsv: u8,
+    pub opcode: u8,
+    pub mask: Option<[u8; 4]>,
+    /// Bytes before the payload.
+    pub header_len: usize,
+    pub payload_len: u64,
+}
+
+impl FrameHead {
+    /// Header plus payload.
+    pub fn total_len(&self) -> u64 {
+        self.header_len as u64 + self.payload_len
+    }
+
+    pub fn is_control(&self) -> bool {
+        self.opcode >= 0x8
+    }
+}
+
+/// Reads a frame header from the start of `buf`. `Ok(None)`: more bytes needed.
+pub fn parse_frame_head(buf: &[u8]) -> Result<Option<FrameHead>, WsError> {
+    if buf.len() < 2 {
+        return Ok(None);
+    }
+    let (b0, b1) = (buf[0], buf[1]);
+    let opcode = b0 & 0x0f;
+    if matches!(opcode, 0x3..=0x7 | 0xB..=0xF) {
+        return Err(WsError::ReservedOpcode(opcode));
+    }
+    let masked = b1 & 0x80 != 0;
+    let (len, mut at) = match b1 & 0x7f {
+        126 if buf.len() >= 4 => (u64::from(u16::from_be_bytes([buf[2], buf[3]])), 4),
+        127 if buf.len() >= 10 => {
+            let l = u64::from_be_bytes(buf[2..10].try_into().unwrap_or([0; 8]));
+            if l >> 63 != 0 {
+                return Err(WsError::BadLength);
+            }
+            (l, 10)
+        }
+        126 | 127 => return Ok(None),
+        n => (u64::from(n), 2),
+    };
+    if opcode >= 0x8 && (b0 & 0x80 == 0 || len > 125) {
+        return Err(WsError::BadControlFrame);
+    }
+    let mask = if masked {
+        if buf.len() < at + 4 {
+            return Ok(None);
+        }
+        let k = [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]];
+        at += 4;
+        Some(k)
+    } else {
+        None
+    };
+    Ok(Some(FrameHead { fin: b0 & 0x80 != 0, rsv: (b0 >> 4) & 0x7, opcode, mask, header_len: at, payload_len: len }))
+}
+
+/// Unmasks (or masks: it's the same XOR) a payload in place.
+pub fn apply_mask(payload: &mut [u8], mask: [u8; 4]) {
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b ^= mask[i % 4];
+    }
+}
+
 /// Encodes one unfragmented frame (FIN set, no RSV bits). Clients must
 /// pass a mask (RFC 6455 section 5.3); servers must not.
 pub fn encode_frame(opcode: u8, payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
@@ -359,5 +429,24 @@ mod tests {
         assert_eq!((out[1].len, out[1].payload == big), (70_000, true));
         assert_eq!(out[2].payload.len(), 300);
         assert_eq!(out[3].payload, b"\x03\xe8bye");
+    }
+
+    #[test]
+    fn frame_heads() {
+        let f = encode_frame(TEXT, b"hello", Some([1, 2, 3, 4]));
+        let h = parse_frame_head(&f).unwrap().unwrap();
+        assert_eq!((h.fin, h.opcode, h.header_len, h.payload_len, h.total_len()), (true, TEXT, 6, 5, 11));
+        let mut p = f[6..].to_vec();
+        apply_mask(&mut p, h.mask.unwrap());
+        assert_eq!(p, b"hello");
+        assert_eq!(parse_frame_head(&f[..1]).unwrap(), None);
+        assert_eq!(parse_frame_head(&f[..5]).unwrap(), None, "mask key incomplete");
+        let big = encode_frame(BINARY, &[0u8; 70_000], None);
+        assert_eq!(parse_frame_head(&big[..9]).unwrap(), None);
+        let h = parse_frame_head(&big).unwrap().unwrap();
+        assert_eq!((h.header_len, h.payload_len, h.mask), (10, 70_000, None));
+        assert!(parse_frame_head(&[0x83, 0]).is_err(), "reserved opcode");
+        assert!(parse_frame_head(&[0x09, 0]).is_err(), "fragmented ping");
+        assert_eq!(parse_frame_head(&[0xC1, 0]).unwrap().unwrap().rsv, 4, "RSV1 set");
     }
 }

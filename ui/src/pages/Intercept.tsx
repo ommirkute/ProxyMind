@@ -6,6 +6,7 @@ interface Settings {
   enabled: boolean;
   requests: boolean;
   responses: boolean;
+  websocket: boolean;
   in_scope_only: boolean;
   host_contains: string;
   path_contains: string;
@@ -14,7 +15,7 @@ interface Settings {
 
 interface Held {
   id: number;
-  kind: "request" | "response";
+  kind: "request" | "response" | "ws_to_server" | "ws_to_client";
   scheme: string;
   host: string;
   port: number;
@@ -24,6 +25,20 @@ interface Held {
   editable: boolean;
   held_ms: number;
 }
+
+const KIND_LABEL: Record<Held["kind"], string> = {
+  request: "request",
+  response: "response",
+  ws_to_server: "WS → server",
+  ws_to_client: "WS ← server",
+};
+
+const KIND_TITLE: Record<Held["kind"], string> = {
+  request: "Request",
+  response: "Response",
+  ws_to_server: "WebSocket message to the server",
+  ws_to_client: "WebSocket message to the browser",
+};
 
 interface State {
   attached: boolean;
@@ -114,6 +129,9 @@ export default function Intercept() {
           <label className="row" style={{ gap: 4 }}>
             <input type="checkbox" checked={settings.responses} onChange={(e) => set({ responses: e.target.checked })} /> responses
           </label>
+          <label className="row" style={{ gap: 4 }} title="Applies to WebSocket connections opened while this is on (they are opened without compression so messages can be edited)">
+            <input type="checkbox" aria-label="WebSocket messages" checked={settings.websocket} onChange={(e) => set({ websocket: e.target.checked })} /> WebSocket messages
+          </label>
           <label className="row" style={{ gap: 4 }}>
             <input type="checkbox" checked={settings.in_scope_only} onChange={(e) => set({ in_scope_only: e.target.checked })} /> in scope only
           </label>
@@ -130,7 +148,8 @@ export default function Intercept() {
         </div>
         <p className="small muted" style={{ marginBottom: 0 }}>
           While on, matching traffic waits here until you forward, edit or drop it. Turning it off lets everything waiting through
-          unchanged. Edits and drops are recorded in the audit log; the project keeps the server's original responses.
+          unchanged. Edits and drops are recorded in the audit log; the project keeps the server's original responses. WebSocket
+          messages are held on connections opened while that option is on; history records what was delivered.
         </p>
       </Panel>
       <ErrorBox error={state.error ?? action.error} />
@@ -142,7 +161,7 @@ export default function Intercept() {
               <tbody>
                 {held.map((h) => (
                   <tr key={h.id} className="clickable" onClick={() => setSelected(h.id)} style={current?.id === h.id ? { background: "var(--accent-soft)" } : undefined}>
-                    <td><Chip value={h.kind} /></td>
+                    <td><Chip value={KIND_LABEL[h.kind]} /></td>
                     <td>{h.method}</td>
                     <td className="mono small" style={{ wordBreak: "break-all" }}>{h.scheme}://{h.host}:{h.port}{h.path}</td>
                     <td className="small muted">{Math.max(0, Math.round((Date.now() - h.held_ms) / 1000))}s</td>
@@ -152,7 +171,7 @@ export default function Intercept() {
             </table>
           )}
         </Panel>
-        <Panel title={current ? `${current.kind === "request" ? "Request" : "Response"} #${current.id}` : "Editor"}>
+        <Panel title={current ? `${KIND_TITLE[current.kind]} #${current.id}` : "Editor"}>
           {!current && <Empty>Select a held message.</Empty>}
           {current && (
             <>
