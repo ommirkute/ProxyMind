@@ -115,7 +115,69 @@ CREATE TABLE authz_results (
 );
 CREATE INDEX authz_results_exchange ON authz_results(exchange_id);
 "#,
+    r#"
+-- Hypothesis ledger.
+CREATE TABLE hypotheses (
+    id         INTEGER PRIMARY KEY,
+    operation  TEXT NOT NULL,
+    param      TEXT NOT NULL DEFAULT '',
+    vuln_class TEXT NOT NULL,
+    rationale  TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '[]',
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+-- Which hypothesis an exchange was sent to test.
+ALTER TABLE exchanges ADD COLUMN hypothesis_id INTEGER;
+CREATE INDEX exchanges_hypothesis ON exchanges(hypothesis_id);
+-- Proof runs: inputs are kept so any proof can be re-run.
+CREATE TABLE proofs (
+    id           INTEGER PRIMARY KEY,
+    oracle       TEXT NOT NULL,
+    inputs       TEXT NOT NULL,
+    proven       INTEGER NOT NULL,
+    confidence   TEXT NOT NULL,
+    reasons      TEXT NOT NULL,
+    details      TEXT NOT NULL,
+    exchange_ids TEXT NOT NULL,
+    finding_id   INTEGER,
+    actor        TEXT NOT NULL,
+    created_ms   INTEGER NOT NULL
+);
+CREATE TABLE findings (
+    id            INTEGER PRIMARY KEY,
+    title         TEXT NOT NULL,
+    vuln_class    TEXT NOT NULL,
+    severity      TEXT NOT NULL,
+    status        TEXT NOT NULL,   -- suspected | proven | confirmed | false_positive | reported
+    url           TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    hypothesis_id INTEGER,
+    proof_id      INTEGER,
+    evidence      TEXT NOT NULL DEFAULT '[]',
+    actor         TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    updated_ms    INTEGER NOT NULL
+);
+CREATE TABLE oast_interactions (
+    id       INTEGER PRIMARY KEY,
+    token    TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    remote   TEXT NOT NULL,
+    method   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    raw      TEXT NOT NULL,
+    ts_ms    INTEGER NOT NULL
+);
+CREATE INDEX oast_interactions_token ON oast_interactions(token);
+"#,
 ];
+
+/// A stored row of one of the JSON-ish engagement tables (hypotheses,
+/// proofs, findings, OAST interactions): column name → value.
+pub type Row = serde_json::Map<String, serde_json::Value>;
 
 /// A stored test identity. `data` holds credentials: never show it to agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +264,8 @@ pub struct NewExchange {
     pub error: Option<String>,
     /// Identity whose credentials were used (None = as recorded / as given).
     pub identity: Option<String>,
+    /// Hypothesis this exchange was sent to test.
+    pub hypothesis_id: Option<i64>,
 }
 
 /// One row of history, without the raw bytes.
@@ -223,6 +287,8 @@ pub struct ExchangeSummary {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypothesis_id: Option<i64>,
 }
 
 /// A full exchange including the raw bytes.
@@ -247,6 +313,10 @@ pub struct HistoryFilter {
     pub source: Option<String>,
     /// e.g. agent:claude-1
     pub actor: Option<String>,
+    /// Exchanges sent while testing this hypothesis.
+    pub hypothesis_id: Option<i64>,
+    /// Exchanges sent with this identity's credentials.
+    pub identity: Option<String>,
     /// Only exchanges with an id greater than this (for paging forward).
     pub after_id: Option<i64>,
     /// Only exchanges with an id less than this (for paging back).
@@ -320,8 +390,8 @@ impl Store {
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
-                                    status, req_hash, resp_hash, req_len, resp_len, error, identity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -339,6 +409,7 @@ impl Store {
                 ex.response.as_ref().map(|r| r.len() as i64),
                 ex.error,
                 ex.identity,
+                ex.hypothesis_id,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -347,7 +418,7 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error, identity";
+                                        status, req_len, resp_len, error, identity, hypothesis_id";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -366,6 +437,7 @@ impl Store {
             resp_len: r.get(12)?,
             error: r.get(13)?,
             identity: r.get(14)?,
+            hypothesis_id: r.get(15)?,
         })
     }
 
@@ -391,14 +463,28 @@ impl Store {
                 (?5 IS NULL OR source = ?5) AND
                 (?6 IS NULL OR actor_id = ?6) AND
                 (?7 IS NULL OR id > ?7) AND
-                (?8 IS NULL OR id < ?8)
+                (?8 IS NULL OR id < ?8) AND
+                (?10 IS NULL OR hypothesis_id = ?10) AND
+                (?11 IS NULL OR identity = ?11)
              ORDER BY id DESC LIMIT ?9",
             Self::SUMMARY_COLS
         );
         let limit = f.limit.unwrap_or(50).clamp(1, 500) as i64;
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![f.host, f.path, f.method, f.status, f.source, f.actor, f.after_id, f.before_id, limit],
+            params![
+                f.host,
+                f.path,
+                f.method,
+                f.status,
+                f.source,
+                f.actor,
+                f.after_id,
+                f.before_id,
+                limit,
+                f.hypothesis_id,
+                f.identity
+            ],
             Self::summary_from_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -409,7 +495,7 @@ impl Store {
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(15)?, r.get::<_, Option<Vec<u8>>>(16)?))
+                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(16)?, r.get::<_, Option<Vec<u8>>>(17)?))
             })
             .optional()?;
         let Some((summary, req_hash, resp_hash)) = row else {
@@ -656,6 +742,158 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The most recent `limit` exchanges with their bytes, oldest first.
+    pub fn recent_exchanges(&self, limit: usize) -> Result<Vec<Exchange>> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM exchanges ORDER BY id DESC LIMIT ?1")?;
+            let rows = stmt.query_map([limit as i64], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids.into_iter().rev() {
+            if let Some(ex) = self.get_exchange(id)? {
+                out.push(ex);
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- engagement tables (hypotheses, proofs, findings, OAST) ----------
+    //
+    // These are written through a small, explicit column list per table so
+    // callers can't touch other tables or columns.
+
+    fn table_columns(table: &str) -> Option<&'static [&'static str]> {
+        Some(match table {
+            "hypotheses" => &[
+                "operation",
+                "param",
+                "vuln_class",
+                "rationale",
+                "status",
+                "actor",
+                "notes",
+                "created_ms",
+                "updated_ms",
+            ],
+            "proofs" => &[
+                "oracle",
+                "inputs",
+                "proven",
+                "confidence",
+                "reasons",
+                "details",
+                "exchange_ids",
+                "finding_id",
+                "actor",
+                "created_ms",
+            ],
+            "findings" => &[
+                "title",
+                "vuln_class",
+                "severity",
+                "status",
+                "url",
+                "description",
+                "hypothesis_id",
+                "proof_id",
+                "evidence",
+                "actor",
+                "created_ms",
+                "updated_ms",
+            ],
+            "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
+            _ => return None,
+        })
+    }
+
+    fn to_sql(v: &serde_json::Value) -> rusqlite::types::Value {
+        use rusqlite::types::Value as V;
+        match v {
+            serde_json::Value::Null => V::Null,
+            serde_json::Value::Bool(b) => V::Integer(i64::from(*b)),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => V::Integer(i),
+                None => V::Real(n.as_f64().unwrap_or(0.0)),
+            },
+            serde_json::Value::String(s) => V::Text(s.clone()),
+            other => V::Text(other.to_string()),
+        }
+    }
+
+    /// Inserts a row; unknown columns are rejected. Returns the new id.
+    pub fn insert_row(&mut self, table: &str, row: &Row) -> Result<i64> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        if let Some(bad) = row.keys().find(|k| !cols.contains(&k.as_str())) {
+            anyhow::bail!("unknown column {bad} for {table}");
+        }
+        let names: Vec<&String> = row.keys().collect();
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+            (1..=names.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ")
+        );
+        let values: Vec<rusqlite::types::Value> = names.iter().map(|k| Self::to_sql(&row[*k])).collect();
+        self.conn.execute(&sql, rusqlite::params_from_iter(values))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Updates columns of one row by id. Returns false if there is no such row.
+    pub fn update_row(&mut self, table: &str, id: i64, changes: &Row) -> Result<bool> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        if let Some(bad) = changes.keys().find(|k| !cols.contains(&k.as_str())) {
+            anyhow::bail!("unknown column {bad} for {table}");
+        }
+        if changes.is_empty() {
+            return Ok(true);
+        }
+        let names: Vec<&String> = changes.keys().collect();
+        let sets: Vec<String> = names.iter().enumerate().map(|(i, k)| format!("{k} = ?{}", i + 2)).collect();
+        let sql = format!("UPDATE {table} SET {} WHERE id = ?1", sets.join(", "));
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Integer(id)];
+        values.extend(names.iter().map(|k| Self::to_sql(&changes[*k])));
+        Ok(self.conn.execute(&sql, rusqlite::params_from_iter(values))? == 1)
+    }
+
+    /// Rows of a table, optionally where `column = value`, newest first.
+    pub fn rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>, limit: usize) -> Result<Vec<Row>> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        let mut all: Vec<&str> = vec!["id"];
+        all.extend_from_slice(cols);
+        let (where_sql, params): (String, Vec<rusqlite::types::Value>) = match filter {
+            Some((col, v)) => {
+                if col != "id" && !cols.contains(&col) {
+                    anyhow::bail!("unknown column {col} for {table}");
+                }
+                (format!("WHERE {col} = ?1"), vec![Self::to_sql(v)])
+            }
+            None => (String::new(), vec![]),
+        };
+        let sql =
+            format!("SELECT {} FROM {table} {where_sql} ORDER BY id DESC LIMIT {}", all.join(", "), limit.min(10_000));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut m = Row::new();
+            for (i, c) in all.iter().enumerate() {
+                use rusqlite::types::ValueRef;
+                let v = match r.get_ref(i)? {
+                    ValueRef::Null => serde_json::Value::Null,
+                    ValueRef::Integer(x) => serde_json::json!(x),
+                    ValueRef::Real(x) => serde_json::json!(x),
+                    ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
+                    ValueRef::Blob(_) => serde_json::Value::Null,
+                };
+                m.insert((*c).to_string(), v);
+            }
+            Ok(m)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn row(&self, table: &str, id: i64) -> Result<Option<Row>> {
+        Ok(self.rows(table, Some(("id", &serde_json::json!(id))), 1)?.into_iter().next())
+    }
+
     pub fn count_exchanges(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM exchanges", [], |r| r.get(0))?)
     }
@@ -681,6 +919,7 @@ mod tests {
             response: Some(body.to_vec()),
             error: None,
             identity: None,
+            hypothesis_id: None,
         }
     }
 

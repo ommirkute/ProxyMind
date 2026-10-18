@@ -82,6 +82,60 @@ enum Command {
         /// The agent's identity in the audit log, e.g. agent:claude
         #[arg(long, default_value = "agent:mcp")]
         actor: String,
+        /// Also run an OAST callback listener on this address (e.g. 127.0.0.1:8085)
+        #[arg(long)]
+        oast_listen: Option<SocketAddr>,
+        /// URL targets should call back (default: http://<oast-listen>)
+        #[arg(long)]
+        oast_public_url: Option<String>,
+    },
+    /// Run an out-of-band (OAST) callback listener that records interactions in the project.
+    OastServer {
+        #[arg(long, short, default_value = "127.0.0.1:8085")]
+        listen: SocketAddr,
+        /// URL targets should call back, e.g. http://oast.example.com:8085 (default: http://<listen>)
+        #[arg(long)]
+        public_url: Option<String>,
+    },
+    /// Show the application model built from traffic.
+    Model {
+        /// Only operations containing this text
+        #[arg(long)]
+        contains: Option<String>,
+        /// Also list objects and their owners
+        #[arg(long)]
+        objects: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What has and hasn't been tested.
+    Coverage {
+        /// Include finished (confirmed/refuted) cells
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List hypotheses.
+    Hypotheses {
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Review findings.
+    Findings {
+        #[command(subcommand)]
+        action: FindingAction,
+    },
+    /// Inspect or re-run proofs.
+    Proof {
+        #[command(subcommand)]
+        action: ProofAction,
+    },
+    /// Write a Markdown report of the findings.
+    Report {
+        /// Output file (default: print)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
     },
     /// Review actions waiting for human approval.
     Approvals {
@@ -103,6 +157,31 @@ enum Command {
         #[arg(long, short, default_value = "127.0.0.1:8899")]
         listen: SocketAddr,
     },
+}
+
+#[derive(Subcommand)]
+enum FindingAction {
+    /// List findings.
+    List {
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one finding with its proofs.
+    Show { id: i64 },
+    /// Mark a finding confirmed.
+    Confirm { id: i64 },
+    /// Mark a finding as a false positive.
+    FalsePositive { id: i64 },
+    /// Mark a finding as reported to the client.
+    Reported { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum ProofAction {
+    /// Show a proof.
+    Show { id: i64 },
+    /// Run a proof again with the same inputs (e.g. during a retest).
+    Rerun { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -288,6 +367,21 @@ fn human_actor(given: Option<&str>) -> Result<Actor> {
     Ok(actor)
 }
 
+/// Starts the OAST listener in this process, recording into the project.
+async fn start_oast(service: &Arc<Service>, addr: SocketAddr, public: Option<String>) -> Result<()> {
+    let public = public.unwrap_or_else(|| format!("http://{addr}"));
+    service.set_oast_public_url(&public)?;
+    let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding OAST listener on {addr}"))?;
+    let s = service.clone();
+    tokio::spawn(pm_oast::serve(l, move |i| {
+        if let Err(e) = s.record_oast(&i) {
+            eprintln!("could not record OAST interaction: {e}");
+        }
+    }));
+    eprintln!("OAST listener on {addr}; payloads will call back to {public}");
+    Ok(())
+}
+
 fn print_approval(a: &pm_service::ApprovalRow) -> Result<()> {
     out!("{}  [{}]  {}  by {}  ({})", a.id, a.status, a.summary, a.actor, a.tier);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&a.params)
@@ -434,12 +528,139 @@ async fn run() -> Result<()> {
                 None => out!("No rules of engagement saved. Run `proxymind roe use <file>`."),
             }
         }
-        Command::Mcp { roe, actor } => {
+        Command::Mcp { roe, actor, oast_listen, oast_public_url } => {
             let actor = Actor::parse(actor)?;
             anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
             let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
+            if let Some(addr) = oast_listen {
+                start_oast(&service, *addr, oast_public_url.clone()).await?;
+            }
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
+        }
+        Command::OastServer { listen, public_url } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            start_oast(&service, *listen, public_url.clone()).await?;
+            tokio::signal::ctrl_c().await?;
+        }
+        Command::Model { contains, objects, json } => {
+            let service = open_service(&cli.project, None)?;
+            let m = service.model_get(&pm_service::ModelFilter {
+                contains: contains.clone(),
+                include_objects: Some(*objects),
+                object_type: None,
+            })?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&m)?);
+            } else {
+                out!("{:<8} {:<16} {:>5}  {:<24} OPERATION", "METHOD", "KIND", "SEEN", "IDENTITIES");
+                for o in m["operations"].as_array().into_iter().flatten() {
+                    let ids: Vec<&str> =
+                        o["identities"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+                    out!(
+                        "{:<8} {:<16} {:>5}  {:<24} {}{}",
+                        o["method"].as_str().unwrap_or(""),
+                        o["kind"].as_str().unwrap_or(""),
+                        o["count"],
+                        ids.join(","),
+                        o["origin"].as_str().unwrap_or(""),
+                        o["template"].as_str().unwrap_or("")
+                    );
+                }
+                for ob in m["objects"].as_array().into_iter().flatten() {
+                    out!(
+                        "  {} {}  owner={} ({})",
+                        ob["object_type"].as_str().unwrap_or(""),
+                        ob["id"].as_str().unwrap_or(""),
+                        ob["owner"].as_str().unwrap_or("?"),
+                        ob["owner_source"].as_str().unwrap_or("-")
+                    );
+                }
+            }
+        }
+        Command::Coverage { all, json } => {
+            let service = open_service(&cli.project, None)?;
+            let c = service.coverage(!all)?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&c)?);
+            } else {
+                out!("{}% tested · {:?}", c.percent_tested, c.totals);
+                for cell in &c.cells {
+                    let param = if cell.param.is_empty() { String::new() } else { format!(" [{}]", cell.param) };
+                    out!("{:<10} {:<16} {}{}", cell.status, cell.vuln_class, cell.operation, param);
+                }
+            }
+        }
+        Command::Hypotheses { status } => {
+            let service = open_service(&cli.project, None)?;
+            for h in service.hypothesis_list(status.as_deref())? {
+                out!(
+                    "#{:<4} {:<10} {:<16} {}  — {} ({})",
+                    h.id,
+                    h.status,
+                    h.vuln_class,
+                    h.operation,
+                    h.rationale,
+                    h.actor
+                );
+            }
+        }
+        Command::Findings { action } => {
+            let service = open_service(&cli.project, None)?;
+            let me = human_actor(None)?;
+            let set = |id: i64, st: &str| {
+                service.finding_update(
+                    &me,
+                    pm_service::FindingUpdate {
+                        id,
+                        status: Some(st.into()),
+                        severity: None,
+                        description: None,
+                        add_evidence: vec![],
+                    },
+                )
+            };
+            match action {
+                FindingAction::List { status } => {
+                    for f in service.finding_list(status.as_deref())? {
+                        out!(
+                            "#{:<4} {:<9} {:<15} {}  {}",
+                            f["id"],
+                            f["severity"].as_str().unwrap_or(""),
+                            f["status"].as_str().unwrap_or(""),
+                            f["title"].as_str().unwrap_or(""),
+                            f["url"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+                FindingAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.finding_get(*id)?)?),
+                FindingAction::Confirm { id } => out!("finding {} is now {}", id, set(*id, "confirmed")?["status"]),
+                FindingAction::FalsePositive { id } => {
+                    out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
+                }
+                FindingAction::Reported { id } => out!("finding {} is now {}", id, set(*id, "reported")?["status"]),
+            }
+        }
+        Command::Proof { action } => {
+            let service = open_service(&cli.project, None)?;
+            match action {
+                ProofAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.proof_get(*id)?)?),
+                ProofAction::Rerun { id } => {
+                    let r = service.proof_rerun(&human_actor(None)?, *id).await?;
+                    out!("{}", serde_json::to_string_pretty(&r)?);
+                }
+            }
+        }
+        Command::Report { out: file } => {
+            let service = open_service(&cli.project, None)?;
+            let md = service.report_markdown()?;
+            match file {
+                Some(f) => {
+                    std::fs::write(f, md)?;
+                    out!("✓ report written to {}", f.display());
+                }
+                None => out!("{md}"),
+            }
         }
         Command::Approvals { action } => {
             let service = open_service(&cli.project, None)?;

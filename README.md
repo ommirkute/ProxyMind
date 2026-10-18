@@ -81,10 +81,10 @@ crates/
   pm-replay    send engine (incl. single-packet parallel sends) ✅ working
   pm-identity  multi-identity sessions, auto re-login           ✅ working
   pm-diff      semantic diff with learned noise masks           ✅ working
-  pm-model     live app model                                   ⏳ planned (M4)
-  pm-ledger    hypotheses and coverage                          ⏳ planned (M4)
-  pm-proof     proof oracles and findings                       ⏳ planned (M5)
-  pm-oast      out-of-band testing client/server                ⏳ planned (M5)
+  pm-model     live app model: operations, objects, ownership   ✅ working
+  pm-ledger    hypotheses and coverage                          ✅ working
+  pm-proof     proof oracles (authz, timing, OAST)              ✅ working
+  pm-oast      out-of-band callback listener (HTTP)             ✅ working (DNS planned)
   pm-ai        LLM views, redaction, untrusted tagging          ✅ working (providers planned)
   pm-service   the one service layer every client uses          ✅ working
   pm-api       REST API and event stream                        ⏳ planned (M2)

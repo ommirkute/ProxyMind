@@ -209,6 +209,7 @@ async fn resending_a_recorded_exchange_uses_its_target() {
             response: None,
             error: None,
             identity: None,
+            hypothesis_id: None,
         })
         .unwrap();
     let s = Service::new(store, Policy::new(Roe::parse(ROE).unwrap())).unwrap();

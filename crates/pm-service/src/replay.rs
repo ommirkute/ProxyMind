@@ -36,6 +36,8 @@ pub struct ReplayRequest {
     pub normalize_newlines: Option<bool>,
     /// Run a previously approved send. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// Hypothesis this send tests (links the exchange as evidence).
+    pub hypothesis_id: Option<i64>,
     /// View of the response to return (default summary).
     pub view: Option<View>,
     pub max_tokens: Option<usize>,
@@ -76,6 +78,8 @@ pub(crate) struct Outgoing {
     pub raw: Vec<u8>,
     pub method: String,
     pub path: String,
+    /// Hypothesis the send tests, recorded on the exchange.
+    pub hypothesis_id: Option<i64>,
 }
 
 impl Outgoing {
@@ -136,7 +140,7 @@ impl Service {
             Some((_, _, p)) => p.to_string(),
             None => head.target.clone(),
         };
-        Ok(Outgoing { endpoint, raw, method: head.method, path })
+        Ok(Outgoing { endpoint, raw, method: head.method, path, hypothesis_id: None })
     }
 
     pub(crate) fn outgoing_from_request(&self, req: &ReplayRequest) -> Result<Outgoing> {
@@ -162,7 +166,9 @@ impl Service {
             Some(r) => r.as_bytes().to_vec(),
             None => base_raw,
         };
-        self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))
+        let mut out = self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
+        out.hypothesis_id = req.hypothesis_id;
+        Ok(out)
     }
 
     /// Asks the gate whether `actor` may send `out`. The approval (if any)
@@ -238,6 +244,7 @@ impl Service {
             response: None,
             error: None,
             identity: identity.map(|i| i.name.clone()),
+            hypothesis_id: out.hypothesis_id,
         };
         let (status, error, elapsed_ms) = match result {
             Ok(resp) => {

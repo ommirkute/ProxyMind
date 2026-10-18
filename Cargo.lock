@@ -985,6 +985,7 @@ dependencies = [
  "jiff",
  "pm-demo",
  "pm-mcp",
+ "pm-oast",
  "pm-proxy",
  "pm-service",
  "pm-store",
@@ -1039,6 +1040,10 @@ dependencies = [
 [[package]]
 name = "pm-ledger"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-mcp"
@@ -1055,10 +1060,23 @@ dependencies = [
 [[package]]
 name = "pm-model"
 version = "0.0.1"
+dependencies = [
+ "pm-ai",
+ "pm-core",
+ "pm-http",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-oast"
 version = "0.0.1"
+dependencies = [
+ "pm-core",
+ "pm-http",
+ "serde",
+ "tokio",
+]
 
 [[package]]
 name = "pm-policy"
@@ -1079,6 +1097,10 @@ dependencies = [
 [[package]]
 name = "pm-proof"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pm-proxy"
@@ -1122,7 +1144,11 @@ dependencies = [
  "pm-diff",
  "pm-http",
  "pm-identity",
+ "pm-ledger",
+ "pm-model",
+ "pm-oast",
  "pm-policy",
+ "pm-proof",
  "pm-replay",
  "pm-store",
  "rusqlite",

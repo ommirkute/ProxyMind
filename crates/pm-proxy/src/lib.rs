@@ -144,6 +144,7 @@ impl Proxy {
                 response: None,
                 error: None,
                 identity: None,
+                hypothesis_id: None,
             };
 
             match result {

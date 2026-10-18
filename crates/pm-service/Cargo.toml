@@ -17,7 +17,11 @@ pm-core = { version = "0.0.1", path = "../pm-core" }
 pm-diff = { version = "0.0.1", path = "../pm-diff" }
 pm-http = { version = "0.0.1", path = "../pm-http" }
 pm-identity = { version = "0.0.1", path = "../pm-identity" }
+pm-ledger = { version = "0.0.1", path = "../pm-ledger" }
+pm-model = { version = "0.0.1", path = "../pm-model" }
+pm-oast = { version = "0.0.1", path = "../pm-oast" }
 pm-policy = { version = "0.0.1", path = "../pm-policy" }
+pm-proof = { version = "0.0.1", path = "../pm-proof" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
 pm-store = { version = "0.0.1", path = "../pm-store" }
 serde = { version = "1.0.229", features = ["derive"] }

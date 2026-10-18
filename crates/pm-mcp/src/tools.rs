@@ -74,6 +74,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "fix_content_length": {"type":"boolean","description":"Set Content-Length to the body length (default true)"},
                 "normalize_newlines": {"type":"boolean","description":"Turn \\n into \\r\\n in the head (default true)"},
                 "approval_id": {"type":"string","description":"From a previous pending_approval result"},
+                "hypothesis_id": {"type":"integer","description":"Hypothesis this send tests (links evidence)"},
                 "view": view,
                 "max_tokens": {"type":"integer","minimum":200,"maximum":20000},
             }),
@@ -119,6 +120,124 @@ pub fn tool_definitions() -> Vec<Value> {
             "authz_results",
             "Latest authorization-check results, per exchange and identity.",
             json!({ "exchange_id": {"type":"integer","description":"Only this exchange"} }),
+            &[],
+        ),
+        tool(
+            "model_get",
+            "The application model built from traffic: operations (method + path template such as \
+             /api/orders/{id}, kind, params, identities seen) and object counts. Start here to understand the app.",
+            json!({
+                "contains": {"type":"string","description":"Only operations whose key contains this text"},
+                "include_objects": {"type":"boolean","description":"Also list objects with their owners (default false)"},
+                "object_type": {"type":"string","description":"Only objects of this type, e.g. Order"},
+            }),
+            &[],
+        ),
+        tool(
+            "authz_candidates",
+            "Suggested access-control tests from the model: recorded requests for objects owned by one identity, \
+             with the other identities to try. Feed them to authz_check, then prove hits with proof_run.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "hypothesis_create",
+            "Record what you are about to test, so work is shared and coverage is tracked. Pass the returned id as \
+             hypothesis_id to replay_send and proof_run to link evidence.",
+            json!({
+                "operation": {"type":"string","description":"Operation key from model_get"},
+                "param": {"type":"string","description":"Parameter tested, if any"},
+                "vuln_class": {"type":"string","description":"idor, bfla, authn, sqli, xss, ssrf, mass_assignment, business_logic, or your own"},
+                "rationale": {"type":"string"},
+            }),
+            &["operation", "vuln_class", "rationale"],
+        ),
+        tool(
+            "hypothesis_update",
+            "Update a hypothesis: status open/testing/confirmed/refuted and/or add a note. Mark refuted when a test \
+             shows the issue is not there, so nobody repeats it.",
+            json!({
+                "id": {"type":"integer"},
+                "status": {"type":"string","enum":["open","testing","confirmed","refuted"]},
+                "note": {"type":"string"},
+            }),
+            &["id"],
+        ),
+        tool(
+            "hypothesis_list",
+            "All hypotheses (optionally by status), with linked evidence exchange ids.",
+            json!({ "status": {"type":"string","enum":["open","testing","confirmed","refuted"]} }),
+            &[],
+        ),
+        tool(
+            "coverage",
+            "What has and hasn't been tested: each operation × relevant vulnerability class, untested first.",
+            json!({ "untested_only": {"type":"boolean","description":"Only untested/open cells (default true)"} }),
+            &[],
+        ),
+        tool(
+            "proof_run",
+            "Have ProxyMind verify a suspected vulnerability itself. Oracles: differential_authz (exchange_id of the \
+             owner's GET + attacker identity: proves IDOR/BOLA or missing role checks), timing (exchange_id or url, \
+             payload_raw with a delay payload, optional baseline_raw: proves time-based injection statistically), oast \
+             (url or exchange_id + raw containing {{oast}}: proves SSRF/blind injection via an out-of-band callback). \
+             Pass finding_id/hypothesis_id to update them when proven. Payload oracles may need human approval.",
+            json!({
+                "oracle": {"type":"string","enum":["differential_authz","timing","oast"]},
+                "exchange_id": {"type":"integer"},
+                "attacker": {"type":"string"},
+                "owner": {"type":"string"},
+                "url": {"type":"string"},
+                "baseline_raw": {"type":"string"},
+                "payload_raw": {"type":"string"},
+                "samples": {"type":"integer","minimum":5,"maximum":30},
+                "min_effect_ms": {"type":"number"},
+                "raw": {"type":"string"},
+                "wait_seconds": {"type":"integer","minimum":1,"maximum":60},
+                "identity": {"type":"string"},
+                "finding_id": {"type":"integer"},
+                "hypothesis_id": {"type":"integer"},
+                "approval_id": {"type":"string"},
+            }),
+            &["oracle"],
+        ),
+        tool(
+            "proof_get",
+            "A stored proof: verdict, reasons, evidence exchange ids and inputs.",
+            json!({ "proof_id": {"type":"integer"} }),
+            &["proof_id"],
+        ),
+        tool(
+            "finding_create",
+            "Record a suspected vulnerability with evidence exchange ids. It becomes 'proven' only via proof_run; \
+             humans confirm it.",
+            json!({
+                "title": {"type":"string"},
+                "vuln_class": {"type":"string"},
+                "severity": {"type":"string","enum":["critical","high","medium","low","info"]},
+                "description": {"type":"string","description":"What is wrong, impact, and how to reproduce"},
+                "url": {"type":"string"},
+                "evidence": {"type":"array","items":{"type":"integer"}},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &["title", "vuln_class", "severity", "description"],
+        ),
+        tool(
+            "finding_update",
+            "Update a finding's description, severity or evidence. Agents may only set status to suspected.",
+            json!({
+                "id": {"type":"integer"},
+                "status": {"type":"string"},
+                "severity": {"type":"string","enum":["critical","high","medium","low","info"]},
+                "description": {"type":"string"},
+                "add_evidence": {"type":"array","items":{"type":"integer"}},
+            }),
+            &["id"],
+        ),
+        tool(
+            "finding_list",
+            "Findings, optionally by status (suspected, proven, confirmed, false_positive, reported).",
+            json!({ "status": {"type":"string"} }),
             &[],
         ),
         tool(
@@ -248,6 +367,67 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             }
             let g: A = args(a)?;
             service.authz_results(g.exchange_id).map(to_json).map_err(|e| e.to_string())
+        }
+        "model_get" => {
+            let f: pm_service::ModelFilter = args(a)?;
+            service.model_get(&f).map_err(|e| e.to_string())
+        }
+        "authz_candidates" => service.authz_candidates().map(to_json).map_err(|e| e.to_string()),
+        "hypothesis_create" => {
+            let h: pm_service::NewHypothesis = args(a)?;
+            service.hypothesis_create(actor, h).map(to_json).map_err(|e| e.to_string())
+        }
+        "hypothesis_update" => {
+            let u: pm_service::HypothesisUpdate = args(a)?;
+            service.hypothesis_update(actor, u).map(to_json).map_err(|e| e.to_string())
+        }
+        "hypothesis_list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                status: Option<String>,
+            }
+            let g: A = args(a)?;
+            service.hypothesis_list(g.status.as_deref()).map(to_json).map_err(|e| e.to_string())
+        }
+        "coverage" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                untested_only: Option<bool>,
+            }
+            let g: A = args(a)?;
+            service.coverage(g.untested_only.unwrap_or(true)).map(to_json).map_err(|e| e.to_string())
+        }
+        "proof_run" => {
+            let r: pm_service::ProofRequest = args(a)?;
+            service.proof_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "proof_get" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                proof_id: i64,
+            }
+            let g: A = args(a)?;
+            service.proof_get(g.proof_id).map_err(|e| e.to_string())
+        }
+        "finding_create" => {
+            let f: pm_service::NewFinding = args(a)?;
+            service.finding_create(actor, f).map_err(|e| e.to_string())
+        }
+        "finding_update" => {
+            let u: pm_service::FindingUpdate = args(a)?;
+            service.finding_update(actor, u).map_err(|e| e.to_string())
+        }
+        "finding_list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                status: Option<String>,
+            }
+            let g: A = args(a)?;
+            service.finding_list(g.status.as_deref()).map(to_json).map_err(|e| e.to_string())
         }
         "approval_status" => {
             let g: ApprovalArgs = args(a)?;

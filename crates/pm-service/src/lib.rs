@@ -6,14 +6,20 @@
 
 mod approvals;
 mod authz;
+mod findings;
 mod history;
 mod identity;
+mod model;
+mod proof;
 mod replay;
 
 pub use authz::{AuthzCheckRequest, AuthzReport};
+pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;
 pub use identity::{IdentityCheck, IdentityInfo};
+pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use pm_store::ApprovalRow;
+pub use proof::{ProofRequest, ProofResult};
 pub use replay::{ReplayRequest, ReplayResult};
 
 use parking_lot::Mutex;
@@ -26,7 +32,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub use {pm_ai, pm_diff, pm_identity, pm_policy, pm_store};
+pub use {pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_store};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {

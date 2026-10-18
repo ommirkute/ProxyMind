@@ -335,6 +335,7 @@ mod tests {
                 resp_len: None,
                 error: None,
                 identity: None,
+                hypothesis_id: None,
             },
             request: b"GET /api/orders/42 HTTP/1.1\r\nHost: shop.test\r\nCookie: session=abcdef0123456789\r\n\r\n"
                 .to_vec(),
