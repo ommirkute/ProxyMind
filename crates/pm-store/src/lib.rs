@@ -12,7 +12,8 @@ use serde::Serialize;
 
 /// Schema migrations, applied in order. Never edit a released entry;
 /// add a new one instead.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE blobs (
     hash      BLOB PRIMARY KEY,
     raw_len   INTEGER NOT NULL,
@@ -41,7 +42,209 @@ CREATE TABLE exchanges (
 );
 CREATE INDEX exchanges_host ON exchanges(host);
 CREATE INDEX exchanges_ts ON exchanges(ts_ms);
-"#];
+"#,
+    r#"
+-- Append-only, hash-chained audit log (see pm-policy::audit).
+CREATE TABLE audit_log (
+    seq       INTEGER PRIMARY KEY,
+    ts_ms     INTEGER NOT NULL,
+    actor     TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    detail    TEXT NOT NULL,
+    decision  TEXT NOT NULL,
+    prev_hash BLOB NOT NULL,
+    hash      BLOB NOT NULL
+);
+CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+"#,
+    r#"
+-- Actions waiting for (or decided by) a human. Shared between processes,
+-- so an MCP server and a human's CLI or UI see the same queue.
+CREATE TABLE approvals (
+    id          TEXT PRIMARY KEY,
+    created_ms  INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    target      TEXT,
+    summary     TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    status      TEXT NOT NULL,      -- pending | approved | denied | used
+    decided_by  TEXT,
+    decided_ms  INTEGER
+);
+CREATE INDEX approvals_status ON approvals(status);
+"#,
+    r#"
+-- Project settings shared by every process, e.g. the rules of engagement.
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#,
+    r#"
+-- Test identities (users/roles) and their credentials.
+CREATE TABLE identities (
+    name       TEXT PRIMARY KEY,
+    role       TEXT NOT NULL,
+    data       TEXT NOT NULL,      -- JSON: auth material, health check, login recipe
+    created_by TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'unknown',  -- unknown | ok | logged_out
+    updated_ms INTEGER NOT NULL
+);
+-- Which identity's credentials an exchange was sent with.
+ALTER TABLE exchanges ADD COLUMN identity TEXT;
+-- Results of authorization checks: one row per (exchange, identity) test.
+CREATE TABLE authz_results (
+    id            INTEGER PRIMARY KEY,
+    exchange_id   INTEGER NOT NULL,
+    method        TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    identity      TEXT NOT NULL,
+    verdict       TEXT NOT NULL,   -- denied | same_as_owner | allowed_different | inconclusive | error
+    status        INTEGER,
+    similarity    REAL,
+    evidence_id   INTEGER,
+    summary       TEXT NOT NULL,
+    checked_by    TEXT NOT NULL,
+    checked_ms    INTEGER NOT NULL
+);
+CREATE INDEX authz_results_exchange ON authz_results(exchange_id);
+"#,
+    r#"
+-- Hypothesis ledger.
+CREATE TABLE hypotheses (
+    id         INTEGER PRIMARY KEY,
+    operation  TEXT NOT NULL,
+    param      TEXT NOT NULL DEFAULT '',
+    vuln_class TEXT NOT NULL,
+    rationale  TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '[]',
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+-- Which hypothesis an exchange was sent to test.
+ALTER TABLE exchanges ADD COLUMN hypothesis_id INTEGER;
+CREATE INDEX exchanges_hypothesis ON exchanges(hypothesis_id);
+-- Proof runs: inputs are kept so any proof can be re-run.
+CREATE TABLE proofs (
+    id           INTEGER PRIMARY KEY,
+    oracle       TEXT NOT NULL,
+    inputs       TEXT NOT NULL,
+    proven       INTEGER NOT NULL,
+    confidence   TEXT NOT NULL,
+    reasons      TEXT NOT NULL,
+    details      TEXT NOT NULL,
+    exchange_ids TEXT NOT NULL,
+    finding_id   INTEGER,
+    actor        TEXT NOT NULL,
+    created_ms   INTEGER NOT NULL
+);
+CREATE TABLE findings (
+    id            INTEGER PRIMARY KEY,
+    title         TEXT NOT NULL,
+    vuln_class    TEXT NOT NULL,
+    severity      TEXT NOT NULL,
+    status        TEXT NOT NULL,   -- suspected | proven | confirmed | false_positive | reported
+    url           TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    hypothesis_id INTEGER,
+    proof_id      INTEGER,
+    evidence      TEXT NOT NULL DEFAULT '[]',
+    actor         TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    updated_ms    INTEGER NOT NULL
+);
+CREATE TABLE oast_interactions (
+    id       INTEGER PRIMARY KEY,
+    token    TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    remote   TEXT NOT NULL,
+    method   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    raw      TEXT NOT NULL,
+    ts_ms    INTEGER NOT NULL
+);
+CREATE INDEX oast_interactions_token ON oast_interactions(token);
+"#,
+];
+
+/// A stored row of one of the JSON-ish engagement tables (hypotheses,
+/// proofs, findings, OAST interactions): column name → value.
+pub type Row = serde_json::Map<String, serde_json::Value>;
+
+/// A stored test identity. `data` holds credentials: never show it to agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityRow {
+    pub name: String,
+    pub role: String,
+    pub data: String,
+    pub created_by: String,
+    pub status: String,
+    pub updated_ms: i64,
+}
+
+/// One authorization-check result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AuthzRow {
+    pub id: i64,
+    pub exchange_id: i64,
+    pub method: String,
+    pub url: String,
+    pub identity: String,
+    pub verdict: String,
+    pub status: Option<u16>,
+    pub similarity: Option<f64>,
+    pub evidence_id: Option<i64>,
+    pub summary: String,
+    pub checked_by: String,
+    pub checked_ms: i64,
+}
+
+/// An action waiting for, or decided by, a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalRow {
+    pub id: String,
+    pub created_ms: i64,
+    pub actor: String,
+    pub action: String,
+    pub tier: String,
+    /// URL the action targets, if any.
+    pub target: Option<String>,
+    pub summary: String,
+    /// The exact parameters (JSON text) the approval covers.
+    pub params: String,
+    pub params_hash: String,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_ms: Option<i64>,
+}
+
+/// One audit log entry. Hashing and verification live in `pm-policy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditRecord {
+    pub seq: i64,
+    pub ts_ms: i64,
+    pub actor: String,
+    pub action: String,
+    /// JSON text describing the action.
+    pub detail: String,
+    pub decision: String,
+    #[serde(serialize_with = "hex_bytes")]
+    pub prev_hash: Vec<u8>,
+    #[serde(serialize_with = "hex_bytes")]
+    pub hash: Vec<u8>,
+}
+
+fn hex_bytes<S: serde::Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+}
 
 /// A finished (or failed) request/response pair to record.
 #[derive(Debug, Clone)]
@@ -59,6 +262,10 @@ pub struct NewExchange {
     pub request: Vec<u8>,
     pub response: Option<Vec<u8>>,
     pub error: Option<String>,
+    /// Identity whose credentials were used (None = as recorded / as given).
+    pub identity: Option<String>,
+    /// Hypothesis this exchange was sent to test.
+    pub hypothesis_id: Option<i64>,
 }
 
 /// One row of history, without the raw bytes.
@@ -78,6 +285,10 @@ pub struct ExchangeSummary {
     pub req_len: i64,
     pub resp_len: Option<i64>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypothesis_id: Option<i64>,
 }
 
 /// A full exchange including the raw bytes.
@@ -86,6 +297,32 @@ pub struct Exchange {
     pub summary: ExchangeSummary,
     pub request: Vec<u8>,
     pub response: Option<Vec<u8>>,
+}
+
+/// Filters for searching history. All set fields must match.
+#[derive(Debug, Clone, Default, serde::Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryFilter {
+    /// Host contains this text (case-insensitive).
+    pub host: Option<String>,
+    /// Path (including query) contains this text (case-insensitive).
+    pub path: Option<String>,
+    pub method: Option<String>,
+    pub status: Option<u16>,
+    /// e.g. proxy, replay
+    pub source: Option<String>,
+    /// e.g. agent:claude-1
+    pub actor: Option<String>,
+    /// Exchanges sent while testing this hypothesis.
+    pub hypothesis_id: Option<i64>,
+    /// Exchanges sent with this identity's credentials.
+    pub identity: Option<String>,
+    /// Only exchanges with an id greater than this (for paging forward).
+    pub after_id: Option<i64>,
+    /// Only exchanges with an id less than this (for paging back).
+    pub before_id: Option<i64>,
+    /// Maximum rows (default 50, max 500).
+    pub limit: Option<usize>,
 }
 
 pub struct Store {
@@ -103,6 +340,8 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // The proxy, an MCP server and the CLI may use one project at once.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -151,8 +390,8 @@ impl Store {
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
-                                    status, req_hash, resp_hash, req_len, resp_len, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -169,6 +408,8 @@ impl Store {
                 ex.request.len() as i64,
                 ex.response.as_ref().map(|r| r.len() as i64),
                 ex.error,
+                ex.identity,
+                ex.hypothesis_id,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -177,7 +418,7 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error";
+                                        status, req_len, resp_len, error, identity, hypothesis_id";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -195,6 +436,8 @@ impl Store {
             req_len: r.get(11)?,
             resp_len: r.get(12)?,
             error: r.get(13)?,
+            identity: r.get(14)?,
+            hypothesis_id: r.get(15)?,
         })
     }
 
@@ -209,12 +452,50 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Searches history, newest first.
+    pub fn search_exchanges(&self, f: &HistoryFilter) -> Result<Vec<ExchangeSummary>> {
+        let sql = format!(
+            "SELECT {} FROM exchanges WHERE
+                (?1 IS NULL OR instr(lower(host), lower(?1)) > 0) AND
+                (?2 IS NULL OR instr(lower(path), lower(?2)) > 0) AND
+                (?3 IS NULL OR upper(method) = upper(?3)) AND
+                (?4 IS NULL OR status = ?4) AND
+                (?5 IS NULL OR source = ?5) AND
+                (?6 IS NULL OR actor_id = ?6) AND
+                (?7 IS NULL OR id > ?7) AND
+                (?8 IS NULL OR id < ?8) AND
+                (?10 IS NULL OR hypothesis_id = ?10) AND
+                (?11 IS NULL OR identity = ?11)
+             ORDER BY id DESC LIMIT ?9",
+            Self::SUMMARY_COLS
+        );
+        let limit = f.limit.unwrap_or(50).clamp(1, 500) as i64;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                f.host,
+                f.path,
+                f.method,
+                f.status,
+                f.source,
+                f.actor,
+                f.after_id,
+                f.before_id,
+                limit,
+                f.hypothesis_id,
+                f.identity
+            ],
+            Self::summary_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn get_exchange(&self, id: i64) -> Result<Option<Exchange>> {
         let sql = format!("SELECT {}, req_hash, resp_hash FROM exchanges WHERE id = ?1", Self::SUMMARY_COLS);
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(14)?, r.get::<_, Option<Vec<u8>>>(15)?))
+                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(16)?, r.get::<_, Option<Vec<u8>>>(17)?))
             })
             .optional()?;
         let Some((summary, req_hash, resp_hash)) = row else {
@@ -225,6 +506,392 @@ impl Store {
             request: self.get_blob(&req_hash)?,
             response: resp_hash.map(|h| self.get_blob(&h)).transpose()?,
         }))
+    }
+
+    /// Appends an audit record. `rec.seq` must be one more than the last.
+    pub fn append_audit(&mut self, rec: &AuditRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![rec.seq, rec.ts_ms, rec.actor, rec.action, rec.detail, rec.decision, rec.prev_hash, rec.hash],
+        )?;
+        Ok(())
+    }
+
+    fn audit_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
+        Ok(AuditRecord {
+            seq: r.get(0)?,
+            ts_ms: r.get(1)?,
+            actor: r.get(2)?,
+            action: r.get(3)?,
+            detail: r.get(4)?,
+            decision: r.get(5)?,
+            prev_hash: r.get(6)?,
+            hash: r.get(7)?,
+        })
+    }
+
+    pub fn last_audit(&self) -> Result<Option<AuditRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash
+                 FROM audit_log ORDER BY seq DESC LIMIT 1",
+                [],
+                Self::audit_from_row,
+            )
+            .optional()?)
+    }
+
+    /// All audit records in order. Loads everything; fine for verification
+    /// of logs up to a few million entries.
+    pub fn audit_records(&self) -> Result<Vec<AuditRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash FROM audit_log ORDER BY seq",
+        )?;
+        let rows = stmt.query_map([], Self::audit_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn insert_approval(&mut self, a: &ApprovalRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO approvals (id, created_ms, actor, action, tier, target, summary, params, params_hash, status,
+                                    decided_by, decided_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                a.id,
+                a.created_ms,
+                a.actor,
+                a.action,
+                a.tier,
+                a.target,
+                a.summary,
+                a.params,
+                a.params_hash,
+                a.status,
+                a.decided_by,
+                a.decided_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    const APPROVAL_COLS: &'static str =
+        "id, created_ms, actor, action, tier, target, summary, params, params_hash, status, decided_by, decided_ms";
+
+    fn approval_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
+        Ok(ApprovalRow {
+            id: r.get(0)?,
+            created_ms: r.get(1)?,
+            actor: r.get(2)?,
+            action: r.get(3)?,
+            tier: r.get(4)?,
+            target: r.get(5)?,
+            summary: r.get(6)?,
+            params: r.get(7)?,
+            params_hash: r.get(8)?,
+            status: r.get(9)?,
+            decided_by: r.get(10)?,
+            decided_ms: r.get(11)?,
+        })
+    }
+
+    pub fn get_approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
+        let sql = format!("SELECT {} FROM approvals WHERE id = ?1", Self::APPROVAL_COLS);
+        Ok(self.conn.query_row(&sql, [id], Self::approval_from_row).optional()?)
+    }
+
+    /// Approvals with this status (or all), newest first.
+    pub fn list_approvals(&self, status: Option<&str>, limit: usize) -> Result<Vec<ApprovalRow>> {
+        let sql = format!(
+            "SELECT {} FROM approvals WHERE (?1 IS NULL OR status = ?1) ORDER BY created_ms DESC LIMIT ?2",
+            Self::APPROVAL_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![status, limit as i64], Self::approval_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves an approval from `from` to `to` atomically. Returns false if it
+    /// was not in state `from` (or, when `params_hash` is given, if the hash
+    /// differs), so two processes can't both decide or use it.
+    pub fn transition_approval(
+        &mut self,
+        id: &str,
+        from: &str,
+        to: &str,
+        decided_by: Option<&str>,
+        params_hash: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE approvals SET status = ?3,
+                    decided_by = COALESCE(?4, decided_by),
+                    decided_ms = CASE WHEN ?4 IS NULL THEN decided_ms ELSE ?6 END
+             WHERE id = ?1 AND status = ?2 AND (?5 IS NULL OR params_hash = ?5)",
+            params![id, from, to, decided_by, params_hash, now_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_identity(&mut self, row: &IdentityRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO identities (name, role, data, created_by, status, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET role = excluded.role, data = excluded.data,
+                 status = excluded.status, updated_ms = excluded.updated_ms",
+            params![row.name, row.role, row.data, row.created_by, row.status, row.updated_ms],
+        )?;
+        Ok(())
+    }
+
+    fn identity_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRow> {
+        Ok(IdentityRow {
+            name: r.get(0)?,
+            role: r.get(1)?,
+            data: r.get(2)?,
+            created_by: r.get(3)?,
+            status: r.get(4)?,
+            updated_ms: r.get(5)?,
+        })
+    }
+
+    pub fn get_identity(&self, name: &str) -> Result<Option<IdentityRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT name, role, data, created_by, status, updated_ms FROM identities WHERE name = ?1",
+                [name],
+                Self::identity_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_identities(&self) -> Result<Vec<IdentityRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, role, data, created_by, status, updated_ms FROM identities ORDER BY name")?;
+        let rows = stmt.query_map([], Self::identity_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_identity(&mut self, name: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM identities WHERE name = ?1", [name])? == 1)
+    }
+
+    pub fn insert_authz(&mut self, r: &AuthzRow) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO authz_results (exchange_id, method, url, identity, verdict, status, similarity, evidence_id,
+                                        summary, checked_by, checked_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                r.exchange_id,
+                r.method,
+                r.url,
+                r.identity,
+                r.verdict,
+                r.status,
+                r.similarity,
+                r.evidence_id,
+                r.summary,
+                r.checked_by,
+                r.checked_ms
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Latest result per (exchange, identity), optionally for one exchange.
+    pub fn authz_results(&self, exchange_id: Option<i64>) -> Result<Vec<AuthzRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, exchange_id, method, url, identity, verdict, status, similarity, evidence_id, summary,
+                    checked_by, checked_ms
+             FROM authz_results a
+             WHERE (?1 IS NULL OR exchange_id = ?1)
+               AND id = (SELECT max(id) FROM authz_results b
+                         WHERE b.exchange_id = a.exchange_id AND b.identity = a.identity)
+             ORDER BY exchange_id, identity",
+        )?;
+        let rows = stmt.query_map([exchange_id], |r| {
+            Ok(AuthzRow {
+                id: r.get(0)?,
+                exchange_id: r.get(1)?,
+                method: r.get(2)?,
+                url: r.get(3)?,
+                identity: r.get(4)?,
+                verdict: r.get(5)?,
+                status: r.get(6)?,
+                similarity: r.get(7)?,
+                evidence_id: r.get(8)?,
+                summary: r.get(9)?,
+                checked_by: r.get(10)?,
+                checked_ms: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The most recent `limit` exchanges with their bytes, oldest first.
+    pub fn recent_exchanges(&self, limit: usize) -> Result<Vec<Exchange>> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM exchanges ORDER BY id DESC LIMIT ?1")?;
+            let rows = stmt.query_map([limit as i64], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids.into_iter().rev() {
+            if let Some(ex) = self.get_exchange(id)? {
+                out.push(ex);
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- engagement tables (hypotheses, proofs, findings, OAST) ----------
+    //
+    // These are written through a small, explicit column list per table so
+    // callers can't touch other tables or columns.
+
+    fn table_columns(table: &str) -> Option<&'static [&'static str]> {
+        Some(match table {
+            "hypotheses" => &[
+                "operation",
+                "param",
+                "vuln_class",
+                "rationale",
+                "status",
+                "actor",
+                "notes",
+                "created_ms",
+                "updated_ms",
+            ],
+            "proofs" => &[
+                "oracle",
+                "inputs",
+                "proven",
+                "confidence",
+                "reasons",
+                "details",
+                "exchange_ids",
+                "finding_id",
+                "actor",
+                "created_ms",
+            ],
+            "findings" => &[
+                "title",
+                "vuln_class",
+                "severity",
+                "status",
+                "url",
+                "description",
+                "hypothesis_id",
+                "proof_id",
+                "evidence",
+                "actor",
+                "created_ms",
+                "updated_ms",
+            ],
+            "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
+            _ => return None,
+        })
+    }
+
+    fn to_sql(v: &serde_json::Value) -> rusqlite::types::Value {
+        use rusqlite::types::Value as V;
+        match v {
+            serde_json::Value::Null => V::Null,
+            serde_json::Value::Bool(b) => V::Integer(i64::from(*b)),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => V::Integer(i),
+                None => V::Real(n.as_f64().unwrap_or(0.0)),
+            },
+            serde_json::Value::String(s) => V::Text(s.clone()),
+            other => V::Text(other.to_string()),
+        }
+    }
+
+    /// Inserts a row; unknown columns are rejected. Returns the new id.
+    pub fn insert_row(&mut self, table: &str, row: &Row) -> Result<i64> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        if let Some(bad) = row.keys().find(|k| !cols.contains(&k.as_str())) {
+            anyhow::bail!("unknown column {bad} for {table}");
+        }
+        let names: Vec<&String> = row.keys().collect();
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+            (1..=names.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ")
+        );
+        let values: Vec<rusqlite::types::Value> = names.iter().map(|k| Self::to_sql(&row[*k])).collect();
+        self.conn.execute(&sql, rusqlite::params_from_iter(values))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Updates columns of one row by id. Returns false if there is no such row.
+    pub fn update_row(&mut self, table: &str, id: i64, changes: &Row) -> Result<bool> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        if let Some(bad) = changes.keys().find(|k| !cols.contains(&k.as_str())) {
+            anyhow::bail!("unknown column {bad} for {table}");
+        }
+        if changes.is_empty() {
+            return Ok(true);
+        }
+        let names: Vec<&String> = changes.keys().collect();
+        let sets: Vec<String> = names.iter().enumerate().map(|(i, k)| format!("{k} = ?{}", i + 2)).collect();
+        let sql = format!("UPDATE {table} SET {} WHERE id = ?1", sets.join(", "));
+        let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Integer(id)];
+        values.extend(names.iter().map(|k| Self::to_sql(&changes[*k])));
+        Ok(self.conn.execute(&sql, rusqlite::params_from_iter(values))? == 1)
+    }
+
+    /// Rows of a table, optionally where `column = value`, newest first.
+    pub fn rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>, limit: usize) -> Result<Vec<Row>> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        let mut all: Vec<&str> = vec!["id"];
+        all.extend_from_slice(cols);
+        let (where_sql, params): (String, Vec<rusqlite::types::Value>) = match filter {
+            Some((col, v)) => {
+                if col != "id" && !cols.contains(&col) {
+                    anyhow::bail!("unknown column {col} for {table}");
+                }
+                (format!("WHERE {col} = ?1"), vec![Self::to_sql(v)])
+            }
+            None => (String::new(), vec![]),
+        };
+        let sql =
+            format!("SELECT {} FROM {table} {where_sql} ORDER BY id DESC LIMIT {}", all.join(", "), limit.min(10_000));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let mut m = Row::new();
+            for (i, c) in all.iter().enumerate() {
+                use rusqlite::types::ValueRef;
+                let v = match r.get_ref(i)? {
+                    ValueRef::Null => serde_json::Value::Null,
+                    ValueRef::Integer(x) => serde_json::json!(x),
+                    ValueRef::Real(x) => serde_json::json!(x),
+                    ValueRef::Text(t) => serde_json::Value::String(String::from_utf8_lossy(t).into_owned()),
+                    ValueRef::Blob(_) => serde_json::Value::Null,
+                };
+                m.insert((*c).to_string(), v);
+            }
+            Ok(m)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn row(&self, table: &str, id: i64) -> Result<Option<Row>> {
+        Ok(self.rows(table, Some(("id", &serde_json::json!(id))), 1)?.into_iter().next())
     }
 
     pub fn count_exchanges(&self) -> Result<i64> {
@@ -251,6 +918,8 @@ mod tests {
             request: format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n").into_bytes(),
             response: Some(body.to_vec()),
             error: None,
+            identity: None,
+            hypothesis_id: None,
         }
     }
 
@@ -267,5 +936,40 @@ mod tests {
         assert_eq!(blobs, 3, "two requests + one shared response");
         assert_eq!(s.list_exchanges(10, Some("example")).unwrap().len(), 2);
         assert_eq!(s.list_exchanges(10, Some("nope")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn search_filters_combine() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_exchange(&sample("/api/Orders/1", b"x")).unwrap();
+        let mut post = sample("/api/orders", b"y");
+        post.method = "POST".into();
+        post.status = Some(201);
+        s.insert_exchange(&post).unwrap();
+        let f = |f: HistoryFilter| s.search_exchanges(&f).unwrap().len();
+        assert_eq!(f(HistoryFilter { path: Some("orders".into()), ..Default::default() }), 2);
+        assert_eq!(f(HistoryFilter { method: Some("post".into()), ..Default::default() }), 1);
+        assert_eq!(f(HistoryFilter { status: Some(200), host: Some("EXAMPLE".into()), ..Default::default() }), 1);
+        assert_eq!(f(HistoryFilter { after_id: Some(1), ..Default::default() }), 1);
+    }
+
+    #[test]
+    fn audit_log_is_append_only() {
+        let mut s = Store::open_in_memory().unwrap();
+        let rec = AuditRecord {
+            seq: 1,
+            ts_ms: 1,
+            actor: "agent:a".into(),
+            action: "replay_send".into(),
+            detail: "{}".into(),
+            decision: "allow".into(),
+            prev_hash: vec![0; 32],
+            hash: vec![1; 32],
+        };
+        s.append_audit(&rec).unwrap();
+        assert_eq!(s.last_audit().unwrap(), Some(rec.clone()));
+        assert!(s.append_audit(&rec).is_err(), "duplicate seq");
+        assert!(s.conn.execute("UPDATE audit_log SET decision = 'deny'", []).is_err());
+        assert!(s.conn.execute("DELETE FROM audit_log", []).is_err());
     }
 }

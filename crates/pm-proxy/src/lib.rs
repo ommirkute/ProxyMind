@@ -7,20 +7,16 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use pm_http::{BodyKind, ChunkedScanner, RequestHead, ResponseHead};
+use pm_core::now_ms;
+use pm_http::RequestHead;
+use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 use pm_store::{NewExchange, Store};
-use pm_tls::{CertAuthority, TlsAcceptor, TlsConnector};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use pm_tls::{CertAuthority, TlsAcceptor};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_CHUNK: usize = 16 * 1024;
-
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
 /// never waits on the database.
@@ -41,7 +37,7 @@ impl Recorder {
         (Self(tx), handle)
     }
 
-    fn record(&self, ex: NewExchange) {
+    pub fn record(&self, ex: NewExchange) {
         let _ = self.0.send(ex);
     }
 }
@@ -54,14 +50,13 @@ pub struct ProxyConfig {
 
 pub struct Proxy {
     ca: Arc<CertAuthority>,
-    upstream_tls: TlsConnector,
+    sender: Sender,
     recorder: Recorder,
 }
 
 impl Proxy {
     pub fn new(ca: Arc<CertAuthority>, recorder: Recorder, verify_upstream: bool) -> Result<Arc<Self>> {
-        let upstream_tls = TlsConnector::from(pm_tls::upstream_client_config(verify_upstream)?);
-        Ok(Arc::new(Self { ca, upstream_tls, recorder }))
+        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -110,7 +105,7 @@ impl Proxy {
     }
 
     /// Serves requests on one client connection until it closes.
-    async fn serve_http<S: Io>(
+    async fn serve_http<S: Io + 'static>(
         &self,
         mut client: Conn<S>,
         scheme: &str,
@@ -132,7 +127,8 @@ impl Proxy {
             request.extend_from_slice(&body);
 
             let started = Instant::now();
-            let result = self.forward(&target, &request, &head.method).await;
+            let ep = Endpoint::new(&target.scheme, &target.host, target.port);
+            let result = self.sender.send(&ep, &request, &head.method, None).await;
             let mut record = NewExchange {
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
@@ -147,20 +143,24 @@ impl Proxy {
                 request,
                 response: None,
                 error: None,
+                identity: None,
+                hypothesis_id: None,
             };
 
             match result {
-                Ok(Upstream { response, resp_head, conn }) => {
-                    client.io.write_all(&response).await?;
+                Ok(resp) => {
+                    client.io.write_all(&resp.raw).await?;
                     client.io.flush().await?;
-                    let close = head.wants_close() || resp_head.wants_close() || conn.closes_client();
-                    record.status = Some(resp_head.status);
-                    record.response = Some(response);
+                    let close = head.wants_close()
+                        || resp.head.wants_close()
+                        || matches!(resp.conn, AfterResponse::ClosedAfterBody);
+                    record.status = Some(resp.head.status);
+                    record.response = Some(resp.raw);
                     self.recorder.record(record);
 
-                    if let UpstreamConn::Upgraded(mut up) = conn {
+                    if let AfterResponse::Upgraded(mut up) = resp.conn {
                         // WebSocket or other protocol switch: pass bytes both ways.
-                        // Frame-level logging comes in milestone M2.
+                        // Frame-level logging comes later.
                         if !up.buf.is_empty() {
                             client.io.write_all(&up.buf).await?;
                         }
@@ -190,64 +190,6 @@ impl Proxy {
                 }
             }
         }
-    }
-
-    async fn connect(&self, target: &Target) -> Result<Box<dyn Io>> {
-        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((target.host.as_str(), target.port)))
-            .await
-            .context("connect timed out")??;
-        tcp.set_nodelay(true)?;
-        if target.scheme == "https" {
-            let name = pm_tls::server_name(&target.host)?;
-            let tls = self.upstream_tls.connect(name, tcp).await.context("TLS handshake with server")?;
-            Ok(Box::new(tls))
-        } else {
-            Ok(Box::new(tcp))
-        }
-    }
-
-    async fn forward(&self, target: &Target, request: &[u8], method: &str) -> Result<Upstream> {
-        let mut up = Conn::new(self.connect(target).await?);
-        up.io.write_all(request).await?;
-        up.io.flush().await?;
-
-        // Interim 1xx responses (except 101) are passed through along with
-        // the final response.
-        let mut response = Vec::new();
-        loop {
-            let head_raw = up.read_head().await?.ok_or_else(|| anyhow!("server closed without responding"))?;
-            let resp_head = pm_http::parse_response_head(&head_raw)?;
-            response.extend_from_slice(&head_raw);
-            if resp_head.status == 101 {
-                return Ok(Upstream { response, resp_head, conn: UpstreamConn::Upgraded(up) });
-            }
-            if (100..200).contains(&resp_head.status) {
-                continue;
-            }
-            let kind = resp_head.body_kind(method)?;
-            response.extend_from_slice(&up.read_body(kind).await?);
-            let conn = if kind == BodyKind::UntilClose { UpstreamConn::ClosedAfterBody } else { UpstreamConn::Done };
-            return Ok(Upstream { response, resp_head, conn });
-        }
-    }
-}
-
-struct Upstream {
-    response: Vec<u8>,
-    resp_head: ResponseHead,
-    conn: UpstreamConn,
-}
-
-enum UpstreamConn {
-    Done,
-    /// The body ran until the server closed, so the client must be closed too.
-    ClosedAfterBody,
-    Upgraded(Conn<Box<dyn Io>>),
-}
-
-impl UpstreamConn {
-    fn closes_client(&self) -> bool {
-        matches!(self, UpstreamConn::ClosedAfterBody)
     }
 }
 
@@ -290,76 +232,4 @@ fn resolve_target(
     let (host, port) =
         pm_http::split_host_port(std::str::from_utf8(host_hdr)?, 80).ok_or_else(|| anyhow!("bad Host header"))?;
     Ok(Target { scheme: "http".into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
-}
-
-/// A connection plus bytes read from it but not yet used.
-struct Conn<S> {
-    io: S,
-    buf: Vec<u8>,
-}
-
-impl<S: AsyncRead + Unpin> Conn<S> {
-    fn new(io: S) -> Self {
-        Self { io, buf: Vec::new() }
-    }
-
-    /// Reads more bytes into the buffer. Returns false at end of stream.
-    async fn fill(&mut self) -> Result<bool> {
-        let start = self.buf.len();
-        self.buf.resize(start + READ_CHUNK, 0);
-        let n = self.io.read(&mut self.buf[start..]).await;
-        self.buf.truncate(start + *n.as_ref().unwrap_or(&0));
-        Ok(n? > 0)
-    }
-
-    /// Reads one message head. `None` means the peer closed cleanly
-    /// between messages.
-    async fn read_head(&mut self) -> Result<Option<Vec<u8>>> {
-        loop {
-            if let Some(end) = pm_http::find_head_end(&self.buf)? {
-                return Ok(Some(self.buf.drain(..end).collect()));
-            }
-            if !self.fill().await? {
-                if self.buf.is_empty() {
-                    return Ok(None);
-                }
-                bail!("connection closed in the middle of a message head");
-            }
-        }
-    }
-
-    /// Reads a body exactly as framed on the wire (chunked bodies stay chunked).
-    async fn read_body(&mut self, kind: BodyKind) -> Result<Vec<u8>> {
-        match kind {
-            BodyKind::None => Ok(Vec::new()),
-            BodyKind::ContentLength(n) => {
-                let n = usize::try_from(n)?;
-                while self.buf.len() < n {
-                    if !self.fill().await? {
-                        bail!("connection closed before the body was complete");
-                    }
-                }
-                Ok(self.buf.drain(..n).collect())
-            }
-            BodyKind::Chunked => {
-                let mut scanner = ChunkedScanner::new();
-                loop {
-                    if let Some(len) = scanner.scan(&self.buf)? {
-                        return Ok(self.buf.drain(..len).collect());
-                    }
-                    if !self.fill().await? {
-                        bail!("connection closed in the middle of a chunked body");
-                    }
-                }
-            }
-            BodyKind::UntilClose => {
-                while self.fill().await? {}
-                Ok(std::mem::take(&mut self.buf))
-            }
-        }
-    }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }

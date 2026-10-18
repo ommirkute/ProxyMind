@@ -76,7 +76,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "description": "URL prefix; '*' matches any characters within a path segment or host label",
+        "description": "URL prefix. In the host, '*' matches one label and a leading '**.' matches one or more labels. In the path, '*' matches within one segment. Without a port, only the scheme's default port matches; ':*' matches any port.",
         "pattern": "^https?://"
       }
     },
