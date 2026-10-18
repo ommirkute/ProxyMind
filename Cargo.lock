@@ -983,6 +983,7 @@ dependencies = [
  "anyhow",
  "clap",
  "jiff",
+ "pm-mcp",
  "pm-proxy",
  "pm-service",
  "pm-store",
@@ -1020,6 +1021,14 @@ version = "0.0.1"
 [[package]]
 name = "pm-mcp"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "pm-service",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pm-model"

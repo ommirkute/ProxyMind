@@ -74,12 +74,57 @@ enum Command {
         #[command(subcommand)]
         action: AuditAction,
     },
+    /// Run an MCP server on stdin/stdout so AI agents (e.g. Claude Code) can use ProxyMind.
+    Mcp {
+        /// Rules of engagement to use (saved to the project). Defaults to the project's saved ROE.
+        #[arg(long)]
+        roe: Option<PathBuf>,
+        /// The agent's identity in the audit log, e.g. agent:claude
+        #[arg(long, default_value = "agent:mcp")]
+        actor: String,
+    },
+    /// Review actions waiting for human approval.
+    Approvals {
+        #[command(subcommand)]
+        action: ApprovalAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ApprovalAction {
+    /// List approvals (pending only, unless --all).
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Approve a pending action.
+    Approve {
+        id: String,
+        /// Who is approving (default: human:<your username>)
+        #[arg(long = "as")]
+        approver: Option<String>,
+    },
+    /// Deny a pending action.
+    Deny {
+        id: String,
+        #[arg(long = "as")]
+        approver: Option<String>,
+    },
+    /// Wait for new approval requests and ask about each one.
+    Watch {
+        #[arg(long = "as")]
+        approver: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 enum RoeAction {
     /// Validate an ROE file and print a summary.
     Check { file: PathBuf },
+    /// Save an ROE file into the project, so the MCP server and approvals use it.
+    Use { file: PathBuf },
+    /// Print the ROE saved in the project.
+    Show,
     /// Show what the policy gate would decide for a request (nothing is sent or recorded).
     Test {
         file: PathBuf,
@@ -126,6 +171,54 @@ fn home_dir(cli: &Cli) -> Result<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .context("cannot find a home directory; pass --home")?;
     Ok(PathBuf::from(base).join(".proxymind"))
+}
+
+const ROE_SETTING: &str = "roe";
+
+/// Opens the project's service with its saved ROE, or saves `roe_file` first.
+fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
+    let mut store = Store::open(project)?;
+    let text = match roe_file {
+        Some(f) => {
+            let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            Roe::parse(&text)?;
+            store.set_setting(ROE_SETTING, &text)?;
+            text
+        }
+        None => store.get_setting(ROE_SETTING)?.context(
+            "this project has no rules of engagement yet; run `proxymind roe use <file>` (see examples/roe.yaml)",
+        )?,
+    };
+    Ok(Service::new(store, Policy::new(Roe::parse(&text)?))?)
+}
+
+fn human_actor(given: Option<&str>) -> Result<Actor> {
+    let id = match given {
+        Some(g) => g.to_string(),
+        None => {
+            let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "local".into());
+            let user: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).collect();
+            format!("human:{}", if user.is_empty() { "local".into() } else { user })
+        }
+    };
+    let actor = Actor::parse(&id)?;
+    anyhow::ensure!(actor.kind == ActorKind::Human, "only human:<name> actors can approve");
+    Ok(actor)
+}
+
+fn print_approval(a: &pm_service::ApprovalRow) -> Result<()> {
+    out!("{}  [{}]  {}  by {}  ({})", a.id, a.status, a.summary, a.actor, a.tier);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&a.params)
+        && let Some(req) = v.get("request").and_then(|r| r.as_str())
+    {
+        for line in req.lines().take(30) {
+            out!("    | {line}");
+        }
+    }
+    if let Some(by) = &a.decided_by {
+        out!("    decided by {by}");
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -246,6 +339,74 @@ async fn run() -> Result<()> {
             out!("{label}: {} {url} as {actor} ({tier:?})", method.to_uppercase());
             for r in v.reasons {
                 out!("  - {r}");
+            }
+        }
+        Command::Roe { action: RoeAction::Use { file } } => {
+            open_service(&cli.project, Some(file))?;
+            out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
+        }
+        Command::Roe { action: RoeAction::Show } => {
+            let store = Store::open(&cli.project)?;
+            match store.get_setting(ROE_SETTING)? {
+                Some(t) => out!("{t}"),
+                None => out!("No rules of engagement saved. Run `proxymind roe use <file>`."),
+            }
+        }
+        Command::Mcp { roe, actor } => {
+            let actor = Actor::parse(actor)?;
+            anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
+            let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
+            eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
+            pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
+        }
+        Command::Approvals { action } => {
+            let service = open_service(&cli.project, None)?;
+            match action {
+                ApprovalAction::List { all } => {
+                    let rows = service.approvals(if *all { None } else { Some("pending") }, 100)?;
+                    if rows.is_empty() {
+                        out!("No {}approvals.", if *all { "" } else { "pending " });
+                    }
+                    for a in &rows {
+                        print_approval(a)?;
+                    }
+                }
+                ApprovalAction::Approve { id, approver } => {
+                    let a = service.decide_approval(id, &human_actor(approver.as_deref())?, true)?;
+                    out!("✓ approved {} ({})", a.id, a.summary);
+                }
+                ApprovalAction::Deny { id, approver } => {
+                    let a = service.decide_approval(id, &human_actor(approver.as_deref())?, false)?;
+                    out!("✗ denied {} ({})", a.id, a.summary);
+                }
+                ApprovalAction::Watch { approver } => {
+                    let me = human_actor(approver.as_deref())?;
+                    out!("Watching {} for approval requests as {} (Ctrl+C to stop)…", cli.project.display(), me.id());
+                    let mut seen = std::collections::HashSet::new();
+                    loop {
+                        for a in service.approvals(Some("pending"), 100)?.into_iter().rev() {
+                            if !seen.insert(a.id.clone()) {
+                                continue;
+                            }
+                            out!("");
+                            print_approval(&a)?;
+                            let answer = tokio::task::spawn_blocking(|| {
+                                use std::io::Write;
+                                print!("Approve? [y/N] ");
+                                let _ = std::io::stdout().flush();
+                                let mut line = String::new();
+                                std::io::stdin().read_line(&mut line).map(|_| line)
+                            })
+                            .await??;
+                            let yes = matches!(answer.trim(), "y" | "Y" | "yes");
+                            match service.decide_approval(&a.id, &me, yes) {
+                                Ok(_) => out!("{} {}", if yes { "✓ approved" } else { "✗ denied" }, a.id),
+                                Err(e) => out!("could not decide {}: {e}", a.id),
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
         Command::Audit { action: AuditAction::Verify } => {

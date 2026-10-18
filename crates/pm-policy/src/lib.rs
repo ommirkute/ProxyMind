@@ -11,11 +11,8 @@ pub mod roe;
 pub mod scope;
 pub mod window;
 
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -254,101 +251,9 @@ impl Policy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalStatus {
-    Pending,
-    Approved,
-    Denied,
-    /// Approved and already run. Approvals are single-use.
-    Used,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Approval {
-    pub id: String,
-    pub request: ActionRequest,
-    /// Hash of the exact action parameters. An approval only covers these.
-    pub params_hash: String,
-    pub status: ApprovalStatus,
-    pub decided_by: Option<String>,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum ApprovalError {
-    #[error("no approval with id {0}")]
-    NotFound(String),
-    #[error("approval {0} was already decided")]
-    AlreadyDecided(String),
-    #[error("only humans can approve actions")]
-    NotHuman,
-}
-
-/// Actions waiting for a human decision. In memory for now; persisted with
-/// the service layer.
-#[derive(Default)]
-pub struct ApprovalQueue {
-    next: AtomicU64,
-    items: Mutex<HashMap<String, Approval>>,
-}
-
-impl ApprovalQueue {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Queues an action. `params` are the exact parameters it will run with.
-    pub fn submit(&self, request: ActionRequest, params: &serde_json::Value) -> Approval {
-        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let approval = Approval {
-            id: format!("apr_{n}"),
-            request,
-            params_hash: params_hash(params),
-            status: ApprovalStatus::Pending,
-            decided_by: None,
-        };
-        self.items.lock().insert(approval.id.clone(), approval.clone());
-        approval
-    }
-
-    pub fn decide(&self, id: &str, approver: &Actor, approve: bool) -> Result<Approval, ApprovalError> {
-        if approver.kind != ActorKind::Human {
-            return Err(ApprovalError::NotHuman);
-        }
-        let mut items = self.items.lock();
-        let a = items.get_mut(id).ok_or_else(|| ApprovalError::NotFound(id.into()))?;
-        if a.status != ApprovalStatus::Pending {
-            return Err(ApprovalError::AlreadyDecided(id.into()));
-        }
-        a.status = if approve { ApprovalStatus::Approved } else { ApprovalStatus::Denied };
-        a.decided_by = Some(approver.id());
-        Ok(a.clone())
-    }
-
-    pub fn get(&self, id: &str) -> Option<Approval> {
-        self.items.lock().get(id).cloned()
-    }
-
-    pub fn pending(&self) -> Vec<Approval> {
-        self.items.lock().values().filter(|a| a.status == ApprovalStatus::Pending).cloned().collect()
-    }
-
-    /// Uses up an approval. Succeeds only once, and only if `id` was
-    /// approved for exactly these parameters.
-    pub fn consume(&self, id: &str, params: &serde_json::Value) -> Option<Approval> {
-        let mut items = self.items.lock();
-        let a = items.get_mut(id)?;
-        if a.status != ApprovalStatus::Approved || a.params_hash != params_hash(params) {
-            return None;
-        }
-        a.status = ApprovalStatus::Used;
-        Some(a.clone())
-    }
-}
-
 /// Hash of the parameters with object keys sorted, so the same parameters
 /// always hash the same whatever order a client sent them in.
-fn params_hash(params: &serde_json::Value) -> String {
+pub fn params_hash(params: &serde_json::Value) -> String {
     fn canonical(v: &serde_json::Value) -> serde_json::Value {
         match v {
             serde_json::Value::Object(o) => {

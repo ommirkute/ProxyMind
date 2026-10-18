@@ -4,7 +4,7 @@
 
 Other proxies give AI access to their tools. ProxyMind gives AI an understanding of the app, a memory of the engagement and a requirement to prove every finding, all within rules of engagement the client can audit.
 
-> **Status: early development (pre-alpha).** Working today: the HTTP/1.1 intercepting proxy with TLS interception, project history, and the policy gate (scope, rules of engagement, approvals, tamper-evident audit log). Everything else below is planned. See [`docs/plan.md`](docs/plan.md).
+> **Status: early development (pre-alpha).** Working today: the HTTP/1.1 intercepting proxy with TLS interception, project history, the policy gate (scope, rules of engagement, approvals, tamper-evident audit log), and an MCP server so AI agents can search traffic and send requests under those rules. Everything else below is planned. See [`docs/plan.md`](docs/plan.md).
 
 ## Why ProxyMind
 
@@ -40,6 +40,16 @@ curl --cacert ~/.proxymind/proxymind-ca.pem -x http://127.0.0.1:8080 https://exa
 
 Traffic is stored in `proxymind.pmproj` (a SQLite file) in the current directory. Use `--project <file>` to choose another.
 
+### Use it with AI agents (MCP)
+
+```bash
+./target/release/proxymind roe use examples/roe.yaml
+claude mcp add proxymind -- "$PWD/target/release/proxymind" -p "$PWD/proxymind.pmproj" mcp --actor agent:claude
+./target/release/proxymind approvals watch    # approve or deny what the agent asks to do
+```
+
+Agents can search history, read exchanges in token-budgeted views with secrets hidden, and send requests through the policy gate. See [docs/agents.md](docs/agents.md).
+
 ### Rules of engagement
 
 Describe what's in scope and what each kind of actor may do in a YAML file (see [`examples/roe.yaml`](examples/roe.yaml)), then check it and try requests against it. Nothing is sent when testing.
@@ -67,17 +77,17 @@ crates/
   pm-proxy     intercepting proxy                               ✅ working (HTTP/1.1)
   pm-cli       the `proxymind` binary                           ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working
-  pm-replay    Repeater-style send engine                       ⏳ planned (M2)
+  pm-replay    send engine (incl. single-packet parallel sends) ✅ working
   pm-identity  multi-identity sessions                          ⏳ planned (M3)
   pm-diff      semantic diff                                    ⏳ planned (M3)
   pm-model     live app model                                   ⏳ planned (M4)
   pm-ledger    hypotheses and coverage                          ⏳ planned (M4)
   pm-proof     proof oracles and findings                       ⏳ planned (M5)
   pm-oast      out-of-band testing client/server                ⏳ planned (M5)
-  pm-ai        LLM views, redaction, providers                  ⏳ planned (M6)
-  pm-service   the one service layer every client uses          🟡 started (policy + audit)
+  pm-ai        LLM views, redaction, untrusted tagging          ✅ working (providers planned)
+  pm-service   the one service layer every client uses          ✅ working
   pm-api       REST API and event stream                        ⏳ planned (M2)
-  pm-mcp       MCP server                                       ⏳ planned (M2)
+  pm-mcp       MCP server                                       ✅ working
 docs/          plan, decision records (ADRs), RFCs
 examples/      example rules-of-engagement file
 schemas/       JSON schemas

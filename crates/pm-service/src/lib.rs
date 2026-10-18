@@ -4,18 +4,18 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
+mod approvals;
 mod history;
 mod replay;
 
 pub use history::ExchangePage;
+pub use pm_store::ApprovalRow;
 pub use replay::{ReplayRequest, ReplayResult};
 
 use parking_lot::Mutex;
 use pm_ai::Redactor;
 use pm_core::now_ms;
-use pm_policy::{
-    ActionRequest, Actor, Approval, ApprovalError, ApprovalQueue, Decision, Policy, RateLimiter, Verdict, audit,
-};
+use pm_policy::{ActionRequest, Actor, Decision, Policy, RateLimiter, Verdict, audit};
 use pm_replay::Sender;
 use pm_store::Store;
 use serde::Serialize;
@@ -26,8 +26,8 @@ pub use {pm_ai, pm_policy, pm_store};
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
-    #[error(transparent)]
-    Approval(#[from] ApprovalError),
+    #[error("{0}")]
+    Approval(String),
     #[error("approval {0} is not approved, was already used, or does not cover these parameters")]
     ApprovalMismatch(String),
     #[error("{0}")]
@@ -54,7 +54,6 @@ pub enum Authorization {
 
 pub struct Service {
     policy: Policy,
-    approvals: ApprovalQueue,
     store: Mutex<Store>,
     sender: Sender,
     limiter: RateLimiter,
@@ -71,7 +70,6 @@ impl Service {
         Ok(Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy,
-            approvals: ApprovalQueue::new(),
             store: Mutex::new(store),
             sender,
             redactor: Redactor::new(),
@@ -135,9 +133,12 @@ impl Service {
             Decision::Allow => Authorization::Allowed { reasons: verdict.reasons },
             Decision::Deny => Authorization::Denied { reasons: verdict.reasons },
             Decision::Approve => {
-                let summary = req.summary.clone();
-                let a = self.approvals.submit(req, params);
-                Authorization::PendingApproval { approval_id: a.id, summary, reasons: verdict.reasons }
+                let id = self.submit_approval(&req, params)?;
+                Authorization::PendingApproval {
+                    approval_id: id,
+                    summary: req.summary.clone(),
+                    reasons: verdict.reasons,
+                }
             }
         };
         let decision = match &auth {
@@ -146,53 +147,6 @@ impl Service {
             Authorization::PendingApproval { approval_id, .. } => format!("pending:{approval_id}"),
         };
         self.audit(&actor, &action, detail, &decision)?;
-        Ok(auth)
-    }
-
-    /// A human approves or denies a pending action. Audited.
-    pub fn decide_approval(&self, id: &str, approver: &Actor, approve: bool) -> Result<Approval> {
-        let result = self.approvals.decide(id, approver, approve);
-        let decision = match &result {
-            Ok(_) if approve => "approved",
-            Ok(_) => "denied",
-            Err(_) => "rejected",
-        };
-        let err = result.as_ref().err().map(ToString::to_string);
-        self.audit(&approver.id(), "approval_decide", json!({ "approval_id": id, "error": err }), decision)?;
-        Ok(result?)
-    }
-
-    pub fn approval(&self, id: &str) -> Option<Approval> {
-        self.approvals.get(id)
-    }
-
-    pub fn pending_approvals(&self) -> Vec<Approval> {
-        self.approvals.pending()
-    }
-
-    /// Runs a previously approved action. Scope and time windows are checked
-    /// again, because they may have changed since the request was made.
-    /// The parameters must match the approved ones exactly.
-    pub fn run_approved(&self, approval_id: &str, params: &Value) -> Result<Authorization> {
-        let Some(a) = self.approvals.consume(approval_id, params) else {
-            let actor = self.approvals.get(approval_id).map(|a| a.request.actor.id()).unwrap_or_default();
-            let detail = json!({ "approval_id": approval_id });
-            self.audit(&actor, "run_approved", detail, "rejected:not-approved-used-or-params-changed")?;
-            return Err(ServiceError::ApprovalMismatch(approval_id.into()));
-        };
-        let mut verdict = self.policy.evaluate(&a.request, jiff::Timestamp::now());
-        // The tier rule was satisfied by the human approval; only hard
-        // limits (scope, time) can still deny it.
-        if verdict.decision == Decision::Approve {
-            verdict.decision = Decision::Allow;
-        }
-        let detail = json!({ "approval_id": approval_id, "reasons": verdict.reasons });
-        let auth = match verdict.decision {
-            Decision::Deny => Authorization::Denied { reasons: verdict.reasons },
-            _ => Authorization::Allowed { reasons: vec![format!("approved by {}", a.decided_by.unwrap_or_default())] },
-        };
-        let decision = if matches!(auth, Authorization::Denied { .. }) { "deny" } else { "allow" };
-        self.audit(&a.request.actor.id(), &a.request.action, detail, decision)?;
         Ok(auth)
     }
 }
@@ -286,5 +240,26 @@ scope:
         let err = verify_audit(&Store::open(&path).unwrap()).unwrap_err().to_string();
         assert!(err.contains("record 2"), "{err}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn approvals_are_shared_between_processes() {
+        let path = std::env::temp_dir().join(format!("pm-service-shared-{}.pmproj", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let open = || Service::new(Store::open(&path).unwrap(), Policy::new(Roe::parse(ROE).unwrap())).unwrap();
+        let (mcp, cli) = (open(), open());
+        let params = json!({"raw": "POST /x"});
+        let auth = mcp.authorize(req("agent:a", Tier::ActiveIntrusive, "https://app.example.com/x"), &params).unwrap();
+        let Authorization::PendingApproval { approval_id, .. } = auth else { panic!("{auth:?}") };
+
+        assert_eq!(cli.approvals(Some("pending"), 10).unwrap()[0].id, approval_id);
+        cli.decide_approval(&approval_id, &Actor::parse("human:omkar").unwrap(), true).unwrap();
+        assert!(cli.decide_approval(&approval_id, &Actor::parse("human:other").unwrap(), false).is_err());
+        assert!(matches!(mcp.run_approved(&approval_id, &params).unwrap(), Authorization::Allowed { .. }));
+        assert_eq!(cli.approval(&approval_id).unwrap().unwrap().status, "used");
+        drop((mcp, cli));
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
     }
 }

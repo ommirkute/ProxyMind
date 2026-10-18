@@ -60,7 +60,52 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
 "#,
+    r#"
+-- Actions waiting for (or decided by) a human. Shared between processes,
+-- so an MCP server and a human's CLI or UI see the same queue.
+CREATE TABLE approvals (
+    id          TEXT PRIMARY KEY,
+    created_ms  INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    target      TEXT,
+    summary     TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    status      TEXT NOT NULL,      -- pending | approved | denied | used
+    decided_by  TEXT,
+    decided_ms  INTEGER
+);
+CREATE INDEX approvals_status ON approvals(status);
+"#,
+    r#"
+-- Project settings shared by every process, e.g. the rules of engagement.
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#,
 ];
+
+/// An action waiting for, or decided by, a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalRow {
+    pub id: String,
+    pub created_ms: i64,
+    pub actor: String,
+    pub action: String,
+    pub tier: String,
+    /// URL the action targets, if any.
+    pub target: Option<String>,
+    pub summary: String,
+    /// The exact parameters (JSON text) the approval covers.
+    pub params: String,
+    pub params_hash: String,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_ms: Option<i64>,
+}
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,6 +209,8 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // The proxy, an MCP server and the CLI may use one project at once.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -355,6 +402,99 @@ impl Store {
         )?;
         let rows = stmt.query_map([], Self::audit_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn insert_approval(&mut self, a: &ApprovalRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO approvals (id, created_ms, actor, action, tier, target, summary, params, params_hash, status,
+                                    decided_by, decided_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                a.id,
+                a.created_ms,
+                a.actor,
+                a.action,
+                a.tier,
+                a.target,
+                a.summary,
+                a.params,
+                a.params_hash,
+                a.status,
+                a.decided_by,
+                a.decided_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    const APPROVAL_COLS: &'static str =
+        "id, created_ms, actor, action, tier, target, summary, params, params_hash, status, decided_by, decided_ms";
+
+    fn approval_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
+        Ok(ApprovalRow {
+            id: r.get(0)?,
+            created_ms: r.get(1)?,
+            actor: r.get(2)?,
+            action: r.get(3)?,
+            tier: r.get(4)?,
+            target: r.get(5)?,
+            summary: r.get(6)?,
+            params: r.get(7)?,
+            params_hash: r.get(8)?,
+            status: r.get(9)?,
+            decided_by: r.get(10)?,
+            decided_ms: r.get(11)?,
+        })
+    }
+
+    pub fn get_approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
+        let sql = format!("SELECT {} FROM approvals WHERE id = ?1", Self::APPROVAL_COLS);
+        Ok(self.conn.query_row(&sql, [id], Self::approval_from_row).optional()?)
+    }
+
+    /// Approvals with this status (or all), newest first.
+    pub fn list_approvals(&self, status: Option<&str>, limit: usize) -> Result<Vec<ApprovalRow>> {
+        let sql = format!(
+            "SELECT {} FROM approvals WHERE (?1 IS NULL OR status = ?1) ORDER BY created_ms DESC LIMIT ?2",
+            Self::APPROVAL_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![status, limit as i64], Self::approval_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves an approval from `from` to `to` atomically. Returns false if it
+    /// was not in state `from` (or, when `params_hash` is given, if the hash
+    /// differs), so two processes can't both decide or use it.
+    pub fn transition_approval(
+        &mut self,
+        id: &str,
+        from: &str,
+        to: &str,
+        decided_by: Option<&str>,
+        params_hash: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE approvals SET status = ?3,
+                    decided_by = COALESCE(?4, decided_by),
+                    decided_ms = CASE WHEN ?4 IS NULL THEN decided_ms ELSE ?6 END
+             WHERE id = ?1 AND status = ?2 AND (?5 IS NULL OR params_hash = ?5)",
+            params![id, from, to, decided_by, params_hash, now_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     pub fn count_exchanges(&self) -> Result<i64> {
