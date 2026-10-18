@@ -36,7 +36,7 @@ Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find t
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, an intercept queue (hold, edit, forward or drop requests and responses), Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, an intercept queue (hold, edit, forward or drop requests and responses), match-and-replace rules, Repeater (send as any identity), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 
@@ -88,6 +88,13 @@ Describe what's in scope and what each kind of actor may do in a YAML file (see 
 ./target/release/proxymind audit list
 ```
 
+Match-and-replace rules (add or strip headers, rewrite bodies) live in the project too; edit them in the UI or load a file, and a running proxy picks them up within seconds. See [`examples/match-replace.yaml`](examples/match-replace.yaml).
+
+```bash
+./target/release/proxymind rules load examples/match-replace.yaml
+./target/release/proxymind rules show
+```
+
 Scope rules resist the usual bypass tricks (encoded paths, `../`, `;params`, look-alike hosts, odd IP formats, IPv4-mapped IPv6). The full list is in [`crates/pm-policy/tests/scope_bypass.rs`](crates/pm-policy/tests/scope_bypass.rs).
 
 ## Repository layout
@@ -97,7 +104,7 @@ crates/
   pm-http      raw HTTP/1.x parsing that keeps exact bytes      ✅ working
   pm-tls       CA and per-host certificates, upstream TLS       ✅ working
   pm-store     SQLite project file and compressed blob store    ✅ working
-  pm-proxy     intercepting proxy, intercept queue              ✅ working (HTTP/1.1)
+  pm-proxy     proxy, intercept queue, match-and-replace       ✅ working (HTTP/1.1)
   pm-cli       the `proxymind` binary                           ✅ working
   pm-demo      VulnShop, a deliberately vulnerable demo API     ✅ working
   pm-policy    scope, ROE, approvals, rate limits, audit chain  ✅ working

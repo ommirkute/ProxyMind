@@ -1,0 +1,26 @@
+# Match-and-replace rules for the proxy:  proxymind rules load examples/match-replace.yaml
+# Rules run in order on live traffic, before the intercept queue. By default
+# they apply only to in-scope targets (in_scope_only: true).
+#
+# part: request_first_line | request_header | request_body |
+#       response_first_line | response_header | response_body
+
+# Tag your traffic so the client's team can tell it apart in their logs.
+- part: request_header
+  replace: "X-Pentest: ProxyMind"
+  comment: Add a header (an empty match adds one)
+
+# Strip a header: replace the whole line with nothing.
+- part: request_header
+  match: "^If-None-Match: .*$"
+  replace: ""
+  regex: true
+  comment: Always get a full response, never 304
+
+# Unhide client-side features flagged in responses.
+- part: response_body
+  match: '"isAdmin":\s*false'
+  replace: '"isAdmin":true'
+  regex: true
+  enabled: false
+  comment: Turn on to see admin-only UI

@@ -1,11 +1,11 @@
 //! The intercepting proxy.
 //!
-//! Spike scope (milestone M0/M1): HTTP/1.1, CONNECT with TLS interception,
-//! WebSocket upgrade pass-through, and recording of every exchange. One
-//! upstream connection per request; pooling, HTTP/2 and the intercept queue
-//! come next.
+//! HTTP/1.1, CONNECT with TLS interception, WebSocket upgrade pass-through,
+//! match-and-replace rules, an intercept queue, and recording of every
+//! exchange. One upstream connection per request; pooling and HTTP/2 come next.
 
 pub mod intercept;
+pub mod rewrite;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings};
 use pm_store::{NewExchange, Store};
 use pm_tls::{CertAuthority, TlsAcceptor};
+pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -57,22 +58,30 @@ pub struct Proxy {
     ca: Arc<CertAuthority>,
     sender: Sender,
     recorder: Recorder,
-    intercept: Option<Arc<InterceptQueue>>,
+    hooks: Hooks,
+}
+
+/// Optional user controls over live traffic.
+#[derive(Default, Clone)]
+pub struct Hooks {
+    /// Match-and-replace rules, applied first.
+    pub rewrite: Option<Arc<Rewriter>>,
+    /// The intercept queue; a human sees messages after the rules ran.
+    pub intercept: Option<Arc<InterceptQueue>>,
 }
 
 impl Proxy {
     pub fn new(ca: Arc<CertAuthority>, recorder: Recorder, verify_upstream: bool) -> Result<Arc<Self>> {
-        Self::with_intercept(ca, recorder, verify_upstream, None)
+        Self::with_hooks(ca, recorder, verify_upstream, Hooks::default())
     }
 
-    /// A proxy that consults `intercept` for every request and response.
-    pub fn with_intercept(
+    pub fn with_hooks(
         ca: Arc<CertAuthority>,
         recorder: Recorder,
         verify_upstream: bool,
-        intercept: Option<Arc<InterceptQueue>>,
+        hooks: Hooks,
     ) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder, intercept }))
+        Ok(Arc::new(Self { ca, sender: Sender::new(verify_upstream)?, recorder, hooks }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -142,22 +151,19 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
-            // Intercept: a human may forward, edit or drop the request.
+            // Match-and-replace rules, then the intercept queue, where a
+            // human may forward, edit or drop the request.
             let mut method = head.method.clone();
             let mut path = target.path.clone();
-            if let Some(q) = &self.intercept {
-                match q.hold(Kind::Request, &target.scheme, &target.host, target.port, &method, &path, &request).await {
+            let mut edited_request = None;
+            if let Some(r) = &self.hooks.rewrite {
+                edited_request = r.apply_request(&target.scheme, &target.host, target.port, &path, &request);
+            }
+            if let Some(q) = &self.hooks.intercept {
+                let current = edited_request.as_deref().unwrap_or(&request);
+                match q.hold(Kind::Request, &target.scheme, &target.host, target.port, &method, &path, current).await {
                     Decision::Forward(None) => {}
-                    Decision::Forward(Some(edited)) => {
-                        if let Ok(Some(end)) = pm_http::find_head_end(&edited)
-                            && let Ok(h) = pm_http::parse_request_head(&edited[..end])
-                        {
-                            path = pm_http::split_absolute_target(&h.target)
-                                .map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
-                            method = h.method;
-                        }
-                        request = edited;
-                    }
+                    Decision::Forward(Some(edited)) => edited_request = Some(edited),
                     Decision::Drop => {
                         let msg = "Request dropped in ProxyMind's intercept queue.";
                         let resp = format!(
@@ -169,6 +175,16 @@ impl Proxy {
                         return Ok(());
                     }
                 }
+            }
+            if let Some(edited) = edited_request {
+                if let Ok(Some(end)) = pm_http::find_head_end(&edited)
+                    && let Ok(h) = pm_http::parse_request_head(&edited[..end])
+                {
+                    path = pm_http::split_absolute_target(&h.target)
+                        .map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
+                    method = h.method;
+                }
+                request = edited;
             }
 
             let started = Instant::now();
@@ -194,14 +210,21 @@ impl Proxy {
 
             match result {
                 Ok(resp) => {
-                    // Intercept the response too, if asked. The project keeps
-                    // the server's original; the browser gets the edit.
+                    // Rules and intercept apply to responses too. The project
+                    // keeps the server's original; the browser gets the edit.
                     let mut to_client: Option<Vec<u8>> = None;
-                    if let Some(q) = &self.intercept
-                        && !matches!(resp.conn, AfterResponse::Upgraded(_))
+                    let upgraded = matches!(resp.conn, AfterResponse::Upgraded(_));
+                    if let Some(r) = &self.hooks.rewrite
+                        && !upgraded
                     {
+                        to_client = r.apply_response(&target.scheme, &target.host, target.port, &path, &resp.raw);
+                    }
+                    if let Some(q) = &self.hooks.intercept
+                        && !upgraded
+                    {
+                        let current = to_client.as_deref().unwrap_or(&resp.raw);
                         match q
-                            .hold(Kind::Response, &target.scheme, &target.host, target.port, &method, &path, &resp.raw)
+                            .hold(Kind::Response, &target.scheme, &target.host, target.port, &method, &path, current)
                             .await
                         {
                             Decision::Forward(None) => {}

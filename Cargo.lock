@@ -1317,6 +1317,7 @@ dependencies = [
  "pm-replay",
  "pm-store",
  "pm-tls",
+ "regex",
  "rustls",
  "serde",
  "tokio",

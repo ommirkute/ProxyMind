@@ -1,10 +1,11 @@
-//! Intercept queue through the real proxy.
+//! Intercept queue and match-and-replace rules through the real proxy.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pm_proxy::intercept::Decision;
-use pm_proxy::{InterceptQueue, InterceptSettings, Proxy, Recorder};
+use pm_proxy::rewrite::Part;
+use pm_proxy::{InterceptQueue, InterceptSettings, Proxy, Recorder, RewriteRule, Rewriter};
 use pm_store::Store;
 use pm_tls::CertAuthority;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -29,6 +30,10 @@ async fn backend(seen: Arc<Mutex<Vec<Vec<u8>>>>) -> u16 {
 }
 
 async fn setup(name: &str) -> (u16, Arc<InterceptQueue>, std::path::PathBuf) {
+    setup_with(name, None).await
+}
+
+async fn setup_with(name: &str, rewrite: Option<Arc<Rewriter>>) -> (u16, Arc<InterceptQueue>, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("pm-intercept-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -37,7 +42,8 @@ async fn setup(name: &str) -> (u16, Arc<InterceptQueue>, std::path::PathBuf) {
     let (recorder, _w) = Recorder::spawn(Store::open(&project).unwrap());
     let q = Arc::new(InterceptQueue::new());
     q.set_settings(InterceptSettings { enabled: true, in_scope_only: false, ..Default::default() });
-    let proxy = Proxy::with_intercept(ca, recorder, false, Some(q.clone())).unwrap();
+    let proxy =
+        Proxy::with_hooks(ca, recorder, false, pm_proxy::Hooks { intercept: Some(q.clone()), rewrite }).unwrap();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(proxy.run(l));
@@ -113,6 +119,43 @@ async fn edited_response_reaches_the_browser_and_the_original_is_recorded() {
         if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
             let ex = s.get_exchange(e.id).unwrap().unwrap();
             assert!(ex.response.unwrap().ends_with(b"original"));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("not recorded");
+}
+
+#[tokio::test]
+async fn rules_rewrite_traffic_before_the_intercept_queue_sees_it() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let port = backend(seen.clone()).await;
+    let rw = Arc::new(Rewriter::new());
+    rw.set_rules(vec![
+        RewriteRule { replace: "X-Pentest: proxymind".into(), in_scope_only: false, ..Default::default() },
+        RewriteRule {
+            part: Part::ResponseBody,
+            pattern: "original".into(),
+            replace: "rewritten!".into(),
+            in_scope_only: false,
+            ..Default::default()
+        },
+    ])
+    .unwrap();
+    let (proxy, q, project) = setup_with("rules", Some(rw)).await;
+    let client = send(proxy, format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+    let held = wait_held(&q).await;
+    assert!(held.raw.contains("X-Pentest: proxymind"), "the human sees the rewritten request: {}", held.raw);
+    q.decide(held.id, Decision::Forward(None));
+    let out = client.await.unwrap();
+    assert!(out.contains("Content-Length: 10\r\n") && out.ends_with("rewritten!"), "{out}");
+    assert_eq!(seen.lock().unwrap()[0], b"GET /a HTTP/1.1\r\nHost: x\r\nX-Pentest: proxymind\r\n\r\n".to_vec());
+    for _ in 0..50 {
+        let s = Store::open(&project).unwrap();
+        if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
+            let ex = s.get_exchange(e.id).unwrap().unwrap();
+            assert!(ex.request.ends_with(b"X-Pentest: proxymind\r\n\r\n"), "records what was sent");
+            assert!(ex.response.unwrap().ends_with(b"original"), "records what the server said");
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

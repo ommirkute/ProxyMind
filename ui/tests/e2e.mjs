@@ -191,6 +191,31 @@ try {
   const heldRows = await page.locator('[data-testid^="row-"]').allTextContents();
   check(heldRows.length === 1 && heldRows[0].includes("held-edited"), "history records the edited request only");
 
+  console.log("Match and replace");
+  await page.getByRole("button", { name: "Match & replace" }).click();
+  await page.getByRole("button", { name: "Add rule" }).click();
+  await page.getByLabel("Rule 1 replace").fill("X-E2E: rewritten");
+  await page.getByRole("button", { name: "Add rule" }).click();
+  await page.getByLabel("Rule 2 part").selectOption("response_body");
+  await page.getByLabel("Rule 2 match").fill("results");
+  await page.getByLabel("Rule 2 replace").fill("REWRITTEN");
+  await page.getByTestId("rules-save").click();
+  await page.waitForSelector("text=Saved 2 rule(s)");
+  await page.screenshot({ path: join(SHOTS, "6c-rules.png") });
+  const rewritten = await search("rules-check");
+  check(rewritten.includes("REWRITTEN") && !rewritten.includes("results"), "response rule rewrites what the client gets");
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByLabel("Path", { exact: true }).fill("rules-check");
+  await sleep(500);
+  await page.locator('[data-testid^="row-"]').first().click();
+  await page.getByRole("tab", { name: "request" }).click();
+  const sent = await page
+    .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "X-E2E: rewritten" })
+    .first()
+    .waitFor({ timeout: 5000 })
+    .then(() => true, () => false);
+  check(sent, "history shows the request as sent, with the added header");
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

@@ -76,6 +76,11 @@ enum Command {
         #[command(subcommand)]
         action: RoeAction,
     },
+    /// Match-and-replace rules the proxy applies to live traffic.
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
     /// Inspect the project's tamper-evident audit log.
     Audit {
         #[command(subcommand)]
@@ -353,6 +358,24 @@ enum ApprovalAction {
 }
 
 #[derive(Subcommand)]
+enum RulesAction {
+    /// Print the saved rules (JSON).
+    Show,
+    /// Replace the rules with a YAML or JSON list; a running proxy picks them up within seconds.
+    Load {
+        file: PathBuf,
+        /// Who is changing them: human:<name> (default: your user name)
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Remove all rules.
+    Clear {
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum RoeAction {
     /// Validate an ROE file and print a summary.
     Check { file: PathBuf },
@@ -483,6 +506,30 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// Keeps the proxy's match-and-replace rules in step with the project, so
+/// `proxymind rules load` or another UI takes effect without a restart.
+fn watch_rules(project: &std::path::Path, rewriter: Arc<pm_proxy::Rewriter>) -> Result<()> {
+    let store = Store::open(project)?;
+    if let Err(e) = pm_service::sync_rules(&store, &rewriter) {
+        eprintln!("Match-and-replace rules not loaded: {e}");
+    }
+    let n = rewriter.rules().iter().filter(|r| r.enabled).count();
+    if n > 0 {
+        eprintln!("{n} match-and-replace rule(s) active");
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match pm_service::sync_rules(&store, &rewriter) {
+                Ok(true) => eprintln!("Match-and-replace rules reloaded"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("match-and-replace rules: {e}"),
+            }
+        }
+    });
+    Ok(())
+}
+
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -497,7 +544,16 @@ async fn run() -> Result<()> {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
             let store = Store::open(&cli.project)?;
             let (recorder, writer) = Recorder::spawn(store);
-            let proxy = Proxy::new(ca.clone(), recorder, *verify_upstream)?;
+            // In-scope-only rules need the rules of engagement; without
+            // them only rules marked "any host" apply.
+            let rewriter = Arc::new(pm_proxy::Rewriter::new());
+            match open_service(&cli.project, None) {
+                Ok(service) => service.attach_rewriter(rewriter.clone())?,
+                Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
+            }
+            watch_rules(&cli.project, rewriter.clone())?;
+            let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), ..Default::default() };
+            let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             eprintln!("ProxyMind listening on http://{listen}");
             eprintln!("Project: {}", cli.project.display());
@@ -601,6 +657,23 @@ async fn run() -> Result<()> {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
         }
+        Command::Rules { action: RulesAction::Show } => {
+            let rules = pm_service::load_rules(&Store::open(&cli.project)?)?;
+            out!("{}", serde_json::to_string_pretty(&rules)?);
+        }
+        Command::Rules { action: RulesAction::Load { file, actor } } => {
+            let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            let rules: Vec<pm_proxy::RewriteRule> =
+                serde_saphyr::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let service = open_service(&cli.project, None)?;
+            let saved = service.set_match_replace_rules(&human_actor(actor.as_deref())?, rules)?;
+            out!("✓ {} match-and-replace rule(s) saved", saved.len());
+        }
+        Command::Rules { action: RulesAction::Clear { actor } } => {
+            let service = open_service(&cli.project, None)?;
+            service.set_match_replace_rules(&human_actor(actor.as_deref())?, vec![])?;
+            out!("✓ match-and-replace rules cleared");
+        }
         Command::Roe { action: RoeAction::Show } => {
             let store = Store::open(&cli.project)?;
             match store.get_setting(ROE_SETTING)? {
@@ -629,7 +702,11 @@ async fn run() -> Result<()> {
                 let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
                 let queue = Arc::new(pm_proxy::InterceptQueue::new());
                 service.attach_intercept(queue.clone());
-                let p = Proxy::with_intercept(ca.clone(), recorder, false, Some(queue))?;
+                let rewriter = Arc::new(pm_proxy::Rewriter::new());
+                service.attach_rewriter(rewriter.clone())?;
+                watch_rules(&cli.project, rewriter.clone())?;
+                let hooks = pm_proxy::Hooks { rewrite: Some(rewriter), intercept: Some(queue) };
+                let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 tokio::spawn(p.run(l));

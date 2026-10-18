@@ -13,6 +13,7 @@ mod intercept;
 mod model;
 mod proof;
 mod replay;
+mod rules;
 
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use findings::{FindingUpdate, NewFinding};
@@ -23,6 +24,7 @@ pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use replay::{ReplayRequest, ReplayResult};
+pub use rules::{RULES_SETTING, load_rules, sync_rules};
 
 use parking_lot::Mutex;
 use pm_ai::Redactor;
@@ -71,6 +73,7 @@ pub struct Service {
     limiter: RateLimiter,
     redactor: Redactor,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
+    rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
 }
 
 impl Service {
@@ -87,6 +90,7 @@ impl Service {
             sender,
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
+            rewriter: std::sync::OnceLock::new(),
         })
     }
 

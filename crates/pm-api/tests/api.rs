@@ -155,3 +155,22 @@ async fn replay_history_findings_and_events() {
     }
     assert!(got.contains("\"findings\":1"), "{got}");
 }
+
+#[tokio::test]
+async fn match_and_replace_rules() {
+    let (port, _) = start().await;
+    let (st, _, body) = http(port, "GET", "/api/v1/match-replace", &[AUTH], None).await;
+    assert_eq!((st, body.as_str()), (200, r#"{"rules":[]}"#));
+    let bad = json!({"rules": [{"part": "request_body", "match": "(", "replace": "x", "regex": true}]});
+    assert_eq!(http(port, "PUT", "/api/v1/match-replace", &[AUTH, CHANGE], Some(bad)).await.0, 400, "bad regex");
+    let smuggle = json!({"rules": [{"replace": "A: 1\r\nB: 2"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/match-replace", &[AUTH, CHANGE], Some(smuggle)).await.0, 400);
+    let good = json!({"rules": [{"replace": "X-Test: 1"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/match-replace", &[AUTH, CHANGE], Some(good)).await.0, 200);
+    let (_, _, body) = http(port, "GET", "/api/v1/match-replace", &[AUTH], None).await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["rules"][0]["replace"], "X-Test: 1");
+    assert_eq!(v["rules"][0]["in_scope_only"], true, "in scope only by default");
+    let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
+    assert!(audit.contains("match_replace_rules"), "changes are audited");
+}

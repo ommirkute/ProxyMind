@@ -21,6 +21,7 @@ pm-replay = { version = "0.0.1", path = "../pm-replay" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
 parking_lot = "0.12.5"
 serde = { version = "1.0.229", features = ["derive"] }
+regex = "1.13.1"
 
 [lints]
 workspace = true

@@ -78,6 +78,7 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/forward-all", post(intercept_forward_all))
         .route("/intercept/{id}/forward", post(intercept_forward))
         .route("/intercept/{id}/drop", post(intercept_drop))
+        .route("/match-replace", get(rules_get).put(rules_put))
 }
 
 #[derive(Deserialize)]
@@ -295,6 +296,19 @@ async fn intercept_forward(State(st): State<AppState>, Path(id): Path<u64>, Json
 async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiResult {
     st.service.intercept_drop(&st.actor, id)?;
     ok(json!({ "dropped": id }))
+}
+
+#[derive(Deserialize)]
+struct RulesBody {
+    rules: Vec<pm_service::pm_proxy::RewriteRule>,
+}
+
+async fn rules_get(State(st): State<AppState>) -> ApiResult {
+    ok(json!({ "rules": st.service.match_replace_rules()? }))
+}
+
+async fn rules_put(State(st): State<AppState>, Json(b): Json<RulesBody>) -> ApiResult {
+    ok(json!({ "rules": st.service.set_match_replace_rules(&st.actor, b.rules)? }))
 }
 
 async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
