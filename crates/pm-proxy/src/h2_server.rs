@@ -15,20 +15,26 @@ use pm_http::h2text::{H2Request, h2_response, render_h2_request};
 use pm_replay::{Endpoint, Io};
 use pm_store::NewExchange;
 
-use crate::{DROPPED_MSG, Proxy};
+use crate::{DROPPED_MSG, Proxy, SelfAddr};
 
 /// Largest request body accepted from the browser over HTTP/2.
 const MAX_BODY: usize = 64 << 20;
 
 impl Proxy {
-    pub(crate) async fn serve_h2<S: Io + 'static>(self: Arc<Self>, io: S, host: String, port: u16) -> Result<()> {
+    pub(crate) async fn serve_h2<S: Io + 'static>(
+        self: Arc<Self>,
+        io: S,
+        host: String,
+        port: u16,
+        me: Option<SelfAddr>,
+    ) -> Result<()> {
         let mut conn = h2::server::handshake(io).await.context("HTTP/2 handshake with client")?;
         while let Some(next) = conn.accept().await {
             let (req, respond) = next.context("HTTP/2 stream from client")?;
             let this = self.clone();
             let host = host.clone();
             tokio::spawn(async move {
-                if let Err(e) = this.h2_stream(req, respond, &host, port).await {
+                if let Err(e) = this.h2_stream(req, respond, &host, port, me).await {
                     tracing::debug!(error = %e, "HTTP/2 stream ended with error");
                 }
             });
@@ -42,6 +48,7 @@ impl Proxy {
         mut respond: SendResponse<Bytes>,
         host: &str,
         port: u16,
+        me: Option<SelfAddr>,
     ) -> Result<()> {
         let (parts, mut body) = req.into_parts();
         let mut data = Vec::new();
@@ -73,7 +80,9 @@ impl Proxy {
         };
 
         let started = Instant::now();
-        let result = self.sender.send(&Endpoint::new("https", host, port), &request, &method, None).await;
+        let guard = self.loop_guard(&me, host, port);
+        let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
+        let result = self.sender.send(&Endpoint::new("https", host, port), &request, &method, check).await;
         let mut record = NewExchange {
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),

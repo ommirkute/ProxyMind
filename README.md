@@ -63,6 +63,19 @@ curl --cacert ~/.proxymind/proxymind-ca.pem -x http://127.0.0.1:8080 https://exa
 
 Traffic is stored in `proxymind.pmproj` (a SQLite file) in the current directory. Use `--project <file>` to choose another.
 
+### Apps that ignore proxy settings (transparent mode)
+
+Mobile apps, thick clients and devices often ignore proxy settings. Send their traffic to ProxyMind with DNS (a hosts-file entry pointing the app's host at the proxy machine) or a port redirect, and ProxyMind handles it without any setup:
+
+```bash
+./target/release/proxymind proxy --listen 0.0.0.0:8080
+# On a Linux gateway, redirect a device's web traffic to the proxy:
+sudo iptables -t nat -A PREROUTING -i <device-interface> -p tcp --dport 80  -j REDIRECT --to-port 8080
+sudo iptables -t nat -A PREROUTING -i <device-interface> -p tcp --dport 443 -j REDIRECT --to-port 8080
+```
+
+Plain HTTP goes to the request's `Host` header. HTTPS without a CONNECT is recognised from the TLS handshake: ProxyMind presents a certificate for the server name the client asked for (SNI), so install the ProxyMind CA on the device, and sends the request to its `Host` (port 443 unless the header says otherwise). Clients that send no server name can't be intercepted this way. A request that would reach ProxyMind itself is refused instead of looping.
+
 ### Use it with AI agents (MCP)
 
 ```bash

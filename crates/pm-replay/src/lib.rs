@@ -160,6 +160,11 @@ impl Sender {
         &self.net
     }
 
+    /// Whether connections to this host go directly (no upstream proxy).
+    pub fn goes_direct(&self, host: &str) -> bool {
+        self.net.upstream_for(host).is_none()
+    }
+
     /// The bytes to write for `request`: unchanged, except when plain HTTP
     /// goes through an HTTP proxy (absolute-form target, proxy login).
     fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {

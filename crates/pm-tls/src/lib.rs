@@ -15,13 +15,15 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+pub use rustls::ServerConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use time::{Duration, OffsetDateTime};
 
-pub use tokio_rustls::{TlsAcceptor, TlsConnector};
+pub use tokio_rustls::rustls::server::Acceptor;
+pub use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
 
 const CA_CERT_FILE: &str = "proxymind-ca.pem";
 const CA_KEY_FILE: &str = "proxymind-ca.key";

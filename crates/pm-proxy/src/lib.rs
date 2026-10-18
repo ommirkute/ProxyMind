@@ -95,6 +95,31 @@ impl Recorder {
     }
 }
 
+/// The address a client reached the proxy on. Requests that would connect
+/// straight back to it (a transparent-mode Host pointing at ProxyMind)
+/// are refused instead of looping forever.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SelfAddr {
+    ip: std::net::IpAddr,
+    port: u16,
+}
+
+impl SelfAddr {
+    fn of(tcp: &TcpStream) -> Option<Self> {
+        tcp.local_addr().ok().map(|a| Self { ip: a.ip(), port: a.port() })
+    }
+
+    fn check(&self, ips: &[std::net::IpAddr], port: u16) -> std::result::Result<(), String> {
+        let me = |ip: &std::net::IpAddr| {
+            *ip == self.ip || ip.is_unspecified() || (ip.is_loopback() && self.ip.is_loopback())
+        };
+        if port == self.port && ips.iter().any(me) {
+            return Err(format!("that is ProxyMind itself ({}:{}); refusing a request loop", self.ip, self.port));
+        }
+        Ok(())
+    }
+}
+
 const DROPPED_MSG: &str = "Request dropped in ProxyMind's intercept queue.";
 
 pub struct ProxyConfig {
@@ -156,12 +181,22 @@ impl Proxy {
 
     async fn handle_client(self: Arc<Self>, tcp: TcpStream) -> Result<()> {
         tcp.set_nodelay(true)?;
+        let me = SelfAddr::of(&tcp);
+        // Transparent mode: a TLS handshake straight away (no CONNECT) from a
+        // client sent here by DNS or a port redirect.
+        let mut first = [0u8; 1];
+        if tcp.peek(&mut first).await? == 0 {
+            return Ok(());
+        }
+        if first[0] == 0x16 {
+            return self.serve_transparent_tls(tcp, me).await;
+        }
         let mut client = Conn::new(tcp);
         let Some(head_raw) = client.read_head().await? else { return Ok(()) };
         let head = pm_http::parse_request_head(&head_raw)?;
 
         if !head.method.eq_ignore_ascii_case("CONNECT") {
-            return self.serve_http(client, "http", None, Some(head_raw)).await;
+            return self.serve_http(client, "http", None, Some(head_raw), me).await;
         }
 
         let (host, port) = pm_http::split_host_port(&head.target, 443).ok_or_else(|| anyhow!("bad CONNECT target"))?;
@@ -173,25 +208,56 @@ impl Proxy {
 
         // Peek at the first byte: 0x16 starts a TLS handshake. Anything else
         // is plain HTTP inside the tunnel (e.g. WebSockets on port 80).
-        let mut first = [0u8; 1];
         if tcp.peek(&mut first).await? == 0 {
             return Ok(());
         }
         if first[0] == 0x16 {
-            let mut cfg = self.ca.server_config(&host)?;
-            if self.hooks.http2 {
-                let mut c = (*cfg).clone();
-                c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-                cfg = Arc::new(c);
-            }
-            let tls = TlsAcceptor::from(cfg).accept(tcp).await.context("TLS handshake with client")?;
+            let tls =
+                TlsAcceptor::from(self.tls_config(&host)?).accept(tcp).await.context("TLS handshake with client")?;
             if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-                return self.serve_h2(tls, host, port).await;
+                return self.serve_h2(tls, host, port, me).await;
             }
-            self.serve_http(Conn::new(tls), "https", Some((host, port)), None).await
+            self.serve_http(Conn::new(tls), "https", Some((host, port)), None, me).await
         } else {
-            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None).await
+            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None, me).await
         }
+    }
+
+    /// The certificate (and ALPN) ProxyMind presents for a host.
+    fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
+        let mut cfg = self.ca.server_config(host)?;
+        if self.hooks.http2 {
+            let mut c = (*cfg).clone();
+            c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            cfg = Arc::new(c);
+        }
+        Ok(cfg)
+    }
+
+    /// TLS without CONNECT: the server name (SNI) picks the certificate;
+    /// requests go to their Host header (default port 443).
+    async fn serve_transparent_tls(self: Arc<Self>, tcp: TcpStream, me: Option<SelfAddr>) -> Result<()> {
+        let start =
+            pm_tls::LazyConfigAcceptor::new(pm_tls::Acceptor::default(), tcp).await.context("reading the TLS hello")?;
+        let Some(sni) = start.client_hello().server_name().map(|n| n.to_string()) else {
+            bail!("transparent HTTPS needs the client to send a server name (SNI)");
+        };
+        let tls = start.into_stream(self.tls_config(&sni)?).await.context("TLS handshake with client")?;
+        if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+            return self.serve_h2(tls, sni, 443, me).await;
+        }
+        self.serve_http(Conn::new(tls), "https", None, None, me).await
+    }
+
+    /// Checks resolved addresses against ProxyMind's own (direct connections only).
+    fn loop_guard<'a>(
+        &self,
+        me: &'a Option<SelfAddr>,
+        host: &str,
+        port: u16,
+    ) -> Option<impl Fn(&[std::net::IpAddr]) -> std::result::Result<(), String> + Sync + 'a> {
+        let me = (*me)?;
+        self.sender.goes_direct(host).then_some(move |ips: &[std::net::IpAddr]| me.check(ips, port))
     }
 
     /// Match-and-replace rules, then the intercept queue, where a human may
@@ -263,6 +329,7 @@ impl Proxy {
         scheme: &str,
         tunnel_target: Option<(String, u16)>,
         mut first_head: Option<Vec<u8>>,
+        me: Option<SelfAddr>,
     ) -> Result<()> {
         loop {
             let head_raw = match first_head.take() {
@@ -315,7 +382,9 @@ impl Proxy {
 
             let started = Instant::now();
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
-            let result = self.sender.send(&ep, &request, &method, None).await;
+            let guard = self.loop_guard(&me, &target.host, target.port);
+            let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
+            let result = self.sender.send(&ep, &request, &method, check).await;
             let mut record = NewExchange {
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
@@ -452,9 +521,10 @@ fn resolve_target(
             head_raw: head_raw.to_vec(),
         });
     }
-    // Origin-form without a tunnel (invisible proxying): use the Host header.
+    // Origin-form without a tunnel (transparent proxying): use the Host header.
     let host_hdr = pm_http::header(&head.headers, "host").ok_or_else(|| anyhow!("request has no Host header"))?;
-    let (host, port) =
-        pm_http::split_host_port(std::str::from_utf8(host_hdr)?, 80).ok_or_else(|| anyhow!("bad Host header"))?;
-    Ok(Target { scheme: "http".into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
+    let default_port = if tunnel_scheme == "https" { 443 } else { 80 };
+    let (host, port) = pm_http::split_host_port(std::str::from_utf8(host_hdr)?.trim(), default_port)
+        .ok_or_else(|| anyhow!("bad Host header"))?;
+    Ok(Target { scheme: tunnel_scheme.into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
 }
