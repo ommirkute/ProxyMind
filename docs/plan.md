@@ -17,6 +17,8 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- XSS proofs (`reflection` oracle): the payload request carries a fresh token; the recorded response is rendered offline in headless Chromium (`pm-browser`, DevTools protocol over our own WebSocket codec) with every other request blocked; proven only when the script runs and returns the token (ADR-0011). VulnShop gained VS-6 (reflected XSS) and an HTML-encoding look-alike
+
 - Race-condition testing (`race_send`, Repeater → Race): HTTP/2 single-packet attack (all final frames in one TCP packet) with last-byte sync for HTTP/1.1 servers; at least active-intrusive; responses grouped. VulnShop gained VS-5 (gift card race)
 - Transparent (invisible) mode: origin-form HTTP routed by Host, TLS without CONNECT recognised by SNI; requests back to the proxy itself refused
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
@@ -39,7 +41,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 1. **Desktop shell** (Tauri) around the web UI
 2. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
-3. **More oracles and payload awareness**: reflection proofs in a headless browser, DNS OAST, payload-aware tiers
+3. **More oracles and payload awareness**: DNS OAST, payload-aware tiers (reflection proofs are done); stored and DOM XSS proofs
 4. Project encryption, signed releases, installers
 
 ## Team roles
@@ -95,7 +97,7 @@ Every test runs under a hypothesis (operation, param, vulnerability class, reaso
 | `differential_authz` | IDOR, BOLA | owner vs attacker response similarity, owner-only marker present, anonymous request denied |
 | `oast` | SSRF, blind injection, XXE | unique callback token received |
 | `timing` | blind/time-based injection | ≥ 20 interleaved samples, Mann-Whitney U, p < 0.01 plus minimum effect size |
-| `reflection` (later) | XSS | headless browser confirms execution |
+| `reflection` | XSS | headless browser renders the recorded response offline and confirms the payload ran |
 
 Each proof stores inputs and a re-run recipe.
 

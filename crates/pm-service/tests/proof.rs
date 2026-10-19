@@ -232,3 +232,63 @@ async fn oast_proof_catches_ssrf() {
     let proof: Value = s.proof_get(1).unwrap();
     assert_eq!(proof["oracle"], "oast");
 }
+
+#[tokio::test]
+async fn reflection_proof_runs_the_payload_in_a_browser_and_rejects_encoded_reflection() {
+    let (s, url) = setup().await;
+    if s.chromium_path().unwrap().is_none() {
+        eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
+        return;
+    }
+    let run = |raw: &str| ProofRequest {
+        oracle: "reflection".into(),
+        url: Some(url.clone()),
+        raw: Some(raw.into()),
+        ..Default::default()
+    };
+    // Agents need approval: payload sends are intrusive.
+    assert!(matches!(
+        s.proof_run(&agent(), run("GET /search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap(),
+        ProofResult::PendingApproval { .. }
+    ));
+
+    // VS-6: the payload runs.
+    let r = s.proof_run(&human(), run("GET /search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap();
+    let ProofResult::Completed { proven, confidence, reasons, details, exchange_ids, .. } = r else { panic!("{r:?}") };
+    assert!(proven, "{reasons:?} {details}");
+    assert_eq!(confidence, "high");
+    assert!(reasons[0].contains("ran the injected script"), "{reasons:?}");
+    assert_eq!(details["payload_in_body"], true);
+    assert!(details["page_activity"].as_str().unwrap().starts_with("<untrusted_target_content>"));
+    assert_eq!(exchange_ids.len(), 1);
+
+    // A payload of the tester's own, using alert() with the token.
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /search?q=%3Csvg%20onload%3Dalert('{{token}}')%3E HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap(),
+    );
+    assert!(proven, "{reasons:?}");
+    assert!(reasons[0].contains("opened a dialog"), "{reasons:?}");
+
+    // Trap: /help reflects the payload HTML-encoded.
+    let (proven, _, reasons) =
+        completed(s.proof_run(&human(), run("GET /help?topic={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap());
+    assert!(!proven, "encoded reflection is not XSS");
+    assert!(reasons[0].contains("encoded"), "{reasons:?}");
+
+    // Trap: JSON endpoints that don't reflect.
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /api/products/search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap(),
+    );
+    assert!(!proven && reasons[0].contains("nothing reflected"), "{reasons:?}");
+
+    // Re-running uses a fresh token and proves it again.
+    let r = s.proof_rerun(&human(), 1).await.unwrap();
+    let ProofResult::Completed { proven, details: again, .. } = r else { panic!("{r:?}") };
+    assert!(proven);
+    assert_ne!(again["token"], details["token"]);
+
+    // Placeholders are required.
+    assert!(s.proof_run(&human(), run("GET /search?q=x HTTP/1.1\r\nHost: x\r\n\r\n")).await.is_err());
+}

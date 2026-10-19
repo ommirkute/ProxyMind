@@ -168,7 +168,8 @@ const START_PROMPT: &str = "You are helping with an authorized security test usi
    proof_run with oracle differential_authz.\n\
 4. Call coverage, pick the highest-priority untested cells, and record a hypothesis before testing each one.\n\
 5. Test with replay_send (one change at a time), passing hypothesis_id; mark hypotheses confirmed or refuted.\n\
-6. For injection or SSRF, use proof_run with oracle timing or oast (these may need human approval).\n\
+6. For injection or SSRF, use proof_run with oracle timing or oast; for XSS, oracle reflection (these may need \
+   human approval).\n\
 7. Finish with finding_list and coverage: say what is proven, what is suspected, and what was not tested.";
 
 #[cfg(test)]

@@ -46,7 +46,7 @@ export default function Findings() {
             </table>
           )}
         </Panel>
-        {selected ? <FindingDetail id={selected} onChange={list.reload} /> : <Panel><Empty>Select a finding.</Empty></Panel>}
+        {selected ? <FindingDetail key={selected} id={selected} onChange={list.reload} /> : <Panel><Empty>Select a finding.</Empty></Panel>}
       </div>
     </div>
   );
@@ -90,6 +90,7 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
   const [attacker, setAttacker] = useState("");
   const [exchange, setExchange] = useState("");
   const [result, setResult] = useState<ProofResult | null>(null);
+  const [xss, setXss] = useState<{ url: string; raw: string } | null>(null);
   const action = useAction();
 
   if (f.error) return <Panel><ErrorBox error={f.error} /></Panel>;
@@ -106,6 +107,14 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
   const prove = () =>
     action.run(async () => {
       const r = await api.post<ProofResult>("/proofs", { oracle: "differential_authz", exchange_id: Number(ex), attacker, finding_id: id });
+      setResult(r);
+      f.reload();
+      onChange();
+    });
+  const xssForm = xss ?? xssTemplate(d.url);
+  const proveXss = () =>
+    action.run(async () => {
+      const r = await api.post<ProofResult>("/proofs", { oracle: "reflection", url: xssForm.url, raw: xssForm.raw, finding_id: id });
       setResult(r);
       f.reload();
       onChange();
@@ -158,6 +167,23 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
           {action.busy ? "Proving…" : "Prove"}
         </button>
       </div>
+      <details style={{ marginTop: 8 }} open={d.vuln_class.toLowerCase().includes("xss")}>
+        <summary className="small">Prove XSS in a headless browser</summary>
+        <p className="small muted">
+          Put <code>{"{{xss_url}}"}</code> (percent-encoded payload), <code>{"{{xss}}"}</code> (as is) or <code>{"{{token}}"}</code> (in
+          your own payload calling <code>pmProof()</code> or <code>alert()</code>) where the payload goes. The recorded response is
+          rendered offline with every other request blocked; it is proven only if the script runs.
+        </p>
+        <div className="row">
+          <input aria-label="XSS target" className="grow mono" placeholder="http://host:port" value={xssForm.url}
+            onChange={(e) => setXss({ ...xssForm, url: e.target.value })} />
+          <button className="btn primary" disabled={!xssForm.url || !xssForm.raw || action.busy} onClick={proveXss} data-testid="prove-xss">
+            {action.busy ? "Proving…" : "Prove XSS"}
+          </button>
+        </div>
+        <textarea aria-label="XSS request" className="mono" rows={4} value={xssForm.raw} style={{ marginTop: 6, width: "100%" }}
+          onChange={(e) => setXss({ ...xssForm, raw: e.target.value })} />
+      </details>
       {result?.status === "completed" && (
         <div className={result.proven ? "notice" : "error"} data-testid="proof-result">
           {result.proven ? "Proven" : "Not proven"} ({result.confidence}): {result.reasons.join(" · ")}
@@ -175,4 +201,18 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
       </div>
     </Panel>
   );
+}
+
+/** A starting point for an XSS proof: the finding's URL with its first query value (or a new q) as the payload. */
+function xssTemplate(findingUrl: string): { url: string; raw: string } {
+  try {
+    const u = new URL(findingUrl);
+    const pairs = u.search.slice(1).split("&").filter(Boolean);
+    const query = pairs.length
+      ? [`${pairs[0].split("=")[0]}={{xss_url}}`, ...pairs.slice(1)].join("&")
+      : "q={{xss_url}}";
+    return { url: u.origin, raw: `GET ${u.pathname}?${query} HTTP/1.1\nHost: ${u.host}\n\n` };
+  } catch {
+    return { url: "", raw: "GET /?q={{xss_url}} HTTP/1.1\nHost: x\n\n" };
+  }
 }

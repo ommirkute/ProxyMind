@@ -27,8 +27,14 @@ vulns:
     method: POST
     path: /api/giftcard/redeem
     description: One-per-user gift card checked then credited without a lock; concurrent requests all succeed.
+  - id: VS-6
+    class: xss
+    method: GET
+    path: /search
+    description: q is written into the HTML results page without encoding (reflected XSS).
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats
   - GET /api/orders
+  - GET /help

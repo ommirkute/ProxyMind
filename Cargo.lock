@@ -1223,6 +1223,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-browser"
+version = "0.0.1"
+dependencies = [
+ "pm-core",
+ "pm-http",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pm-cli"
 version = "0.0.1"
 dependencies = [
@@ -1408,6 +1420,7 @@ dependencies = [
  "jiff",
  "parking_lot",
  "pm-ai",
+ "pm-browser",
  "pm-core",
  "pm-demo",
  "pm-diff",

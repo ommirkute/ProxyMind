@@ -1,6 +1,6 @@
 # ProxyMind: handoff for a new working session
 
-Read this first, then `CLAUDE.md` (rules), `docs/plan.md` (roadmap) and `docs/adr/` (decisions). Everything below reflects `main` as of the merge of PR #2.
+Read this first, then `CLAUDE.md` (rules), `docs/plan.md` (roadmap) and `docs/adr/` (decisions). Everything below reflects `main` plus the XSS-proof work (reflection oracle).
 
 ## 1. What ProxyMind is
 
@@ -27,7 +27,7 @@ An open-source, AI-native intercepting proxy for authorized web security testing
                  ▼                               └──┬───────────┬──────────┬──────────┘
             pm-store (SQLite project file, blobs)    │           │          │
                                                  pm-replay   pm-identity  pm-model / pm-ledger
-                                                 (send engine, pm-diff     pm-proof / pm-oast
+                                                 (send engine, pm-diff     pm-proof / pm-oast / pm-browser
                                                   HTTP/2, race, pm-ai (views, redaction,
                                                   upstream proxy) untrusted tagging)
 ```
@@ -54,14 +54,15 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-diff` | Semantic diff with learned noise | `lib.rs` |
 | `pm-model` | App model: path templating, objects, ownership | `lib.rs` |
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
-| `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST | `lib.rs` |
+| `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST, reflection (XSS verdict, payload templates) | `lib.rs` |
+| `pm-browser` | Headless Chromium over CDP (own WebSocket codec): renders a recorded response offline, blocks every other request, reports binding calls and dialogs | `lib.rs` |
 | `pm-oast` | HTTP callback listener + token helpers (DNS not yet) | `lib.rs` |
 | `pm-service` | The service layer (history, replay, ws replay, race, intercept, rules, network, identities, authz, model, ledger, proofs, findings, approvals, assistant storage) | one module per area in `src/` |
 | `pm-mcp` | MCP server over stdio; 25 tools | `lib.rs` (instructions), `tools.rs` |
 | `pm-assistant` | Built-in assistant: Anthropic + OpenAI-compatible wire formats, tool loop through `pm_mcp::call_tool` as `agent:assistant` | `lib.rs`, `llm.rs` |
 | `pm-api` | axum REST API + SSE event stream, token auth, serves `ui/dist` | `lib.rs`, `routes.rs` |
 | `pm-cli` | `proxymind` binary | `main.rs`, `bench.rs` |
-| `pm-demo` | VulnShop: deliberately vulnerable demo target with ground truth VS-1…VS-5 | `lib.rs` |
+| `pm-demo` | VulnShop: deliberately vulnerable demo target with ground truth VS-1…VS-6 | `lib.rs` |
 
 ### Request paths
 
@@ -71,14 +72,14 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `proof`, `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
 - **MCP tools (25):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
 - **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
 - **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Approvals, Identities & Authz, Model & Coverage, Findings, Audit log, Network.
 
 ### Storage (`pm-store` tables)
 
-`blobs, exchanges, audit_log, approvals, settings, identities, authz_results, hypotheses, proofs, findings, oast_interactions, ws_messages, assistant_chats`. The `settings` table holds the ROE, match-and-replace rules, network config, assistant config and the OAST public URL (intercept settings live in memory only). Add tables only by appending a new migration.
+`blobs, exchanges, audit_log, approvals, settings, identities, authz_results, hypotheses, proofs, findings, oast_interactions, ws_messages, assistant_chats`. The `settings` table holds the ROE, match-and-replace rules, network config, assistant config, and the OAST public URL (intercept settings live in memory only). Add tables only by appending a new migration.
 
 ## 3. What's done
 
@@ -87,17 +88,17 @@ All of this has automated tests and passes CI on Linux, macOS and Windows plus a
 - **Proxy:** HTTP/1.1 (byte-exact), HTTP/2 to browsers and servers with downgrade (ADR-0009: HTTP/2 shown as text with `HTTP/2` in the request line), CONNECT + TLS interception, transparent mode (Host routing, TLS without CONNECT via SNI, loop guard), upstream HTTP/SOCKS5 proxy and per-host client certificates.
 - **Manual tools:** intercept queue (requests, responses, WebSocket messages), match-and-replace rules, Repeater (send as any identity), race testing (HTTP/2 single-packet attack, last-byte fallback), WebSocket logging/replay/intercept.
 - **Safety:** ROE with bypass-resistant scope, tiers per actor kind, rate limits, DNS-rebinding check, single-use parameter-bound approvals, blake3 hash-chained audit log.
-- **Engine:** identities with re-login, semantic diff, authorization checks and matrix, app model with suggested tests, hypothesis ledger and coverage, proof engine (differential authz, timing, HTTP OAST) with re-runnable proofs, findings and Markdown report.
+- **Engine:** identities with re-login, semantic diff, authorization checks and matrix, app model with suggested tests, hypothesis ledger and coverage, proof engine (differential authz, timing, HTTP OAST, reflected XSS in an offline headless browser; ADR-0011) with re-runnable proofs, findings and Markdown report.
 - **AI:** MCP server, token-budgeted views, redaction, untrusted tagging; built-in assistant (local by default; cloud only with `data.allow_cloud_models`; keys from env vars; every model call audited; ADR-0010).
-- **Demo/bench:** VulnShop (VS-1 IDOR, VS-2 BFLA, VS-3 time-based SQLi, VS-4 SSRF, VS-5 race), ground truth in `bench/ground-truth/vulnshop.yaml`, `proxymind bench score`, `bench/demo.sh`, an end-to-end test where an agent finds and proves bugs over MCP.
+- **Demo/bench:** VulnShop (VS-1 IDOR, VS-2 BFLA, VS-3 time-based SQLi, VS-4 SSRF, VS-5 race, VS-6 reflected XSS; `/help` is the HTML-encoding trap), ground truth in `bench/ground-truth/vulnshop.yaml`, `proxymind bench score`, `bench/demo.sh`, an end-to-end test where an agent finds and proves bugs over MCP.
 
 ## 4. What's next, and how to do each
 
-Order from `docs/plan.md`. The first two need things the cloud sandbox doesn't have (noted below); the third is fully doable in the sandbox and is the recommended next phase.
+Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (noted below); the rest of A is fully doable in the sandbox and is the recommended next phase.
 
 ### A. More oracles and payload awareness (recommended next)
 
-1. **XSS proofs in a headless browser (`reflection` oracle).**
+1. ✅ **Done: XSS proofs in a headless browser (`reflection` oracle).** How it was built, for reference and for follow-ups (stored XSS: render a *different* exchange than the one sent; DOM XSS: serve same-origin subresources from history instead of blocking them):
    - Flow: `proof_run` with `oracle: "reflection"` → gate as active-intrusive → send the request with a payload carrying a unique token, e.g. `<img src=x onerror=pmProof('TOKEN')>` → render **the recorded response** in headless Chromium, not a live re-fetch.
    - Rendering: launch Chromium headless with `--remote-debugging-port=0`, read `DevToolsActivePort`, speak CDP over WebSocket (the frame encoder/decoder already exist in `pm_http::ws`; or use a CDP crate after a `cargo deny` check). Use `Fetch.enable` to fulfil the main document with the recorded response body and **block every other request** (no side effects, no traffic outside scope). `Runtime.addBinding("pmProof")`; a `Runtime.bindingCalled` event with the token proves execution. Also catch `Page.javascriptDialogOpening` for `alert` payloads.
    - Where: verdict logic in `pm-proof` (pure); browser driving in a new crate (e.g. `pm-browser`) so lower crates stay I/O-free; dispatch in `pm-service/src/proof.rs` next to `prove_oast`. Find the browser via a setting or `PROXYMIND_CHROMIUM`; in the sandbox it's under `/opt/pw-browsers`.
@@ -153,4 +154,4 @@ npm run test:e2e                      # needs a built binary (target/debug/proxy
 - **Git:** develop on the branch the session assigns. Commit messages end with the attribution trailers from the session's instructions. Don't put model identifiers in repo files. Open PRs only when asked. `main` gets merges of PRs (merge commits).
 
 ### Status of the session that wrote this
-`main` = merge of PR #2 (commit `89d0bad`). Working tree clean. CI green on `main`'s content. The demo works end to end: `bash bench/demo.sh`, or `proxymind demo-target` + `proxymind ui`.
+The XSS-proof session added `pm-browser`, the `reflection` oracle (service, MCP enum, REST via `/proofs`, CLI `proof xss` / `proof browser`, Findings page "Prove XSS"), VulnShop VS-6 plus the `/help` trap, ADR-0011, and tests at every level (pure verdict, real-browser rendering with a network tripwire, service proof against VulnShop, UI e2e). Browser tests skip with a note when no Chromium/Chrome is found; GitHub's runners have Chrome. Recommended next: DNS OAST, then payload-aware tiers (section 4A).

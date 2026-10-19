@@ -273,6 +273,25 @@ enum ProofAction {
         #[arg(long)]
         finding: Option<i64>,
     },
+    /// Prove reflected XSS: send a request carrying a payload, then render the recorded response in
+    /// headless Chromium (offline, every other request blocked) and check that the script ran.
+    Xss {
+        /// Target as scheme://host[:port] (or use --exchange to take it from a recorded exchange)
+        #[arg(long, required_unless_present = "exchange")]
+        url: Option<String>,
+        #[arg(long)]
+        exchange: Option<i64>,
+        /// File with the raw request; put {{xss_url}} (percent-encoded), {{xss}} or {{token}} where the payload goes
+        #[arg(long)]
+        raw_file: PathBuf,
+        /// Send with this identity's credentials
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        finding: Option<i64>,
+    },
+    /// Show which Chromium/Chrome XSS proofs will use (set PROXYMIND_CHROMIUM to choose one).
+    Browser,
     /// Show a proof.
     Show { id: i64 },
     /// Run a proof again with the same inputs (e.g. during a retest).
@@ -1017,6 +1036,13 @@ async fn run() -> Result<()> {
                 FindingAction::Reported { id } => out!("finding {} is now {}", id, set(*id, "reported")?["status"]),
             }
         }
+        Command::Proof { action: ProofAction::Browser } => match pm_service::pm_browser::find_chromium() {
+            Some(p) => out!("browser for XSS proofs: {}", p.display()),
+            None => out!(
+                "no Chromium or Chrome found; install one or set {} to its path",
+                pm_service::pm_browser::ENV_CHROMIUM
+            ),
+        },
         Command::Proof { action } => {
             let service = open_service(&cli.project, None)?;
             let print_result = |r: &pm_service::ProofResult| -> Result<()> {
@@ -1067,6 +1093,25 @@ async fn run() -> Result<()> {
                         .await?;
                     print_result(&r)?;
                 }
+                ProofAction::Xss { url, exchange, raw_file, identity, finding } => {
+                    let raw = std::fs::read_to_string(raw_file)?;
+                    let r = service
+                        .proof_run(
+                            &human_actor(None)?,
+                            pm_service::ProofRequest {
+                                oracle: "reflection".into(),
+                                url: url.clone(),
+                                exchange_id: *exchange,
+                                raw: Some(raw),
+                                identity: identity.clone(),
+                                finding_id: *finding,
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    print_result(&r)?;
+                }
+                ProofAction::Browser => unreachable!("handled above"),
                 ProofAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.proof_get(*id)?)?),
                 ProofAction::Rerun { id } => {
                     let r = service.proof_rerun(&human_actor(None)?, *id).await?;

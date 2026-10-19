@@ -60,6 +60,10 @@ async function browseAs(proxy, shop, user, paths) {
 
 try {
   mkdirSync(SHOTS, { recursive: true });
+  // proxymind renders XSS proofs in the same Chromium the test drives.
+  const exe = process.env.CHROMIUM ?? ["/opt/pw-browsers/chromium-1194/chrome-linux/chrome"].find(existsSync);
+  const browserPath = exe ?? chromium.executablePath();
+  if (existsSync(browserPath)) process.env.PROXYMIND_CHROMIUM ??= browserPath;
   const [shop, proxy, ui] = [await freePort(), await freePort(), await freePort()];
   start(["demo-target", "--listen", `127.0.0.1:${shop}`]);
   writeFileSync(join(dir, "roe.yaml"), `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
@@ -75,7 +79,6 @@ try {
   await browseAs(proxy, shop, "alice", ["/api/me", "/api/orders", "/api/orders/1001", "/api/invoices/5001"]);
   await browseAs(proxy, shop, "bob", ["/api/me"]);
 
-  const exe = process.env.CHROMIUM ?? ["/opt/pw-browsers/chromium-1194/chrome-linux/chrome"].find(existsSync);
   const browser = await chromium.launch({ executablePath: exe });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const consoleErrors = [];
@@ -138,6 +141,19 @@ try {
   await page.waitForSelector('[data-testid="findings"] >> text=proven');
   check(true, "finding status becomes proven");
   await page.screenshot({ path: join(SHOTS, "4-findings.png") });
+
+  console.log("XSS proof");
+  await page.getByRole("button", { name: "New finding" }).click();
+  await page.getByLabel("Title").fill("Reflected XSS in search");
+  await page.getByLabel("Class").selectOption("xss");
+  await page.getByLabel("Evidence").fill(String(orderId));
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByLabel("XSS request").fill("GET /search?q={{xss_url}} HTTP/1.1\nHost: shop\n\n");
+  await page.getByTestId("prove-xss").click();
+  await page.waitForSelector('[data-testid="proof-result"]', { timeout: 60000 });
+  check(await page.getByTestId("proof-result").textContent().then((t) => t.startsWith("Proven") && t.includes("ran the injected script")),
+    "a headless browser runs the reflected payload");
+  await page.screenshot({ path: join(SHOTS, "4b-xss-proof.png") });
 
   console.log("Repeater");
   await page.goto(link.replace(/\/auth.*/, `/#/repeater/${orderId}`));

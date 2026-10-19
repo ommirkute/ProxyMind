@@ -14,3 +14,4 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0008](0008-web-ui-first.md) | Web UI served by the binary first; Tauri shell later | Accepted |
 | [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Accepted |
 | [0010](0010-assistant-is-an-agent.md) | The built-in assistant is an agent like any other | Accepted |
+| [0011](0011-xss-proofs-offline-browser.md) | XSS proofs render the recorded response in an offline headless browser | Accepted |

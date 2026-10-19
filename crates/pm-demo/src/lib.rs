@@ -66,10 +66,18 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         description: "A one-per-user gift card is checked, then credited after a pause, without a lock: \
                       requests sent together are all credited.",
     },
+    Vuln {
+        id: "VS-6",
+        class: "xss_reflected",
+        method: "GET",
+        path: "/search",
+        description: "The q parameter is written into the HTML results page without encoding (reflected XSS).",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
-pub const SECURE_ENDPOINTS: &[&str] = &["GET /api/invoices/{id}", "GET /api/admin/stats", "GET /api/orders"];
+pub const SECURE_ENDPOINTS: &[&str] =
+    &["GET /api/invoices/{id}", "GET /api/admin/stats", "GET /api/orders", "GET /help"];
 
 struct User {
     id: u32,
@@ -174,6 +182,21 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn parse_query(q: &str) -> HashMap<String, String> {
@@ -383,6 +406,24 @@ impl VulnShop {
         let segs: Vec<&str> = req.path.trim_matches('/').split('/').collect();
         match (req.method.as_str(), segs.as_slice()) {
             ("GET", [""]) => Response { status: 200, headers: vec![], body: HOME.into(), content_type: "text/html" },
+            ("GET", ["search"]) => {
+                // VS-6: reflected XSS, q is written into the page as is.
+                let q = req.query.get("q").cloned().unwrap_or_default();
+                let body = format!(
+                    "<!doctype html><html><head><title>Search</title></head><body><h1>Search</h1>\
+                     <p>Results for {q}</p><ul><li>Coffee</li></ul></body></html>"
+                );
+                Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
+            ("GET", ["help"]) => {
+                // Secure look-alike: the topic is HTML-encoded.
+                let topic = html_escape(&req.query.get("topic").cloned().unwrap_or_default());
+                let body = format!(
+                    "<!doctype html><html><head><title>Help</title></head><body><h1>Help</h1>\
+                     <p>No help found for {topic}</p></body></html>"
+                );
+                Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
             ("POST", ["api", "login"]) => {
                 let p = req.params();
                 let (u, pw) =

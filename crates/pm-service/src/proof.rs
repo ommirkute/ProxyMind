@@ -16,7 +16,7 @@ pub const OAST_SETTING: &str = "oast_public_url";
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProofRequest {
-    /// differential_authz, timing or oast
+    /// differential_authz, timing, oast or reflection
     pub oracle: String,
     /// Recorded exchange to work from (the owner's request for
     /// differential_authz; the baseline for timing; the target for oast).
@@ -37,10 +37,12 @@ pub struct ProofRequest {
     /// timing: required median slowdown in ms (default 500).
     pub min_effect_ms: Option<f64>,
     /// oast: request containing {{oast}} where the callback URL goes.
+    /// reflection: request containing {{xss}} (payload as is), {{xss_url}}
+    /// (percent-encoded) or {{token}} (inside a payload of your own).
     pub raw: Option<String>,
     /// oast: how long to wait for a callback (default 10 s, max 60).
     pub wait_seconds: Option<u64>,
-    /// timing/oast: send with this identity's credentials.
+    /// timing/oast/reflection: send with this identity's credentials.
     pub identity: Option<String>,
     /// Mark this finding as proven if the proof succeeds.
     pub finding_id: Option<i64>,
@@ -136,7 +138,12 @@ impl Service {
             "differential_authz" => self.prove_differential(actor, &req).await?,
             "timing" => self.prove_timing(actor, &req).await?,
             "oast" => self.prove_oast(actor, &req).await?,
-            other => return invalid(format!("unknown oracle {other:?}; use differential_authz, timing or oast")),
+            "reflection" => self.prove_reflection(actor, &req).await?,
+            other => {
+                return invalid(format!(
+                    "unknown oracle {other:?}; use differential_authz, timing, oast or reflection"
+                ));
+            }
         };
         let (verdict, exchange_ids, details) = match run {
             Ok(x) => x,
@@ -424,6 +431,112 @@ impl Service {
         Ok(Ok((verdict, vec![sent.exchange_id], details)))
     }
 
+    /// The browser used for reflection proofs: `$PROXYMIND_CHROMIUM`, then
+    /// the usual install locations. Deliberately not a project setting: a
+    /// project file handed over by someone else must not pick what runs.
+    pub fn chromium_path(&self) -> Result<Option<std::path::PathBuf>> {
+        Ok(pm_browser::find_chromium())
+    }
+
+    /// Reflected XSS: send the request with a payload carrying a fresh token,
+    /// then render the *recorded* response in headless Chromium with every
+    /// other request blocked. Proven only if script ran and returned the token.
+    #[allow(clippy::type_complexity)]
+    async fn prove_reflection(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        let raw = req.raw.clone().ok_or_else(|| {
+            ServiceError::Invalid("reflection needs raw containing {{xss}}, {{xss_url}} or {{token}}".into())
+        })?;
+        if !pm_proof::XSS_PLACEHOLDERS.iter().any(|p| raw.contains(p)) {
+            return invalid("put {{xss}}, {{xss_url}} (percent-encoded) or {{token}} in raw where the payload goes");
+        }
+        let endpoint = match (req.exchange_id, &req.url) {
+            (Some(id), _) => self.exchange_outgoing(id)?.0.endpoint,
+            (None, Some(u)) => parse_url_endpoint(u)?,
+            _ => return invalid("reflection needs exchange_id or url"),
+        };
+        // Find the browser before asking for approval or sending anything.
+        let chromium = self.chromium_path()?.ok_or_else(|| {
+            ServiceError::Invalid(format!(
+                "no Chromium or Chrome found for the reflection oracle: install one, or set {} to its path",
+                pm_browser::ENV_CHROMIUM
+            ))
+        })?;
+        let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let params = json!({
+            "endpoint": format!("{}://{}:{}", endpoint.scheme, endpoint.host, endpoint.port),
+            "raw": raw, "identity": req.identity,
+        });
+        match self.gate_proof(
+            actor,
+            "proof_reflection",
+            Tier::ActiveIntrusive,
+            &template,
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let token = xss_token()?;
+        let mut out = self.outgoing(endpoint, pm_proof::fill_xss_template(&raw, &token).as_bytes(), true)?;
+        out.hypothesis_id = req.hypothesis_id;
+        let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
+        // Render exactly what was recorded.
+        let recorded = self.store.lock().get_exchange(sent.exchange_id)?.and_then(|e| e.response);
+        let payload = pm_proof::xss_payload(&token);
+        let mut inputs = pm_proof::ReflectionInputs { token: token.clone(), status: sent.status, ..Default::default() };
+        let mut activity = Value::Null;
+        let mut render_error = None;
+        let mut blocked_total = 0;
+        if let Some(doc) = recorded.as_deref().and_then(|r| recorded_document(&out.url(), r)) {
+            let body = String::from_utf8_lossy(&doc.body);
+            inputs.token_in_body = body.contains(&token);
+            // The payload as sent: the default one, or the user's own around {{token}}.
+            inputs.payload_in_body = body.contains(&payload)
+                || custom_payload(&raw, &token).is_some_and(|p| !p.is_empty() && body.contains(&p));
+            inputs.content_type =
+                doc.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone());
+            let opts = pm_browser::RenderOptions {
+                binding: pm_proof::XSS_BINDING.into(),
+                stop_on: Some(token.clone()),
+                ..Default::default()
+            };
+            match pm_browser::render(&chromium, &doc, &opts).await {
+                Ok(r) => {
+                    inputs.rendered = r.served;
+                    inputs.binding_calls = r.binding_calls.clone();
+                    inputs.dialogs = r.dialogs.iter().map(|d| d.message.clone()).collect();
+                    inputs.blocked_requests = r.blocked_total;
+                    blocked_total = r.blocked_total;
+                    let dialogs: Vec<Value> =
+                        r.dialogs.iter().map(|d| json!({ "type": d.kind, "message": d.message })).collect();
+                    let page = json!({ "binding_calls": r.binding_calls, "dialogs": dialogs,
+                                       "blocked_requests": r.blocked.iter().take(10).collect::<Vec<_>>() });
+                    activity = json!(pm_ai::wrap_untrusted(&page.to_string()));
+                }
+                Err(e) => render_error = Some(e.to_string()),
+            }
+        }
+        let mut verdict = pm_proof::reflection(&inputs);
+        if let Some(e) = &render_error {
+            verdict.reasons.push(format!("browser error: {e}"));
+        }
+        let details = json!({
+            "token": token, "payload": payload, "url": out.url(), "status": sent.status,
+            "content_type": inputs.content_type, "token_in_body": inputs.token_in_body,
+            "payload_in_body": inputs.payload_in_body, "rendered": inputs.rendered,
+            "blocked_total": blocked_total, "page_activity": activity, "render_error": render_error,
+        });
+        Ok(Ok((verdict, vec![sent.exchange_id], details)))
+    }
+
     /// Where payloads should send callbacks (the OAST listener's public URL).
     pub fn set_oast_public_url(&self, url: &str) -> Result<()> {
         url::Url::parse(url).map_err(|e| ServiceError::Invalid(format!("bad OAST url: {e}")))?;
@@ -435,6 +548,70 @@ impl Service {
     pub fn record_oast(&self, i: &pm_oast::Interaction) -> Result<()> {
         record_oast_in(&mut self.store.lock(), i)
     }
+}
+
+/// A fresh, unguessable token (so a page can't fake a proof).
+fn xss_token() -> Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 10];
+    SystemRandom::new().fill(&mut b).map_err(|_| ServiceError::Invalid("no system randomness".into()))?;
+    Ok(format!("pm{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>()))
+}
+
+/// For a template using {{token}} in a payload of the user's own, the
+/// unencoded text around the token on that line (e.g. `<svg onload=alert('…')>`).
+fn custom_payload(raw: &str, token: &str) -> Option<String> {
+    let line = raw.lines().find(|l| l.contains("{{token}}"))?;
+    let start = line[..line.find("{{token}}")?].rfind(['=', '&', '?', ' ']).map_or(0, |i| i + 1);
+    let rest = &line[start..];
+    let end = rest.find(['&', ' ']).unwrap_or(rest.len());
+    Some(percent_decode(&rest[..end].replace("{{token}}", token)))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (b'+', ..) => {
+                out.push(b' ');
+                i += 1;
+            }
+            (c, ..) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The recorded response as a browser document: HTTP/2 text converted,
+/// body de-chunked and decompressed.
+fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
+    let converted;
+    let raw = if pm_http::h2text::is_http2_response(raw) {
+        converted = pm_http::h2text::to_http1_response(raw)?;
+        &converted[..]
+    } else {
+        raw
+    };
+    let (head, body) = pm_http::split_message(raw);
+    let head = pm_http::parse_response_head(head).ok()?;
+    let decoded = pm_ai::body::decode(&head.headers, body);
+    let mut headers: Vec<(String, String)> =
+        head.headers.iter().map(|h| (h.name.clone(), String::from_utf8_lossy(&h.value).into_owned())).collect();
+    if decoded.notes.iter().any(|n| n.contains("decoded")) {
+        // The body handed over is plain; the browser must not decode it again.
+        headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-encoding"));
+    }
+    Some(pm_browser::Document { url: url.to_string(), status: head.status, headers, body: decoded.bytes })
 }
 
 pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<()> {
@@ -484,4 +661,27 @@ pub(crate) fn decode_proof(row: &serde_json::Map<String, Value>) -> Value {
         "actor": row.get("actor"),
         "created_ms": row.get("created_ms"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_payloads_are_found_and_decoded() {
+        let raw = "GET /s?a=1&q=%3Csvg%20onload%3Dalert('{{token}}')%3E&b=2 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(custom_payload(raw, "T").as_deref(), Some("<svg onload=alert('T')>"));
+        assert_eq!(custom_payload("q={{xss}}", "T"), None);
+        assert_eq!(percent_decode("a+b%2"), "a b%2");
+    }
+
+    #[test]
+    fn recorded_documents_are_decoded() {
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let d = recorded_document("http://x/", raw).unwrap();
+        assert_eq!((d.status, d.body.as_slice()), (200, &b"hello"[..]));
+        let h2 = b"HTTP/2 200\r\ncontent-type: text/html\r\n\r\n<p>x</p>";
+        assert_eq!(recorded_document("http://x/", h2).unwrap().body, b"<p>x</p>");
+    }
 }

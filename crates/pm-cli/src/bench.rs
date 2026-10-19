@@ -148,11 +148,18 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 5));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 6));
         assert_eq!(s.unmatched_findings, vec![3]);
         assert_eq!(s.findings_on_secure_endpoints, vec![3]);
         let race = vec![json!({"id": 9, "vuln_class": "race condition (TOCTOU)", "status": "proven",
             "url": "http://x/api/giftcard/redeem"})];
         assert_eq!(score(&truth, &race).proven, 1, "race findings match VS-5");
+        let xss = vec![
+            json!({"id": 10, "vuln_class": "Reflected XSS", "status": "proven", "url": "http://x/search?q=a"}),
+            json!({"id": 11, "vuln_class": "xss", "status": "suspected", "url": "http://x/help?topic=a"}),
+        ];
+        let s = score(&truth, &xss);
+        assert_eq!(s.proven, 1, "xss findings match VS-6");
+        assert_eq!(s.findings_on_secure_endpoints, vec![11], "/help encodes its input");
     }
 }

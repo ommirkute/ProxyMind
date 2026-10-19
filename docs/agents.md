@@ -101,7 +101,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `hypothesis_create` / `hypothesis_update` / `hypothesis_list` | The shared ledger of what is being tested and what was ruled out |
 | `coverage` | Each operation × relevant vulnerability class, untested and high-priority first |
 | `finding_create` / `finding_update` / `finding_list` | Record findings with evidence; agents can't mark them proven or confirmed |
-| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing` or `oast` |
+| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast` or `reflection` |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
@@ -115,8 +115,9 @@ A finding only becomes **proven** when ProxyMind checks it itself:
 | `differential_authz` | IDOR/BOLA, missing role checks | the owner's request works twice, an anonymous request is refused, and a different, not more privileged identity gets the same data (noise ignored; owner details such as emails raise confidence) |
 | `timing` | time-based injection | payload responses are slower than interleaved baseline responses with p < 0.01 (Mann-Whitney U) *and* by at least `min_effect_ms` |
 | `oast` | SSRF, blind injection | the target calls back with a unique token. Run `proxymind oast-server`, or start the MCP server with `--oast-listen 127.0.0.1:8085` (use a public URL the target can reach) |
+| `reflection` | reflected XSS | a headless browser rendering the **recorded** response runs the payload and hands back a fresh token (through `pmProof()` or a dialog). Put `{{xss_url}}` (percent-encoded default payload), `{{xss}}` (unencoded) or `{{token}}` (inside your own payload, e.g. `<svg onload=alert('{{token}}')>`) in `raw`. Rendering is offline: the page's other requests are all blocked, and the response's own CSP applies. Needs Chromium or Chrome (found automatically, or set `PROXYMIND_CHROMIUM`; `proxymind proof browser` shows which one is used) |
 
-Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`) count as intrusive, so agents need approval by default.
+Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`, `reflection`) count as intrusive, so agents need approval by default.
 
 ## What the agent sees
 

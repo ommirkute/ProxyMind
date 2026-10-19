@@ -235,10 +235,13 @@ pub fn tool_definitions() -> Vec<Value> {
             "Have ProxyMind verify a suspected vulnerability itself. Oracles: differential_authz (exchange_id of the \
              owner's GET + attacker identity: proves IDOR/BOLA or missing role checks), timing (exchange_id or url, \
              payload_raw with a delay payload, optional baseline_raw: proves time-based injection statistically), oast \
-             (url or exchange_id + raw containing {{oast}}: proves SSRF/blind injection via an out-of-band callback). \
+             (url or exchange_id + raw containing {{oast}}: proves SSRF/blind injection via an out-of-band callback), \
+             reflection (url or exchange_id + raw containing {{xss_url}} in a query/form value, {{xss}} unencoded, or \
+             {{token}} inside your own payload that calls pmProof('{{token}}') or alert('{{token}}'): sends it, \
+             renders the recorded response offline in headless Chromium and proves XSS only if the script ran). \
              Pass finding_id/hypothesis_id to update them when proven. Payload oracles may need human approval.",
             json!({
-                "oracle": {"type":"string","enum":["differential_authz","timing","oast"]},
+                "oracle": {"type":"string","enum":["differential_authz","timing","oast","reflection"]},
                 "exchange_id": {"type":"integer"},
                 "attacker": {"type":"string"},
                 "owner": {"type":"string"},

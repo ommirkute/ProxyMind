@@ -12,7 +12,7 @@ Other proxies give AI access to their tools. ProxyMind gives AI an understanding
 |---|---|
 | 🧠 **Live app model** | Builds a map of the app from traffic: objects, IDs, who owns them, and operations. Agents ask questions like "which endpoints accept another user's order ID?" instead of reading raw logs. |
 | 👥 **Multi-identity by default** | Keeps several user sessions alive (automatic re-login), replays any request as any user, and compares the responses while ignoring timestamps and tokens. |
-| ✅ **No proof, no finding** | Findings count only when ProxyMind proves them itself (differential authz, OAST callbacks, statistical timing). Every proof can be re-run with one command. |
+| ✅ **No proof, no finding** | Findings count only when ProxyMind proves them itself (differential authz, OAST callbacks, statistical timing, XSS run in a headless browser). Every proof can be re-run with one command. |
 | 📒 **Hypothesis ledger & coverage** | Shared memory of what was tested, by whom, and what's still untested, for humans and agents alike. |
 | 🛡️ **Rules of engagement as code** | Scope, rate limits, time windows and approvals are enforced by the core, outside the model, with a tamper-evident audit log. |
 | 🔌 **Any model, any agent, offline** | MCP server for Claude Code, Cursor or your own agents, including ones running local models (REST API planned). ProxyMind never sends your data to a model itself, and agents see secrets only as placeholders. |
@@ -142,7 +142,8 @@ crates/
   pm-diff      semantic diff with learned noise masks           ✅ working
   pm-model     live app model: operations, objects, ownership   ✅ working
   pm-ledger    hypotheses and coverage                          ✅ working
-  pm-proof     proof oracles (authz, timing, OAST)              ✅ working
+  pm-proof     proof oracles (authz, timing, OAST, reflection)  ✅ working
+  pm-browser   headless Chromium for offline XSS proofs         ✅ working
   pm-oast      out-of-band callback listener (HTTP)             ✅ working (DNS planned)
   pm-ai        LLM views, redaction, untrusted tagging          ✅ working
   pm-service   the one service layer every client uses          ✅ working
