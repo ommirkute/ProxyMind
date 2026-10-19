@@ -292,3 +292,59 @@ async fn reflection_proof_runs_the_payload_in_a_browser_and_rejects_encoded_refl
     // Placeholders are required.
     assert!(s.proof_run(&human(), run("GET /search?q=x HTTP/1.1\r\nHost: x\r\n\r\n")).await.is_err());
 }
+
+#[tokio::test]
+async fn oast_proof_catches_dns_lookups() {
+    let (s, url) = setup().await;
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dns_addr = sock.local_addr().unwrap();
+    let s2 = s.clone();
+    tokio::spawn(pm_service::pm_oast::dns::serve(sock, "oast.test".into(), std::net::Ipv4Addr::LOCALHOST, move |i| {
+        let _ = s2.record_oast(&i);
+    }));
+    s.set_oast_dns_domain("OAST.test.").unwrap();
+    assert!(s.set_oast_dns_domain("bad domain").is_err());
+    let run = |raw: &str| ProofRequest {
+        oracle: "oast".into(),
+        url: Some(url.clone()),
+        raw: Some(raw.into()),
+        wait_seconds: Some(3),
+        ..Default::default()
+    };
+    // The target resolves the name it's given: simulate the lookup once the
+    // request is sent, the way a vulnerable server would.
+    let s3 = s.clone();
+    let lookup = tokio::spawn(async move {
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let page = s3.history_search(&human(), &Default::default()).unwrap();
+            if let Some(name) = page
+                .exchanges
+                .iter()
+                .find_map(|e| e.path.split(['=', '&']).find(|w| w.ends_with(".oast.test")).map(str::to_string))
+            {
+                let c = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                c.send_to(&dns_query(&name), dns_addr).await.unwrap();
+                return;
+            }
+        }
+    });
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /api/products/search?q={{oast_dns}} HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap(),
+    );
+    lookup.await.unwrap();
+    assert!(proven, "{reasons:?}");
+    assert!(reasons[0].contains("DNS A"), "{reasons:?}");
+}
+
+fn dns_query(name: &str) -> Vec<u8> {
+    let mut p = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for l in name.split('.') {
+        p.push(l.len() as u8);
+        p.extend_from_slice(l.as_bytes());
+    }
+    p.extend_from_slice(&[0, 0, 1, 0, 1]);
+    p
+}

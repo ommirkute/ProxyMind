@@ -144,7 +144,7 @@ crates/
   pm-ledger    hypotheses and coverage                          ✅ working
   pm-proof     proof oracles (authz, timing, OAST, reflection)  ✅ working
   pm-browser   headless Chromium for offline XSS proofs         ✅ working
-  pm-oast      out-of-band callback listener (HTTP)             ✅ working (DNS planned)
+  pm-oast      out-of-band callback listener (HTTP and DNS)     ✅ working
   pm-ai        LLM views, redaction, untrusted tagging          ✅ working
   pm-service   the one service layer every client uses          ✅ working
   pm-api       REST API, live events, serves the web UI         ✅ working

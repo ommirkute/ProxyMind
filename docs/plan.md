@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- DNS OAST: a minimal authoritative DNS responder (sans-I/O parser, golden tests) records `<token>.<domain>` lookups; payloads use `{{oast_dns}}`; `oast-server --dns --domain`
 - XSS proofs (`reflection` oracle): the payload request carries a fresh token; the recorded response is rendered offline in headless Chromium (`pm-browser`, DevTools protocol over our own WebSocket codec) with every other request blocked; proven only when the script runs and returns the token (ADR-0011). VulnShop gained VS-6 (reflected XSS) and an HTML-encoding look-alike
 
 - Race-condition testing (`race_send`, Repeater → Race): HTTP/2 single-packet attack (all final frames in one TCP packet) with last-byte sync for HTTP/1.1 servers; at least active-intrusive; responses grouped. VulnShop gained VS-5 (gift card race)
@@ -41,7 +42,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 1. **Desktop shell** (Tauri) around the web UI
 2. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
-3. **More oracles and payload awareness**: DNS OAST, payload-aware tiers (reflection proofs are done); stored and DOM XSS proofs
+3. **More oracles and payload awareness**: payload-aware tiers (reflection proofs and DNS OAST are done); stored and DOM XSS proofs
 4. Project encryption, signed releases, installers
 
 ## Team roles

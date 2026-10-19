@@ -138,6 +138,15 @@ enum Command {
         /// URL targets should call back, e.g. http://oast.example.com:8085 (default: http://<listen>)
         #[arg(long)]
         public_url: Option<String>,
+        /// Also answer DNS on this UDP address (e.g. 0.0.0.0:53); needs --domain
+        #[arg(long, requires = "domain")]
+        dns: Option<SocketAddr>,
+        /// Domain delegated to this server (NS record), e.g. oast.example.com
+        #[arg(long, requires = "dns")]
+        domain: Option<String>,
+        /// IPv4 address A queries are answered with (default: the HTTP listener's address, or 127.0.0.1)
+        #[arg(long)]
+        dns_answer: Option<std::net::Ipv4Addr>,
     },
     /// Show the application model built from traffic.
     Model {
@@ -918,9 +927,24 @@ async fn run() -> Result<()> {
                 _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
             }
         }
-        Command::OastServer { listen, public_url } => {
+        Command::OastServer { listen, public_url, dns, domain, dns_answer } => {
             let service = Arc::new(open_service(&cli.project, None)?);
             start_oast(&service, *listen, public_url.clone()).await?;
+            if let (Some(addr), Some(domain)) = (dns, domain) {
+                let ip = dns_answer.unwrap_or(match listen.ip() {
+                    std::net::IpAddr::V4(v4) if !v4.is_unspecified() => v4,
+                    _ => std::net::Ipv4Addr::LOCALHOST,
+                });
+                service.set_oast_dns_domain(domain)?;
+                let sock = tokio::net::UdpSocket::bind(addr).await.with_context(|| format!("binding DNS on {addr}"))?;
+                let s = service.clone();
+                tokio::spawn(pm_oast::dns::serve(sock, domain.to_ascii_lowercase(), ip, move |i| {
+                    if let Err(e) = s.record_oast(&i) {
+                        eprintln!("could not record OAST interaction: {e}");
+                    }
+                }));
+                eprintln!("OAST DNS on {addr} for *.{domain} (A → {ip}); delegate the domain here with an NS record");
+            }
             tokio::signal::ctrl_c().await?;
         }
         Command::Model { contains, objects, json } => {

@@ -12,6 +12,8 @@ use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError, now_ms};
 
 pub const OAST_SETTING: &str = "oast_public_url";
+/// Project setting: the domain delegated to the OAST DNS responder.
+pub const OAST_DNS_SETTING: &str = "oast_dns_domain";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -36,7 +38,8 @@ pub struct ProofRequest {
     pub samples: Option<usize>,
     /// timing: required median slowdown in ms (default 500).
     pub min_effect_ms: Option<f64>,
-    /// oast: request containing {{oast}} where the callback URL goes.
+    /// oast: request containing {{oast}} where the callback URL goes, or
+    /// {{oast_dns}} where a host name to resolve goes (needs a DNS listener).
     /// reflection: request containing {{xss}} (payload as is), {{xss_url}}
     /// (percent-encoded) or {{token}} (inside a payload of your own).
     pub raw: Option<String>,
@@ -371,14 +374,25 @@ impl Service {
         actor: &Actor,
         req: &ProofRequest,
     ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
-        let public = self.store.lock().get_setting(OAST_SETTING)?.ok_or_else(|| {
-            ServiceError::Invalid(
-                "no OAST listener configured: run `proxymind oast-server` or start mcp with --oast".into(),
-            )
-        })?;
-        let raw = req.raw.clone().ok_or_else(|| ServiceError::Invalid("oast needs raw containing {{oast}}".into()))?;
-        if !raw.contains("{{oast}}") {
-            return invalid("put {{oast}} in raw where the callback URL should go");
+        let raw = req
+            .raw
+            .clone()
+            .ok_or_else(|| ServiceError::Invalid("oast needs raw containing {{oast}} or {{oast_dns}}".into()))?;
+        let (wants_http, wants_dns) = (raw.contains("{{oast}}"), raw.contains("{{oast_dns}}"));
+        if !wants_http && !wants_dns {
+            return invalid(
+                "put {{oast}} in raw where the callback URL should go, or {{oast_dns}} where a host name goes",
+            );
+        }
+        let public = self.store.lock().get_setting(OAST_SETTING)?;
+        let dns_domain = self.store.lock().get_setting(OAST_DNS_SETTING)?;
+        if wants_http && public.is_none() {
+            return invalid("no OAST listener configured: run `proxymind oast-server` or start mcp with --oast-listen");
+        }
+        if wants_dns && dns_domain.is_none() {
+            return invalid(
+                "no OAST DNS domain configured: run `proxymind oast-server --dns <addr> --domain <domain>`",
+            );
         }
         let endpoint = match (req.exchange_id, &req.url) {
             (Some(id), _) => self.exchange_outgoing(id)?.0.endpoint,
@@ -406,8 +420,16 @@ impl Service {
             }
         }
         let token = pm_oast::new_token();
-        let callback = format!("{}/{token}", public.trim_end_matches('/'));
-        let mut out = self.outgoing(endpoint, raw.replace("{{oast}}", &callback).as_bytes(), true)?;
+        let callback = public.map(|p| format!("{}/{token}", p.trim_end_matches('/')));
+        let dns_name = dns_domain.map(|d| format!("{token}.{}", d.trim_end_matches('.')));
+        let mut filled = raw.clone();
+        if let Some(c) = &callback {
+            filled = filled.replace("{{oast}}", c);
+        }
+        if let Some(n) = &dns_name {
+            filled = filled.replace("{{oast_dns}}", n);
+        }
+        let mut out = self.outgoing(endpoint, filled.as_bytes(), true)?;
         out.hypothesis_id = req.hypothesis_id;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let deadline = std::time::Instant::now() + Duration::from_secs(wait);
@@ -420,14 +442,15 @@ impl Service {
         };
         let first = hits.last().map(|h| {
             format!(
-                "{} {} from {}",
+                "{} {} {} from {}",
+                h.get("protocol").and_then(Value::as_str).unwrap_or("").to_uppercase(),
                 h.get("method").and_then(Value::as_str).unwrap_or(""),
                 h.get("path").and_then(Value::as_str).unwrap_or(""),
                 h.get("remote").and_then(Value::as_str).unwrap_or("")
             )
         });
         let verdict = pm_proof::oast(&token, hits.len(), first.as_deref());
-        let details = json!({ "token": token, "callback_url": callback, "interactions": hits });
+        let details = json!({ "token": token, "callback_url": callback, "dns_name": dns_name, "interactions": hits });
         Ok(Ok((verdict, vec![sent.exchange_id], details)))
     }
 
@@ -541,6 +564,21 @@ impl Service {
     pub fn set_oast_public_url(&self, url: &str) -> Result<()> {
         url::Url::parse(url).map_err(|e| ServiceError::Invalid(format!("bad OAST url: {e}")))?;
         self.store.lock().set_setting(OAST_SETTING, url)?;
+        Ok(())
+    }
+
+    /// The domain delegated to the OAST DNS responder (payloads use
+    /// `<token>.<domain>` via {{oast_dns}}).
+    pub fn set_oast_dns_domain(&self, domain: &str) -> Result<()> {
+        let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        let ok = !d.is_empty()
+            && d.len() <= 200
+            && d.split('.')
+                .all(|l| !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        if !ok {
+            return invalid(format!("{domain:?} is not a valid domain name"));
+        }
+        self.store.lock().set_setting(OAST_DNS_SETTING, &d)?;
         Ok(())
     }
 

@@ -56,7 +56,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
 | `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST, reflection (XSS verdict, payload templates) | `lib.rs` |
 | `pm-browser` | Headless Chromium over CDP (own WebSocket codec): renders a recorded response offline, blocks every other request, reports binding calls and dialogs | `lib.rs` |
-| `pm-oast` | HTTP callback listener + token helpers (DNS not yet) | `lib.rs` |
+| `pm-oast` | HTTP callback listener, authoritative DNS responder (sans-I/O parser), token helpers | `lib.rs`, `dns.rs` |
 | `pm-service` | The service layer (history, replay, ws replay, race, intercept, rules, network, identities, authz, model, ledger, proofs, findings, approvals, assistant storage) | one module per area in `src/` |
 | `pm-mcp` | MCP server over stdio; 25 tools | `lib.rs` (instructions), `tools.rs` |
 | `pm-assistant` | Built-in assistant: Anthropic + OpenAI-compatible wire formats, tool loop through `pm_mcp::call_tool` as `agent:assistant` | `lib.rs`, `llm.rs` |
@@ -103,7 +103,7 @@ Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (n
    - Rendering: launch Chromium headless with `--remote-debugging-port=0`, read `DevToolsActivePort`, speak CDP over WebSocket (the frame encoder/decoder already exist in `pm_http::ws`; or use a CDP crate after a `cargo deny` check). Use `Fetch.enable` to fulfil the main document with the recorded response body and **block every other request** (no side effects, no traffic outside scope). `Runtime.addBinding("pmProof")`; a `Runtime.bindingCalled` event with the token proves execution. Also catch `Page.javascriptDialogOpening` for `alert` payloads.
    - Where: verdict logic in `pm-proof` (pure); browser driving in a new crate (e.g. `pm-browser`) so lower crates stay I/O-free; dispatch in `pm-service/src/proof.rs` next to `prove_oast`. Find the browser via a setting or `PROXYMIND_CHROMIUM`; in the sandbox it's under `/opt/pw-browsers`.
    - Test: add a reflected-XSS endpoint to VulnShop (VS-6 + ground truth + `class_family` mapping in `pm-cli/src/bench.rs`), plus an HTML-encoded look-alike as a false-positive trap.
-2. **DNS OAST.**
+2. ✅ **Done: DNS OAST.** (`pm_oast::dns`, `{{oast_dns}}`, `oast-server --dns --domain [--dns-answer]`; domain stored as the `oast_dns_domain` setting.)
    - Add a minimal authoritative DNS responder to `pm-oast` (UDP; parse the query name; if it's `<token>.<oast-domain>`, record an interaction with `protocol: "dns"` and answer an A record pointing at the OAST HTTP host).
    - Keep the parser sans-I/O and fuzzable; add golden tests with hand-built packets.
    - CLI: `oast-server --dns 0.0.0.0:53 --domain oast.example.com`. Payloads get `{{oast_dns}}`; `prove_oast` accepts either protocol. Needs an NS delegation in real use; tests use a local UDP client.
