@@ -189,7 +189,7 @@ fn candidates() -> Vec<PathBuf> {
 /// Renders `doc` in a fresh headless browser and reports what ran.
 pub async fn render(chromium: &Path, doc: &Document, opts: &RenderOptions) -> Result<Report> {
     let browser = Browser::launch(chromium).await?;
-    let result = tokio::time::timeout(opts.timeout + Duration::from_secs(5), drive(&browser, doc, opts))
+    let result = tokio::time::timeout(opts.timeout + Duration::from_secs(120), drive(&browser, doc, opts))
         .await
         .unwrap_or(Err(Error::Timeout("rendering the page")));
     browser.shutdown().await;
@@ -365,7 +365,7 @@ impl Cdp {
                 return Err(Error::Protocol("handshake response too large".into()));
             }
             let mut chunk = [0u8; 4096];
-            let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
+            let n = tokio::time::timeout(Duration::from_secs(30), stream.read(&mut chunk))
                 .await
                 .map_err(|_| Error::Timeout("connecting to the browser"))??;
             if n == 0 {
@@ -409,7 +409,7 @@ impl Cdp {
     /// Sends a command and waits for its result; events seen meanwhile are queued.
     async fn call(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
         let id = self.send(method, params, session).await?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut skipped = VecDeque::new();
         let result = loop {
             let Some(msg) = self.next(deadline).await? else {
@@ -490,7 +490,20 @@ fn skip_header(name: &str) -> bool {
 }
 
 async fn drive(browser: &Browser, doc: &Document, opts: &RenderOptions) -> Result<Report> {
-    let mut cdp = Cdp::connect(browser.port, &browser.ws_path).await?;
+    // A freshly started browser on a busy machine can be slow to answer
+    // its first connection; try a few times.
+    let mut attempt = 0;
+    let mut cdp = loop {
+        match Cdp::connect(browser.port, &browser.ws_path).await {
+            Ok(c) => break c,
+            Err(e) if attempt < 2 => {
+                tracing::warn!("DevTools connection failed ({e}); retrying");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let target = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?;
     let target_id = target["targetId"].as_str().ok_or_else(|| Error::Protocol("no targetId".into()))?.to_string();
     let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None).await?;

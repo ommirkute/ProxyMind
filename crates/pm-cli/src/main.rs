@@ -705,9 +705,24 @@ fn print_approval(a: &pm_service::ApprovalRow) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    match run().await {
+fn main() -> std::process::ExitCode {
+    // `run` is one large async state machine covering every command. Keep it
+    // on the heap and drive it from a thread with a roomy stack: Windows
+    // gives the main thread only 1 MB, which a debug build overflows.
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(8 << 20).build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: could not start the async runtime: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let result = std::thread::Builder::new()
+        .name("proxymind-main".into())
+        .stack_size(16 << 20)
+        .spawn(move || rt.block_on(Box::pin(run())))
+        .map_err(anyhow::Error::from)
+        .and_then(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the main thread panicked"))));
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) if is_broken_pipe(&e) => std::process::ExitCode::SUCCESS,
         Err(e) => {
