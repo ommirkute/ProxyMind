@@ -17,6 +17,7 @@ pm-ai = { version = "0.0.1", path = "../pm-ai" }
 pm-browser = { version = "0.0.1", path = "../pm-browser" }
 pm-core = { version = "0.0.1", path = "../pm-core" }
 pm-fuzz = { version = "0.0.1", path = "../pm-fuzz" }
+pm-crawl = { version = "0.0.1", path = "../pm-crawl" }
 pm-diff = { version = "0.0.1", path = "../pm-diff" }
 pm-http = { version = "0.0.1", path = "../pm-http" }
 pm-identity = { version = "0.0.1", path = "../pm-identity" }

@@ -1266,6 +1266,14 @@ name = "pm-core"
 version = "0.0.1"
 
 [[package]]
+name = "pm-crawl"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "url",
+]
+
+[[package]]
 name = "pm-demo"
 version = "0.0.1"
 dependencies = [
@@ -1429,6 +1437,7 @@ dependencies = [
  "pm-ai",
  "pm-browser",
  "pm-core",
+ "pm-crawl",
  "pm-demo",
  "pm-diff",
  "pm-fuzz",

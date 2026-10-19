@@ -163,7 +163,8 @@ impl McpServer {
 
 const START_PROMPT: &str = "You are helping with an authorized security test using ProxyMind.\n\
 1. Call roe_get and summarise what is in scope and what needs approval.\n\
-2. Call model_get to see the application's operations, and identity_list to see which users you can act as.\n\
+2. Call model_get to see the application's operations (crawl first if it is nearly empty), and identity_list to \
+   see which users you can act as.\n\
 3. Call authz_candidates and run authz_check on each; for every same_as_owner result, create a finding and run \
    proof_run with oracle differential_authz.\n\
 4. Call coverage, pick the highest-priority untested cells, and record a hypothesis before testing each one.\n\

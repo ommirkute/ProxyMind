@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Crawler (`crawl`, Model page, `proxymind crawl`): GET-only, per-URL scope check, skips state-changing links and risky payloads, robots.txt and sitemaps, forms listed not submitted; pages feed the app model
 - Intruder (`intruder_run`, UI page, `proxymind intruder`): §-marked positions, sniper / battering ram / pitchfork / cluster bomb, payload lists, number ranges and built-in lists, grep and reflection, anomalies against the baseline; one approval covers the whole attack (template, payloads, mode); at least intrusive, raised by any payload
 - Payload-aware tiers: a pure classifier in `pm-policy` (destructive SQL, OS commands, file writes, bulk actions; undoes multi-level percent-encoding, JSON escapes, SQL comments) raises the tier of any send; approvals say why. Never lowers a tier
 - DNS OAST: a minimal authoritative DNS responder (sans-I/O parser, golden tests) records `<token>.<domain>` lookups; payloads use `{{oast_dns}}`; `oast-server --dns --domain`
@@ -27,7 +28,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
 - WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (26 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (27 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map

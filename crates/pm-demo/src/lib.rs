@@ -234,7 +234,10 @@ fn now_ms() -> u128 {
 const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><body>\
 <h1>VulnShop</h1><p>A deliberately vulnerable demo shop. Do not expose it to a network.</p>\
 <form method=post action=/api/login><input name=username><input type=password name=password>\
-<button>Log in</button></form><a href=/api/products>Products</a></body></html>";
+<button>Log in</button></form><a href=/api/products>Products</a> \
+<form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
+<a href='/help?topic=orders'>Help</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<script src=/static/app.js></script></body></html>";
 
 impl VulnShop {
     pub fn new() -> Self {
@@ -415,6 +418,12 @@ impl VulnShop {
                 );
                 Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
             }
+            ("GET", ["robots.txt"]) => Response {
+                status: 200,
+                headers: vec![],
+                body: "User-agent: *\nDisallow: /api/admin/\nDisallow: /*.bak$\n".into(),
+                content_type: "text/plain",
+            },
             ("GET", ["help"]) => {
                 // Secure look-alike: the topic is HTML-encoded.
                 let topic = html_escape(&req.query.get("topic").cloned().unwrap_or_default());

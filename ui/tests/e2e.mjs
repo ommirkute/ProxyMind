@@ -474,6 +474,17 @@ try {
   await page.screenshot({ path: join(SHOTS, "6f-assistant.png") });
   model.close();
 
+  console.log("Crawl");
+  await page.getByRole("button", { name: "Model & Coverage" }).click();
+  await page.getByRole("button", { name: "Discover pages…" }).click();
+  await page.getByLabel("Crawl start URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByTestId("crawl-run").click();
+  await page.waitForSelector('[data-testid="crawl-summary"]', { timeout: 60000 });
+  check(await page.getByTestId("crawl-summary").textContent().then((t) => /^\d+ pages · 2 forms/.test(t)), "crawl finds pages and both forms");
+  await page.getByText("Skipped links").click();
+  check((await page.getByText("the link probably logs out").count()) === 1, "the logout link is skipped");
+  await page.screenshot({ path: join(SHOTS, "6b-crawl.png") });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

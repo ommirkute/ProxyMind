@@ -177,6 +177,21 @@ enum Command {
         #[command(subcommand)]
         action: FindingAction,
     },
+    /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
+    Crawl {
+        url: String,
+        #[arg(long, default_value_t = 50)]
+        max_pages: usize,
+        #[arg(long, default_value_t = 3)]
+        max_depth: usize,
+        /// Don't read robots.txt and sitemaps
+        #[arg(long)]
+        no_robots: bool,
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Fuzz a request: payloads in positions marked §like this§, anomalies pointed out.
     Intruder {
         /// Target as scheme://host[:port] (or use --exchange)
@@ -1094,6 +1109,46 @@ async fn run() -> Result<()> {
                     out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
                 }
                 FindingAction::Reported { id } => out!("finding {} is now {}", id, set(*id, "reported")?["status"]),
+            }
+        }
+        Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
+            let service = open_service(&cli.project, None)?;
+            let r = service
+                .crawl(
+                    &human_actor(None)?,
+                    pm_service::CrawlRequest {
+                        url: url.clone(),
+                        max_pages: Some(*max_pages),
+                        max_depth: Some(*max_depth),
+                        robots: Some(!*no_robots),
+                        identity: identity.clone(),
+                        approval_id: None,
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (pm_service::CrawlResult::Done { pages, forms, skipped, skipped_total, not_visited }, false) => {
+                    for p in pages {
+                        out!(
+                            "{:>5}  #{:<6} {}",
+                            p.status.map_or("err".into(), |s| s.to_string()),
+                            p.exchange_id,
+                            p.url
+                        );
+                    }
+                    out!(
+                        "\n{} pages, {} forms, {skipped_total} links skipped, {not_visited} not visited",
+                        pages.len(),
+                        forms.len()
+                    );
+                    for f in forms {
+                        out!("  form {} {} ({})", f.method, f.action, f.inputs.join(", "));
+                    }
+                    for s in skipped.iter().take(20) {
+                        out!("  skipped {}: {}", s.url, s.reason);
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
         Command::Intruder {

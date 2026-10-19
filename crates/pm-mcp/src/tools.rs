@@ -206,6 +206,21 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "crawl",
+            "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
+             out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
+             with status, forms found (not submitted) and links skipped with why. Usually allowed directly.",
+            json!({
+                "url": {"type":"string","description":"Start URL, e.g. https://app.example.com/"},
+                "max_pages": {"type":"integer","minimum":1,"maximum":500,"description":"Default 50"},
+                "max_depth": {"type":"integer","minimum":0,"maximum":10,"description":"Default 3"},
+                "robots": {"type":"boolean","description":"Read robots.txt and sitemaps (default true)"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &["url"],
+        ),
+        tool(
             "model_get",
             "The application model built from traffic: operations (method + path template such as \
              /api/orders/{id}, kind, params, identities seen) and object counts. Start here to understand the app.",
@@ -433,6 +448,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;
             service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "crawl" => {
+            let r: pm_service::CrawlRequest = args(a)?;
+            service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "intruder_run" => {
             let r: pm_service::IntruderRequest = args(a)?;

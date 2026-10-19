@@ -79,6 +79,7 @@ pub fn api() -> Router<AppState> {
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
         .route("/intruder", post(intruder))
+        .route("/crawl", post(crawl))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -333,6 +334,10 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {
+    ok(st.service.crawl(&st.actor, r).await?)
 }
 
 async fn intruder(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {

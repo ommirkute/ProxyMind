@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, type Coverage, type ModelObject, type Operation } from "../api";
-import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useLoad, useNav } from "../components";
+import { Chip, Empty, ErrorBox, ExchangeLink, Panel, StatusCode, useAction, useLoad, useNav } from "../components";
 
 interface ModelResponse {
   operations: Operation[];
@@ -23,6 +23,7 @@ export default function Model() {
 
   return (
     <div className="content">
+      <CrawlPanel />
       <Panel
         title="Operations"
         actions={
@@ -112,5 +113,79 @@ export default function Model() {
         )}
       </Panel>
     </div>
+  );
+}
+
+type CrawlResult =
+  | {
+      status: "done";
+      pages: { url: string; depth: number; exchange_id: number; status?: number; content_type?: string; links_found: number }[];
+      forms: { page: string; method: string; action: string; inputs: string[] }[];
+      skipped: { url: string; reason: string }[];
+      skipped_total: number;
+      not_visited: number;
+    }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
+/** Discover pages: GET only, in scope only, never links that log out or delete. */
+function CrawlPanel() {
+  const [url, setUrl] = useState("");
+  const [maxPages, setMaxPages] = useState(50);
+  const [result, setResult] = useState<CrawlResult | null>(null);
+  const [open, setOpen] = useState(false);
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      setResult(await api.post<CrawlResult>("/crawl", { url, max_pages: maxPages }));
+    });
+  return (
+    <Panel
+      title="Crawl"
+      actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Discover pages…"}</button>}
+    >
+      {open && (
+        <>
+          <div className="row">
+            <input aria-label="Crawl start URL" className="grow mono" placeholder="https://app.example.com/" value={url} onChange={(e) => setUrl(e.target.value)} />
+            <input aria-label="Max pages" type="number" min={1} max={500} value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} style={{ width: 80 }} />
+            <button className="btn primary" disabled={!url || action.busy} onClick={run} data-testid="crawl-run">{action.busy ? "Crawling…" : "Crawl"}</button>
+          </div>
+          <p className="small muted">GET requests only, in scope only; links that look like log out or delete are skipped, forms are listed but never submitted.</p>
+          <ErrorBox error={action.error} />
+          {result?.status === "pending_approval" && <div className="notice">Needs approval: {result.summary}</div>}
+          {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
+          {result?.status === "done" && (
+            <>
+              <div className="small" data-testid="crawl-summary">
+                {result.pages.length} pages · {result.forms.length} forms · {result.skipped_total} skipped · {result.not_visited} not visited
+              </div>
+              <table className="grid small">
+                <thead><tr><th>Status</th><th>URL</th><th>Type</th><th>Links</th><th></th></tr></thead>
+                <tbody>
+                  {result.pages.map((p) => (
+                    <tr key={p.exchange_id}>
+                      <td><StatusCode status={p.status ?? null} /></td>
+                      <td className="mono">{p.url}</td>
+                      <td className="muted">{p.content_type?.split(";")[0]}</td>
+                      <td>{p.links_found}</td>
+                      <td><ExchangeLink id={p.exchange_id} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {result.forms.length > 0 && (
+                <ul className="small">{result.forms.map((f) => <li key={f.method + f.action}><Chip value={f.method} /> <span className="mono">{f.action}</span> ({f.inputs.join(", ") || "no fields"})</li>)}</ul>
+              )}
+              {result.skipped.length > 0 && (
+                <details className="small"><summary>Skipped links</summary>
+                  <ul>{result.skipped.map((s) => <li key={s.url}><span className="mono">{s.url}</span>: {s.reason}</li>)}</ul>
+                </details>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </Panel>
   );
 }
