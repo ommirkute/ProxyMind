@@ -1286,6 +1286,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-fuzz"
+version = "0.0.1"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "pm-http"
 version = "0.0.1"
 dependencies = [
@@ -1424,6 +1431,7 @@ dependencies = [
  "pm-core",
  "pm-demo",
  "pm-diff",
+ "pm-fuzz",
  "pm-http",
  "pm-identity",
  "pm-ledger",

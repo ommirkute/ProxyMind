@@ -163,6 +163,18 @@ try {
   check(await page.getByTestId("replay-result").textContent().then((t) => t.includes("401")), "anonymous replay gets 401");
   await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
 
+  console.log("Intruder");
+  await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
+  await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");
+  await page.getByLabel("Send as").selectOption("bob");
+  await page.getByLabel("Payloads").fill("1001\n1002\n9999");
+  await page.getByLabel("Grep").fill("alice@");
+  await page.getByTestId("intruder-run").click();
+  await page.waitForSelector('[data-testid="intruder-summary"]');
+  check(await page.getByTestId("intruder-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests");
+  check((await page.getByTestId("anomaly").count()) === 3, "alice's orders (grep) and the 404 stand out");
+  await page.screenshot({ path: join(SHOTS, "5b-intruder.png") });
+
   console.log("Approvals (an agent asks over MCP)");
   const mcp = start(["mcp", "--actor", "agent:claude"]);
   const replies = [];

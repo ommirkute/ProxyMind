@@ -177,6 +177,42 @@ enum Command {
         #[command(subcommand)]
         action: FindingAction,
     },
+    /// Fuzz a request: payloads in positions marked §like this§, anomalies pointed out.
+    Intruder {
+        /// Target as scheme://host[:port] (or use --exchange)
+        #[arg(long, required_unless_present = "exchange")]
+        url: Option<String>,
+        /// Recorded exchange whose target to use
+        #[arg(long)]
+        exchange: Option<i64>,
+        /// File with the raw request, positions marked §like this§
+        #[arg(long)]
+        raw_file: PathBuf,
+        /// sniper, battering_ram, pitchfork or cluster_bomb
+        #[arg(long, default_value = "sniper")]
+        mode: String,
+        /// A payload file (one payload per line); repeat for one set per position
+        #[arg(long = "payloads")]
+        payload_files: Vec<PathBuf>,
+        /// Numbers as a payload set, e.g. 1000-1050 or 0-100:10
+        #[arg(long)]
+        numbers: Option<String>,
+        /// A built-in payload list: ids, sqli, xss, traversal, ssti, methods_override
+        #[arg(long)]
+        builtin: Option<String>,
+        /// Percent-encode payloads
+        #[arg(long)]
+        url_encode: bool,
+        /// Flag responses containing this text (repeatable)
+        #[arg(long)]
+        grep: Vec<String>,
+        /// Send with this identity's credentials
+        #[arg(long)]
+        identity: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect or re-run proofs.
     Proof {
         #[command(subcommand)]
@@ -1058,6 +1094,79 @@ async fn run() -> Result<()> {
                     out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
                 }
                 FindingAction::Reported { id } => out!("finding {} is now {}", id, set(*id, "reported")?["status"]),
+            }
+        }
+        Command::Intruder {
+            url,
+            exchange,
+            raw_file,
+            mode,
+            payload_files,
+            numbers,
+            builtin,
+            url_encode,
+            grep,
+            identity,
+            json,
+        } => {
+            let service = open_service(&cli.project, None)?;
+            let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode))
+                .map_err(|_| anyhow::anyhow!("mode must be sniper, battering_ram, pitchfork or cluster_bomb"))?;
+            let set = |list: Vec<String>, numbers: Option<String>, builtin: Option<String>| {
+                pm_service::pm_fuzz::PayloadSet { list, numbers, builtin, url_encode: *url_encode }
+            };
+            let mut sets = Vec::new();
+            for f in payload_files {
+                let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+                sets.push(set(text.lines().filter(|l| !l.is_empty()).map(str::to_string).collect(), None, None));
+            }
+            if numbers.is_some() || builtin.is_some() {
+                sets.push(set(vec![], numbers.clone(), builtin.clone()));
+            }
+            anyhow::ensure!(!sets.is_empty(), "give payloads with --payloads, --numbers or --builtin");
+            let r = service
+                .intruder_run(
+                    &human_actor(None)?,
+                    pm_service::IntruderRequest {
+                        url: url.clone(),
+                        exchange_id: *exchange,
+                        raw: std::fs::read_to_string(raw_file)?,
+                        mode,
+                        payload_sets: sets,
+                        grep: grep.clone(),
+                        identity: identity.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (pm_service::IntruderResult::Done { baseline, results, anomalies }, false) => {
+                    let line = |label: &str, r: &pm_service::IntruderRow| -> Result<()> {
+                        out!(
+                            "{label:>5}  #{:<6} {:>5}  {:>7} B  {:>6} ms  {}{}",
+                            r.exchange_id,
+                            r.status.map_or("err".into(), |s| s.to_string()),
+                            r.body_length,
+                            r.elapsed_ms,
+                            r.payloads.iter().map(|p| p.as_deref().unwrap_or("·")).collect::<Vec<_>>().join(" | "),
+                            if r.matches.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  grep: {}", r.matches.join(", "))
+                            }
+                        );
+                        Ok(())
+                    };
+                    line("base", baseline)?;
+                    for (i, row) in results.iter().enumerate() {
+                        line(&(i + 1).to_string(), row)?;
+                    }
+                    out!("\n{} anomalies:", anomalies.len());
+                    for a in anomalies {
+                        out!("  {}: {}", a.index + 1, a.reasons.join("; "));
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
         Command::Proof { action: ProofAction::Browser } => match pm_service::pm_browser::find_chromium() {

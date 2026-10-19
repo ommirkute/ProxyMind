@@ -11,6 +11,7 @@ mod findings;
 mod history;
 mod identity;
 mod intercept;
+mod intruder;
 mod model;
 mod network;
 mod proof;
@@ -26,6 +27,7 @@ pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
+pub use intruder::{IntruderRequest, IntruderResult, IntruderRow};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{NETWORK_SETTING, load_network, sync_network};
 pub use pm_store::ApprovalRow;
@@ -47,8 +49,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_browser, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_replay,
-    pm_store,
+    pm_ai, pm_browser, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy,
+    pm_replay, pm_store,
 };
 
 #[derive(Debug, Error)]

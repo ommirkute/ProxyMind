@@ -94,6 +94,34 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "intruder_run",
+            "Fuzz a request: mark positions in raw with §original§ (e.g. GET /api/orders/§1001§), give payload sets, \
+             and ProxyMind sends the baseline plus one request per payload (sniper: one position at a time; \
+             battering_ram: same payload everywhere; pitchfork: set i in position i together; cluster_bomb: every \
+             combination), max 1000. Returns status, body length, time, grep matches and reflection per request, and \
+             anomalies: results that differ from the baseline or the rest. Payload sets take list, numbers \
+             (\"1000-1050\" or \"0-100:10\"), builtin (ids, sqli, xss, traversal, ssti, methods_override) and \
+             url_encode. Needs approval by default for the whole attack: ask the user, then call again with identical \
+             arguments plus approval_id.",
+            json!({
+                "exchange_id": {"type":"integer","description":"Recorded request whose target to use"},
+                "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
+                "raw": {"type":"string","description":"Request with positions marked §like this§"},
+                "mode": {"type":"string","enum":["sniper","battering_ram","pitchfork","cluster_bomb"]},
+                "payload_sets": {"type":"array","items":{"type":"object","properties":{
+                    "list":{"type":"array","items":{"type":"string"}},
+                    "numbers":{"type":"string"},
+                    "builtin":{"type":"string","enum":["ids","sqli","xss","traversal","ssti","methods_override"]},
+                    "url_encode":{"type":"boolean"}}}},
+                "grep": {"type":"array","items":{"type":"string"},"description":"Flag responses containing these"},
+                "identity": {"type":"string"},
+                "fix_content_length": {"type":"boolean"},
+                "hypothesis_id": {"type":"integer"},
+                "approval_id": {"type":"string"},
+            }),
+            &["raw", "payload_sets"],
+        ),
+        tool(
             "ws_send",
             "Open a new WebSocket like a recorded one (exchange_id of a status-101 upgrade), send messages in order and \
              get every message both ways. ProxyMind listens wait_ms after opening and after each message, answers pings \
@@ -405,6 +433,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;
             service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "intruder_run" => {
+            let r: pm_service::IntruderRequest = args(a)?;
+            service.intruder_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "ws_send" => {
             let r: pm_service::WsReplayRequest = args(a)?;

@@ -4,6 +4,7 @@ import { NavContext, type Page } from "./components";
 import History from "./pages/History";
 import Intercept from "./pages/Intercept";
 import Repeater from "./pages/Repeater";
+import Intruder from "./pages/Intruder";
 import Rules from "./pages/Rules";
 import Approvals from "./pages/Approvals";
 import Assistant from "./pages/Assistant";
@@ -19,6 +20,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "intercept", label: "Intercept" },
   { id: "rules", label: "Match & replace" },
   { id: "repeater", label: "Repeater" },
+  { id: "intruder", label: "Intruder" },
   { id: "approvals", label: "Approvals" },
   { id: "authz", label: "Identities & Authz" },
   { id: "model", label: "Model & Coverage" },
@@ -97,6 +99,7 @@ export default function App() {
     intercept: Intercept,
     rules: Rules,
     repeater: Repeater,
+    intruder: Intruder,
     approvals: Approvals,
     authz: Authz,
     model: Model,
