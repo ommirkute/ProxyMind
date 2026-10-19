@@ -26,7 +26,9 @@ PROXYMIND=./target/release/proxymind bench/demo.sh
 
 The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a Markdown report.
 
-Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining two bugs.
+Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining bugs.
+
+Prefer a container? `docker build -t proxymind .` builds an image with the UI and a headless Chromium for XSS proofs; see [docs/releasing.md](docs/releasing.md#container-image) for running it. Tagged releases ship signed binaries for Linux, macOS and Windows, an SBOM and an image on GHCR.
 
 ## The UI
 

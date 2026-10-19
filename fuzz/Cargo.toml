@@ -1,0 +1,76 @@
+# Fuzz targets for the parsers that read hostile input. Needs nightly:
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run http_messages -- -max_total_time=60
+# Run nightly in CI (.github/workflows/nightly.yml).
+[package]
+name = "proxymind-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pm-http = { path = "../crates/pm-http" }
+pm-oast = { path = "../crates/pm-oast" }
+pm-policy = { path = "../crates/pm-policy" }
+pm-crawl = { path = "../crates/pm-crawl" }
+pm-fuzz = { path = "../crates/pm-fuzz" }
+pm-scan = { path = "../crates/pm-scan" }
+url = "2"
+
+# Not part of the main workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "http_messages"
+path = "fuzz_targets/http_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_frames"
+path = "fuzz_targets/websocket_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_query"
+path = "fuzz_targets/dns_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_classifier"
+path = "fuzz_targets/payload_classifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crawl_extract"
+path = "fuzz_targets/crawl_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intruder_template"
+path = "fuzz_targets/intruder_template.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passive_checks"
+path = "fuzz_targets/passive_checks.rs"
+test = false
+doc = false
+bench = false

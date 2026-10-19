@@ -130,6 +130,12 @@ enum Command {
         /// Who you are in the audit log (default: human:<your username>)
         #[arg(long = "as")]
         actor: Option<String>,
+        /// Allow the UI/API to listen on a non-loopback address. Only for a
+        /// container whose port is published on the host's loopback
+        /// (docker run -p 127.0.0.1:7777:7777); requests must still be
+        /// addressed to localhost and carry the token.
+        #[arg(long)]
+        bind_any: bool,
     },
     /// Run an out-of-band (OAST) callback listener that records interactions in the project.
     OastServer {
@@ -952,8 +958,12 @@ async fn run() -> Result<()> {
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
-        Command::Ui { listen, proxy, no_proxy, no_http2, actor } => {
-            anyhow::ensure!(listen.ip().is_loopback(), "the UI/API must listen on a loopback address");
+        Command::Ui { listen, proxy, no_proxy, no_http2, actor, bind_any } => {
+            anyhow::ensure!(
+                listen.ip().is_loopback() || *bind_any,
+                "the UI/API must listen on a loopback address (inside a container, add --bind-any and publish the \
+                 port on 127.0.0.1 only)"
+            );
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
@@ -983,7 +993,9 @@ async fn run() -> Result<()> {
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
             eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
-            out!("Open: http://{listen}/auth?token={token}");
+            let shown =
+                if listen.ip().is_unspecified() { SocketAddr::from(([127, 0, 0, 1], listen.port())) } else { *listen };
+            out!("Open: http://{shown}/auth?token={token}");
             tokio::select! {
                 r = axum::serve(l, pm_api::router(state)) => r?,
                 _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),

@@ -1,0 +1,7 @@
+target/
+ui/node_modules/
+ui/dist/
+*.pmproj
+*.pmproj-*
+.git/
+.proxymind/

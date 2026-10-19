@@ -145,7 +145,8 @@ fn tags(html: &str) -> Vec<Tag> {
         if closing {
             i += 1;
         }
-        let name_end = html[i..].find(|c: char| c.is_whitespace() || c == '>' || c == '/').map_or(b.len(), |e| i + e);
+        let name_end =
+            html[i..].find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/').map_or(b.len(), |e| i + e);
         let name = html[i..name_end].to_ascii_lowercase();
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             i = start;
@@ -163,7 +164,7 @@ fn tags(html: &str) -> Vec<Tag> {
                 break;
             }
             let k_end = html[i..]
-                .find(|c: char| c.is_whitespace() || c == '=' || c == '>' || c == '/')
+                .find(|c: char| c.is_ascii_whitespace() || c == '=' || c == '>' || c == '/')
                 .map_or(b.len(), |e| i + e);
             let key = html[i..k_end].to_ascii_lowercase();
             i = k_end.max(i + 1).min(b.len());
@@ -182,7 +183,8 @@ fn tags(html: &str) -> Vec<Tag> {
                     value = html[i + 1..v_end].to_string();
                     i = (v_end + 1).min(b.len());
                 } else {
-                    let v_end = html[i..].find(|c: char| c.is_whitespace() || c == '>').map_or(b.len(), |e| i + e);
+                    let v_end =
+                        html[i..].find(|c: char| c.is_ascii_whitespace() || c == '>').map_or(b.len(), |e| i + e);
                     value = html[i..v_end].to_string();
                     i = v_end;
                 }
@@ -343,7 +345,10 @@ mod tests {
     fn base_href_and_garbage() {
         let e = extract(&u("http://a.test/x/y"), "<base href='/root/'><a href=z>");
         assert_eq!(e.links[0].as_str(), "http://a.test/root/z");
-        // Never panics on junk.
+        // Never panics on junk, including Unicode whitespace (U+0085, found by fuzzing).
+        let fuzzed = String::from_utf8_lossy(b"<9\n\xff==\xbf<9,<\xc2\x85\n\n\xbf<9,,\xef\xbf\xff=\x00\n\n");
+        let _ = extract(&u("http://a.test/"), &fuzzed);
+        let _ = extract(&u("http://a.test/"), "<a\u{85}href=x\u{a0}b=\u{2003}c>");
         for junk in
             ["<", "<a", "<a href", "<a href=", "<a href='", "<<>>", "<!--", "<a/b=c>", "é<a href=é>", "<script>"]
         {

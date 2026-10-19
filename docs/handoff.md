@@ -125,9 +125,12 @@ ADR-0006/0008: wrap the existing web UI, don't rewrite it.
 - **Build:** on Linux it needs `libwebkit2gtk-4.1-dev` and friends, so build and test in a CI job (`apt-get install`). It can't be checked visually in the sandbox.
 
 ### D. Later
-Project encryption (v0.2), signed releases and SBOMs, installers and a Docker image, `cargo-fuzz` on parsers in nightly CI, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
+Project encryption (v0.2), installers, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
 
 ## 5. How to work on it
+
+### Releases, container, fuzzing
+See `docs/releasing.md`: tag `v*` → `.github/workflows/release.yml` (binaries, checksums, SBOM, attestations, GHCR image). `.github/workflows/nightly.yml` fuzzes parsers (`fuzz/`, needs nightly + cargo-fuzz) and builds the image. In the sandbox, `dockerd` can be started by hand and builds work with `--secret id=extra_ca,src=/root/.ccr/ca-bundle.crt` and the proxy as build args.
 
 ### Commands (run all before pushing)
 
