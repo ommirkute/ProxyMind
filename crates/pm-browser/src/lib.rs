@@ -206,8 +206,9 @@ struct Browser {
 }
 
 enum LaunchError {
-    /// The process exited before it was ready (often: no usable sandbox).
-    Exited(String),
+    /// The process exited, or never became ready, in time (often: no usable
+    /// sandbox). The text includes the end of the browser's stderr.
+    NotReady(String),
     Other(Error),
 }
 
@@ -227,22 +228,29 @@ fn temp_profile_dir() -> PathBuf {
 impl Browser {
     async fn launch(path: &Path) -> Result<Self> {
         let no_sandbox = running_as_root() || std::env::var(ENV_NO_SANDBOX).is_ok_and(|v| v == "1");
-        match Self::launch_once(path, no_sandbox).await {
+        let fail = |reason| Err(Error::Launch { path: path.display().to_string(), reason });
+        if no_sandbox {
+            return match Self::launch_once(path, true, Duration::from_secs(45)).await {
+                Ok(b) => Ok(b),
+                Err(LaunchError::NotReady(r)) => fail(r),
+                Err(LaunchError::Other(e)) => Err(e),
+            };
+        }
+        match Self::launch_once(path, false, Duration::from_secs(20)).await {
             Ok(b) => Ok(b),
-            Err(LaunchError::Exited(reason)) if !no_sandbox => {
-                tracing::warn!("browser exited at start ({reason}); retrying without its sandbox");
-                match Self::launch_once(path, true).await {
+            Err(LaunchError::NotReady(first)) => {
+                tracing::warn!("browser did not start with its sandbox ({first}); retrying without it");
+                match Self::launch_once(path, true, Duration::from_secs(45)).await {
                     Ok(b) => Ok(b),
-                    Err(LaunchError::Exited(reason)) => Err(Error::Launch { path: path.display().to_string(), reason }),
+                    Err(LaunchError::NotReady(r)) => fail(format!("{r}; with the sandbox: {first}")),
                     Err(LaunchError::Other(e)) => Err(e),
                 }
             }
-            Err(LaunchError::Exited(reason)) => Err(Error::Launch { path: path.display().to_string(), reason }),
             Err(LaunchError::Other(e)) => Err(e),
         }
     }
 
-    async fn launch_once(path: &Path, no_sandbox: bool) -> std::result::Result<Self, LaunchError> {
+    async fn launch_once(path: &Path, no_sandbox: bool, wait: Duration) -> std::result::Result<Self, LaunchError> {
         let dir = temp_profile_dir();
         std::fs::create_dir_all(&dir).map_err(|e| LaunchError::Other(e.into()))?;
         let mut cmd = Command::new(path);
@@ -270,16 +278,27 @@ impl Browser {
                 "--disable-gpu",
                 "--hide-scrollbars",
                 "--window-size=1280,800",
+                // Never wait on an OS keyring or keychain prompt.
+                "--password-store=basic",
+                "--use-mock-keychain",
             ]);
         if no_sandbox {
             cmd.arg("--no-sandbox");
         }
-        cmd.arg("about:blank").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+        let log = dir.join("stderr.log");
+        let stderr = std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+        cmd.arg("about:blank").stdin(Stdio::null()).stdout(Stdio::null()).stderr(stderr).kill_on_drop(true);
         let child = cmd.spawn().map_err(|e| {
             LaunchError::Other(Error::Launch { path: path.display().to_string(), reason: e.to_string() })
         })?;
         let mut b = Browser { child, dir, port: 0, ws_path: String::new() };
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + wait;
+        let stderr_tail = || {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
+            if tail.is_empty() { String::new() } else { format!("; stderr: {}", clip(&tail)) }
+        };
         let port_file = b.dir.join("DevToolsActivePort");
         loop {
             if let Ok(s) = std::fs::read_to_string(&port_file) {
@@ -293,12 +312,14 @@ impl Browser {
                 }
             }
             if let Ok(Some(status)) = b.child.try_wait() {
+                let why = format!("exited with {status}{}", stderr_tail());
                 b.shutdown().await;
-                return Err(LaunchError::Exited(format!("exited with {status}")));
+                return Err(LaunchError::NotReady(why));
             }
             if Instant::now() >= deadline {
+                let why = format!("not ready after {} s{}", wait.as_secs(), stderr_tail());
                 b.shutdown().await;
-                return Err(LaunchError::Other(Error::Timeout("waiting for the browser to start")));
+                return Err(LaunchError::NotReady(why));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

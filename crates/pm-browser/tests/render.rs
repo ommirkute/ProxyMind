@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use pm_browser::{Document, RenderOptions, find_chromium, render};
 
+/// One browser at a time: parallel cold starts on a busy CI runner are slow.
+static BROWSER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn html(url: &str, body: &str) -> Document {
     Document {
         url: url.into(),
@@ -36,6 +39,7 @@ async fn tripwire() -> (u16, Arc<AtomicUsize>) {
 
 #[tokio::test]
 async fn executes_injected_script_offline_and_blocks_all_traffic() {
+    let _one = BROWSER.lock().await;
     let Some(chrome) = find_chromium() else {
         eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
         return;
@@ -90,6 +94,7 @@ async fn executes_injected_script_offline_and_blocks_all_traffic() {
 
 #[tokio::test]
 async fn content_security_policy_is_honoured() {
+    let _one = BROWSER.lock().await;
     let Some(chrome) = find_chromium() else {
         eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
         return;
