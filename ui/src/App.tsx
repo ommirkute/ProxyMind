@@ -12,6 +12,7 @@ import Authz from "./pages/Authz";
 import Model from "./pages/Model";
 import Network from "./pages/Network";
 import Findings from "./pages/Findings";
+import Issues from "./pages/Issues";
 import Audit from "./pages/Audit";
 
 const PAGES: { id: Page; label: string }[] = [
@@ -24,6 +25,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "approvals", label: "Approvals" },
   { id: "authz", label: "Identities & Authz" },
   { id: "model", label: "Model & Coverage" },
+  { id: "issues", label: "Issues" },
   { id: "findings", label: "Findings" },
   { id: "audit", label: "Audit log" },
   { id: "network", label: "Network" },
@@ -103,6 +105,7 @@ export default function App() {
     approvals: Approvals,
     authz: Authz,
     model: Model,
+    issues: Issues,
     findings: Findings,
     audit: Audit,
     network: Network,

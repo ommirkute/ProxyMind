@@ -54,13 +54,14 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-diff` | Semantic diff with learned noise | `lib.rs` |
 | `pm-model` | App model: path templating, objects, ownership | `lib.rs` |
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
+| `pm-scan` | Passive checks (pure) over one exchange: headers, cookies, CORS, disclosure, errors, secrets | `lib.rs` |
 | `pm-crawl` | Crawler logic (pure): HTML links/forms, robots.txt, sitemaps, risky-link filter, frontier | `lib.rs` |
 | `pm-fuzz` | Intruder logic (pure): § positions, attack modes, payload sets, anomaly detection | `lib.rs` |
 | `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST, reflection (XSS verdict, payload templates) | `lib.rs` |
 | `pm-browser` | Headless Chromium over CDP (own WebSocket codec): renders a recorded response offline, blocks every other request, reports binding calls and dialogs | `lib.rs` |
 | `pm-oast` | HTTP callback listener, authoritative DNS responder (sans-I/O parser), token helpers | `lib.rs`, `dns.rs` |
 | `pm-service` | The service layer (history, replay, ws replay, race, intercept, rules, network, identities, authz, model, ledger, proofs, findings, approvals, assistant storage) | one module per area in `src/` |
-| `pm-mcp` | MCP server over stdio; 27 tools | `lib.rs` (instructions), `tools.rs` |
+| `pm-mcp` | MCP server over stdio; 28 tools | `lib.rs` (instructions), `tools.rs` |
 | `pm-assistant` | Built-in assistant: Anthropic + OpenAI-compatible wire formats, tool loop through `pm_mcp::call_tool` as `agent:assistant` | `lib.rs`, `llm.rs` |
 | `pm-api` | axum REST API + SSE event stream, token auth, serves `ui/dist` | `lib.rs`, `routes.rs` |
 | `pm-cli` | `proxymind` binary | `main.rs`, `bench.rs` |
@@ -74,10 +75,10 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
-- **MCP tools (27):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
-- **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
-- **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Findings, Audit log, Network.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **MCP tools (28):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_issues crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
+- **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
+- **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Issues, Findings, Audit log, Network.
 
 ### Storage (`pm-store` tables)
 
@@ -124,7 +125,7 @@ ADR-0006/0008: wrap the existing web UI, don't rewrite it.
 - **Build:** on Linux it needs `libwebkit2gtk-4.1-dev` and friends, so build and test in a CI job (`apt-get install`). It can't be checked visually in the sandbox.
 
 ### D. Later
-Project encryption (v0.2), signed releases and SBOMs, installers and a Docker image, `cargo-fuzz` on parsers in nightly CI, `h2spec`, scanner checks, plugins. (Intruder and crawler: done, basic.)
+Project encryption (v0.2), signed releases and SBOMs, installers and a Docker image, `cargo-fuzz` on parsers in nightly CI, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
 
 ## 5. How to work on it
 

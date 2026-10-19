@@ -36,7 +36,7 @@ Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find t
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests, responses and WebSocket messages), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity, or race a request with the HTTP/2 single-packet attack), a crawler (GET only, in scope, skips logout/delete links), Intruder (fuzz marked positions with payload lists, number ranges or built-in lists; anomalies highlighted), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests, responses and WebSocket messages), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity, or race a request with the HTTP/2 single-packet attack), passive scanner issues (headers, cookies, CORS, errors, secrets; nothing sent), a crawler (GET only, in scope, skips logout/delete links), Intruder (fuzz marked positions with payload lists, number ranges or built-in lists; anomalies highlighted), approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 
@@ -142,6 +142,7 @@ crates/
   pm-diff      semantic diff with learned noise masks           ✅ working
   pm-model     live app model: operations, objects, ownership   ✅ working
   pm-ledger    hypotheses and coverage                          ✅ working
+  pm-scan      passive scanner checks                           ✅ working
   pm-crawl     crawler: links, forms, robots.txt, sitemaps      ✅ working
   pm-fuzz      Intruder: positions, attack modes, anomalies     ✅ working
   pm-proof     proof oracles (authz, timing, OAST, reflection)  ✅ working

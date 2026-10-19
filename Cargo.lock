@@ -1428,6 +1428,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-scan"
+version = "0.0.1"
+dependencies = [
+ "pm-http",
+ "serde",
+]
+
+[[package]]
 name = "pm-service"
 version = "0.0.1"
 dependencies = [
@@ -1450,6 +1458,7 @@ dependencies = [
  "pm-proof",
  "pm-proxy",
  "pm-replay",
+ "pm-scan",
  "pm-store",
  "ring",
  "rusqlite",

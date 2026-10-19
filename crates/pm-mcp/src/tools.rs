@@ -206,6 +206,19 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "scan_issues",
+            "Passive scan of recorded traffic (sends nothing): missing security headers, weak session cookies, \
+             permissive CORS, version disclosure, database errors and stack traces, secrets in responses, directory \
+             listings, passwords over HTTP. Grouped by origin and path template, most severe first. These are leads \
+             to test and prove, not findings.",
+            json!({
+                "host": {"type":"string","description":"Only hosts containing this"},
+                "limit": {"type":"integer","description":"Recent exchanges to scan (default 2000)"},
+                "min_severity": {"type":"string","enum":["info","low","medium","high"]},
+            }),
+            &[],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -448,6 +461,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;
             service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_issues" => {
+            let f: pm_service::ScanFilter = args(a)?;
+            service.scan_passive(actor, &f).map(to_json).map_err(|e| e.to_string())
         }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;

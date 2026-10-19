@@ -177,6 +177,17 @@ enum Command {
         #[command(subcommand)]
         action: FindingAction,
     },
+    /// Passive scan of recorded traffic (sends nothing): leads to test, not findings.
+    Scan {
+        /// Only hosts containing this
+        #[arg(long)]
+        host: Option<String>,
+        /// info, low, medium or high
+        #[arg(long)]
+        min_severity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
     Crawl {
         url: String,
@@ -1109,6 +1120,30 @@ async fn run() -> Result<()> {
                     out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
                 }
                 FindingAction::Reported { id } => out!("finding {} is now {}", id, set(*id, "reported")?["status"]),
+            }
+        }
+        Command::Scan { host, min_severity, json } => {
+            let service = open_service(&cli.project, None)?;
+            let issues = service.scan_passive(
+                &human_actor(None)?,
+                &pm_service::ScanFilter { host: host.clone(), min_severity: min_severity.clone(), limit: None },
+            )?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&issues)?);
+            } else {
+                for i in &issues {
+                    out!(
+                        "{:<6} {}  {}{}  ({}×, e.g. #{})\n         {}",
+                        format!("{:?}", i.severity).to_lowercase(),
+                        i.title,
+                        i.origin,
+                        if i.path == "*" { String::new() } else { i.path.clone() },
+                        i.count,
+                        i.exchange_ids.first().copied().unwrap_or_default(),
+                        i.evidence
+                    );
+                }
+                out!("{} issues (leads to test, not findings)", issues.len());
             }
         }
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {

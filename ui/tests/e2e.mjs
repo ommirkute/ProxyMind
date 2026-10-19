@@ -485,6 +485,12 @@ try {
   check((await page.getByText("the link probably logs out").count()) === 1, "the logout link is skipped");
   await page.screenshot({ path: join(SHOTS, "6b-crawl.png") });
 
+  console.log("Passive issues");
+  await page.getByRole("button", { name: "Issues" }).click();
+  await page.waitForSelector('[data-testid="issues"]');
+  check(await page.locator('[data-testid="issues"]').textContent().then((t) => t.includes("Password field on a page served over plain HTTP")), "passive scan flags the login form over HTTP");
+  await page.screenshot({ path: join(SHOTS, "6c-issues.png") });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

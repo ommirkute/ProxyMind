@@ -19,6 +19,7 @@ mod proof;
 mod race;
 mod replay;
 mod rules;
+mod scan;
 mod ws;
 mod ws_replay;
 
@@ -37,6 +38,7 @@ pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
+pub use scan::{ScanFilter, ScanIssue};
 pub use ws::{WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
@@ -52,7 +54,7 @@ use thiserror::Error;
 
 pub use {
     pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof,
-    pm_proxy, pm_replay, pm_store,
+    pm_proxy, pm_replay, pm_scan, pm_store,
 };
 
 #[derive(Debug, Error)]
