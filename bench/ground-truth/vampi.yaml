@@ -1,0 +1,44 @@
+# Known vulnerabilities in VAmPI (vulnerable=1), checked by hand against
+# erev0s/vampi@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
+# Users after GET /createdb: name1/pass1, name2/pass2, admin/pass1.
+# `{name}` path segments match any one segment.
+app: VAmPI
+vulns:
+  - id: VA-1
+    class: sqli
+    method: GET
+    path: /users/v1/{username}
+    description: The username is concatenated into SQL; a quote returns a SQLAlchemy/SQLite error page.
+  - id: VA-2
+    class: data_exposure
+    method: GET
+    path: /users/v1/_debug
+    description: Lists every user with plaintext password and admin flag, without authentication.
+  - id: VA-3
+    class: bola
+    method: GET
+    path: /books/v1/{book_title}
+    description: Any logged-in user reads another user's book secret.
+  - id: VA-4
+    class: bola
+    method: PUT
+    path: /users/v1/{username}/password
+    description: Any logged-in user changes another user's password.
+  - id: VA-5
+    class: mass_assignment
+    method: POST
+    path: /users/v1/register
+    description: '"admin": true in the registration body creates an admin.'
+  - id: VA-6
+    class: user_enumeration
+    method: POST
+    path: /users/v1/login
+    description: Different messages for an unknown user and a wrong password.
+  - id: VA-7
+    class: redos
+    method: PUT
+    path: /users/v1/{username}/email
+    description: The email is checked with a catastrophic-backtracking regex (documented by VAmPI; not exercised here).
+# Correctly protected look-alikes.
+secure:
+  - DELETE /users/v1/{username}

@@ -1,0 +1,58 @@
+# OWASP crAPI: vulnerabilities from crAPI's published challenge list
+# (docs/challenges.md). NOT yet checked by a ProxyMind run: crAPI needs
+# about 4 GB of images; the nightly benchmark job is the first to run it.
+# Image tags: crAPI publishes only latest/main/develop; pin digests before
+# publishing results. `{name}` segments match any one segment.
+app: crAPI
+vulns:
+  - id: CR-1
+    class: bola
+    method: GET
+    path: /identity/api/v2/vehicle/{vehicleId}/location
+    description: Any user reads another user's vehicle location by vehicle id (challenge 1).
+  - id: CR-2
+    class: bola
+    method: GET
+    path: /workshop/api/mechanic/mechanic_report
+    description: Any user reads another user's mechanic report by report_id (challenge 2).
+  - id: CR-3
+    class: broken_authentication
+    method: POST
+    path: /identity/api/auth/v2/check-otp
+    description: The older OTP check has no attempt limit; brute force resets any password (challenge 3).
+  - id: CR-4
+    class: data_exposure
+    method: GET
+    path: /community/api/v2/community/posts/recent
+    description: Posts include other users' emails and vehicle ids (challenge 4).
+  - id: CR-5
+    class: rate_limiting
+    method: POST
+    path: /workshop/api/merchant/contact_mechanic
+    description: repeat_request_if_failed and number_of_repeats let a user flood the mechanic API (challenge 6).
+  - id: CR-6
+    class: bfla
+    method: DELETE
+    path: /identity/api/v2/admin/videos/{id}
+    description: A normal user deletes other users' videos through the admin endpoint (challenge 7).
+  - id: CR-7
+    class: mass_assignment
+    method: PUT
+    path: /workshop/api/shop/orders/{id}
+    description: Setting an order's status to returned refunds an item that was never returned (challenges 8 and 9).
+  - id: CR-8
+    class: ssrf
+    method: POST
+    path: /workshop/api/merchant/contact_mechanic
+    description: mechanic_api is fetched server-side with no allow-list (challenge 11).
+  - id: CR-9
+    class: nosqli
+    method: POST
+    path: /community/api/v2/coupon/validate-coupon
+    description: The coupon code is passed to MongoDB as an object; {"$ne":1} finds a valid coupon (challenge 12).
+  - id: CR-10
+    class: sqli
+    method: POST
+    path: /workshop/api/shop/apply_coupon
+    description: The coupon code is concatenated into PostgreSQL (challenge 13).
+secure: []

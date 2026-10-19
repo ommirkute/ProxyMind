@@ -288,8 +288,17 @@ enum BenchAction {
     /// Compare findings with ground truth (default: VulnShop's).
     Score {
         /// Ground-truth YAML (see bench/ground-truth/vulnshop.yaml)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "app")]
         truth: Option<PathBuf>,
+        /// Built-in ground truth: vulnshop, vampi, juice-shop or crapi
+        #[arg(long)]
+        app: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The model-free baseline: check every access-control candidate as the
+    /// other identities, then record and prove each leak.
+    Auto {
         #[arg(long)]
         json: bool,
     },
@@ -1354,9 +1363,31 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Score { truth, json } } => {
+        Command::Bench { action: BenchAction::Auto { json } } => {
             let service = open_service(&cli.project, None)?;
-            let truth = bench::load_truth(truth.as_deref())?;
+            let r = service.auto_access_control(&human_actor(None)?).await?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                out!("{} candidates, {} checked, {} leaks", r.candidates, r.checks, r.leaks);
+                for p in &r.results {
+                    out!(
+                        "  {} {}: {} reads {}'s data (finding #{})",
+                        if p.proven { "✓ proven" } else { "✗ not proven" },
+                        p.operation,
+                        p.attacker,
+                        p.owner,
+                        p.finding_id
+                    );
+                }
+            }
+        }
+        Command::Bench { action: BenchAction::Score { truth, app, json } } => {
+            let service = open_service(&cli.project, None)?;
+            let truth = match app {
+                Some(a) => bench::builtin_truth(a)?,
+                None => bench::load_truth(truth.as_deref())?,
+            };
             let score = bench::score(&truth, &service.finding_list(None)?);
             if *json {
                 out!("{}", serde_json::to_string_pretty(&score)?);

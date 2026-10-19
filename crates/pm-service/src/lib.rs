@@ -7,6 +7,7 @@
 mod approvals;
 mod assistant;
 mod authz;
+mod auto;
 mod crawl;
 mod findings;
 mod history;
@@ -25,6 +26,7 @@ mod ws_replay;
 
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
+pub use auto::{AutoProven, AutoReport};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use findings::{FindingUpdate, NewFinding};
 pub use history::ExchangePage;

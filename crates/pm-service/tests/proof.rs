@@ -348,3 +348,25 @@ fn dns_query(name: &str) -> Vec<u8> {
     p.extend_from_slice(&[0, 0, 1, 0, 1]);
     p
 }
+
+#[tokio::test]
+async fn automatic_access_control_pass_proves_leaks_and_drops_the_rest() {
+    let (s, url) = setup().await;
+    for who in ["alice", "bob", "admin"] {
+        get_as(&s, &url, "/api/me", who).await;
+        get_as(&s, &url, "/api/orders", who).await;
+    }
+    get_as(&s, &url, "/api/orders/1001", "alice").await;
+    get_as(&s, &url, "/api/invoices/5001", "alice").await;
+    get_as(&s, &url, "/api/admin/users", "admin").await;
+    let r = s.auto_access_control(&human()).await.unwrap();
+    let proven: Vec<(String, bool)> = r.results.iter().map(|p| (p.operation.clone(), p.proven)).collect();
+    assert!(proven.iter().any(|(op, ok)| op.ends_with("/api/orders/{id}") && *ok), "{proven:?}");
+    assert!(proven.iter().any(|(op, ok)| op.ends_with("/api/admin/users") && *ok), "{proven:?}");
+    // Admins reading users' invoices is expected, so it's not reported at all.
+    assert!(!proven.iter().any(|(op, _)| op.contains("invoices")), "{proven:?}");
+    let findings = s.finding_list(None).unwrap();
+    let classes: Vec<&str> = findings.iter().filter_map(|f| f["vuln_class"].as_str()).collect();
+    assert!(classes.contains(&"idor") && classes.contains(&"bfla"), "{classes:?}");
+    assert!(findings.iter().all(|f| f["status"] == "proven"), "only proven findings stay live");
+}

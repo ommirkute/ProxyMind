@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Real-app benchmarks (M6): ground truth for VAmPI and Juice Shop reproduced by hand against pinned images, crAPI from its challenge list (not yet run), `bench/run.sh` (browse as two users, crawl, `bench auto`, passive scan, optional agent, score), `bench score --app`, a model-free baseline (`bench auto`: check, record and prove access-control leaks; unprovable ones are dropped) and a nightly job posting scores
 - Release engineering: Dockerfile (UI + Chromium, non-root, `--bind-any` for containers), a tag-triggered release workflow (binaries for 3 OSes, SHA256SUMS, SPDX SBOM, Sigstore build-provenance attestations, GHCR image), and nightly fuzzing of 7 parser targets plus an image smoke test (`docs/releasing.md`). Fuzzing already found and fixed a crawler panic on Unicode whitespace
 - Passive scanner (`scan_issues`, Issues page, `proxymind scan`): checks over recorded traffic for security headers, cookie flags, CORS, version disclosure, DB errors and stack traces, secrets, directory listings and passwords over HTTP; grouped per origin and path template; one click turns an issue into a finding (still unproven)
 - Crawler (`crawl`, Model page, `proxymind crawl`): GET-only, per-URL scope check, skips state-changing links and risky payloads, robots.txt and sitemaps, forms listed not submitted; pages feed the app model
@@ -46,7 +47,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 **Next, in order:**
 
 1. **Desktop shell** (Tauri) around the web UI
-2. **Benchmarks on real apps** (M6): crAPI, Juice Shop, VAmPI ground truth; nightly scores in the README
+2. **Benchmarks on real apps** (M6): done for VAmPI and Juice Shop (baseline); next: run crAPI, score agents, publish scores in the README
 3. **More oracles**: stored and DOM XSS proofs (reflection proofs, DNS OAST and payload-aware tiers are done)
 4. Project encryption, installers (signed releases, SBOMs and the Docker image are done)
 

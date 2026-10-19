@@ -8,13 +8,13 @@
 
 services:
   juice-shop:
-    image: bkimminich/juice-shop:latest  # pin a version tag before publishing benchmark results
+    image: bkimminich/juice-shop:v20.3.0
     ports:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
   vampi:
-    image: erev0s/vampi:latest
+    image: erev0s/vampi@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
     environment:
       vulnerable: "1"
       tokentimetolive: "3600"

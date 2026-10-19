@@ -75,7 +75,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `bench` (`score --app`, `auto`), `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
 - **MCP tools (28):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_issues crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
 - **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
 - **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Issues, Findings, Audit log, Network.
@@ -113,6 +113,7 @@ Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (n
 3. ✅ **Done: payload-aware tiers** (`pm_policy::payload`, `Tier::for_http_request`, applied in `gate_send_with`, `gate_proof` and WebSocket sends). Classify what a request does, not just its method: destructive SQL (`DROP`, `DELETE FROM`, `TRUNCATE`), OS-command and file-write patterns, and bulk actions raise the tier. Put the classifier in `pm-policy` (pure, well tested), call it in `gate_send_with` and take the max of method tier and payload tier. Add scope-bypass-style adversarial tests.
 
 ### B. Benchmarks on real apps (M6)
+✅ **Foundation done:** `bench/run.sh <app>`, profiles in `bench/apps/`, ground truth for vampi/juice-shop (verified) and crapi (unverified), `bench score --app`, `bench auto`, nightly `bench` job. Docker works in the sandbox (start `dockerd` by hand) but disk is tight (crAPI didn't fit). Next: a crAPI profile and run, agent scoring, slug-style ids in the model (VAmPI scores 0 because of it). Original notes:
 `bench/docker-compose.yml` already lists Juice Shop and VAmPI; crAPI uses its own compose.
 - **Ground truth:** write `bench/ground-truth/{juice-shop,crapi,vampi}.yaml` in the VulnShop format, pinning image versions.
 - **Runner:** a script (`bench/run.sh`) that starts the app, runs a scripted browse through the proxy, drives an agent or the assistant, then `proxymind bench score`.

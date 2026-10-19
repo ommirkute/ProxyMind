@@ -1,0 +1,47 @@
+# API-level vulnerabilities in OWASP Juice Shop, checked by hand against
+# bkimminich/juice-shop:v20.3.0. Juice Shop has 100+ challenges; this list
+# covers the ones an intercepting proxy and API testing can reach. Client-
+# side challenges (DOM XSS, Angular bypasses) aren't listed yet.
+app: Juice Shop
+vulns:
+  - id: JS-1
+    class: sqli
+    method: POST
+    path: /rest/user/login
+    description: "' or 1=1-- in the email logs in as the first user (admin)."
+  - id: JS-2
+    class: sqli
+    method: GET
+    path: /rest/products/search
+    description: q is concatenated into SQL; UNION SELECT reads the Users table.
+  - id: JS-3
+    class: bola
+    method: GET
+    path: /rest/basket/{id}
+    description: Any logged-in user reads any basket by id.
+  - id: JS-4
+    class: mass_assignment
+    method: POST
+    path: /api/Users
+    description: '"role": "admin" in the registration body creates an admin.'
+  - id: JS-5
+    class: data_exposure
+    method: GET
+    path: /api/Users
+    description: Any logged-in user lists all users.
+  - id: JS-6
+    class: broken_authentication
+    method: GET
+    path: /rest/user/change-password
+    description: The password changes without the current password (new and repeat only).
+  - id: JS-7
+    class: data_exposure
+    method: GET
+    path: /metrics
+    description: Prometheus metrics are public.
+  - id: JS-8
+    class: data_exposure
+    method: GET
+    path: /ftp/{file}
+    description: Confidential documents (e.g. acquisitions.md) in a public FTP-style folder.
+secure: []

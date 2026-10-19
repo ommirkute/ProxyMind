@@ -55,3 +55,28 @@ jobs:
         run: |
           docker run --rm proxymind:nightly --version
           docker run --rm proxymind:nightly proof browser | grep -q /usr/bin/chromium
+
+  bench:
+    name: benchmarks (model-free baseline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p pm-cli
+      - name: Start Juice Shop and VAmPI
+        run: docker compose -f bench/docker-compose.yml up -d juice-shop vampi
+      - name: Run benchmarks
+        env:
+          PROXYMIND: ${{ github.workspace }}/target/release/proxymind
+          OUT: ${{ runner.temp }}/bench
+        run: |
+          for app in vulnshop vampi juice-shop; do
+            WORK=$(mktemp -d) bench/run.sh "$app"
+          done
+          cat "$OUT"/*.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: ${{ runner.temp }}/bench
