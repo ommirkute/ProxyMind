@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Plugins (ADR-0014): acting plugins are MCP clients as `plugin:<name>` under stricter tiers; passive-check plugins are any executable speaking a JSON-lines protocol, installed per user (`proxymind plugin add`), merged into the Issues list; example `examples/plugins/jwt-check`
 - Desktop app (`desktop/`, Tauri 2, ADR-0012): runs the proxy and API in-process and shows the same web UI (remote page, no IPC), tray menu, setup page when the project can't open; built and linted in its own CI job
 - Sealed projects (ADR-0013): `proxymind project lock/unlock` encrypts a consistent snapshot with Argon2id + chunked ChaCha20-Poly1305 (`pm-vault`); locked files are refused with a hint everywhere a project opens
 - Real-app benchmarks (M6): ground truth for VAmPI and Juice Shop reproduced by hand against pinned images, crAPI from its challenge list (not yet run), `bench/run.sh` (browse as two users, crawl, `bench auto`, passive scan, optional agent, score), `bench score --app`, a model-free baseline (`bench auto`: check, record and prove access-control leaks; unprovable ones are dropped) and a nightly job posting scores

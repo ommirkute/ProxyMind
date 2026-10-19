@@ -1,0 +1,19 @@
+[package]
+name = "pm-plugin"
+description = "Plugin manifests, the user's plugin registry and the passive-check protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+pm-core = { version = "0.0.1", path = "../pm-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde-saphyr = "1.1.0"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

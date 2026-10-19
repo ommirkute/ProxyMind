@@ -56,6 +56,11 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
     let roe =
         store.get_setting("roe")?.with_context(|| format!("{} has no rules of engagement yet", project.display()))?;
     let service = Arc::new(Service::new(store, Policy::new(Roe::parse(&roe)?))?);
+    // The user's passive-check plugins (ADR-0014).
+    match pm_plugin::Registry::load(home) {
+        Ok(r) => service.set_plugins(r.enabled()),
+        Err(e) => eprintln!("plugins not loaded: {e}"),
+    }
     let token = pm_api::load_or_create_token(&home.join("api-token"))?;
 
     // The proxy, as in `proxymind ui`; the UI still works if 8080 is taken.

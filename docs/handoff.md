@@ -55,6 +55,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-model` | App model: path templating, objects, ownership | `lib.rs` |
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
 | `pm-scan` | Passive checks (pure) over one exchange: headers, cookies, CORS, disclosure, errors, secrets | `lib.rs` |
+| `pm-plugin` | Plugin manifests, the per-user registry, the passive JSON-lines protocol and runner | `lib.rs` |
 | `pm-vault` | Passphrase sealing of project files (Argon2id, chunked ChaCha20-Poly1305) | `lib.rs` |
 | `pm-crawl` | Crawler logic (pure): HTML links/forms, robots.txt, sitemaps, risky-link filter, frontier | `lib.rs` |
 | `pm-fuzz` | Intruder logic (pure): § positions, attack modes, payload sets, anomaly detection | `lib.rs` |
@@ -76,7 +77,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `project` (`lock`, `unlock`), `bench` (`score --app`, `auto`), `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `plugin` (`add`, `list`, `remove`), `project` (`lock`, `unlock`), `bench` (`score --app`, `auto`), `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
 - **MCP tools (28):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_issues crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
 - **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
 - **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Issues, Findings, Audit log, Network.
@@ -128,7 +129,7 @@ ADR-0006/0008: wrap the existing web UI, don't rewrite it.
 - **Build:** on Linux it needs `libwebkit2gtk-4.1-dev` and friends, so build and test in a CI job (`apt-get install`). It can't be checked visually in the sandbox.
 
 ### D. Later
-Transparent project encryption (sealing is done: `project lock/unlock`, ADR-0013), installers, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
+Transparent project encryption (sealing is done: `project lock/unlock`, ADR-0013), installers, `h2spec`, active scanner checks, plugin sandboxing and active-check plugins. (Intruder, crawler, passive scanner and plugin foundation: done, basic.)
 
 ## 5. How to work on it
 

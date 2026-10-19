@@ -121,6 +121,8 @@ Match-and-replace rules (add or strip headers, rewrite bodies) live in the proje
 
 Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Repeater, agents and proofs all use them.
 
+Want your own checks? A passive-check plugin is any program that reads exchanges as JSON lines and prints issues (`proxymind plugin add examples/plugins/jwt-check`); acting plugins use the MCP tools as `plugin:<name>` under stricter rules ([ADR-0014](docs/adr/0014-plugins.md)).
+
 Handing a project to a client or storing it? `proxymind -p client.pmproj project lock --remove` seals it into an encrypted `client.pmlock` (Argon2id passphrase, authenticated encryption); `proxymind project unlock client.pmlock` restores it.
 
 Prefer a desktop app? `desktop/` wraps the same UI in a Tauri window with a tray icon (see [ADR-0012](docs/adr/0012-desktop-shell.md) for how to build it).
@@ -148,6 +150,7 @@ crates/
   pm-diff      semantic diff with learned noise masks           ✅ working
   pm-model     live app model: operations, objects, ownership   ✅ working
   pm-ledger    hypotheses and coverage                          ✅ working
+  pm-plugin    plugins: per-user registry, passive-check protocol ✅ working
   pm-vault     sealed (encrypted) project files                 ✅ working
   pm-scan      passive scanner checks                           ✅ working
   pm-crawl     crawler: links, forms, robots.txt, sitemaps      ✅ working

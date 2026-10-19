@@ -1,0 +1,8 @@
+# A passive-check plugin for ProxyMind: install with
+#   proxymind plugin add examples/plugins/jwt-check
+name: jwt-check
+version: 0.1.0
+description: Flags JWTs sent with alg none, HMAC-signed JWTs (crackable secrets) and JWTs without an expiry.
+passive:
+  command: ["python3", "check.py"]
+  timeout_seconds: 60

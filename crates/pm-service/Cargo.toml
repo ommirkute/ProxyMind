@@ -29,6 +29,7 @@ pm-proof = { version = "0.0.1", path = "../pm-proof" }
 pm-proxy = { version = "0.0.1", path = "../pm-proxy" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
 ring = "0.17.14"
+pm-plugin = { version = "0.0.1", path = "../pm-plugin" }
 pm-scan = { version = "0.0.1", path = "../pm-scan" }
 pm-store = { version = "0.0.1", path = "../pm-store" }
 serde = { version = "1.0.229", features = ["derive"] }

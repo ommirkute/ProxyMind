@@ -209,6 +209,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install, list or remove passive-check plugins (per user, never per project).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
     /// Lock (encrypt) or unlock a project file with a passphrase.
     Project {
         #[command(subcommand)]
@@ -339,6 +344,17 @@ enum FindingAction {
     FalsePositive { id: i64 },
     /// Mark a finding as reported to the client.
     Reported { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Install the plugin in a directory (it must contain proxymind-plugin.yaml).
+    /// Plugins run as you, with your permissions: install only code you trust.
+    Add { dir: PathBuf },
+    /// List installed plugins.
+    List,
+    /// Uninstall a plugin by name.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -939,6 +955,7 @@ async fn run() -> Result<()> {
             let actor = Actor::parse(actor)?;
             anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
             let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
+            service.set_plugins(user_plugins(&cli));
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
@@ -955,6 +972,7 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
+            service.set_plugins(user_plugins(&cli));
             let me = human_actor(actor.as_deref())?;
             if !*no_proxy {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
@@ -1124,6 +1142,7 @@ async fn run() -> Result<()> {
         }
         Command::Scan { host, min_severity, json } => {
             let service = open_service(&cli.project, None)?;
+            service.set_plugins(user_plugins(&cli));
             let issues = service.scan_passive(
                 &human_actor(None)?,
                 &pm_service::ScanFilter { host: host.clone(), min_severity: min_severity.clone(), limit: None },
@@ -1147,6 +1166,39 @@ async fn run() -> Result<()> {
             }
         }
         Command::Project { action } => project_command(&cli.project, action)?,
+        Command::Plugin { action } => {
+            let home = home_dir(&cli)?;
+            let mut reg = pm_plugin::Registry::load(&home)?;
+            match action {
+                PluginAction::Add { dir } => {
+                    let p = reg.add(dir)?.clone();
+                    reg.save()?;
+                    out!("✓ installed {} {} from {}", p.manifest.name, p.manifest.version, p.dir.display());
+                    out!(
+                        "  It runs with the passive scan (`proxymind scan`, the Issues page). It runs as you: install only code you trust."
+                    );
+                }
+                PluginAction::List => {
+                    if reg.plugins.is_empty() {
+                        out!("No plugins installed. See examples/plugins/.");
+                    }
+                    for p in &reg.plugins {
+                        out!(
+                            "{:<20} {:<8} {}  ({})",
+                            p.manifest.name,
+                            p.manifest.version,
+                            p.manifest.description,
+                            p.dir.display()
+                        );
+                    }
+                }
+                PluginAction::Remove { name } => {
+                    anyhow::ensure!(reg.remove(name), "no plugin named {name}");
+                    reg.save()?;
+                    out!("✓ removed {name}");
+                }
+            }
+        }
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
             let service = open_service(&cli.project, None)?;
             let r = service
@@ -1714,4 +1766,18 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
         }
     }
     Ok(())
+}
+
+/// The user's enabled passive-check plugins; problems are reported, not fatal.
+fn user_plugins(cli: &Cli) -> Vec<pm_plugin::Installed> {
+    match home_dir(cli)
+        .map_err(|e| e.to_string())
+        .and_then(|h| pm_plugin::Registry::load(&h).map_err(|e| e.to_string()))
+    {
+        Ok(r) => r.enabled(),
+        Err(e) => {
+            eprintln!("plugins not loaded: {e}");
+            Vec::new()
+        }
+    }
 }

@@ -1335,6 +1335,7 @@ dependencies = [
  "pm-mcp",
  "pm-model",
  "pm-oast",
+ "pm-plugin",
  "pm-proxy",
  "pm-service",
  "pm-store",
@@ -1449,6 +1450,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-plugin"
+version = "0.0.1"
+dependencies = [
+ "pm-core",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pm-policy"
 version = "0.0.1"
 dependencies = [
@@ -1543,6 +1555,7 @@ dependencies = [
  "pm-ledger",
  "pm-model",
  "pm-oast",
+ "pm-plugin",
  "pm-policy",
  "pm-proof",
  "pm-proxy",

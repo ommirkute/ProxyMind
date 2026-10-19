@@ -241,7 +241,12 @@ struct CoverageQuery {
 }
 
 async fn scan_issues(State(st): State<AppState>, Query(f): Query<pm_service::ScanFilter>) -> ApiResult {
-    ok(st.service.scan_passive(&st.actor, &f)?)
+    // Plugins run as processes; keep them off the async workers.
+    let (service, actor) = (st.service.clone(), st.actor.clone());
+    let issues = tokio::task::spawn_blocking(move || service.scan_passive(&actor, &f))
+        .await
+        .map_err(|e| pm_service::ServiceError::Invalid(format!("scan failed: {e}")))??;
+    ok(issues)
 }
 
 async fn coverage(State(st): State<AppState>, Query(q): Query<CoverageQuery>) -> ApiResult {

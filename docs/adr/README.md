@@ -17,3 +17,4 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0011](0011-xss-proofs-offline-browser.md) | XSS proofs render the recorded response in an offline headless browser | Accepted |
 | [0012](0012-desktop-shell.md) | The desktop app runs the local stack in-process and shows the web UI | Accepted |
 | [0013](0013-sealed-projects.md) | Projects are encrypted at rest by sealing, before transparent encryption | Accepted |
+| [0014](0014-plugins.md) | Plugins act through the gate or analyse recordings, and are installed per user | Accepted |

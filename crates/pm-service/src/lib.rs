@@ -55,8 +55,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof,
-    pm_proxy, pm_replay, pm_scan, pm_store,
+    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_plugin, pm_policy,
+    pm_proof, pm_proxy, pm_replay, pm_scan, pm_store,
 };
 
 #[derive(Debug, Error)]
@@ -95,6 +95,8 @@ pub struct Service {
     redactor: Redactor,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
     rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
+    /// Passive-check plugins the user installed (never from the project).
+    plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
 }
 
 impl Service {
@@ -117,7 +119,14 @@ impl Service {
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
             rewriter: std::sync::OnceLock::new(),
+            plugins: parking_lot::RwLock::new(Vec::new()),
         })
+    }
+
+    /// Sets the passive-check plugins to run with the passive scan. Callers
+    /// pass the user's registry (`pm_plugin::Registry`), never the project's.
+    pub fn set_plugins(&self, plugins: Vec<pm_plugin::Installed>) {
+        *self.plugins.write() = plugins;
     }
 
     /// Whether content shown to this actor should have secrets replaced.
