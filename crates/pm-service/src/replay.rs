@@ -210,17 +210,17 @@ impl Service {
         if !extra.is_null() {
             params["extra"] = extra;
         }
-        let summary = match identity {
+        let mut summary = match identity {
             Some(i) => format!("{} {} as {i}", out.method, out.url()),
             None => format!("{} {}", out.method, out.url()),
         };
-        let action = ActionRequest {
-            actor: actor.clone(),
-            action: action.into(),
-            tier: tier.unwrap_or_else(|| Tier::for_http_method(&out.method)),
-            target: Some(target),
-            summary,
-        };
+        // What the payload does can raise the tier, never lower it.
+        let (by_request, payload_reasons) = Tier::for_http_request(&out.raw);
+        let tier = tier.map_or(by_request, |t| t.max(by_request));
+        if !payload_reasons.is_empty() {
+            summary.push_str(&format!(" [payload: {}]", payload_reasons.join("; ")));
+        }
+        let action = ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
         match approval_id {
             Some(id) => self.run_approved(id, &params),
             None => self.authorize(action, &params),

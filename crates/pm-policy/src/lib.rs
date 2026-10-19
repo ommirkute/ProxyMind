@@ -6,6 +6,7 @@
 //! cannot positively place in scope is refused.
 
 pub mod audit;
+pub mod payload;
 pub mod ratelimit;
 pub mod roe;
 pub mod scope;
@@ -67,8 +68,17 @@ impl Tier {
         self >= Tier::ActiveSafe
     }
 
+    /// Tier for sending one raw HTTP request: the higher of its method's
+    /// tier and what its payload does (see [`payload`]), with the reasons
+    /// the payload raised it.
+    pub fn for_http_request(raw: &[u8]) -> (Tier, Vec<String>) {
+        let method = String::from_utf8_lossy(raw.split(|&b| b == b' ').next().unwrap_or_default()).into_owned();
+        let by_method = Tier::for_http_method(&method);
+        let p = payload::classify_http(raw);
+        if p.tier > by_method { (p.tier, p.reasons) } else { (by_method, Vec::new()) }
+    }
+
     /// Default tier for sending one HTTP request with this method.
-    /// Payload-aware classification comes with the fuzzer and scanner.
     pub fn for_http_method(method: &str) -> Tier {
         match method.to_ascii_uppercase().as_str() {
             "GET" | "HEAD" | "OPTIONS" => Tier::ActiveSafe,

@@ -48,7 +48,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-store` | SQLite schema + compressed, deduplicated blobs | `lib.rs` (`MIGRATIONS`) |
 | `pm-replay` | Send engine: connect (direct / upstream HTTP / SOCKS5), TLS, HTTP/2, parallel + race sends | `lib.rs`, `net.rs`, `h2send.rs`, `race.rs` |
 | `pm-proxy` | Listener, CONNECT, MITM, HTTP/2 server side, intercept queue, rewrite rules, WebSocket relay, transparent mode | `lib.rs`, `h2_server.rs`, `intercept.rs`, `rewrite.rs`, `ws_relay.rs` |
-| `pm-policy` | ROE file, scope matching (bypass-resistant), tiers, rate limits, approvals, hash-chained audit | `lib.rs`, `roe.rs`, `audit.rs` |
+| `pm-policy` | ROE file, scope matching (bypass-resistant), tiers (method + payload-aware), rate limits, approvals, hash-chained audit | `lib.rs`, `roe.rs`, `audit.rs`, `payload.rs` |
 | `pm-ai` | Token-budgeted exchange views, secret redaction with placeholders, untrusted tagging | `lib.rs`, `body.rs` |
 | `pm-identity` | Test identities, login recipes, health checks, auth swap | `lib.rs` |
 | `pm-diff` | Semantic diff with learned noise | `lib.rs` |
@@ -107,7 +107,7 @@ Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (n
    - Add a minimal authoritative DNS responder to `pm-oast` (UDP; parse the query name; if it's `<token>.<oast-domain>`, record an interaction with `protocol: "dns"` and answer an A record pointing at the OAST HTTP host).
    - Keep the parser sans-I/O and fuzzable; add golden tests with hand-built packets.
    - CLI: `oast-server --dns 0.0.0.0:53 --domain oast.example.com`. Payloads get `{{oast_dns}}`; `prove_oast` accepts either protocol. Needs an NS delegation in real use; tests use a local UDP client.
-3. **Payload-aware tiers.** Classify what a request does, not just its method: destructive SQL (`DROP`, `DELETE FROM`, `TRUNCATE`), OS-command and file-write patterns, and bulk actions raise the tier. Put the classifier in `pm-policy` (pure, well tested), call it in `gate_send_with` and take the max of method tier and payload tier. Add scope-bypass-style adversarial tests.
+3. ✅ **Done: payload-aware tiers** (`pm_policy::payload`, `Tier::for_http_request`, applied in `gate_send_with`, `gate_proof` and WebSocket sends). Classify what a request does, not just its method: destructive SQL (`DROP`, `DELETE FROM`, `TRUNCATE`), OS-command and file-write patterns, and bulk actions raise the tier. Put the classifier in `pm-policy` (pure, well tested), call it in `gate_send_with` and take the max of method tier and payload tier. Add scope-bypass-style adversarial tests.
 
 ### B. Benchmarks on real apps (M6)
 `bench/docker-compose.yml` already lists Juice Shop and VAmPI; crAPI uses its own compose.

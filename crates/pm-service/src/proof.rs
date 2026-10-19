@@ -121,6 +121,13 @@ impl Service {
     ) -> Result<Authorization> {
         let target = Target::from_parts(&out.endpoint.scheme, &out.endpoint.host, out.endpoint.port, &out.path)
             .map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let (by_request, payload_reasons) = Tier::for_http_request(&out.raw);
+        let tier = tier.max(by_request);
+        let note = if payload_reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" [payload: {}]", payload_reasons.join("; "))
+        };
         match approval {
             Some(id) => self.run_approved(id, params),
             None => self.authorize(
@@ -129,7 +136,7 @@ impl Service {
                     action: action.into(),
                     tier,
                     target: Some(target),
-                    summary: format!("{action}: {} {}", out.method, out.url()),
+                    summary: format!("{action}: {} {}{note}", out.method, out.url()),
                 },
                 params,
             ),

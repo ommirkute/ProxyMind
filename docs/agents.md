@@ -119,6 +119,8 @@ A finding only becomes **proven** when ProxyMind checks it itself:
 
 Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`, `reflection`) count as intrusive, so agents need approval by default.
 
+**Tiers follow the payload, not just the method.** A GET whose query or body carries destructive SQL (`DROP TABLE`, `DELETE FROM`, `INTO OUTFILE`), destructive OS commands (`rm -rf`, `shutdown`) or a delete mutation is *destructive* (refused for agents by default); command-injection probes, SQL writes and bulk actions are *intrusive*. Encoding tricks (double percent-encoding, comments, JSON escapes) are undone first. The approval request says what was found.
+
 ## What the agent sees
 
 - **Secrets are hidden.** Cookies, tokens, passwords and API keys appear as placeholders such as `{{secret:cookie_session_1}}`. The agent can use placeholders in requests; ProxyMind swaps the real values in when sending. Turn this off with `data.redact_before_llm: false` in the ROE.
