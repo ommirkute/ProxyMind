@@ -55,6 +55,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-model` | App model: path templating, objects, ownership | `lib.rs` |
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
 | `pm-scan` | Passive checks (pure) over one exchange: headers, cookies, CORS, disclosure, errors, secrets | `lib.rs` |
+| `pm-vault` | Passphrase sealing of project files (Argon2id, chunked ChaCha20-Poly1305) | `lib.rs` |
 | `pm-crawl` | Crawler logic (pure): HTML links/forms, robots.txt, sitemaps, risky-link filter, frontier | `lib.rs` |
 | `pm-fuzz` | Intruder logic (pure): § positions, attack modes, payload sets, anomaly detection | `lib.rs` |
 | `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST, reflection (XSS verdict, payload templates) | `lib.rs` |
@@ -75,7 +76,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `bench` (`score --app`, `auto`), `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `project` (`lock`, `unlock`), `bench` (`score --app`, `auto`), `scan`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
 - **MCP tools (28):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_issues crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
 - **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
 - **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Issues, Findings, Audit log, Network.
@@ -120,13 +121,14 @@ Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (n
 - **CI:** a nightly GitHub Actions workflow (Ubuntu runners have Docker even though this sandbox can't pull images) that publishes scores as an artifact and in the README.
 
 ### C. Desktop shell (Tauri 2)
+✅ **Foundation done** (`desktop/`, ADR-0012; excluded from the workspace; CI job `desktop`). In the sandbox: `apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb`, build in `desktop/`, run under `Xvfb :77` and screenshot with ImageMagick `import`. Next: macOS/Windows CI, `tauri build` installers, project picker, CA helper. Original notes:
 ADR-0006/0008: wrap the existing web UI, don't rewrite it.
 - **Layout:** a `desktop/` crate starts the `pm-api` router in-process on `127.0.0.1:0` and opens a webview at `/auth?token=…`.
 - **Native extras:** tray icon (proxy on/off), CA install helper, file pickers for projects.
 - **Build:** on Linux it needs `libwebkit2gtk-4.1-dev` and friends, so build and test in a CI job (`apt-get install`). It can't be checked visually in the sandbox.
 
 ### D. Later
-Project encryption (v0.2), installers, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
+Transparent project encryption (sealing is done: `project lock/unlock`, ADR-0013), installers, `h2spec`, active scanner checks, plugins. (Intruder, crawler and passive scanner: done, basic.)
 
 ## 5. How to work on it
 

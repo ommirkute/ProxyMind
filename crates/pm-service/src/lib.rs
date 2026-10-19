@@ -34,7 +34,7 @@ pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
 pub use intruder::{IntruderRequest, IntruderResult, IntruderRow};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
-pub use network::{NETWORK_SETTING, load_network, sync_network};
+pub use network::{NETWORK_SETTING, load_network, sync_network, watch_project};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};

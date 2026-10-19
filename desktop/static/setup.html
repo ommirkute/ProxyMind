@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ProxyMind: set up a project</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1f2330; }
+  code, pre { background: #f2f3f7; border-radius: 4px; padding: 2px 4px; }
+  pre { padding: 12px; overflow-x: auto; }
+  h1 { font-size: 22px; } .why { color: #b42318; }
+</style>
+</head>
+<body>
+<h1>ProxyMind couldn't open the project</h1>
+<p class="why" id="why"></p>
+<p>Every ProxyMind project needs rules of engagement (what's in scope) before anything can be sent. Create one from the example and load it:</p>
+<pre>proxymind -p &lt;project&gt; roe use roe.yaml</pre>
+<p>See <code>examples/roe.yaml</code>. The desktop app opens <code>~/.proxymind/desktop.pmproj</code> unless you pass a project file or set <code>PROXYMIND_PROJECT</code>. Then restart the app.</p>
+<script src="setup.js"></script>
+</body>
+</html>

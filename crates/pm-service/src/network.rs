@@ -60,3 +60,49 @@ impl Service {
         Ok(cfg.masked())
     }
 }
+/// Keeps match-and-replace rules and network settings in step with the
+/// project, so changes from the CLI or another UI apply without a restart.
+pub fn watch_project(
+    project: &std::path::Path,
+    rewriter: Option<std::sync::Arc<pm_proxy::Rewriter>>,
+    network: pm_replay::Network,
+) -> anyhow::Result<()> {
+    let store = pm_store::Store::open(project)?;
+    if let Some(r) = &rewriter {
+        if let Err(e) = crate::sync_rules(&store, r) {
+            eprintln!("Match-and-replace rules not loaded: {e}");
+        }
+        let n = r.rules().iter().filter(|r| r.enabled).count();
+        if n > 0 {
+            eprintln!("{n} match-and-replace rule(s) active");
+        }
+    }
+    if let Err(e) = crate::sync_network(&store, &network) {
+        eprintln!("Network settings not applied: {e}");
+    }
+    let net = network.config();
+    if let Some(u) = &net.upstream {
+        eprintln!("Upstream proxy: {:?} {}:{}", u.kind, u.host, u.port);
+    }
+    if !net.client_certs.is_empty() {
+        eprintln!("{} client certificate(s) configured", net.client_certs.len());
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if let Some(r) = &rewriter {
+                match crate::sync_rules(&store, r) {
+                    Ok(true) => eprintln!("Match-and-replace rules reloaded"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("match-and-replace rules: {e}"),
+                }
+            }
+            match crate::sync_network(&store, &network) {
+                Ok(true) => eprintln!("Network settings reloaded"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("network settings: {e}"),
+            }
+        }
+    });
+    Ok(())
+}

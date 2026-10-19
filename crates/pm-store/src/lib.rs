@@ -388,6 +388,17 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        // A sealed project (pm-vault) must be unlocked first.
+        let mut head = [0u8; 8];
+        if std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok()
+            && &head == b"PMLOCK1\0"
+        {
+            anyhow::bail!(
+                "{} is a locked project; run `proxymind project unlock {}` first",
+                path.display(),
+                path.display()
+            );
+        }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
     }
@@ -771,6 +782,14 @@ impl Store {
             .prepare("SELECT id, title, updated_ms FROM assistant_chats ORDER BY updated_ms DESC, id DESC LIMIT ?1")?;
         let rows = stmt.query_map([limit.clamp(1, 500) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Writes a consistent single-file copy of the project (WAL included)
+    /// to `path`, which must not exist yet.
+    pub fn snapshot_to(&self, path: &Path) -> Result<()> {
+        let p = path.to_str().context("snapshot path is not valid UTF-8")?;
+        self.conn.execute("VACUUM INTO ?1", [p])?;
+        Ok(())
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {

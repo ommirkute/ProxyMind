@@ -1,0 +1,36 @@
+# ProxyMind desktop app (Tauri 2): wraps the web UI; no UI code of its own
+# (ADR-0006/0008). Kept out of the main workspace so building ProxyMind
+# never needs WebKitGTK; CI builds it in its own job.
+#
+#   Linux deps: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+#   cd ui && npm ci && npm run build && cd ../desktop && cargo run
+[package]
+name = "proxymind-desktop"
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "proxymind-desktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+pm-api = { path = "../crates/pm-api" }
+pm-proxy = { path = "../crates/pm-proxy" }
+pm-service = { path = "../crates/pm-service" }
+pm-store = { path = "../crates/pm-store" }
+pm-tls = { path = "../crates/pm-tls" }
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1.53.3", features = ["full"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[workspace]

@@ -209,6 +209,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Lock (encrypt) or unlock a project file with a passphrase.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
     /// Fuzz a request: payloads in positions marked §like this§, anomalies pointed out.
     Intruder {
         /// Target as scheme://host[:port] (or use --exchange)
@@ -334,6 +339,27 @@ enum FindingAction {
     FalsePositive { id: i64 },
     /// Mark a finding as reported to the client.
     Reported { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// Encrypt the project (-p) into a .pmlock file to store or hand over.
+    /// The passphrase comes from PROXYMIND_PASSPHRASE or a prompt.
+    Lock {
+        /// Output file (default: the project's name with .pmlock)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Delete the unencrypted project afterwards (a normal delete, not a secure wipe)
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Decrypt a .pmlock file back into a project.
+    Unlock {
+        file: PathBuf,
+        /// Output project (default: the file's name with .pmproj); never overwritten
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -675,53 +701,6 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Keeps match-and-replace rules and network settings in step with the
-/// project, so changes from the CLI or another UI apply without a restart.
-fn watch_project(
-    project: &std::path::Path,
-    rewriter: Option<Arc<pm_proxy::Rewriter>>,
-    network: pm_service::pm_replay::Network,
-) -> Result<()> {
-    let store = Store::open(project)?;
-    if let Some(r) = &rewriter {
-        if let Err(e) = pm_service::sync_rules(&store, r) {
-            eprintln!("Match-and-replace rules not loaded: {e}");
-        }
-        let n = r.rules().iter().filter(|r| r.enabled).count();
-        if n > 0 {
-            eprintln!("{n} match-and-replace rule(s) active");
-        }
-    }
-    if let Err(e) = pm_service::sync_network(&store, &network) {
-        eprintln!("Network settings not applied: {e}");
-    }
-    let net = network.config();
-    if let Some(u) = &net.upstream {
-        eprintln!("Upstream proxy: {:?} {}:{}", u.kind, u.host, u.port);
-    }
-    if !net.client_certs.is_empty() {
-        eprintln!("{} client certificate(s) configured", net.client_certs.len());
-    }
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if let Some(r) = &rewriter {
-                match pm_service::sync_rules(&store, r) {
-                    Ok(true) => eprintln!("Match-and-replace rules reloaded"),
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("match-and-replace rules: {e}"),
-                }
-            }
-            match pm_service::sync_network(&store, &network) {
-                Ok(true) => eprintln!("Network settings reloaded"),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("network settings: {e}"),
-            }
-        }
-    });
-    Ok(())
-}
-
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -744,7 +723,7 @@ async fn run() -> Result<()> {
                 Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
             }
             let network = pm_service::pm_replay::Network::new();
-            watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
+            pm_service::watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
             let hooks = pm_proxy::Hooks {
                 rewrite: Some(rewriter),
                 network: Some(network),
@@ -963,7 +942,7 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
-            watch_project(&cli.project, None, service.network().clone())?;
+            pm_service::watch_project(&cli.project, None, service.network().clone())?;
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
@@ -984,7 +963,7 @@ async fn run() -> Result<()> {
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());
                 service.attach_rewriter(rewriter.clone())?;
-                watch_project(&cli.project, Some(rewriter.clone()), service.network().clone())?;
+                pm_service::watch_project(&cli.project, Some(rewriter.clone()), service.network().clone())?;
                 let hooks = pm_proxy::Hooks {
                     rewrite: Some(rewriter),
                     intercept: Some(queue),
@@ -997,7 +976,7 @@ async fn run() -> Result<()> {
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
             } else {
-                watch_project(&cli.project, None, service.network().clone())?;
+                pm_service::watch_project(&cli.project, None, service.network().clone())?;
             }
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
@@ -1167,6 +1146,7 @@ async fn run() -> Result<()> {
                 out!("{} issues (leads to test, not findings)", issues.len());
             }
         }
+        Command::Project { action } => project_command(&cli.project, action)?,
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
             let service = open_service(&cli.project, None)?;
             let r = service
@@ -1646,4 +1626,92 @@ fn tier_line(roe: &Roe, actor: ActorKind) -> String {
 
 fn is_broken_pipe(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
+}
+
+fn is_locked(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && pm_vault::is_sealed(&head)
+}
+
+fn passphrase(confirm: bool) -> Result<String> {
+    if let Ok(p) = std::env::var("PROXYMIND_PASSPHRASE") {
+        return Ok(p);
+    }
+    let p = rpassword::prompt_password("Passphrase: ")?;
+    if confirm {
+        anyhow::ensure!(rpassword::prompt_password("Repeat it: ")? == p, "the passphrases don't match");
+    }
+    Ok(p)
+}
+
+/// A sibling path that doesn't exist yet, for writing before a rename.
+fn temp_beside(path: &std::path::Path, tag: &str) -> PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".{name}.{tag}-{}-{}", std::process::id(), jiff::Timestamp::now().as_millisecond()))
+}
+
+fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<()> {
+    match action {
+        ProjectAction::Lock { out, remove } => {
+            anyhow::ensure!(project.exists(), "{} does not exist", project.display());
+            anyhow::ensure!(!is_locked(project), "{} is already locked", project.display());
+            let out = out.clone().unwrap_or_else(|| project.with_extension("pmlock"));
+            anyhow::ensure!(!out.exists(), "{} already exists", out.display());
+            let pass = passphrase(true)?;
+            // A consistent single-file copy first (the live file may have a WAL).
+            let snap = temp_beside(project, "snapshot");
+            Store::open(project)?.snapshot_to(&snap)?;
+            let tmp = temp_beside(&out, "partial");
+            let sealed = (|| -> Result<u64> {
+                let mut input = std::io::BufReader::new(std::fs::File::open(&snap)?);
+                let mut output = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+                Ok(pm_vault::seal(&mut input, &mut output, &pass, pm_vault::Cost::default())?)
+            })();
+            let _ = std::fs::remove_file(&snap);
+            let bytes = match sealed {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            };
+            std::fs::rename(&tmp, &out)?;
+            out!("✓ locked {} ({bytes} bytes) into {}", project.display(), out.display());
+            if *remove {
+                for suffix in ["", "-wal", "-shm"] {
+                    let p = PathBuf::from(format!("{}{suffix}", project.display()));
+                    if p.exists() {
+                        std::fs::remove_file(&p)?;
+                    }
+                }
+                out!(
+                    "  removed the unencrypted project (a normal delete; use full-disk encryption for stronger guarantees)"
+                );
+            }
+        }
+        ProjectAction::Unlock { file, out } => {
+            anyhow::ensure!(is_locked(file), "{} is not a locked project", file.display());
+            let out = out.clone().unwrap_or_else(|| file.with_extension("pmproj"));
+            anyhow::ensure!(!out.exists(), "{} already exists; choose another --out", out.display());
+            let pass = passphrase(false)?;
+            let tmp = temp_beside(&out, "partial");
+            let opened = (|| -> Result<u64> {
+                let mut input = std::io::BufReader::new(std::fs::File::open(file)?);
+                let mut output = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+                Ok(pm_vault::open(&mut input, &mut output, &pass)?)
+            })();
+            match opened {
+                Ok(n) => {
+                    std::fs::rename(&tmp, &out)?;
+                    out!("✓ unlocked {} ({n} bytes) into {}", file.display(), out.display());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
 }
