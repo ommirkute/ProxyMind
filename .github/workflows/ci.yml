@@ -61,6 +61,11 @@ jobs:
         run: python3 -m unittest discover -s sdk/python/tests -v
         env:
           PROXYMIND: ${{ github.workspace }}/target/debug/proxymind
+      - name: TypeScript SDK (typecheck, build, tests against the real binary)
+        run: npm ci && npm run build && npm test
+        working-directory: sdk/typescript
+        env:
+          PROXYMIND: ${{ github.workspace }}/target/debug/proxymind
       - run: npx playwright-core install --with-deps chromium
         working-directory: ui
       - run: npm run test:e2e

@@ -136,8 +136,9 @@ Transparent project encryption (sealing is done: `project lock/unlock`, ADR-0013
 
 ## 5. How to work on it
 
-### Python SDK
-`sdk/python` (Apache-2.0, no dependencies). Tests start a real `proxymind ui` and VulnShop: `PROXYMIND=target/debug/proxymind python3 -m unittest discover -s sdk/python/tests` (also in the CI `ui` job). Add a method there when you add an API route.
+### SDKs
+TypeScript: `sdk/typescript` (no runtime dependencies): `npm ci && npm run build && PROXYMIND=../../target/debug/proxymind npm test` (also in the CI `ui` job). Python:
+`sdk/python` (Apache-2.0, no dependencies). Tests start a real `proxymind ui` and VulnShop: `PROXYMIND=target/debug/proxymind python3 -m unittest discover -s sdk/python/tests` (also in the CI `ui` job). Add a method to both SDKs when you add an API route.
 
 ### Releases, container, fuzzing
 **Actions minutes are limited** (2,000 per month on the owner's plan). Pushes run CI on Linux only, docs-only pushes are skipped, and a newer push cancels the older run; pull requests and manual runs cover macOS and Windows. Nightly is manual only. Batch several features per push.
@@ -173,6 +174,6 @@ npm run test:e2e                      # needs a built binary (target/debug/proxy
 - **Git:** develop on the branch the session assigns. Commit messages end with the attribution trailers from the session's instructions. Don't put model identifiers in repo files. Open PRs only when asked. `main` gets merges of PRs (merge commits).
 
 ### Status of the session that wrote this
-Two breadth-first passes added, each with tests: XSS proofs (headless Chromium), DNS OAST, payload-aware tiers, Intruder, crawler, passive and active scanners, OpenAPI import, Decoder/Comparer/Sequencer, report exports (HTML/JSON/SARIF), plugins (passive-check protocol), sealed projects, a Tauri desktop app with installers in releases, a Docker image, a signed release workflow, nightly fuzzing (10 targets) and benchmarks, real-app ground truth (VAmPI, Juice Shop verified; crAPI unverified) and a Python SDK. VulnShop now has VS-1…VS-13. A third pass is under way: HAR/cURL import and export and history search with a site map, GraphQL, content discovery, an engagement page, a proxy setup page and the desktop project picker and CA helper (done), then a TypeScript SDK.
+Two breadth-first passes added, each with tests: XSS proofs (headless Chromium), DNS OAST, payload-aware tiers, Intruder, crawler, passive and active scanners, OpenAPI import, Decoder/Comparer/Sequencer, report exports (HTML/JSON/SARIF), plugins (passive-check protocol), sealed projects, a Tauri desktop app with installers in releases, a Docker image, a signed release workflow, nightly fuzzing (10 targets) and benchmarks, real-app ground truth (VAmPI, Juice Shop verified; crAPI unverified) and a Python SDK. VulnShop now has VS-1…VS-13. A third pass is under way: HAR/cURL import and export and history search with a site map, GraphQL, content discovery, an engagement page, a proxy setup page the desktop project picker and CA helper, and a TypeScript SDK (done). The third foundation pass is complete; next are deep dives (see below).
 
 Good next deep dives: an agent-driven benchmark run; slug-style ids in the app model (VAmPI scores 0 on the baseline because of it); stored/DOM XSS proofs; blind (time/OAST) active checks; crAPI; code signing; plugin sandboxing; transparent project encryption.
