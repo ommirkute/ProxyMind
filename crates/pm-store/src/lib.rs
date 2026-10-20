@@ -348,6 +348,18 @@ pub struct ExchangeSummary {
     pub hypothesis_id: Option<i64>,
 }
 
+/// The columns the site map needs.
+#[derive(Debug, Clone)]
+pub struct SiteRow {
+    pub id: i64,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub method: String,
+    pub path: String,
+    pub status: Option<u16>,
+}
+
 /// A full exchange including the raw bytes.
 #[derive(Debug, Clone)]
 pub struct Exchange {
@@ -555,6 +567,27 @@ impl Store {
             ],
             Self::summary_from_row,
         )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// (id, scheme, host, port, method, path, status) of up to `limit` exchanges,
+    /// newest first, optionally only hosts containing `host` (for the site map).
+    pub fn site_rows(&self, host: Option<&str>, limit: usize) -> Result<Vec<SiteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scheme, host, port, method, path, status FROM exchanges
+             WHERE (?1 IS NULL OR instr(lower(host), lower(?1)) > 0) ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![host, limit as i64], |r| {
+            Ok(SiteRow {
+                id: r.get(0)?,
+                scheme: r.get(1)?,
+                host: r.get(2)?,
+                port: r.get(3)?,
+                method: r.get(4)?,
+                path: r.get(5)?,
+                status: r.get(6)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

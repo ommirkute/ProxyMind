@@ -193,6 +193,17 @@ try {
   const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("export-har").click()]);
   check(dl.suggestedFilename() === "proxymind.har", "HAR export downloads a file");
 
+  console.log("Site map and search");
+  await page.getByRole("button", { name: "Site map & Search" }).click();
+  await page.locator('[data-testid="sitemap-node"][data-path="/api/orders"]').first().waitFor({ state: "attached" });
+  check(true, "site map shows /api/orders");
+  await page.getByLabel("Search text").fill("alice@");
+  await page.getByTestId("search").click();
+  await page.waitForSelector('[data-testid="search-summary"]');
+  check(await page.getByTestId("search-hit").count() > 0, "content search finds alice's email in responses");
+  check(await page.locator('[data-testid="search-hit"] mark').first().textContent() === "alice@", "the match is highlighted");
+  await page.screenshot({ path: join(SHOTS, "5c-sitemap.png") });
+
   console.log("Intruder");
   await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
   await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");

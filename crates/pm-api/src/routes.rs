@@ -75,6 +75,8 @@ pub fn api() -> Router<AppState> {
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
         .route("/exchanges/{id}", get(exchange))
+        .route("/search", post(search))
+        .route("/sitemap", get(sitemap))
         .route("/exchanges/{id}/ws", get(ws_messages))
         .route("/exchanges/{id}/curl", get(exchange_curl))
         .route(
@@ -379,6 +381,19 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn search(State(st): State<AppState>, Json(r): Json<pm_service::SearchRequest>) -> ApiResult {
+    ok(st.service.history_search_text(&st.actor, &r)?)
+}
+
+#[derive(serde::Deserialize)]
+struct SiteQuery {
+    host: Option<String>,
+}
+
+async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiResult {
+    ok(st.service.site_map(&st.actor, q.host.as_deref().filter(|h| !h.is_empty()))?)
 }
 
 async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

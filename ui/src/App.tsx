@@ -15,9 +15,11 @@ import Findings from "./pages/Findings";
 import Issues from "./pages/Issues";
 import Tools from "./pages/Tools";
 import Audit from "./pages/Audit";
+import SiteMap from "./pages/SiteMap";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "history", label: "History" },
+  { id: "sitemap", label: "Site map & Search" },
   { id: "assistant", label: "Assistant" },
   { id: "intercept", label: "Intercept" },
   { id: "rules", label: "Match & replace" },
@@ -109,6 +111,7 @@ export default function App() {
     model: Model,
     issues: Issues,
     tools: Tools,
+    sitemap: SiteMap,
     findings: Findings,
     audit: Audit,
     network: Network,

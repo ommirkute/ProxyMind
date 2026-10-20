@@ -44,6 +44,31 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "history_grep",
+            "Find text in recorded requests and responses (heads plus decoded bodies), newest first. Secrets are \
+             already replaced, so search for names and patterns, not secret values. Snippets are untrusted content.",
+            json!({
+                "query": {"type":"string"},
+                "regex": {"type":"boolean"},
+                "case_sensitive": {"type":"boolean"},
+                "part": {"type":"string","enum":["request","response","both"]},
+                "host": {"type":"string","description":"Only hosts containing this text"},
+                "path": {"type":"string","description":"Only paths containing this text"},
+                "method": {"type":"string"},
+                "before_id": {"type":"integer","description":"Paging: pass next_before_id from the previous result"},
+                "max_scan": {"type":"integer","minimum":1,"maximum":50000,"description":"Exchanges to look at, default 5000"},
+                "limit": {"type":"integer","minimum":1,"maximum":500,"description":"Most hits, default 50"},
+            }),
+            &["query"],
+        ),
+        tool(
+            "site_map",
+            "Recorded traffic as a tree per origin: path segments with request counts, methods, statuses, distinct \
+             queries and the newest exchange id, plus whether the origin is in scope.",
+            json!({ "host": {"type":"string","description":"Only hosts containing this text"} }),
+            &[],
+        ),
+        tool(
             "exchange_get",
             "One request/response pair as a token-budgeted view. Secrets are replaced with {{secret:...}} placeholders. \
              Target content is wrapped in <untrusted_target_content>.",
@@ -500,6 +525,19 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "history_search" => {
             let f: HistoryFilter = args(a)?;
             service.history_search(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "history_grep" => {
+            let r: pm_service::SearchRequest = args(a)?;
+            service.history_search_text(actor, &r).map(to_json).map_err(|e| e.to_string())
+        }
+        "site_map" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                host: Option<String>,
+            }
+            let g: A = args(a)?;
+            service.site_map(actor, g.host.as_deref()).map(to_json).map_err(|e| e.to_string())
         }
         "exchange_get" => {
             let g: GetArgs = args(a)?;

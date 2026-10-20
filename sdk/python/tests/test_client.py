@@ -98,6 +98,13 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(r["imported"], 1)
         self.assertTrue(self.pm.history(source="import", path="/copied"))
 
+    def test_search_and_site_map(self):
+        self.get("/api/products")
+        hits = self.pm.search("coffee", part="response")["hits"]
+        self.assertTrue(hits and hits[0]["part"] == "response")
+        origins = [s["origin"] for s in self.pm.site_map()]
+        self.assertIn(self.url, origins)
+
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.
         with self.assertRaises(PendingApproval) as p:

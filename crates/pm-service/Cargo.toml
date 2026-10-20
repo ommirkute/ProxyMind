@@ -45,5 +45,6 @@ url = "2.5.8"
 workspace = true
 
 [dev-dependencies]
+flate2 = "1.1.10"
 pm-demo = { path = "../pm-demo" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

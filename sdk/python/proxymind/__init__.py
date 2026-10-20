@@ -135,6 +135,16 @@ class Client:
     def exchange(self, exchange_id: int) -> dict:
         return self._get(f"/exchanges/{exchange_id}")
 
+    def search(self, query: str, regex: bool = False, case_sensitive: bool = False, part: str = "both",
+               **filters: Any) -> dict:
+        """Finds text in recorded requests/responses (bodies decoded). Returns {hits, scanned, next_before_id}."""
+        return self._post("/search", self._args(query=query, regex=regex, case_sensitive=case_sensitive, part=part,
+                                               **filters))
+
+    def site_map(self, host: Optional[str] = None) -> list:
+        """Recorded traffic as a tree per origin."""
+        return self._get("/sitemap", host=host)
+
     def model(self, **filters: Any) -> dict:
         return self._get("/model", **filters)
 

@@ -74,6 +74,34 @@ enum Command {
     },
     /// Show the raw request and response of one exchange.
     Show { id: i64 },
+    /// Find text in recorded requests and responses (decoded bodies included).
+    Search {
+        query: String,
+        /// Treat the query as a regular expression
+        #[arg(long)]
+        regex: bool,
+        #[arg(long)]
+        case_sensitive: bool,
+        /// request, response or both
+        #[arg(long, default_value = "both")]
+        part: String,
+        /// Only hosts containing this text
+        #[arg(long)]
+        host: Option<String>,
+        /// Most hits
+        #[arg(long, short = 'n', default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recorded traffic as a tree per origin.
+    Sitemap {
+        /// Only hosts containing this text
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Check and try out a rules-of-engagement (ROE) file.
     Roe {
         #[command(subcommand)]
@@ -862,6 +890,57 @@ async fn run() -> Result<()> {
                 CaAction::Export => {
                     use std::io::Write;
                     write!(std::io::stdout(), "{}", ca.ca_pem())?;
+                }
+            }
+        }
+        Command::Search { query, regex, case_sensitive, part, host, limit, json } => {
+            let service = open_service(&cli.project, None)?;
+            let r = service.history_search_text(
+                &human_actor(None)?,
+                &pm_service::SearchRequest {
+                    query: query.clone(),
+                    regex: *regex,
+                    case_sensitive: *case_sensitive,
+                    part: Some(part.clone()),
+                    max_scan: Some(pm_service::MAX_SCAN),
+                    filter: pm_store::HistoryFilter { host: host.clone(), limit: Some(*limit), ..Default::default() },
+                },
+            )?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                for h in &r.hits {
+                    let e = &h.exchange;
+                    out!("#{} {} {}{} [{}, {} match(es)]", e.id, e.method, e.host, e.path, h.part, h.matches);
+                    for s in &h.snippets {
+                        out!("    {}", s.text);
+                    }
+                }
+                out!("{} hit(s) in {} exchange(s)", r.hits.len(), r.scanned);
+            }
+        }
+        Command::Sitemap { host, json } => {
+            let service = open_service(&cli.project, None)?;
+            let sites = service.site_map(&human_actor(None)?, host.as_deref())?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&sites)?);
+            } else {
+                fn walk(n: &pm_service::pm_tools::sitemap::Node, depth: usize) -> anyhow::Result<()> {
+                    for c in &n.children {
+                        let statuses: Vec<String> = c.statuses.iter().map(u16::to_string).collect();
+                        let here = if c.requests > 0 {
+                            format!("  {} {} ({})", c.methods.join(","), statuses.join(","), c.requests)
+                        } else {
+                            String::new()
+                        };
+                        out!("{}{}{}", "  ".repeat(depth), c.name, here);
+                        walk(c, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                for s in &sites {
+                    out!("{} ({} requests{})", s.site.origin, s.site.total, if s.in_scope { ", in scope" } else { "" });
+                    walk(&s.site.root, 1)?;
                 }
             }
         }

@@ -1552,6 +1552,7 @@ name = "pm-service"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "flate2",
  "jiff",
  "parking_lot",
  "pm-ai",
@@ -1617,8 +1618,10 @@ name = "pm-tools"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "memchr",
  "pm-core",
  "pm-http",
+ "regex",
  "ring",
  "serde",
  "serde_json",

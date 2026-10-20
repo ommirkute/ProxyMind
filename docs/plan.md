@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Site map and content search (`pm_tools::{search,sitemap}`, Site map & Search page, `proxymind search/sitemap`, `/api/v1/search`, `/sitemap`, MCP `history_grep`, `site_map`): literal or regex, case options, request/response/both, decoded bodies, paging; agents match against redacted text so search can't confirm secrets
 - HAR import/export and cURL (`pm_tools::{har,curl}`, History and Repeater, `proxymind import/export/curl`, `/api/v1/import/har`, `/export/har`, `/exchanges/{id}/curl`, `/tools/curl`, MCP `import_har`, `curl_parse`): imports send nothing and are tagged `source: import`; exports and cURL for agents have secrets replaced
 - Python SDK (`sdk/python`, Apache-2.0, stdlib only): typed errors (`ApiError`, `Denied`, `PendingApproval`), approval waiting, live events, every main API action; integration tests against the real binary in CI
 - Decoder, Comparer and Sequencer (Tools page, `decode`/`compare`/`sequencer` CLI, MCP `decode`, `compare_exchanges`, `sequencer_run`): codec chains and smart decode, LCS line diffs plus semantic diff, token randomness (per-position entropy, constant positions, duplicates, counters; statistics only, never the tokens). VulnShop gained VS-11 (sequential reset codes)
@@ -40,7 +41,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
 - WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (35 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (37 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map
