@@ -72,6 +72,10 @@ pub fn class_family(c: &str) -> &'static str {
         "sqli"
     } else if c.contains("command") || c.contains("cmd") || c == "rce" || c.contains("os_injection") {
         "command_injection"
+    } else if c.contains("xxe") || c.contains("xml_external") {
+        "xxe"
+    } else if c.contains("code_injection") || c.contains("eval") || c.contains("log4") || c.contains("jndi") {
+        "code_injection"
     } else if c.contains("ssrf") {
         "ssrf"
     } else if c.contains("xss") {
@@ -211,7 +215,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 15));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 16));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

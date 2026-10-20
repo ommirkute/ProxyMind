@@ -78,6 +78,11 @@ vulns:
     method: GET
     path: /api/products
     description: Time-based blind SQL injection in the User-Agent header.
+  - id: VS-16
+    class: xxe
+    method: POST
+    path: /api/import
+    description: XML import resolves external entities over http (blind XXE).
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats

@@ -75,7 +75,7 @@ async fn the_baseline_discovers_imports_and_sweeps() {
     assert_eq!(exposed, [format!("GET {url}/.git/config").as_str()], "one finding per kind of exposure");
     let (spec, ops, sent) = d.openapi.clone().expect("openapi.json imported");
     assert!(spec.ends_with("/openapi.json"));
-    assert_eq!(ops, 9);
+    assert_eq!(ops, 10, "including POST /api/import");
     assert!(sent > 0);
 
     // The sweep reaches what the spec's examples recorded: error-based SQLi in /api/reviews.

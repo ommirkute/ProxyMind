@@ -61,6 +61,14 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("sql_boolean", "sqli"),
     ("sql_time", "sqli"),
     ("cmd_time", "command_injection"),
+    // Out of band (only with an OAST listener).
+    ("ssrf_oob", "ssrf"),
+    ("xxe_oob", "xxe"),
+    ("sql_oob", "sqli"),
+    ("cmd_oob", "command_injection"),
+    ("ssti_oob", "ssti"),
+    ("log4shell", "rce"),
+    ("code_oob", "code_injection"),
 ];
 
 /// Most operations with parameters one sweep scans, and most without.
@@ -232,6 +240,7 @@ impl Service {
                         exchange_id: example,
                         checks: checks.clone(),
                         max_requests: Some(150),
+                        oob_wait_seconds: Some(3),
                         ..Default::default()
                     },
                 )

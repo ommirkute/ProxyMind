@@ -8,6 +8,7 @@
 //! what to test or report.
 
 pub mod active;
+pub mod oob;
 
 use pm_http::Header;
 use serde::Serialize;

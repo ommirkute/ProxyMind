@@ -64,6 +64,14 @@ done
 step "crawl"
 "${P[@]}" crawl "$APP_URL/" --max-pages "${BENCH_CRAWL_PAGES:-60}" | tail -1 >&2
 
+step "OAST listener (for out-of-band checks)"
+# Reachable from Docker containers (docker0) and the host alike.
+OAST_HOST=${BENCH_OAST_HOST:-$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)}
+OAST_HOST=${OAST_HOST:-127.0.0.1}
+"${P[@]}" oast-server --listen "$OAST_HOST:${BENCH_OAST_PORT:-18085}" >/dev/null 2>&1 &
+PIDS+=($!)
+sleep 1
+
 step "automatic access-control pass"
 "${P[@]}" bench auto | tee "$OUT/$APP-auto.txt" >&2
 

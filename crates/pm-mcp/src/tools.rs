@@ -267,11 +267,14 @@ pub fn tool_definitions() -> Vec<Value> {
              cookie and User-Agent/Referer/X-Forwarded-For header. One-shot: sql_error, cmd_injection, \
              reflected_input, open_redirect, path_traversal, ssti. Multi-step with confirmation: sql_boolean \
              (true/false pairs), sql_time and cmd_time (the delay must follow the payload: sleep 0 fast, a longer \
-             sleep longer). Returns leads with evidence and, where an oracle fits, how to prove them (prove_with). \
+             sleep longer). Out of band, with an OAST listener (the target calls back; each probe has its own \
+             token): ssrf_oob, xxe_oob, sql_oob, cmd_oob, ssti_oob, log4shell, code_oob. Returns leads with \
+             evidence and, where an oracle fits, how to prove them (prove_with). \
              Needs approval by default: ask the user, then call again with identical arguments plus approval_id.",
             json!({
                 "exchange_id": {"type":"integer"},
-                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time"]}},
+                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time","ssrf_oob","xxe_oob","sql_oob","cmd_oob","ssti_oob","log4shell","code_oob"]}},
+                "oob_wait_seconds": {"type":"integer","minimum":1,"maximum":60,"description":"Wait for callbacks, default 10"},
                 "max_requests": {"type":"integer","minimum":1,"maximum":2000},
                 "identity": {"type":"string"},
                 "hypothesis_id": {"type":"integer"},

@@ -15,22 +15,22 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | SQL injection: error-based | ✅ (quote → DB error) | ✅ | 1 (more payloads, headers, confirmation) |
 | SQL injection: boolean-based blind | ✅ step 1 | ✅ (length only) | 1 (content similarity, two formulations) |
 | SQL injection: time-based blind | ✅ step 1 (+ `timing` proof oracle) | ✅ | 1 (delay must follow the payload) |
-| SQL injection: out-of-band | ❌ | ✅ (Interactsh) | 2 (pm-oast) |
+| SQL injection: out-of-band | ✅ step 2 (SQL Server, MySQL, Oracle, PostgreSQL) | ✅ (Interactsh) | 2 |
 | SQL injection in headers and cookies | ✅ step 1 | ✅ (headers) | 1 |
 | OS command injection: output-based | ✅ step 1 | ✅ | 1 |
 | OS command injection: time-based | ✅ step 1 | ✅ | 1 |
-| OS command injection: out-of-band | ❌ | ✅ | 2 |
+| OS command injection: out-of-band | ✅ step 2 (curl, wget, nslookup) | ✅ | 2 |
 | Server-side template injection: evaluated | ✅ (3 engines) → step 1 adds more engines | ✅ | 1 |
-| Server-side template injection: blind | ❌ | ✅ (OOB) | 2 (needs OOB to be safe) |
-| Expression language / code injection (PHP, Python, Node eval) | ❌ | 🟡 | 2 |
+| Server-side template injection: blind | ✅ step 2 (6 engines, OOB) | ✅ (OOB) | 2 |
+| Expression language / code injection (PHP, Python, Node eval) | 🟡 step 2 (OOB) | 🟡 | 2 |
 | NoSQL injection (operators, JS) | ❌ | ✅ | 3 |
 | LDAP injection | ❌ | ✅ | 3 |
 | XPath injection | ❌ | ❌ | 3 |
-| XML external entity (in-band and OOB) | ❌ | ✅ | 2 |
+| XML external entity (in-band and OOB) | 🟡 OOB step 2 (external DTD, entity) | ✅ | 2 (in-band file read: 3) |
 | XML injection / SOAP | ❌ | 🟡 | 3 |
 | CRLF / HTTP response header injection | ❌ | ❌ | 3 |
 | SMTP / email header injection | ❌ | ❌ | 4 |
-| Log4Shell-style lookups (OOB) | ❌ | ✅ | 2 |
+| Log4Shell-style lookups (OOB) | ✅ step 2 (needs the DNS zone) | ✅ | 2 |
 | Server-side JavaScript / prototype pollution | ❌ | ✅ (client and server, blind) | 4 |
 | Java / .NET / PHP deserialization | ❌ | ✅ (Java) | 4 (approval) |
 | File path traversal / manipulation | ✅ | ✅ | 3 (more encodings, Windows) |
@@ -53,8 +53,8 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 
 | Issue | ProxyMind | BurpMax | Step |
 |---|---|---|---|
-| SSRF (in-band and OOB) | ❌ (`api/fetch` found by agents only) | ✅ | 2 |
-| External service interaction (DNS / HTTP) | ✅ OAST server | ✅ | 2 |
+| SSRF (in-band and OOB) | ✅ OOB step 2 (URL-like parameters, Referer) | ✅ | 2 |
+| External service interaction (DNS / HTTP) | ✅ OAST server + scan | ✅ | 2 |
 | Host header injection / password-reset poisoning | ❌ | ✅ | 3 |
 | Web cache poisoning (unkeyed inputs) | ❌ | ❌ | 4 |
 | Web cache deception | ❌ | ❌ | 4 |
@@ -115,7 +115,8 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
    engines; confirmation rules and fast-to-slow ordering. *(done)*
 2. **Out-of-band** through ProxyMind's own OAST server: blind SSRF, XXE,
    OOB SQL and command injection, blind template injection, Log4Shell,
-   code injection.
+   code injection. *(done: every probe carries its own token; callbacks are
+   collected while the slower checks run)*
 3. Stored and DOM XSS, CSRF, Host header, active CORS, NoSQL/LDAP/XPath,
    CRLF, auth bypass, hidden parameters, richer insertion points, one
    crawl-and-audit task.

@@ -231,6 +231,9 @@ pub struct ActiveScanRequest {
     pub checks: Vec<String>,
     /// Most probe requests (default 300, max 2000).
     pub max_requests: Option<usize>,
+    /// How long to wait for out-of-band callbacks after the last such
+    /// probe (default 10 s, max 60).
+    pub oob_wait_seconds: Option<u64>,
     pub identity: Option<String>,
     pub approval_id: Option<String>,
     pub hypothesis_id: Option<i64>,
@@ -311,8 +314,13 @@ impl Service {
     pub async fn scan_active(&self, actor: &Actor, req: ActiveScanRequest) -> Result<ActiveScanResult> {
         use crate::Authorization;
         use pm_scan::active::{self as act, PointKind};
-        if let Some(bad) = req.checks.iter().find(|c| !act::CHECKS.contains(&c.as_str())) {
-            return Err(crate::ServiceError::Invalid(format!("unknown check {bad}; use {}", act::CHECKS.join(", "))));
+        let known = |c: &str| act::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
+        if let Some(bad) = req.checks.iter().find(|c| !known(c)) {
+            return Err(crate::ServiceError::Invalid(format!(
+                "unknown check {bad}; use {}, {}",
+                act::CHECKS.join(", "),
+                pm_scan::oob::CHECKS.join(", ")
+            )));
         }
         let want = |c: &str| req.checks.is_empty() || req.checks.iter().any(|x| x == c);
         let ex = self
@@ -344,7 +352,23 @@ impl Service {
                 plans.push(Plan::Time("cmd_time", pt.clone(), act::cmd_time_probes(&pt.original)));
             }
         }
-        if probes.is_empty() && plans.is_empty() {
+        // Out-of-band probes, when an OAST listener is configured.
+        // One lock at a time: in one struct literal both guards would live
+        // to the end of the statement and deadlock.
+        let url = self.store.lock().get_setting(crate::proof::OAST_SETTING)?;
+        let domain = self.store.lock().get_setting(crate::proof::OAST_DNS_SETTING)?;
+        let callback = pm_scan::oob::Callback { url, domain };
+        let oob = pm_scan::oob::probes(&raw, &req.checks, &callback, &id_segments, limit, pm_oast::new_token);
+        let mut notes = Vec::new();
+        if !callback.is_set() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
+            notes.push(
+                "out-of-band checks skipped: no OAST listener (run `proxymind oast-server`, or mcp with --oast-listen)"
+                    .to_string(),
+            );
+        } else if callback.domain.is_none() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
+            notes.push("DNS-only payloads (nslookup, UNC paths, JNDI) skipped: no OAST DNS zone".to_string());
+        }
+        if probes.is_empty() && plans.is_empty() && oob.is_empty() {
             return Err(crate::ServiceError::Invalid(
                 "no insertion points in this request (no query, form, JSON, numeric path values, cookies or headers)"
                     .into(),
@@ -356,8 +380,13 @@ impl Service {
         let mut base = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
         base.hypothesis_id = req.hypothesis_id;
         let mut tier = Tier::ActiveIntrusive;
-        let mut planned = probes.len() + if plans.is_empty() { 1 } else { 3 };
-        for raw in probes.iter().map(|p| p.raw.clone()).chain(plans.iter().flat_map(|p| p.samples(&raw))) {
+        let mut planned = probes.len() + oob.len() + if plans.is_empty() { 1 } else { 3 };
+        for raw in probes
+            .iter()
+            .map(|p| p.raw.clone())
+            .chain(oob.iter().map(|p| p.probe.raw.clone()))
+            .chain(plans.iter().flat_map(|p| p.samples(&raw)))
+        {
             tier = tier.max(Tier::for_http_request(&raw).0);
         }
         planned += plans.iter().map(Plan::max_requests).sum::<usize>();
@@ -386,7 +415,6 @@ impl Service {
 
         let identity = req.identity.as_deref();
         let mut sent_count = 0usize;
-        let mut notes = Vec::new();
         let send = |raw: Vec<u8>| {
             let endpoint = endpoint.clone();
             async move {
@@ -435,7 +463,28 @@ impl Service {
             issues.push(ActiveFinding { issue, exchange_id: sent.exchange_id });
         }
 
-        // 2 and 3. Multi-step checks: boolean pairs, then delays (slowest last).
+        // 2. Out-of-band probes; their callbacks are collected at the end,
+        // while the slower checks below run.
+        let mut oob_sent: Vec<(&pm_scan::oob::OobProbe, i64)> = Vec::new();
+        for p in &oob {
+            let family = p.probe.check.split('_').next().unwrap_or_default();
+            // Already shown in-band; and where a shell already runs our input,
+            // template or code payloads that call curl would be ambiguous.
+            let shell = matches!(p.probe.check, "ssti_oob" | "code_oob") && found(&issues, "cmd", &p.probe.point.name);
+            if found(&issues, family, &p.probe.point.name) || shell {
+                continue;
+            }
+            if sent_count >= limit {
+                notes.push(format!("stopped at the request limit ({limit})"));
+                break;
+            }
+            sent_count += 1;
+            oob_sent.push((p, send(p.probe.raw.clone()).await?.exchange_id));
+        }
+        let oob_deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(req.oob_wait_seconds.unwrap_or(10).clamp(1, 60));
+
+        // 3 and 4. Multi-step checks: boolean pairs, then delays (slowest last).
         if !plans.is_empty() {
             let b2 = send(raw.clone().into_bytes()).await?;
             let b3 = send(raw.clone().into_bytes()).await?;
@@ -536,6 +585,46 @@ impl Service {
                 }
             }
             sent_count += 2;
+        }
+        // 5. Callbacks: wait out the rest of the window, then match tokens.
+        if !oob_sent.is_empty() {
+            let tokens: std::collections::HashSet<&str> = oob_sent.iter().map(|(p, _)| p.token.as_str()).collect();
+            let hits = loop {
+                let rows = self.store.lock().rows("oast_interactions", None, 5000)?;
+                let hits: Vec<_> = rows
+                    .into_iter()
+                    .filter(|r| r.get("token").and_then(|t| t.as_str()).is_some_and(|t| tokens.contains(t)))
+                    .collect();
+                if std::time::Instant::now() >= oob_deadline {
+                    break hits;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            };
+            for (p, exchange_id) in &oob_sent {
+                let mine: Vec<_> =
+                    hits.iter().filter(|h| h.get("token").and_then(|t| t.as_str()) == Some(p.token.as_str())).collect();
+                let Some(first) = mine.last() else { continue };
+                let dup = issues
+                    .iter()
+                    .any(|f| f.issue.check == p.probe.check && f.issue.point.ends_with(&p.probe.point.name));
+                if dup {
+                    continue;
+                }
+                let field = |k: &str| first.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let seen = format!(
+                    "{} {} {} from {} ({} interaction{})",
+                    field("protocol").to_uppercase(),
+                    field("method"),
+                    field("path"),
+                    field("remote"),
+                    mine.len(),
+                    if mine.len() == 1 { "" } else { "s" }
+                );
+                issues.push(ActiveFinding { issue: pm_scan::oob::issue(p, &seen), exchange_id: *exchange_id });
+            }
+            notes.push(
+                "out-of-band: callbacks that arrive after the wait aren't matched; retest with proof_run oast".into(),
+            );
         }
         if actor.kind == ActorKind::Agent {
             for f in &mut issues {

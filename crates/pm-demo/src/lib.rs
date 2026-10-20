@@ -139,6 +139,14 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         description: "The User-Agent header is looked up in a visit log with string concatenation (time-based \
                       blind SQL injection in a header).",
     },
+    Vuln {
+        id: "VS-16",
+        class: "xxe",
+        method: "POST",
+        path: "/api/import",
+        description: "Product imports are XML; the parser resolves external entities and fetches their http:// URLs \
+                      (blind XXE, seen out of band).",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -359,6 +367,7 @@ const OPENAPI: &str = r##"{
     "/api/login": {"post": {"summary": "Log in", "security": [], "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Login"}}}}}},
     "/api/me": {"get": {"summary": "Current user"}},
     "/api/products": {"get": {"summary": "List products", "security": []}},
+    "/api/import": {"post": {"summary": "Import products (XML)", "security": [], "requestBody": {"content": {"application/xml": {"example": "<?xml version=\"1.0\"?><items><item>Coffee</item></items>"}}}}},
     "/api/products/search": {"get": {"summary": "Search products", "security": [], "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string", "example": "Coffee"}}]}},
     "/api/orders": {"get": {"summary": "Your orders"}, "post": {"summary": "Place an order"}},
     "/api/orders/{id}": {"get": {"summary": "One order", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "example": 1001}}]}},
@@ -419,6 +428,7 @@ async fn demo_query(sql: String) -> Vec<String> {
 async fn fake_shell(line: &str) -> String {
     let mut line = line.to_string();
     let mut slept = 0.0;
+    let mut fetches = Vec::new();
     // Command substitution first: $(cmd) and `cmd` (but not $((…)) arithmetic).
     for _ in 0..5 {
         let found = match (line.find("$("), line.find('`')) {
@@ -441,17 +451,49 @@ async fn fake_shell(line: &str) -> String {
             _ => None,
         };
         let Some((start, end, a, b)) = found else { break };
-        let (out, s) = shell_commands(&line[a..b]);
+        let (out, s, f) = shell_commands(&line[a..b]);
         slept += s;
+        fetches.extend(f);
         line.replace_range(start..end, out.trim());
     }
-    let (out, s) = shell_commands(&line);
+    let (out, s, f) = shell_commands(&line);
     slept += s;
+    fetches.extend(f);
     tokio::time::sleep(Duration::from_secs_f64(f64::min(slept, 10.0))).await;
+    // curl and wget (run as commands) really fetch, http:// only like VS-4,
+    // so out-of-band payloads can be seen; a few at most.
+    for url in fetches.iter().take(3) {
+        let _ = fetch(url).await;
+    }
     out
 }
 
-fn shell_commands(line: &str) -> (String, f64) {
+/// URLs of external entities an XML document declares and uses.
+fn external_entities(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<!ENTITY") {
+        rest = &rest[i + 8..];
+        let decl = &rest[..rest.find('>').unwrap_or(rest.len())];
+        let words: Vec<&str> = decl.split_whitespace().collect();
+        let (param, name) = match words.as_slice() {
+            ["%", n, ..] => (true, *n),
+            [n, ..] => (false, *n),
+            _ => continue,
+        };
+        let Some(url) = decl.split('"').nth(1).filter(|u| decl.contains("SYSTEM") && u.starts_with("http://")) else {
+            continue;
+        };
+        let used = if param { xml.contains(&format!("%{name};")) } else { xml.contains(&format!("&{name};")) };
+        if used && out.len() < 3 {
+            out.push(url.to_string());
+        }
+    }
+    out
+}
+
+/// Output, seconds slept, and URLs that curl/wget fetched.
+fn shell_commands(line: &str) -> (String, f64, Vec<String>) {
     let mut cmds = Vec::new();
     let mut cur = String::new();
     let mut chars = line.chars().peekable();
@@ -473,7 +515,7 @@ fn shell_commands(line: &str) -> (String, f64) {
         }
     }
     cmds.push(cur);
-    let (mut out, mut slept) = (String::new(), 0.0);
+    let (mut out, mut slept, mut fetches) = (String::new(), 0.0, Vec::new());
     for cmd in cmds {
         let words: Vec<&str> = cmd.split_whitespace().collect();
         match words.first().copied() {
@@ -495,10 +537,15 @@ fn shell_commands(line: &str) -> (String, f64) {
                 out.push('\n');
             }
             Some("sleep") => slept += words.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+            Some("curl" | "wget") => {
+                fetches.extend(words.iter().filter(|w| w.starts_with("http://")).map(|w| w.to_string()));
+                out.push_str("<html>ok</html>\n");
+            }
+            Some("nslookup") => out.push_str("Server: 127.0.0.53\n"),
             Some(other) => out.push_str(&format!("sh: {other}: not found\n")),
         }
     }
-    (out, slept)
+    (out, slept, fetches)
 }
 
 /// The introspection result for VulnShop's GraphQL schema.
@@ -895,6 +942,15 @@ impl VulnShop {
                         {"id": 1, "name": "Coffee", "price": 4.5}, {"id": 2, "name": "Tea", "price": 3.0}, {"id": 3, "name": "Cake", "price": 6.25}
                     ]}),
                 )
+            }
+            ("POST", ["api", "import"]) => {
+                // VS-16: an XML parser that resolves external entities (http:// only).
+                let xml = String::from_utf8_lossy(&req.body).into_owned();
+                for url in external_entities(&xml) {
+                    let _ = fetch(&url).await;
+                }
+                let items = xml.matches("<item>").count();
+                json_resp(200, json!({"imported": items}))
             }
             ("GET", ["api", "tools", "ping"]) => {
                 // VS-14: OS command injection into a simulated shell (nothing is executed).

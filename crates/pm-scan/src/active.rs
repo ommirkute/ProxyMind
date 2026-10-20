@@ -39,6 +39,8 @@ pub enum PointKind {
     Path,
     Cookie,
     Header,
+    /// The whole body (e.g. an XML document for XXE).
+    Body,
 }
 
 /// Where a payload can go.
@@ -223,6 +225,18 @@ fn json_leaves(v: &serde_json::Value, ptr: String, out: &mut Vec<(String, String
         }
         _ => {}
     }
+}
+
+impl Point {
+    /// The request body as one insertion point.
+    pub fn body() -> Self {
+        Self { kind: PointKind::Body, name: "body".into(), original: String::new(), locator: Locator::None }
+    }
+}
+
+/// Head and body of a raw request (`\r\n\r\n` or `\n\n`), for whole-body payloads.
+pub fn split_body(raw: &str) -> Option<(&str, &str)> {
+    raw.split_once("\r\n\r\n").or_else(|| raw.split_once("\n\n"))
 }
 
 /// Places where payloads can go in `raw`.

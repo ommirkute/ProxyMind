@@ -35,14 +35,14 @@ async fn imports_a_recorded_spec_and_sends_safe_examples() {
     let OpenApiImportResult::Imported { title, base_url, operations, sent, .. } = r else { panic!("{r:?}") };
     assert_eq!(title, "VulnShop API");
     assert_eq!(base_url.as_deref(), Some(url.as_str()), "relative server resolved against where the spec came from");
-    assert_eq!(operations.len(), 9);
+    assert_eq!(operations.len(), 10);
     let order = operations.iter().find(|o| o.path == "/api/orders/{id}").unwrap();
     assert!(order.auth);
     assert!(order.example_request.starts_with("GET /api/orders/1001 HTTP/1.1"), "{}", order.example_request);
     let login = operations.iter().find(|o| o.path == "/api/login").unwrap();
     assert!(login.example_request.ends_with(r#"{"username":"alice","password":"alice123"}"#));
     assert!(sent.is_empty());
-    assert_eq!(s.openapi_get().unwrap()["operations"].as_array().unwrap().len(), 9);
+    assert_eq!(s.openapi_get().unwrap()["operations"].as_array().unwrap().len(), 10);
 
     // Sending the GET examples records them, and the model learns the operations.
     let r = s
