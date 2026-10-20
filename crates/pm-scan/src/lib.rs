@@ -94,7 +94,27 @@ pub fn check(x: &Exchange) -> Vec<Issue> {
     cors(x, &mut out);
     disclosure(x, &mut out);
     body(x, &mut out);
+    graphql(x, &mut out);
     out
+}
+
+/// A GraphQL server answering introspection hands out its whole schema,
+/// including fields the UI never uses.
+fn graphql(x: &Exchange, out: &mut Vec<Issue>) {
+    if x.status != 200 || x.body.len() < 20 {
+        return;
+    }
+    let head = &x.body[..x.body.len().min(4096)];
+    let text = String::from_utf8_lossy(head);
+    if text.contains("\"__schema\"") && (text.contains("\"queryType\"") || text.contains("\"types\"")) {
+        out.push(issue(
+            "graphql_introspection",
+            "GraphQL introspection is enabled",
+            Severity::Low,
+            "the response is an introspection result (import it from History or the Model page)".into(),
+            false,
+        ));
+    }
 }
 
 fn headers(x: &Exchange, out: &mut Vec<Issue>) {
@@ -455,5 +475,8 @@ mod tests {
         ];
         assert_eq!(run("http", GET, 200, html, "<input type=\"password\" name=p>"), vec!["password_over_http"]);
         assert_eq!(run("http", GET, 200, html, "<title>Index of /backup</title>"), vec!["directory_listing"]);
+        let gql = r#"{"data":{"__schema":{"queryType":{"name":"Query"},"types":[]}}}"#;
+        assert_eq!(run("https", GET, 200, &[], gql), vec!["graphql_introspection"]);
+        assert!(run("https", GET, 200, &[], r#"{"doc":"__schema is a word"}"#).is_empty());
     }
 }

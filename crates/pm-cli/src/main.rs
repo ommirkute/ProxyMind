@@ -251,6 +251,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a GraphQL schema (introspection) and list its operations with example requests.
+    Graphql {
+        /// The endpoint, e.g. https://app.example.com/graphql
+        #[arg(long)]
+        url: Option<String>,
+        /// An introspection result (JSON file)
+        #[arg(long, conflicts_with_all = ["exchange", "fetch"])]
+        schema: Option<PathBuf>,
+        /// A recorded exchange whose response is an introspection result
+        #[arg(long, conflicts_with = "fetch")]
+        exchange: Option<i64>,
+        /// Send the introspection query to --url (in scope only)
+        #[arg(long, requires = "url")]
+        fetch: bool,
+        #[arg(long)]
+        identity: Option<String>,
+        /// Print each operation's example request
+        #[arg(long)]
+        examples: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Add the exchanges of a HAR file (browser devtools export) to history. Sends nothing.
     Import {
         /// The .har file
@@ -1464,6 +1486,48 @@ async fn run() -> Result<()> {
                     }
                     for x in skipped {
                         out!("  skipped {x}");
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
+            }
+        }
+        Command::Graphql { url, schema, exchange, fetch, identity, examples, json } => {
+            let service = open_service(&cli.project, None)?;
+            let schema = match schema {
+                Some(f) => Some(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?),
+                None => None,
+            };
+            anyhow::ensure!(
+                schema.is_some() || exchange.is_some() || *fetch,
+                "give --schema, --exchange or --fetch (with --url)"
+            );
+            let r = service
+                .graphql_import(
+                    &human_actor(None)?,
+                    pm_service::GraphQlImportRequest {
+                        url: url.clone(),
+                        schema,
+                        exchange_id: *exchange,
+                        fetch: *fetch,
+                        identity: identity.clone(),
+                        approval_id: None,
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (pm_service::GraphQlImportResult::Imported { url, types, operations, truncated, .. }, false) => {
+                    out!(
+                        "{}: {} operations, {types} types{}",
+                        url.as_deref().unwrap_or("(no endpoint given)"),
+                        operations.len(),
+                        if *truncated > 0 { format!(" ({truncated} more not listed)") } else { String::new() }
+                    );
+                    for o in operations {
+                        let args: Vec<String> = o.op.args.iter().map(|a| format!("{}: {}", a.name, a.ty)).collect();
+                        out!("  {:<12} {}({}): {}", o.op.kind, o.op.name, args.join(", "), o.op.returns);
+                        if *examples && let Some(req) = &o.example_request {
+                            out!("{}\n", req.replace("\r\n", "\n"));
+                        }
                     }
                 }
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),

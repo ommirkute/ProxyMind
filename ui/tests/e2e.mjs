@@ -535,6 +535,18 @@ try {
   await page.waitForSelector('[data-testid="openapi-summary"]');
   check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 9 operations")), "the spec's 9 operations are listed");
 
+  console.log("GraphQL");
+  await page.getByRole("button", { name: "Import GraphQL schema…" }).click();
+  await page.getByLabel("GraphQL endpoint").fill(`http://127.0.0.1:${shop}/graphql`);
+  await page.getByTestId("graphql-fetch").click();
+  await page.waitForSelector('[data-testid="graphql-summary"]');
+  check(await page.getByTestId("graphql-summary").textContent().then((t) => t.startsWith("3 operations")), "introspection lists 3 operations");
+  await page.screenshot({ path: join(SHOTS, "7b-graphql.png"), fullPage: true });
+  await page.getByTestId("graphql-repeater-invoice").click();
+  await page.waitForFunction(() => document.querySelector("textarea")?.value.includes("query Invoice"));
+  check(true, "an example opens in Repeater");
+  await page.getByRole("button", { name: "Model & Coverage" }).click();
+
   console.log("Passive issues");
   await page.getByRole("button", { name: "Issues" }).click();
   await page.waitForSelector('[data-testid="issues"]');

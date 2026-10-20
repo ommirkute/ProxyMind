@@ -98,6 +98,11 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(r["imported"], 1)
         self.assertTrue(self.pm.history(source="import", path="/copied"))
 
+    def test_graphql(self):
+        r = self.pm.graphql_import(url=f"{self.url}/graphql", fetch=True)
+        self.assertEqual([o["name"] for o in r["operations"]], ["me", "invoice", "products"])
+        self.assertIn("query Invoice", r["operations"][1]["example_request"])
+
     def test_search_and_site_map(self):
         self.get("/api/products")
         hits = self.pm.search("coffee", part="response")["hits"]

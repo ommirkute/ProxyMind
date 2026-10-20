@@ -57,6 +57,11 @@ vulns:
     method: POST
     path: /api/password/reset
     description: Reset codes are a counter (each is the previous plus one).
+  - id: VS-12
+    class: idor
+    method: POST
+    path: /graphql
+    description: The GraphQL invoice(id) resolver returns any user's invoice (REST checks ownership).
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}

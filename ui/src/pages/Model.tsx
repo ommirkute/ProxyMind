@@ -25,6 +25,7 @@ export default function Model() {
     <div className="content">
       <CrawlPanel />
       <OpenApiPanel />
+      <GraphQlPanel />
       <Panel
         title="Operations"
         actions={
@@ -245,6 +246,97 @@ function OpenApiPanel() {
                       </tr>
                     );
                   })}
+                </tbody>
+              </table>
+            </>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+interface GqlOperation {
+  kind: string;
+  name: string;
+  description?: string;
+  args: { name: string; type: string; required: boolean }[];
+  returns: string;
+  document: string;
+  variables: unknown;
+  example_request?: string;
+}
+
+type GqlResult =
+  | { status: "imported"; url: string | null; types: number; operations: GqlOperation[]; truncated: number; exchange_id?: number }
+  | { status: "pending_approval"; approval_id: string; summary: string }
+  | { status: "denied"; reasons: string[] };
+
+function GraphQlPanel() {
+  const { go } = useNav();
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [exchange, setExchange] = useState("");
+  const [schema, setSchema] = useState("");
+  const [result, setResult] = useState<GqlResult | null>(null);
+  const [approval, setApproval] = useState<string | null>(null);
+  const action = useAction();
+  const run = (fetch: boolean) =>
+    action.run(async () => {
+      const body = fetch
+        ? { url, fetch: true, approval_id: approval || undefined }
+        : exchange
+          ? { url: url || undefined, exchange_id: Number(exchange) }
+          : { url: url || undefined, schema };
+      const r = await api.post<GqlResult>("/graphql/import", body);
+      setApproval(r.status === "pending_approval" ? r.approval_id : null);
+      setResult(r);
+    });
+  const toRepeater = (o: GqlOperation, endpoint: string) => {
+    try {
+      sessionStorage.setItem("pm_repeater_draft", JSON.stringify({ url: new URL(endpoint).origin, raw: o.example_request }));
+    } catch {
+      /* storage blocked: Repeater opens empty */
+    }
+    go("repeater");
+  };
+  return (
+    <Panel title="GraphQL" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import GraphQL schema…"}</button>}>
+      {open && (
+        <>
+          <div className="row">
+            <input aria-label="GraphQL endpoint" className="grow mono" placeholder="https://host/graphql" value={url} onChange={(e) => setUrl(e.target.value)} />
+            <button className="btn" disabled={!url || action.busy} onClick={() => run(true)} data-testid="graphql-fetch" title="Send the introspection query (in scope only)">
+              {approval ? "Fetch (approved)" : "Fetch schema"}
+            </button>
+            <span className="small muted">or from exchange</span>
+            <input aria-label="Schema exchange" value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="id" style={{ width: 70 }} />
+            <button className="btn primary" disabled={(!exchange && !schema) || action.busy} onClick={() => run(false)}>Import</button>
+          </div>
+          {!exchange && <textarea aria-label="Introspection JSON" className="mono" rows={3} value={schema} onChange={(e) => setSchema(e.target.value)} placeholder="or paste an introspection result (JSON)" style={{ width: "100%", marginTop: 6 }} />}
+          <ErrorBox error={action.error} />
+          {result?.status === "pending_approval" && <div className="notice">Needs approval: {result.summary}. Approve it, then press Fetch again.</div>}
+          {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
+          {result?.status === "imported" && (
+            <>
+              <div className="small" data-testid="graphql-summary">
+                {result.operations.length} operations, {result.types} types{result.exchange_id ? <> (fetched in <ExchangeLink id={result.exchange_id} />)</> : null}
+              </div>
+              <table className="grid small">
+                <thead><tr><th>Kind</th><th>Operation</th><th>Returns</th><th></th></tr></thead>
+                <tbody>
+                  {result.operations.map((o) => (
+                    <tr key={o.kind + o.name} title={o.document}>
+                      <td><Chip value={o.kind} /></td>
+                      <td className="mono">{o.name}({o.args.map((a) => `${a.name}: ${a.type}`).join(", ")})</td>
+                      <td className="mono muted">{o.returns}</td>
+                      <td>
+                        {o.example_request && result.url && (
+                          <button className="btn" data-testid={`graphql-repeater-${o.name}`} onClick={() => toRepeater(o, result.url!)}>Repeater</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </>

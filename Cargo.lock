@@ -1391,6 +1391,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-graphql"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-http"
 version = "0.0.1"
 dependencies = [
@@ -1562,6 +1570,7 @@ dependencies = [
  "pm-demo",
  "pm-diff",
  "pm-fuzz",
+ "pm-graphql",
  "pm-http",
  "pm-identity",
  "pm-ledger",

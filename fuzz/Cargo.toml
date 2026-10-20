@@ -14,6 +14,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+pm-graphql = { path = "../crates/pm-graphql" }
+serde_json = "1.0.154"
 pm-http = { path = "../crates/pm-http" }
 pm-oast = { path = "../crates/pm-oast" }
 pm-policy = { path = "../crates/pm-policy" }
@@ -87,6 +89,13 @@ bench = false
 [[bin]]
 name = "har_curl"
 path = "fuzz_targets/har_curl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graphql_schema"
+path = "fuzz_targets/graphql_schema.rs"
 test = false
 doc = false
 bench = false

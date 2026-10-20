@@ -95,6 +95,8 @@ pub fn api() -> Router<AppState> {
         .route("/tools/sequencer/analyze", post(tools_sequencer_analyze))
         .route("/openapi", get(openapi_get))
         .route("/openapi/import", post(openapi_import))
+        .route("/graphql", get(graphql_get))
+        .route("/graphql/import", post(graphql_import))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -427,6 +429,14 @@ struct CurlBody {
 
 async fn tools_curl(State(st): State<AppState>, Json(r): Json<CurlBody>) -> ApiResult {
     ok(st.service.curl_parse(&r.command)?)
+}
+
+async fn graphql_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.graphql_get()?)
+}
+
+async fn graphql_import(State(st): State<AppState>, Json(r): Json<pm_service::GraphQlImportRequest>) -> ApiResult {
+    ok(st.service.graphql_import(&st.actor, r).await?)
 }
 
 async fn openapi_get(State(st): State<AppState>) -> ApiResult {

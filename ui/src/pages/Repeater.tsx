@@ -39,6 +39,22 @@ export default function Repeater() {
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
 
+  // A request handed over by another page (e.g. a GraphQL example).
+  useEffect(() => {
+    if (arg) return;
+    try {
+      const draft = sessionStorage.getItem("pm_repeater_draft");
+      if (!draft) return;
+      sessionStorage.removeItem("pm_repeater_draft");
+      const d = JSON.parse(draft) as { url: string; raw: string };
+      setUrl(d.url);
+      setRaw(d.raw.replace(/\r\n/g, "\n"));
+    } catch {
+      /* storage blocked or bad draft */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Load the exchange we were sent here with.
   useEffect(() => {
     if (!arg) return;

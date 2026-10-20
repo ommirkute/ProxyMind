@@ -29,6 +29,7 @@ jobs:
           - passive_checks
           - openapi_spec
           - har_curl
+          - graphql_schema
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

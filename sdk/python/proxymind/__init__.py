@@ -205,6 +205,12 @@ class Client:
     def openapi_import(self, spec: Optional[str] = None, exchange_id: Optional[int] = None, **extra: Any) -> dict:
         return self._check(self._post("/openapi/import", self._args(spec=spec, exchange_id=exchange_id, **extra)))
 
+    def graphql_import(self, url: Optional[str] = None, schema: Optional[str] = None,
+                       exchange_id: Optional[int] = None, fetch: bool = False, **extra: Any) -> dict:
+        """Reads a GraphQL schema (introspection JSON, a recorded response, or fetch=True) into operations."""
+        return self._check(self._post("/graphql/import", self._args(url=url, schema=schema, exchange_id=exchange_id,
+                                                                    fetch=fetch or None, **extra)))
+
     def authz_check(self, exchange_id: int, identities: list, include_anonymous: bool = True) -> dict:
         return self._post("/authz/check", {"exchange_id": exchange_id, "identities": identities, "include_anonymous": include_anonymous})
 

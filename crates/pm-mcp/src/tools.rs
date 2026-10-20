@@ -283,6 +283,22 @@ pub fn tool_definitions() -> Vec<Value> {
             &["input"],
         ),
         tool(
+            "graphql_import",
+            "Read a GraphQL schema from an introspection result and list its queries, mutations and subscriptions \
+             with example documents, variables and HTTP requests (use them with replay_send). Give url (the \
+             endpoint) and one of: schema (introspection JSON text), exchange_id (a recorded introspection \
+             response), or fetch: true to send the introspection query (may need approval).",
+            json!({
+                "url": {"type":"string","description":"e.g. https://app.example.com/graphql"},
+                "schema": {"type":"string"},
+                "exchange_id": {"type":"integer"},
+                "fetch": {"type":"boolean"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &[],
+        ),
+        tool(
             "import_har",
             "Add the exchanges in a HAR file (browser devtools export) to history, tagged source=import. Sends \
              nothing. Bodies are stored decoded, so imported exchanges are rebuilt, not byte-exact.",
@@ -588,6 +604,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "decode" => {
             let r: pm_service::DecodeRequest = args(a)?;
             service.decode(&r).map_err(|e| e.to_string())
+        }
+        "graphql_import" => {
+            let r: pm_service::GraphQlImportRequest = args(a)?;
+            service.graphql_import(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "import_har" => {
             let r: pm_service::ImportRequest = args(a)?;

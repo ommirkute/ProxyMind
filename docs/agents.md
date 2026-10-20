@@ -93,6 +93,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
 | `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies; secrets are replaced before matching, snippets are untrusted |
 | `site_map` | Recorded traffic as a tree per origin with counts, methods, statuses and in-scope flags |
+| `graphql_import` | Read a GraphQL schema (introspection JSON, a recorded introspection response, or `fetch: true` through the gate) into queries, mutations and subscriptions with example documents, variables and requests for `replay_send` |
 | `import_har` | Add the exchanges of a HAR file (text) to history as `source: import`; nothing is sent, bodies are rebuilt decoded |
 | `curl_parse` | Read a curl command into a raw request and url for `replay_send`; nothing is sent, unsupported options come back as warnings |
 | `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |

@@ -108,6 +108,13 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/password/reset",
         description: "Password-reset codes are a counter: each one is the previous plus one.",
     },
+    Vuln {
+        id: "VS-12",
+        class: "idor",
+        method: "POST",
+        path: "/graphql",
+        description: "The GraphQL invoice(id) resolver returns any user's invoice; the REST endpoint checks ownership.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -344,6 +351,40 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <a href='/help?topic=orders'>Help</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
 
+/// The introspection result for VulnShop's GraphQL schema.
+fn graphql_schema() -> Value {
+    let named = |kind: &str, name: &str| json!({"kind": kind, "name": name, "ofType": null});
+    let non_null = |t: Value| json!({"kind": "NON_NULL", "name": null, "ofType": t});
+    let list = |t: Value| json!({"kind": "LIST", "name": null, "ofType": t});
+    let field =
+        |name: &str, args: Value, ty: Value| json!({"name": name, "description": null, "args": args, "type": ty});
+    let scalar = |n: &str| named("SCALAR", n);
+    let id_arg = json!([{"name": "id", "type": non_null(scalar("ID")), "defaultValue": null}]);
+    json!({
+        "queryType": {"name": "Query"}, "mutationType": null, "subscriptionType": null,
+        "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": [
+                field("me", json!([]), named("OBJECT", "User")),
+                field("invoice", id_arg, named("OBJECT", "Invoice")),
+                field("products", json!([]), non_null(list(non_null(named("OBJECT", "Product"))))),
+            ]},
+            {"kind": "OBJECT", "name": "User", "fields": [
+                field("id", json!([]), non_null(scalar("ID"))), field("username", json!([]), scalar("String")),
+                field("email", json!([]), scalar("String")), field("role", json!([]), scalar("String")),
+            ]},
+            {"kind": "OBJECT", "name": "Invoice", "fields": [
+                field("id", json!([]), non_null(scalar("ID"))), field("total", json!([]), scalar("Float")),
+                field("owner", json!([]), named("OBJECT", "User")),
+            ]},
+            {"kind": "OBJECT", "name": "Product", "fields": [
+                field("id", json!([]), non_null(scalar("ID"))), field("name", json!([]), scalar("String")),
+                field("price", json!([]), scalar("Float")),
+            ]},
+            scalar("ID"), scalar("String"), scalar("Float"), scalar("Boolean"),
+        ]
+    })
+}
+
 impl VulnShop {
     pub fn new() -> Self {
         let orders = vec![
@@ -499,6 +540,58 @@ impl VulnShop {
         }
     }
 
+    /// A tiny GraphQL endpoint: introspection is on (as on many real servers)
+    /// and the root fields me, invoice(id) and products are answered.
+    fn graphql(&self, req: &Request) -> Response {
+        let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+            return json_resp(400, json!({"errors": [{"message": "expected a JSON body"}]}));
+        };
+        let query = body["query"].as_str().unwrap_or_default();
+        if query.contains("__schema") {
+            return json_resp(200, json!({"data": {"__schema": graphql_schema()}}));
+        }
+        let Some(user) = self.user(req) else {
+            return json_resp(200, json!({"errors": [{"message": "not logged in"}], "data": null}));
+        };
+        // The first field inside the first selection set is the root field.
+        let after = query.split_once('{').map(|(_, r)| r.trim_start()).unwrap_or_default();
+        let field: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let user_json = |u: &User| json!({"id": u.id.to_string(), "username": u.name, "email": format!("{}@vulnshop.test", u.name), "role": u.role});
+        let data = match field.as_str() {
+            "me" => json!({"me": user_json(user)}),
+            "products" => json!({"products": [
+                {"id": "1", "name": "Coffee", "price": 3.5}, {"id": "2", "name": "Tea", "price": 2.0},
+                {"id": "3", "name": "Cake", "price": 4.25}]}),
+            "invoice" => {
+                // VS-12: no ownership check here, unlike GET /api/invoices/{id}.
+                let id = body["variables"]["id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| body["variables"]["id"].as_u64().map(|n| n.to_string()))
+                    .or_else(|| {
+                        let rest = after.split_once("id:")?.1.trim_start().trim_start_matches('"');
+                        Some(rest.chars().take_while(char::is_ascii_digit).collect())
+                    })
+                    .unwrap_or_default();
+                let st = self.state.lock().expect("state");
+                match id.parse::<u32>().ok().and_then(|id| st.invoices.iter().find(|i| i.0 == id)) {
+                    Some(inv) => {
+                        let owner = USERS.iter().find(|u| u.id == inv.1).expect("owner");
+                        json!({"invoice": {"id": inv.0.to_string(), "total": inv.2, "owner": user_json(owner)}})
+                    }
+                    None => json!({"invoice": null}),
+                }
+            }
+            other => {
+                return json_resp(
+                    200,
+                    json!({"errors": [{"message": format!("Cannot query field \"{other}\" on type \"Query\".")}]}),
+                );
+            }
+        };
+        json_resp(200, json!({"data": data}))
+    }
+
     fn user(&self, req: &Request) -> Option<&'static User> {
         let tok = req.token()?;
         let id = *self.state.lock().ok()?.sessions.get(&tok)?;
@@ -591,6 +684,7 @@ impl VulnShop {
                     content_type: "text/html; charset=utf-8",
                 }
             }
+            ("POST", ["graphql"]) => self.graphql(req),
             ("GET", ["openapi.json"]) => {
                 Response { status: 200, headers: vec![], body: OPENAPI.into(), content_type: "application/json" }
             }
