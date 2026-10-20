@@ -273,12 +273,15 @@ pub fn tool_definitions() -> Vec<Value> {
              checked against a missing path), hidden_params (param mining); sql_error also reports NoSQL, LDAP and \
              XPath errors. Client side: stored_xss (on submissions; looks for the value on HTML pages from history), \
              dom_xss (renders the page in headless Chromium with sink hooks), csrf (the request from a foreign \
-             Origin with the session cookie). Returns leads with \
+             Origin with the session cookie). Step 4: jwt (guessable HMAC secret offline; changed signature, alg none \
+             and no signature sent), graphql (introspection, batching, suggestions, GET), cache_poisoning (unkeyed \
+             headers, with a cache buster), cache_deception (.css suffixes on private pages), mass_assignment \
+             (role/isAdmin added to submissions), proto_pollution (__proto__ in JSON). Returns leads with \
              evidence and, where an oracle fits, how to prove them (prove_with). \
              Needs approval by default: ask the user, then call again with identical arguments plus approval_id.",
             json!({
                 "exchange_id": {"type":"integer"},
-                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time","ssrf_oob","xxe_oob","sql_oob","cmd_oob","ssti_oob","log4shell","code_oob","crlf","host_header","cors","nosql_operator","auth_bypass","hidden_params","stored_xss","dom_xss","csrf"]}},
+                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time","ssrf_oob","xxe_oob","sql_oob","cmd_oob","ssti_oob","log4shell","code_oob","crlf","host_header","cors","nosql_operator","auth_bypass","hidden_params","stored_xss","dom_xss","csrf","jwt","graphql","cache_poisoning","cache_deception","mass_assignment","proto_pollution"]}},
                 "oob_wait_seconds": {"type":"integer","minimum":1,"maximum":60,"description":"Wait for callbacks, default 10"},
                 "max_requests": {"type":"integer","minimum":1,"maximum":2000},
                 "identity": {"type":"string"},

@@ -218,6 +218,55 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/recommend",
         description: "ctx is base64 of a JSON object; its category goes into SQL unescaped (error-based).",
     },
+    Vuln {
+        id: "VS-27",
+        class: "jwt",
+        method: "GET",
+        path: "/api/v3/profile",
+        description: "Login JWTs are signed with the secret \"secret\", and alg: none tokens are accepted.",
+    },
+    Vuln {
+        id: "VS-28",
+        class: "graphql",
+        method: "POST",
+        path: "/graphql",
+        description: "Introspection is on and batched operations are run (one request, many guesses).",
+    },
+    Vuln {
+        id: "VS-29",
+        class: "cache_poisoning",
+        method: "GET",
+        path: "/api/banner",
+        description: "The banner's script URL comes from X-Forwarded-Host, which the cache doesn't key on.",
+    },
+    Vuln {
+        id: "VS-30",
+        class: "cache_deception",
+        method: "GET",
+        path: "/api/account/settings",
+        description: "Any suffix after /settings is ignored, and the cache stores everything ending in .css.",
+    },
+    Vuln {
+        id: "VS-31",
+        class: "mass_assignment",
+        method: "POST",
+        path: "/api/register",
+        description: "Registration takes a role field from the request (role=admin works).",
+    },
+    Vuln {
+        id: "VS-32",
+        class: "prototype_pollution",
+        method: "POST",
+        path: "/api/preferences",
+        description: "Preferences are deep-merged without skipping __proto__ or constructor.prototype.",
+    },
+    Vuln {
+        id: "VS-33",
+        class: "csrf",
+        method: "POST",
+        path: "/graphql",
+        description: "GraphQL runs cross-site requests with the session cookie: no token, any content type.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -230,6 +279,9 @@ pub const SECURE_ENDPOINTS: &[&str] = &[
     "GET /docs",
     "POST /api/settings",
     "GET /hello",
+    "GET /api/notice",
+    "GET /api/account/keys",
+    "POST /api/signup",
 ];
 
 struct User {
@@ -265,6 +317,12 @@ struct State {
     guestbook: Vec<(String, String)>,
     /// VS-24: profile emails by user id.
     emails: HashMap<u32, String>,
+    /// VS-29/VS-30: a shared response cache keyed on the request target only.
+    cache: HashMap<String, (std::time::Instant, Response)>,
+    /// VS-31: registered accounts (name, role).
+    registered: Vec<(String, String)>,
+    /// VS-32: what got merged into "Object.prototype".
+    proto: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone)]
@@ -284,6 +342,8 @@ impl Default for VulnShop {
 struct Request {
     method: String,
     path: String,
+    /// Path and query as sent (the cache key).
+    target: String,
     query: HashMap<String, String>,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -408,6 +468,7 @@ fn parse_query(q: &str) -> HashMap<String, String> {
     q.split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (url_decode(k), url_decode(v))).collect()
 }
 
+#[derive(Clone)]
 struct Response {
     status: u16,
     headers: Vec<(String, String)>,
@@ -434,6 +495,43 @@ fn reason(status: u16) -> &'static str {
 
 fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// VS-27: the HMAC key for login JWTs (a guessable one).
+const JWT_SECRET: &str = "secret";
+
+fn b64url(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+fn sign_jwt(claims: &Value, secret: &str) -> String {
+    let input = format!("{}.{}", b64url(br#"{"alg":"HS256","typ":"JWT"}"#), b64url(claims.to_string().as_bytes()));
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    format!("{input}.{}", b64url(ring::hmac::sign(&key, input.as_bytes()).as_ref()))
+}
+
+/// The claims of a valid token; `trust_none` accepts `alg: none` unsigned.
+fn verify_jwt(token: &str, trust_none: bool) -> Option<Value> {
+    let mut parts = token.split('.');
+    let (h, p, sig) = (parts.next()?, parts.next()?, parts.next()?);
+    let unb64 = |x: &str| b64_decode(&x.replace('-', "+").replace('_', "/"));
+    let header: Value = serde_json::from_slice(&unb64(h)?).ok()?;
+    let claims: Value = serde_json::from_slice(&unb64(p)?).ok()?;
+    let alg = header["alg"].as_str()?;
+    if alg.eq_ignore_ascii_case("none") {
+        return trust_none.then_some(claims);
+    }
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, JWT_SECRET.as_bytes());
+    ring::hmac::verify(&key, format!("{h}.{p}").as_bytes(), &unb64(sig)?).ok()?;
+    Some(claims)
 }
 
 /// Standard base64 (padding optional).
@@ -481,6 +579,7 @@ const OPENAPI: &str = r##"{
     "/api/reviews": {"get": {"summary": "Product reviews", "security": [], "parameters": [{"name": "product", "in": "query", "required": true, "schema": {"type": "integer", "example": 1}}]}},
     "/api/giftcard/redeem": {"post": {"summary": "Redeem the welcome gift card"}},
     "/api/guestbook": {"post": {"summary": "Sign the guestbook", "security": [], "requestBody": {"content": {"application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"name": {"type": "string", "example": "carol"}, "message": {"type": "string", "example": "Nice shop"}}}}}}}},
+    "/api/register": {"post": {"summary": "Create an account", "security": [], "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"username": {"type": "string", "example": "carol"}, "password": {"type": "string", "example": "carol123"}}}}}}}},
     "/api/profile": {"post": {"summary": "Change your email", "requestBody": {"content": {"application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"email": {"type": "string", "example": "alice@example.org"}}}}}}}}
   }
 }"##;
@@ -730,6 +829,9 @@ impl VulnShop {
                 credit: HashMap::new(),
                 guestbook: vec![("alice".into(), "Lovely coffee!".into())],
                 emails: HashMap::new(),
+                cache: HashMap::new(),
+                registered: Vec::new(),
+                proto: serde_json::Map::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
             reset_codes: Arc::new(AtomicU64::new(400_000)),
@@ -788,6 +890,7 @@ impl VulnShop {
         let req = Request {
             method: head.method.to_ascii_uppercase(),
             path: path.to_string(),
+            target: head.target.clone(),
             query: parse_query(query),
             headers: head
                 .headers
@@ -799,7 +902,7 @@ impl VulnShop {
         if wants_ws && req.method == "GET" && req.path == "/ws/support" {
             return self.support_socket(s, &req, buf[head_end..].to_vec()).await;
         }
-        let resp = self.route(&req).await;
+        let resp = self.cached(&req).await;
         let mut out = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nX-Request-Id: {}\r\nConnection: close\r\n",
             resp.status,
@@ -876,6 +979,25 @@ impl VulnShop {
         let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
             return json_resp(400, json!({"errors": [{"message": "expected a JSON body"}]}));
         };
+        // VS-28: batches run every operation.
+        if let Value::Array(ops) = &body {
+            let results: Vec<Value> = ops
+                .iter()
+                .take(100)
+                .map(|op| {
+                    let one = Request {
+                        method: req.method.clone(),
+                        path: req.path.clone(),
+                        target: req.target.clone(),
+                        query: req.query.clone(),
+                        headers: req.headers.clone(),
+                        body: op.to_string().into_bytes(),
+                    };
+                    serde_json::from_str(&self.graphql(&one).body).unwrap_or(Value::Null)
+                })
+                .collect();
+            return json_resp(200, Value::Array(results));
+        }
         let query = body["query"].as_str().unwrap_or_default();
         if query.contains("__schema") {
             return json_resp(200, json!({"data": {"__schema": graphql_schema()}}));
@@ -931,6 +1053,37 @@ impl VulnShop {
     /// Fields that change on every response (noise for diffing tools).
     fn meta(&self) -> Value {
         json!({ "generated_at": now_ms() as u64, "request_id": self.counter.load(Ordering::Relaxed) })
+    }
+
+    /// A shared cache in front of the app (VS-29, VS-30): static-looking
+    /// paths and the banner/notice pages, keyed on the target only, 30 s.
+    async fn cached(&self, req: &Request) -> Response {
+        let static_ext = [".css", ".js", ".png", ".ico"].iter().any(|e| req.path.ends_with(e));
+        let cacheable = req.method == "GET" && (static_ext || req.path == "/api/banner" || req.path == "/api/notice");
+        if !cacheable {
+            return self.route(req).await;
+        }
+        let ttl = Duration::from_secs(30);
+        let hit = self.state.lock().ok().and_then(|st| {
+            st.cache.get(&req.target).filter(|(at, _)| at.elapsed() < ttl).map(|(at, r)| (at.elapsed(), r.clone()))
+        });
+        if let Some((age, mut r)) = hit {
+            r.headers.push(("X-Cache".into(), "hit".into()));
+            r.headers.push(("Age".into(), age.as_secs().to_string()));
+            return r;
+        }
+        let mut r = self.route(req).await;
+        r.headers.push(("Cache-Control".into(), "public, max-age=30".into()));
+        if r.status == 200
+            && let Ok(mut st) = self.state.lock()
+        {
+            if st.cache.len() > 500 {
+                st.cache.clear();
+            }
+            st.cache.insert(req.target.clone(), (std::time::Instant::now(), r.clone()));
+        }
+        r.headers.push(("X-Cache".into(), "miss".into()));
+        r
     }
 
     async fn route(&self, req: &Request) -> Response {
@@ -1130,6 +1283,98 @@ impl VulnShop {
                     .into(),
                 content_type: "application/javascript",
             },
+            ("GET", ["api", "v3", "profile"]) => {
+                // VS-27: weak secret, and alg none is trusted.
+                let tok = req.header("authorization").and_then(|a| a.strip_prefix("Bearer ")).unwrap_or("");
+                match verify_jwt(tok, true) {
+                    Some(c) => {
+                        json_resp(200, json!({"profile": {"username": c["sub"], "role": c["role"], "plan": "gold"}}))
+                    }
+                    None => json_resp(401, json!({"error": "invalid token"})),
+                }
+            }
+            ("GET", ["api", "banner"]) => {
+                // VS-29: the script host comes from X-Forwarded-Host (unkeyed by the cache).
+                let host = req.header("x-forwarded-host").or(req.header("host")).unwrap_or("localhost");
+                let lang = html_escape(&req.query.get("lang").cloned().unwrap_or_else(|| "en".into()));
+                let body = format!(
+                    "<!doctype html><div class=banner lang={lang}>Spring sale!</div>\
+                     <script src=\"//{host}/static/banner.js\"></script>"
+                );
+                Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
+            ("GET", ["api", "notice"]) => {
+                // Secure look-alike: cached too, but no request header goes into it.
+                let lang = html_escape(&req.query.get("lang").cloned().unwrap_or_else(|| "en".into()));
+                let body = format!(
+                    "<!doctype html><div class=notice lang={lang}>Opening hours 9-5</div>\
+                     <script src=\"/static/notice.js\"></script>"
+                );
+                Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
+            ("GET", ["api", "account", s, ..]) if s.starts_with("settings") => {
+                // VS-30: /settings/anything.css and /settings;x.css get the same page (and get cached).
+                let Some(u) = self.user(req) else { return unauthorized() };
+                json_resp(
+                    200,
+                    json!({"username": u.name, "email": format!("{}@vulnshop.test", u.name), "api_key": format!("vs-{}-{:08x}", u.name, u.id * 7919)}),
+                )
+            }
+            ("GET", ["api", "account", "keys"]) => {
+                // Secure look-alike: exact path only.
+                let Some(u) = self.user(req) else { return unauthorized() };
+                json_resp(200, json!({"keys": [format!("vs-{}-key", u.name)]}))
+            }
+            ("POST", ["api", "register"]) => {
+                // VS-31: role comes from the request.
+                let p = req.params();
+                let name = p.get("username").cloned().unwrap_or_default();
+                if name.is_empty() {
+                    return json_resp(400, json!({"error": "username required"}));
+                }
+                let role = p.get("role").cloned().unwrap_or_else(|| "user".into());
+                if let Ok(mut st) = self.state.lock()
+                    && st.registered.len() < 1000
+                {
+                    st.registered.push((name.clone(), role.clone()));
+                }
+                json_resp(201, json!({"user": {"username": name, "role": role}}))
+            }
+            ("POST", ["api", "signup"]) => {
+                // Secure look-alike: only known fields are used.
+                let p = req.params();
+                let name = p.get("username").cloned().unwrap_or_default();
+                if name.is_empty() {
+                    return json_resp(400, json!({"error": "username required"}));
+                }
+                json_resp(201, json!({"user": {"username": name, "role": "user"}}))
+            }
+            ("POST", ["api", "preferences"]) => {
+                // VS-32: a naive deep merge; __proto__ lands in the shared prototype.
+                let Ok(Value::Object(body)) = serde_json::from_slice::<Value>(&req.body) else {
+                    return json_resp(400, json!({"error": "expected a JSON object"}));
+                };
+                let mut prefs = serde_json::Map::new();
+                prefs.insert("theme".into(), json!("light"));
+                let Ok(mut st) = self.state.lock() else { return json_resp(500, json!({})) };
+                for (k, v) in body {
+                    match (k.as_str(), v) {
+                        ("__proto__", Value::Object(o)) => st.proto.extend(o),
+                        ("constructor", Value::Object(o)) => {
+                            if let Some(Value::Object(p)) = o.get("prototype") {
+                                st.proto.extend(p.clone());
+                            }
+                        }
+                        (_, v) => {
+                            prefs.insert(k, v);
+                        }
+                    }
+                }
+                // Inherited properties show up when the object is serialised by key.
+                let mut out = st.proto.clone();
+                out.extend(prefs);
+                json_resp(200, json!({"preferences": out}))
+            }
             ("GET", ["help"]) => {
                 // Secure look-alike: the topic is HTML-encoded.
                 let topic = html_escape(&req.query.get("topic").cloned().unwrap_or_default());
@@ -1151,7 +1396,9 @@ impl VulnShop {
                         if let Ok(mut st) = self.state.lock() {
                             st.sessions.insert(token.clone(), user.id);
                         }
-                        let mut r = json_resp(200, json!({"token": token, "user": user.name}));
+                        let claims = json!({"sub": user.name, "role": user.role, "iat": (now_ms() / 1000) as u64});
+                        let jwt = sign_jwt(&claims, JWT_SECRET);
+                        let mut r = json_resp(200, json!({"token": token, "user": user.name, "jwt": jwt}));
                         r.headers.push(("Set-Cookie".into(), format!("session={token}; Path=/; HttpOnly")));
                         r
                     }

@@ -31,7 +31,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | CRLF / HTTP response header injection | ✅ step 3 | ❌ | 3 |
 | SMTP / email header injection | ❌ | ❌ | 4 |
 | Log4Shell-style lookups (OOB) | ✅ step 2 (needs the DNS zone) | ✅ | 2 |
-| Server-side JavaScript / prototype pollution | ❌ | ✅ (client and server, blind) | 4 |
+| Server-side JavaScript / prototype pollution | ✅ step 4 (server-side, `__proto__` / `constructor.prototype` property reflection) | ✅ (client and server, blind) | 4 |
 | Java / .NET / PHP deserialization | ❌ | ✅ (Java) | 4 (approval) |
 | File path traversal / manipulation | ✅ | ✅ | 3 (more encodings, Windows) |
 | File upload (type bypass, web shell) | ❌ | ✅ | 4 (approval) |
@@ -56,8 +56,8 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | SSRF (in-band and OOB) | ✅ OOB step 2 (URL-like parameters, Referer) | ✅ | 2 |
 | External service interaction (DNS / HTTP) | ✅ OAST server + scan | ✅ | 2 |
 | Host header injection / password-reset poisoning | ✅ step 3 (Host, X-Forwarded-Host) | ✅ | 3 |
-| Web cache poisoning (unkeyed inputs) | ❌ | ❌ | 4 |
-| Web cache deception | ❌ | ❌ | 4 |
+| Web cache poisoning (unkeyed inputs) | ✅ step 4 (5 headers, cache buster, confirmed by a cache hit) | ❌ | 4 |
+| Web cache deception | ✅ step 4 (`/x.css` and `;x.css` suffixes, confirmed without credentials) | ❌ | 4 |
 | HTTP request smuggling (CL.TE, TE.CL, H2) | ❌ | ✅ | 4 (approval; can affect others) |
 | CORS: arbitrary / null / trusted-subdomain origins | ✅ passive + active (4 origins) | ✅ | 3 |
 | HTTP method override / TRACE | ❌ | ✅ (methods) | 3 |
@@ -68,11 +68,11 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 |---|---|---|---|
 | IDOR / broken object authorization | ✅ (differential authz, proven) | ✅ | – |
 | Authentication bypass (path, header, method tricks) | ✅ step 3 (8 path tricks, rewrite and IP headers, with a control) | ✅ | 3 |
-| Mass assignment | ❌ | ✅ | 4 (approval) |
+| Mass assignment | ✅ step 4 (role / isAdmin / admin / verified on submissions) | ✅ | 4 |
 | Race conditions | ✅ (Repeater race, single-packet) | ✅ | 4 (as a scan check) |
-| JWT (none alg, weak secret, kid/jku) | ❌ | ✅ | 4 |
+| JWT (none alg, weak secret, kid/jku) | ✅ step 4 (weak HMAC secret offline, unverified signature, alg none, no signature; kid/jku later) | ✅ | 4 |
 | OAuth / OIDC (redirect_uri, state, PKCE) | ❌ | ✅ | 4 |
-| GraphQL (introspection, batching, depth) | 🟡 (introspection, passive) | ✅ | 4 |
+| GraphQL (introspection, batching, depth) | ✅ step 4 (introspection, batching, suggestions, GET/CSRF; depth limits later) | ✅ | 4 |
 | Hidden parameters (param mining) | ✅ step 3 (70 names, reflection or difference, bisected) | ✅ | 3 |
 
 ## Information disclosure and configuration (mostly passive)
@@ -125,4 +125,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
    injection, DOM open redirect, XML injection, method override)*
 4. JWT, OAuth, GraphQL depth, request smuggling, cache poisoning and
    deception, prototype pollution, deserialization, file upload, mass
-   assignment, race checks: the risky ones behind approval.
+   assignment, race checks: the risky ones behind approval. *(4a done: JWT,
+   GraphQL, cache poisoning and deception, mass assignment, prototype
+   pollution; 4b next: request smuggling, OAuth, deserialization, file
+   upload, race as a scan check)*

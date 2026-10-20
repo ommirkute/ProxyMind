@@ -90,16 +90,25 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     // Submissions only (see SWEEP_SUBMIT_CHECKS).
     ("stored_xss", "stored_xss"),
     ("csrf", "csrf"),
+    // Step 4.
+    ("jwt", "jwt"),
+    ("graphql", "graphql"),
+    ("cache_poisoning", "cache_poisoning"),
+    ("cache_deception", "cache_deception"),
+    ("mass_assignment", "mass_assignment"),
+    ("proto_pollution", "prototype_pollution"),
 ];
 
 /// Checks run on recorded submissions (POST, PUT, PATCH): these re-send the
 /// request, so they change state on the target like the original did.
-const SWEEP_SUBMIT_CHECKS: &[&str] = &["stored_xss", "csrf"];
+const SWEEP_SUBMIT_CHECKS: &[&str] = &["stored_xss", "csrf", "jwt", "graphql", "mass_assignment", "proto_pollution"];
 const SWEEP_MAX_SUBMITS: usize = 10;
+/// Of those, the ones that only make sense on submissions.
+const SUBMIT_ONLY: &[&str] = &["stored_xss", "csrf", "mass_assignment", "proto_pollution"];
 
 /// Most operations with parameters one sweep scans, and most without.
 const SWEEP_MAX_OPERATIONS: usize = 40;
-const SWEEP_MAX_PLAIN: usize = 20;
+const SWEEP_MAX_PLAIN: usize = 30;
 
 /// Whether a path's words suggest that requesting it changes state.
 fn changes_state(template: &str) -> bool {
@@ -231,6 +240,7 @@ impl Service {
     /// them (as a browser would); everything goes through the gate.
     pub async fn auto_active_sweep(&self, actor: &Actor) -> Result<ScanSweep> {
         let mut sweep = ScanSweep::default();
+        let mut seen_jwt = std::collections::BTreeSet::new();
         for t in self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)? {
             let r = self
                 .scan_active(
@@ -259,6 +269,10 @@ impl Service {
             };
             sweep.operations += 1;
             sweep.requests += requests;
+            // A token weakness (weak secret, alg none) shows on every endpoint
+            // that takes the token: one finding per kind is enough.
+            let issues: Vec<_> =
+                issues.into_iter().filter(|f| f.issue.check != "jwt" || seen_jwt.insert(f.issue.title)).collect();
             sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
         }
         Ok(sweep)
@@ -281,7 +295,7 @@ impl Service {
         let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
         let checks: Vec<String> = SWEEP_CHECKS
             .iter()
-            .filter(|(c, _)| runnable(c) && !SWEEP_SUBMIT_CHECKS.contains(c))
+            .filter(|(c, _)| runnable(c) && !SUBMIT_ONLY.contains(c))
             .map(|(c, _)| c.to_string())
             .collect();
         let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
@@ -297,6 +311,10 @@ impl Service {
             .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
             .collect();
         let has_params = |o: &&pm_model::Operation| !o.path_params.is_empty() || !o.query_params.is_empty();
+        // Among operations without parameters, ones that send credentials
+        // first: their cookies and tokens are what the checks work on.
+        let mut candidates = candidates;
+        candidates.sort_by_key(|o| !o.authenticated);
         let ops = candidates
             .iter()
             .filter(|o| has_params(o))
@@ -318,12 +336,16 @@ impl Service {
         for (op, checks) in ops.chain(submits) {
             // The recent example with the most insertion points (an imported
             // example may lack the browser's cookies and headers).
-            let points = |id: i64| {
-                self.exchange_raw(id)
-                    .map(|e| pm_scan::active::points(&String::from_utf8_lossy(&e.request)).len())
-                    .unwrap_or(0)
+            // Prefer a request that worked, then one carrying tokens, then
+            // the most insertion points.
+            let rank = |id: i64| {
+                self.exchange_raw(id).map_or((false, 0, 0), |e| {
+                    let raw = String::from_utf8_lossy(&e.request);
+                    let ok = e.summary.status.is_some_and(|s| (200..400).contains(&s));
+                    (ok, pm_scan::advanced::find_jwts(&raw).len(), pm_scan::active::points(&raw).len())
+                })
             };
-            if let Some(&example) = op.examples.iter().rev().take(5).max_by_key(|&&id| (points(id), id)) {
+            if let Some(&example) = op.examples.iter().rev().take(10).max_by_key(|&&id| (rank(id), id)) {
                 out.push(ScanTarget {
                     operation: op.key.clone(),
                     exchange_id: example,

@@ -68,6 +68,16 @@ pub fn class_family(c: &str) -> &'static str {
         "bfla"
     } else if c.contains("csrf") || c.contains("xsrf") || c.contains("cross_site_request_forgery") {
         "csrf"
+    } else if c.contains("jwt") || c.contains("json_web_token") {
+        "jwt"
+    } else if c.contains("graphql") {
+        "graphql"
+    } else if c.contains("cache_poison") {
+        "cache_poisoning"
+    } else if c.contains("cache_decept") {
+        "cache_deception"
+    } else if c.contains("proto") && c.contains("pollution") {
+        "prototype_pollution"
     } else if c.contains("nosql") {
         "nosqli"
     } else if c.contains("sql") {
@@ -154,7 +164,10 @@ pub fn score(truth: &Truth, findings: &[Value]) -> Score {
         for f in &live {
             let (template, raw_path) = endpoint_of(f);
             let same_class = class_family(f["vuln_class"].as_str().unwrap_or("")) == class_family(&v.class);
-            if same_class && same_method(f, &v.method) && (template == v.path || path_matches(&v.path, &raw_path)) {
+            // `* *` in the ground truth: an app-wide bug (a weak token secret), any endpoint.
+            let anywhere = v.path == "*" && v.method == "*";
+            let at_endpoint = same_method(f, &v.method) && (template == v.path || path_matches(&v.path, &raw_path));
+            if same_class && (anywhere || at_endpoint) {
                 let id = f["id"].as_i64().unwrap_or(0);
                 ids.push(id);
                 matched.insert(id);
@@ -220,6 +233,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn app_wide_bugs_match_any_endpoint() {
+        let truth: Truth = serde_saphyr::from_str(
+            "app: x\nvulns:\n  - {id: X-1, class: jwt, method: \"*\", path: \"*\", description: weak secret}\nsecure: []\n",
+        )
+        .unwrap();
+        let f =
+            vec![json!({"id": 1, "vuln_class": "jwt", "status": "suspected", "method": "GET", "url": "http://x/me"})];
+        let s = score(&truth, &f);
+        assert_eq!(s.found, 1);
+        assert!(s.unmatched_findings.is_empty());
+    }
+
+    #[test]
     fn scanner_classes_map_to_their_families() {
         for (class, family) in [
             ("host_header_injection", "host_header"),
@@ -234,6 +260,10 @@ mod tests {
             ("csrf", "csrf"),
             ("stored_xss", "xss"),
             ("dom_xss", "xss"),
+            ("jwt", "jwt"),
+            ("cache_poisoning", "cache_poisoning"),
+            ("prototype_pollution", "prototype_pollution"),
+            ("mass_assignment", "mass_assignment"),
         ] {
             assert_eq!(class_family(class), family, "{class}");
         }
@@ -249,7 +279,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 26));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 33));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

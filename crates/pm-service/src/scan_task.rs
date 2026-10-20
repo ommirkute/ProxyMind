@@ -213,7 +213,11 @@ impl Service {
             if t.submission {
                 t.checks.retain(|c| all.contains(c));
             } else {
-                t.checks = all.iter().filter(|c| !matches!(c.as_str(), "stored_xss" | "csrf")).cloned().collect();
+                t.checks = all
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), "stored_xss" | "csrf" | "mass_assignment" | "proto_pollution"))
+                    .cloned()
+                    .collect();
             }
         }
         targets.retain(|t| !t.checks.is_empty());

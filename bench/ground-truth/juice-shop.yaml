@@ -44,4 +44,9 @@ vulns:
     method: GET
     path: /ftp/{file}
     description: Confidential documents (e.g. acquisitions.md) in a public FTP-style folder.
+  - id: JS-9
+    class: jwt
+    method: "*"
+    path: "*"
+    description: Unsigned tokens (alg none) are accepted (Juice Shop's "Unsigned JWT" challenge).
 secure: []

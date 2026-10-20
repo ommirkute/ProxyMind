@@ -39,6 +39,11 @@ vulns:
     method: PUT
     path: /users/v1/{username}/email
     description: The email is checked with a catastrophic-backtracking regex (documented by VAmPI; not exercised here).
+  - id: VA-8
+    class: jwt
+    method: "*"
+    path: "*"
+    description: Tokens are signed with the HMAC secret "random" (VAmPI's documented weak JWT key), so anyone can sign one.
 # Correctly protected look-alikes.
 secure:
   - DELETE /users/v1/{username}

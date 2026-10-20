@@ -213,6 +213,15 @@ enum Plan {
     /// (what changed, cross-site version of the request), and the request
     /// without cookies (a control: an action that needs no session can't be forged).
     Csrf(Vec<(String, Vec<u8>)>, Vec<u8>),
+    /// Tokens found in the (unredacted) request, and that request.
+    Jwt(Vec<pm_scan::advanced::Jwt>, String),
+    GraphQl(Vec<(&'static str, Vec<u8>)>),
+    /// (header, poisoned request, same URL without it), each with its own cache buster.
+    CachePoison(Vec<(&'static str, Vec<u8>, Vec<u8>)>),
+    /// (trick, request), and the original without credentials.
+    CacheDeception(Vec<(&'static str, Vec<u8>)>, Vec<u8>),
+    MassAssignment(Vec<u8>),
+    Proto(Vec<(&'static str, Vec<u8>)>),
 }
 
 impl Plan {
@@ -227,6 +236,12 @@ impl Plan {
             Plan::StoredXss(stores, pages) => stores.len() + pages.len(),
             Plan::DomXss(v, scripts) => v.len() + scripts.len(),
             Plan::Csrf(v, _) => v.len() + 1,
+            Plan::Jwt(tokens, _) => tokens.len() * 6,
+            Plan::GraphQl(v) => v.len(),
+            Plan::CachePoison(v) => v.len() * 2,
+            Plan::CacheDeception(v, _) => v.len() * 2 + 1,
+            Plan::MassAssignment(_) => 1,
+            Plan::Proto(v) => v.len(),
         }
     }
 
@@ -242,6 +257,15 @@ impl Plan {
             Plan::StoredXss(stores, _) => stores.iter().map(|(_, r, _)| r.clone()).collect(),
             Plan::DomXss(v, _) => v.iter().map(|(_, r, _)| r.clone()).collect(),
             Plan::Csrf(v, _) => v.iter().map(|(_, r)| r.clone()).collect(),
+            Plan::Jwt(tokens, real) => tokens
+                .iter()
+                .flat_map(|t| t.forgeries().into_iter().map(|(_, f)| real.replace(&t.token, &f).into_bytes()))
+                .collect(),
+            Plan::GraphQl(v) | Plan::Proto(v) | Plan::CacheDeception(v, _) => {
+                v.iter().map(|(_, r)| r.clone()).collect()
+            }
+            Plan::CachePoison(v) => v.iter().map(|(_, r, _)| r.clone()).collect(),
+            Plan::MassAssignment(r) => vec![r.clone()],
         }
     }
 }
@@ -293,6 +317,26 @@ pub enum ActiveScanResult {
     Denied {
         reasons: Vec<String>,
     },
+}
+
+/// An issue from the step 4 checks (titles and severities vary per finding).
+fn adv_issue(
+    check: &'static str,
+    title: &'static str,
+    severity: &'static str,
+    point: &str,
+    payload: &str,
+    evidence: String,
+) -> pm_scan::active::ActiveIssue {
+    pm_scan::active::ActiveIssue {
+        check,
+        title,
+        severity,
+        point: point.to_string(),
+        payload: payload.to_string(),
+        evidence,
+        prove_with: None,
+    }
 }
 
 fn seen_of(resp: Option<&[u8]>) -> pm_scan::active::Seen {
@@ -492,6 +536,47 @@ impl Service {
                 && let Some(anon) = act::without_header(&raw, "cookie")
             {
                 plans.push(Plan::Csrf(v, anon));
+            }
+        }
+        // Step 4: tokens, GraphQL, caches, mass assignment, prototypes.
+        {
+            use pm_scan::advanced as adv;
+            let get = ex.summary.method.eq_ignore_ascii_case("GET");
+            if want("jwt") {
+                // Tokens are redacted in `raw`: look at the real request.
+                let real = String::from_utf8_lossy(&self.redactor.unredact(raw.as_bytes())).into_owned();
+                let tokens = adv::find_jwts(&real);
+                if !tokens.is_empty() {
+                    plans.push(Plan::Jwt(tokens, real));
+                }
+            }
+            if want("graphql") {
+                let v = adv::graphql_probes(&raw);
+                if !v.is_empty() {
+                    plans.push(Plan::GraphQl(v));
+                }
+            }
+            if want("cache_poisoning") && get {
+                plans.push(Plan::CachePoison(adv::cache_poison_probes(&raw, &marker)));
+            }
+            if want("cache_deception")
+                && get
+                && adv::has_credentials(&raw)
+                && let Some(anon) = adv::anonymous(&raw)
+            {
+                plans.push(Plan::CacheDeception(adv::cache_deception_probes(&raw, &marker), anon));
+            }
+            if want("mass_assignment")
+                && !get
+                && let Some(r) = adv::with_privileged_fields(&raw, &marker)
+            {
+                plans.push(Plan::MassAssignment(r));
+            }
+            if want("proto_pollution") && !get {
+                let v = adv::proto_probes(&raw, &marker);
+                if !v.is_empty() {
+                    plans.push(Plan::Proto(v));
+                }
             }
         }
         // Out-of-band probes, when an OAST listener is configured.
@@ -946,6 +1031,257 @@ impl Service {
                                 let pt = act::Point::request("Origin header");
                                 let issue = act::multi_step_issue("csrf", &pt, what, evidence);
                                 issues.push(ActiveFinding { issue, exchange_id: got_sent.exchange_id });
+                                break;
+                            }
+                        }
+                    }
+                    Plan::Jwt(tokens, real) => {
+                        use pm_scan::advanced as adv;
+                        for t in tokens {
+                            let where_ = real
+                                .lines()
+                                .find(|l| l.contains(&t.token))
+                                .and_then(|l| l.split_once(':').map(|(k, _)| k.trim().to_ascii_lowercase()))
+                                .filter(|k| !k.contains(' ') && k.len() < 40)
+                                .unwrap_or_else(|| "body".into());
+                            let point = format!("request jwt ({where_})");
+                            if let Some(secret) = t.weak_secret() {
+                                let evidence = format!(
+                                    "the {} signature verifies with the secret {secret:?}: anyone can sign tokens \
+                                     with any claims",
+                                    t.alg
+                                );
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "jwt",
+                                        "JWT signed with a guessable secret",
+                                        "high",
+                                        &point,
+                                        &t.alg,
+                                        evidence,
+                                    ),
+                                    exchange_id: b.exchange_id,
+                                });
+                            }
+                            if !adv::accepted(&base_seen, &base_seen) || sent_count + 2 > limit {
+                                continue;
+                            }
+                            let with = |tok: &str| real.replace(&t.token, tok).into_bytes();
+                            // A request that works without the token says nothing about it.
+                            sent_count += 2;
+                            let anon = seen_of(send(with("")).await?.response.as_deref());
+                            if adv::accepted(&base_seen, &anon) {
+                                continue;
+                            }
+                            let tampered_sent = send(with(&t.tampered())).await?;
+                            if adv::accepted(&base_seen, &seen_of(tampered_sent.response.as_deref())) {
+                                let evidence = "a token with a changed signature got the same answer as the real one, \
+                                                and no token was refused"
+                                    .to_string();
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "jwt",
+                                        "JWT signature is not verified",
+                                        "high",
+                                        &point,
+                                        "changed signature",
+                                        evidence,
+                                    ),
+                                    exchange_id: tampered_sent.exchange_id,
+                                });
+                                continue;
+                            }
+                            for (how, forged) in t.forgeries() {
+                                if sent_count + 1 > limit {
+                                    notes.push(format!("stopped at the request limit ({limit})"));
+                                    break 'plans;
+                                }
+                                sent_count += 1;
+                                let f_sent = send(with(&forged)).await?;
+                                if adv::accepted(&base_seen, &seen_of(f_sent.response.as_deref())) {
+                                    let evidence = format!(
+                                        "a forged token ({how}) got the same answer as the real one, while a changed \
+                                         signature and no token were refused"
+                                    );
+                                    issues.push(ActiveFinding {
+                                        issue: adv_issue(
+                                            "jwt",
+                                            "JWT forgery accepted (alg none or no signature)",
+                                            "high",
+                                            &point,
+                                            &how,
+                                            evidence,
+                                        ),
+                                        exchange_id: f_sent.exchange_id,
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Plan::GraphQl(probes) => {
+                        for (what, r) in probes {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let g_sent = send(r.clone()).await?;
+                            let got = seen_of(g_sent.response.as_deref());
+                            if let Some((severity, title, evidence)) =
+                                pm_scan::advanced::graphql_verdict(what, &base_seen, &got)
+                            {
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue("graphql", title, severity, "request graphql", what, evidence),
+                                    exchange_id: g_sent.exchange_id,
+                                });
+                            }
+                        }
+                    }
+                    Plan::CachePoison(probes) => {
+                        use pm_scan::advanced as adv;
+                        for (header, poisoned, clean) in probes {
+                            if sent_count + 2 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let p_seen = seen_of(send(poisoned.clone()).await?.response.as_deref());
+                            if !adv::shows_injection(header, &base_seen, &p_seen, &marker) {
+                                continue;
+                            }
+                            // The same URL without the header: served from the cache?
+                            sent_count += 1;
+                            let c_sent = send(clean.clone()).await?;
+                            let c_seen = seen_of(c_sent.response.as_deref());
+                            if adv::shows_injection(header, &base_seen, &c_seen, &marker) {
+                                let evidence = format!(
+                                    "{header} changed the response, and the same URL requested without it got the \
+                                     changed response back from the cache (age: {}, x-cache: {}); probes used a \
+                                     cache buster, so other users were not affected",
+                                    c_seen.header("age").unwrap_or("-"),
+                                    c_seen.header("x-cache").unwrap_or("-")
+                                );
+                                let point = format!("request {} header", header.to_ascii_lowercase());
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "cache_poisoning",
+                                        "Web cache poisoning through an unkeyed header",
+                                        "high",
+                                        &point,
+                                        header,
+                                        evidence,
+                                    ),
+                                    exchange_id: c_sent.exchange_id,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    Plan::CacheDeception(probes, anon) => {
+                        use pm_scan::advanced as adv;
+                        if !base_seen.status.is_some_and(|s| (200..300).contains(&s))
+                            || base_seen.body.trim().is_empty()
+                            || sent_count + 1 > limit
+                        {
+                            continue;
+                        }
+                        // Only private content matters: without credentials the page must differ.
+                        sent_count += 1;
+                        let anon_seen = seen_of(send(anon.clone()).await?.response.as_deref());
+                        if act::similarity(&anon_seen.body, &base_seen.body) >= 0.9
+                            && anon_seen.status == base_seen.status
+                        {
+                            continue;
+                        }
+                        for (trick, r) in probes {
+                            if sent_count + 2 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let authed = seen_of(send(r.clone()).await?.response.as_deref());
+                            if !adv::accepted(&base_seen, &authed) {
+                                continue;
+                            }
+                            let Some(anon_r) = adv::anonymous(&String::from_utf8_lossy(r)) else { continue };
+                            sent_count += 1;
+                            let a_sent = send(anon_r).await?;
+                            let leaked = seen_of(a_sent.response.as_deref());
+                            if adv::accepted(&base_seen, &leaked) {
+                                let evidence = format!(
+                                    "the private page with a {trick} suffix was cached: requested again without \
+                                     credentials it came back with the logged-in content ({} bytes), while the \
+                                     original URL without credentials gets {}",
+                                    leaked.body.len(),
+                                    pm_proof::status_text(anon_seen.status)
+                                );
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "cache_deception",
+                                        "Web cache deception: a private page is cached under a static-looking URL",
+                                        "high",
+                                        "request path",
+                                        trick,
+                                        evidence,
+                                    ),
+                                    exchange_id: a_sent.exchange_id,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    Plan::MassAssignment(r) => {
+                        if !base_seen.status.is_some_and(|s| (200..300).contains(&s)) || sent_count + 1 > limit {
+                            continue;
+                        }
+                        sent_count += 1;
+                        let m_sent = send(r.clone()).await?;
+                        let got = seen_of(m_sent.response.as_deref());
+                        let fields = pm_scan::advanced::mass_assigned(&base_seen, &got, &marker);
+                        if !fields.is_empty() {
+                            let evidence = format!(
+                                "privileged fields added to the submission came back set: {}",
+                                fields.join(", ")
+                            );
+                            issues.push(ActiveFinding {
+                                issue: adv_issue(
+                                    "mass_assignment",
+                                    "Mass assignment: privileged fields in the request are accepted",
+                                    "high",
+                                    "request body fields",
+                                    &fields.join(", "),
+                                    evidence,
+                                ),
+                                exchange_id: m_sent.exchange_id,
+                            });
+                        }
+                    }
+                    Plan::Proto(probes) => {
+                        for (how, r) in probes {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let p_sent = send(r.clone()).await?;
+                            if pm_scan::advanced::polluted(&seen_of(p_sent.response.as_deref()), &marker) {
+                                let evidence = format!(
+                                    "a property sent inside {how} shows up as an ordinary property in the response: \
+                                     the object was merged into a prototype (the server may stay polluted until it \
+                                     restarts)"
+                                );
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "proto_pollution",
+                                        "Server-side prototype pollution",
+                                        "high",
+                                        "request body",
+                                        how,
+                                        evidence,
+                                    ),
+                                    exchange_id: p_sent.exchange_id,
+                                });
                                 break;
                             }
                         }

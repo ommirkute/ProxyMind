@@ -667,7 +667,7 @@ try {
   await page.getByLabel("Spec exchange").fill(String(specId));
   await page.getByTestId("openapi-import").click();
   await page.waitForSelector('[data-testid="openapi-summary"]');
-  check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 12 operations")), "the spec's 12 operations are listed");
+  check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 13 operations")), "the spec's 13 operations are listed");
 
   console.log("Content discovery");
   await page.getByRole("button", { name: "Find hidden paths…" }).click();

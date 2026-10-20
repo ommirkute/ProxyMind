@@ -171,6 +171,12 @@ pub const CHECKS: &[&str] = &[
     "stored_xss",
     "dom_xss",
     "csrf",
+    "jwt",
+    "graphql",
+    "cache_poisoning",
+    "cache_deception",
+    "mass_assignment",
+    "proto_pollution",
 ];
 
 /// Checks that take several rounds (run after the one-shot ones).
@@ -184,6 +190,12 @@ pub const MULTI_STEP: &[&str] = &[
     "stored_xss",
     "dom_xss",
     "csrf",
+    "jwt",
+    "graphql",
+    "cache_poisoning",
+    "cache_deception",
+    "mass_assignment",
+    "proto_pollution",
 ];
 
 /// Headers that apps often pass to SQL (logging, analytics) or shells.
@@ -232,7 +244,7 @@ pub struct ActiveIssue {
     pub prove_with: Option<String>,
 }
 
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -284,18 +296,18 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[derive(Clone, Copy)]
-struct Parsed<'a> {
-    method: &'a str,
-    target: &'a str,
-    version: &'a str,
-    rest_of_head: &'a str,
-    body: &'a str,
-    form: bool,
-    json: bool,
-    xml: bool,
+pub(crate) struct Parsed<'a> {
+    pub(crate) method: &'a str,
+    pub(crate) target: &'a str,
+    pub(crate) version: &'a str,
+    pub(crate) rest_of_head: &'a str,
+    pub(crate) body: &'a str,
+    pub(crate) form: bool,
+    pub(crate) json: bool,
+    pub(crate) xml: bool,
 }
 
-fn parse(raw: &str) -> Option<Parsed<'_>> {
+pub(crate) fn parse(raw: &str) -> Option<Parsed<'_>> {
     let (head, body) = raw.split_once("\r\n\r\n").or_else(|| raw.split_once("\n\n"))?;
     let (line, rest_of_head) = head.split_once('\n').unwrap_or((head, ""));
     let line = line.trim_end_matches('\r');
@@ -318,7 +330,7 @@ fn parse(raw: &str) -> Option<Parsed<'_>> {
     })
 }
 
-fn rebuild(p: &Parsed, target: &str, body: &str) -> Vec<u8> {
+pub(crate) fn rebuild(p: &Parsed, target: &str, body: &str) -> Vec<u8> {
     let sep = if p.rest_of_head.is_empty() { "" } else { "\r\n" };
     format!("{} {target} {}{sep}{}\r\n\r\n{body}", p.method, p.version, p.rest_of_head.trim_end_matches(['\r', '\n']))
         .replace("\r\r\n", "\r\n")
@@ -1228,8 +1240,12 @@ fn host_of(raw: &str) -> Option<String> {
 pub fn request_probes(raw: &str, checks: &[String], marker: &str) -> Vec<Probe> {
     let want = |c: &str| checks.is_empty() || checks.iter().any(|x| x == c);
     let mut out = Vec::new();
+    // Forged Host values go with a cache buster, so a cache can't serve them to others.
+    let busted = crate::advanced::with_cache_buster(raw, &crate::advanced::buster_for(marker, 99))
+        .map(|r| String::from_utf8_lossy(&r).into_owned());
     let mut add = |check: &'static str, point: &str, header: &str, value: String| {
-        if let Some(r) = set_header(raw, header, &value) {
+        let base = if check == "host_header" { busted.as_deref().unwrap_or(raw) } else { raw };
+        if let Some(r) = set_header(base, header, &value) {
             out.push(Probe { check, point: Point::request(point), payload: format!("{header}: {value}"), raw: r });
         }
     };

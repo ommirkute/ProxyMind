@@ -133,6 +133,41 @@ vulns:
     method: GET
     path: /api/recommend
     description: ctx is base64 JSON; its category goes into SQL unescaped.
+  - id: VS-27
+    class: jwt
+    method: GET
+    path: /api/v3/profile
+    description: login JWTs use the secret "secret", and alg none is accepted.
+  - id: VS-28
+    class: graphql
+    method: POST
+    path: /graphql
+    description: introspection on, batched operations run.
+  - id: VS-29
+    class: cache_poisoning
+    method: GET
+    path: /api/banner
+    description: X-Forwarded-Host goes into the cached page.
+  - id: VS-30
+    class: cache_deception
+    method: GET
+    path: /api/account/settings
+    description: suffixes ignored, .css responses cached with private data.
+  - id: VS-31
+    class: mass_assignment
+    method: POST
+    path: /api/register
+    description: role comes from the request.
+  - id: VS-32
+    class: prototype_pollution
+    method: POST
+    path: /api/preferences
+    description: deep merge does not skip __proto__.
+  - id: VS-33
+    class: csrf
+    method: POST
+    path: /graphql
+    description: GraphQL takes cross-site requests with the session cookie (no token, any content type).
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats
@@ -142,3 +177,6 @@ secure:
   - GET /docs
   - POST /api/settings
   - GET /hello
+  - GET /api/notice
+  - GET /api/account/keys
+  - POST /api/signup
