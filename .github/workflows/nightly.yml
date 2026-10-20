@@ -2,9 +2,11 @@ name: Nightly
 
 # Slow checks that don't need to run on every push: fuzzing the parsers
 # that read hostile input, and building the container image.
+# Manual only for now, to stay within the plan's Actions minutes (a full
+# run is about 90 minutes). To run it on a schedule again, add:
+#   schedule:
+#     - cron: "17 3 * * 0"   # weekly, Sunday 03:17 UTC
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:

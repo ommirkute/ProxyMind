@@ -2,7 +2,7 @@
 
 ## Cutting a release
 
-1. Make sure `main` is green (CI and the latest nightly run).
+1. Make sure `main` is green: run CI by hand (Actions → CI → Run workflow) so macOS and Windows are covered, and run Nightly.
 2. Set the version in `Cargo.toml` (`[workspace.package] version`) and commit.
 3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
 
@@ -36,7 +36,7 @@ The image includes Chromium for XSS proofs (about 1.1 GB in all; build with `--b
 
 ## Nightly checks
 
-`.github/workflows/nightly.yml` fuzzes the parsers that read hostile input (HTTP/1.x and HTTP/2 text, WebSocket frames, DNS queries, the payload classifier, the crawler's HTML reader, Intruder templates, the passive checks and OpenAPI specs) for five minutes each, and builds and smoke-tests the container image. Crashes are uploaded as artifacts; add each one as a regression test next to the code it broke.
+`.github/workflows/nightly.yml` (run by hand from the Actions tab for now, to save Actions minutes) fuzzes the parsers that read hostile input (HTTP/1.x and HTTP/2 text, WebSocket frames, DNS queries, the payload classifier, the crawler's HTML reader, Intruder templates, the passive checks and OpenAPI specs) for five minutes each, and builds and smoke-tests the container image. Crashes are uploaded as artifacts; add each one as a regression test next to the code it broke.
 
 Run a fuzz target locally:
 
