@@ -258,6 +258,20 @@ pub fn tool_definitions() -> Vec<Value> {
             &["input"],
         ),
         tool(
+            "import_har",
+            "Add the exchanges in a HAR file (browser devtools export) to history, tagged source=import. Sends \
+             nothing. Bodies are stored decoded, so imported exchanges are rebuilt, not byte-exact.",
+            json!({ "har": {"type":"string","description":"The HAR document as JSON text"} }),
+            &["har"],
+        ),
+        tool(
+            "curl_parse",
+            "Read a curl command (e.g. from a browser's Copy as cURL) into a raw request and url for replay_send. \
+             Sends nothing; options that can't be honoured (files, multipart) come back as warnings.",
+            json!({ "command": {"type":"string"} }),
+            &["command"],
+        ),
+        tool(
             "compare_exchanges",
             "Compare two recorded exchanges: semantic response similarity and line diffs of requests and responses.",
             json!({ "a": {"type":"integer"}, "b": {"type":"integer"} }),
@@ -536,6 +550,19 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "decode" => {
             let r: pm_service::DecodeRequest = args(a)?;
             service.decode(&r).map_err(|e| e.to_string())
+        }
+        "import_har" => {
+            let r: pm_service::ImportRequest = args(a)?;
+            service.traffic_import_har(actor, &r).map(to_json).map_err(|e| e.to_string())
+        }
+        "curl_parse" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                command: String,
+            }
+            let g: A = args(a)?;
+            service.curl_parse(&g.command).map(to_json).map_err(|e| e.to_string())
         }
         "compare_exchanges" => {
             #[derive(serde::Deserialize)]

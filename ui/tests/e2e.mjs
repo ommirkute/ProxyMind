@@ -168,6 +168,31 @@ try {
   check(await page.getByTestId("replay-result").textContent().then((t) => t.includes("401")), "anonymous replay gets 401");
   await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
 
+  console.log("cURL and HAR");
+  await page.goto(link.replace(/\/auth.*/, `/#/history/${orderId}`));
+  await page.getByTestId("copy-curl").click();
+  await page.waitForSelector('[data-testid="curl-command"]');
+  const curlCmd = await page.getByTestId("curl-command").textContent();
+  check(curlCmd.startsWith("curl ") && curlCmd.includes("/api/orders/"), "copy as cURL");
+  await page.goto(link.replace(/\/auth.*/, "/#/repeater"));
+  await page.getByTestId("paste-curl").click();
+  await page.getByLabel("cURL command").fill(curlCmd);
+  await page.getByTestId("parse-curl").click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Target"]')?.value.startsWith("http"));
+  const target = await page.getByLabel("Target").inputValue();
+  check(target === `http://127.0.0.1:${shop}`, `pasted cURL fills the target (${target})`);
+  await page.goto(link.replace(/\/auth.*/, "/#/history"));
+  const har = { log: { version: "1.2", entries: [{ startedDateTime: "2024-01-01T00:00:00Z", time: 1,
+    request: { method: "GET", url: "https://imported.test/from-har", headers: [] },
+    response: { status: 204, headers: [], content: { text: "" } } }] } };
+  await page.getByTestId("import-har").setInputFiles({ name: "x.har", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(har)) });
+  await page.waitForSelector('[data-testid="import-note"]');
+  check(await page.getByTestId("import-note").textContent().then((t) => t.startsWith("Imported 1 exchanges")), "HAR import");
+  await page.locator("text=/from-har").first().waitFor();
+  check(true, "imported exchange is listed");
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("export-har").click()]);
+  check(dl.suggestedFilename() === "proxymind.har", "HAR export downloads a file");
+
   console.log("Intruder");
   await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
   await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");

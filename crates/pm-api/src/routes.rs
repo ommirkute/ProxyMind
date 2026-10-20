@@ -76,6 +76,13 @@ pub fn api() -> Router<AppState> {
         .route("/exchanges", get(exchanges))
         .route("/exchanges/{id}", get(exchange))
         .route("/exchanges/{id}/ws", get(ws_messages))
+        .route("/exchanges/{id}/curl", get(exchange_curl))
+        .route(
+            "/import/har",
+            post(import_har).layer(axum::extract::DefaultBodyLimit::max(pm_service::MAX_IMPORT_BYTES + 1024)),
+        )
+        .route("/export/har", post(export_har))
+        .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
         .route("/intruder", post(intruder))
@@ -372,6 +379,39 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(json!({ "command": st.service.exchange_curl(&st.actor, id)? }))
+}
+
+async fn import_har(State(st): State<AppState>, Json(r): Json<pm_service::ImportRequest>) -> ApiResult {
+    ok(st.service.traffic_import_har(&st.actor, &r)?)
+}
+
+/// A HAR download: it holds target content, so it is never rendered here.
+async fn export_har(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::ExportRequest>,
+) -> Result<Response, ApiError> {
+    let har = st.service.traffic_export_har(&st.actor, &r)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind.har\""),
+        ],
+        har.to_string(),
+    )
+        .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct CurlBody {
+    command: String,
+}
+
+async fn tools_curl(State(st): State<AppState>, Json(r): Json<CurlBody>) -> ApiResult {
+    ok(st.service.curl_parse(&r.command)?)
 }
 
 async fn openapi_get(State(st): State<AppState>) -> ApiResult {

@@ -24,6 +24,7 @@ mod report;
 mod rules;
 mod scan;
 mod tools;
+mod traffic;
 mod ws;
 mod ws_replay;
 
@@ -47,6 +48,7 @@ pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
 pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
+pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use ws::{WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 

@@ -33,6 +33,9 @@ export default function Repeater() {
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
   const [race, setRace] = useState<RaceResult | null>(null);
   const [raceApproval, setRaceApproval] = useState<string | null>(null);
+  const [curlOpen, setCurlOpen] = useState(false);
+  const [curlText, setCurlText] = useState("");
+  const [curlWarnings, setCurlWarnings] = useState<string[]>([]);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
 
@@ -49,6 +52,16 @@ export default function Repeater() {
       .catch((e) => action.setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [arg]);
+
+  const pasteCurl = () =>
+    action.run(async () => {
+      const r = await api.post<{ url: string; raw: string; warnings: string[] }>("/tools/curl", { command: curlText });
+      setUrl(r.url);
+      setRaw(r.raw.replace(/\r\n/g, "\n"));
+      setCurlWarnings(r.warnings);
+      setCurlOpen(false);
+      setSent(null);
+    });
 
   const send = () =>
     action.run(async () => {
@@ -98,6 +111,17 @@ export default function Repeater() {
             </button>
           }
         >
+          <div className="row" style={{ marginBottom: 8 }}>
+            <button className="btn" onClick={() => setCurlOpen((o) => !o)} data-testid="paste-curl">Paste cURL…</button>
+          </div>
+          {curlOpen && (
+            <div style={{ marginBottom: 8 }}>
+              <textarea aria-label="cURL command" className="mono" rows={5} style={{ width: "100%" }} placeholder="curl 'https://…' -H '…'" value={curlText} onChange={(e) => setCurlText(e.target.value)} />
+              <button className="btn primary" disabled={!curlText.trim() || action.busy} onClick={pasteCurl} data-testid="parse-curl">Load into Repeater</button>
+              <span className="small muted"> Nothing is sent until you press Send.</span>
+            </div>
+          )}
+          {curlWarnings.length > 0 && <div className="notice small">Ignored: {curlWarnings.join("; ")}</div>}
           <div className="row" style={{ marginBottom: 8 }}>
             <input aria-label="Target" className="grow mono" placeholder="https://host:port" value={url} onChange={(e) => setUrl(e.target.value)} />
             <select aria-label="Send as" value={identity} onChange={(e) => setIdentity(e.target.value)}>

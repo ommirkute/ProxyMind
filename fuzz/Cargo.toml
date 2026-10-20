@@ -18,6 +18,7 @@ pm-http = { path = "../crates/pm-http" }
 pm-oast = { path = "../crates/pm-oast" }
 pm-policy = { path = "../crates/pm-policy" }
 pm-crawl = { path = "../crates/pm-crawl" }
+pm-tools = { path = "../crates/pm-tools" }
 pm-fuzz = { path = "../crates/pm-fuzz" }
 pm-scan = { path = "../crates/pm-scan" }
 pm-openapi = { path = "../crates/pm-openapi" }
@@ -79,6 +80,13 @@ bench = false
 [[bin]]
 name = "openapi_spec"
 path = "fuzz_targets/openapi_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "har_curl"
+path = "fuzz_targets/har_curl.rs"
 test = false
 doc = false
 bench = false

@@ -215,6 +215,22 @@ class Client:
     def sequencer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
         return self._check(self._post("/tools/sequencer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
 
+    def import_har(self, har: str) -> dict:
+        """Adds a HAR file's exchanges (text) to history; sends nothing. Returns {imported, exchange_ids, skipped}."""
+        return self._post("/import/har", {"har": har})
+
+    def export_har(self, ids: Optional[list] = None, **filters: Any) -> dict:
+        """History as a HAR document: exactly ids, or everything matching history filters (host, path, limit…)."""
+        return self._post("/export/har", self._args(ids=ids, **filters))
+
+    def curl(self, exchange_id: int) -> str:
+        """A curl command that sends the same request as a recorded exchange."""
+        return self._get(f"/exchanges/{exchange_id}/curl")["command"]
+
+    def curl_parse(self, command: str) -> dict:
+        """Reads a curl command into {url, method, raw, warnings}, ready for replay(); sends nothing."""
+        return self._post("/tools/curl", {"command": command})
+
     def approve(self, approval_id: str) -> dict:
         return self._post(f"/approvals/{approval_id}/approve")
 

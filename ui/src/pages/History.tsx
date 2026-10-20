@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtBytes, fmtTime, qs, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
+import { api, fmtBytes, fmtTime, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
 import { Chip, Empty, ErrorBox, Raw, StatusCode, useAction, useNav } from "../components";
 
 const ROW = 30;
@@ -66,6 +66,30 @@ export default function History() {
       })
       .catch((e) => setError(e.message));
 
+  const [note, setNote] = useState<string | null>(null);
+  const importHar = (file: File | undefined) => {
+    if (!file) return;
+    file
+      .text()
+      .then((har) => api.post<{ imported: number; skipped: string[] }>("/import/har", { har }))
+      .then((r) => {
+        setNote(`Imported ${r.imported} exchanges${r.skipped.length ? `; skipped ${r.skipped.length}: ${r.skipped.slice(0, 3).join("; ")}` : ""}.`);
+        setFilters((f) => ({ ...f, source: "import" }));
+      })
+      .catch((e) => setError(e.message));
+  };
+  const exportHar = () =>
+    api
+      .post<unknown>("/export/har", {
+        host: filters.host || undefined,
+        path: filters.path || undefined,
+        method: filters.method || undefined,
+        status: filters.status ? Number(filters.status) : undefined,
+        source: filters.source || undefined,
+      })
+      .then((har) => saveText("proxymind.har", JSON.stringify(har)))
+      .catch((e) => setError(e.message));
+
   const set = (k: keyof Filters) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setFilters((f) => ({ ...f, [k]: e.target.value }));
 
@@ -85,12 +109,18 @@ export default function History() {
             <input aria-label="Status" placeholder="status" value={filters.status} onChange={set("status")} style={{ width: 70 }} />
             <select aria-label="Source" value={filters.source} onChange={set("source")}>
               <option value="">any source</option>
-              {["proxy", "replay", "authz", "proof", "login", "health"].map((m) => (
+              {["proxy", "replay", "import", "authz", "proof", "login", "health"].map((m) => (
                 <option key={m}>{m}</option>
               ))}
             </select>
+            <label className="btn" title="Add a HAR file (browser devtools export) to history; nothing is sent">
+              Import HAR
+              <input type="file" accept=".har,application/json" hidden data-testid="import-har" onChange={(e) => importHar(e.target.files?.[0])} />
+            </label>
+            <button className="btn" onClick={exportHar} title="Download the filtered history as a HAR file" data-testid="export-har">Export HAR</button>
           </div>
           <ErrorBox error={error} />
+          {note && <div className="notice" data-testid="import-note">{note}</div>}
           <VirtualRows rows={rows} selected={selected} onSelect={(id) => go("history", id)} />
           {olderFrom && (
             <div style={{ padding: 8, borderTop: "1px solid var(--border)" }}>
@@ -156,9 +186,11 @@ function Detail({ id }: { id: number }) {
   const [capture, setCapture] = useState({ open: false, name: "", role: "user" });
   const action = useAction();
   const [note, setNote] = useState<string | null>(null);
+  const [curl, setCurl] = useState<string | null>(null);
 
   useEffect(() => {
     setEx(null);
+    setCurl(null);
     setNote(null);
     api
       .get<ExchangeDetail>(`/exchanges/${id}`)
@@ -179,6 +211,13 @@ function Detail({ id }: { id: number }) {
       await api.post("/identities/capture", { name: capture.name, role: capture.role, exchange_id: id });
       setCapture({ open: false, name: "", role: "user" });
       setNote(`Identity "${capture.name}" captured from #${id}.`);
+    });
+
+  const copyCurl = () =>
+    action.run(async () => {
+      const r = await api.get<{ command: string }>(`/exchanges/${id}/curl`);
+      setCurl(r.command);
+      await navigator.clipboard?.writeText(r.command).catch(() => {});
     });
 
   return (
@@ -203,7 +242,9 @@ function Detail({ id }: { id: number }) {
         <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
         <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
         <button className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>
+        <button className="btn" data-testid="copy-curl" onClick={copyCurl}>Copy as cURL</button>
       </div>
+      {curl && <pre className="raw small" data-testid="curl-command" style={{ marginTop: 8 }}>{curl}</pre>}
       {capture.open && (
         <div className="row" style={{ marginTop: 8 }}>
           <input aria-label="Identity name" placeholder="name, e.g. alice" value={capture.name} onChange={(e) => setCapture((c) => ({ ...c, name: e.target.value }))} />

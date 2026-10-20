@@ -26,6 +26,7 @@ jobs:
           - intruder_template
           - passive_checks
           - openapi_spec
+          - har_curl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

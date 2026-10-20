@@ -1618,6 +1618,7 @@ version = "0.0.1"
 dependencies = [
  "flate2",
  "pm-core",
+ "pm-http",
  "ring",
  "serde",
  "serde_json",

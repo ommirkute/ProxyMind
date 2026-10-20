@@ -1,6 +1,6 @@
 [package]
 name = "pm-tools"
-description = "Decoder, comparer and sequencer logic. No I/O."
+description = "Decoder, comparer, sequencer, HAR and cURL logic. No I/O."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 flate2 = "1.1.10"
 pm-core = { version = "0.0.1", path = "../pm-core" }
+pm-http = { version = "0.0.1", path = "../pm-http" }
 ring = "0.17.14"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

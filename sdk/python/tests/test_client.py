@@ -2,6 +2,7 @@
 
 Set PROXYMIND to the binary (default: ../../target/debug/proxymind)."""
 
+import json
 import os
 import socket
 import subprocess
@@ -83,6 +84,19 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(e.exception.status, 404)
         with self.assertRaises(Denied):
             self.pm.replay(url="http://example.org", raw="GET / HTTP/1.1\r\nHost: example.org\r\n\r\n")
+
+    def test_har_and_curl(self):
+        ex = self.get("/api/products")
+        cmd = self.pm.curl(ex)
+        self.assertTrue(cmd.startswith("curl "))
+        parsed = self.pm.curl_parse(cmd)
+        self.assertEqual(parsed["url"], self.url)
+        har = self.pm.export_har(ids=[ex])
+        self.assertEqual(len(har["log"]["entries"]), 1)
+        har["log"]["entries"][0]["request"]["url"] = "https://elsewhere.test/copied"
+        r = self.pm.import_har(json.dumps(har))
+        self.assertEqual(r["imported"], 1)
+        self.assertTrue(self.pm.history(source="import", path="/copied"))
 
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.

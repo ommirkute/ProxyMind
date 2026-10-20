@@ -38,6 +38,16 @@ export const api = {
   put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
 };
 
+/** Saves text as a file in the browser (for downloads that need a POST). */
+export function saveText(name: string, text: string, type = "application/json") {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {

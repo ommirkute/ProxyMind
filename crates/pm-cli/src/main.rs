@@ -223,6 +223,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Add the exchanges of a HAR file (browser devtools export) to history. Sends nothing.
+    Import {
+        /// The .har file
+        file: PathBuf,
+    },
+    /// Write history as a HAR file (newest first).
+    Export {
+        /// Output file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Only these exchange ids (repeatable)
+        #[arg(long = "id")]
+        ids: Vec<i64>,
+        /// Host contains
+        #[arg(long)]
+        host: Option<String>,
+        /// Most exchanges to write
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Print a curl command for a recorded exchange, or (--parse) read one into a raw request.
+    Curl {
+        /// Exchange id
+        #[arg(required_unless_present = "parse")]
+        exchange_id: Option<i64>,
+        /// Read a curl command (or - for stdin) and print the raw request
+        #[arg(long, conflicts_with = "exchange_id")]
+        parse: Option<String>,
+    },
     /// Encode or decode text locally (no ops: smart decode).
     Decode {
         input: String,
@@ -1361,6 +1390,53 @@ async fn run() -> Result<()> {
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
+        Command::Import { file } => {
+            let service = open_service(&cli.project, None)?;
+            let har = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            let r = service.traffic_import_har(&human_actor(None)?, &pm_service::ImportRequest { har })?;
+            out!("Imported {} exchanges.", r.imported);
+            for s in &r.skipped {
+                out!("  skipped: {s}");
+            }
+        }
+        Command::Export { out, ids, host, limit } => {
+            let service = open_service(&cli.project, None)?;
+            let req = pm_service::ExportRequest {
+                ids: (!ids.is_empty()).then(|| ids.clone()),
+                filter: pm_store::HistoryFilter { host: host.clone(), limit: *limit, ..Default::default() },
+            };
+            let har = service.traffic_export_har(&human_actor(None)?, &req)?;
+            let n = har["log"]["entries"].as_array().map_or(0, Vec::len);
+            match out {
+                Some(path) => {
+                    std::fs::write(path, har.to_string()).with_context(|| format!("writing {}", path.display()))?;
+                    eprintln!("Wrote {n} exchanges to {}", path.display());
+                }
+                None => out!("{har}"),
+            }
+        }
+        Command::Curl { exchange_id, parse } => match (exchange_id, parse) {
+            (_, Some(cmd)) => {
+                let cmd = if cmd == "-" {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                    s
+                } else {
+                    cmd.clone()
+                };
+                let c = pm_service::pm_tools::curl::parse_curl(&cmd).map_err(|e| anyhow::anyhow!(e))?;
+                for w in &c.warnings {
+                    eprintln!("warning: {w}");
+                }
+                eprintln!("# send to {}://{}", c.url.scheme, c.url.authority());
+                out!("{}", String::from_utf8_lossy(&c.raw));
+            }
+            (Some(id), None) => {
+                let service = open_service(&cli.project, None)?;
+                out!("{}", service.exchange_curl(&human_actor(None)?, *id)?);
+            }
+            (None, None) => anyhow::bail!("give an exchange id or --parse"),
+        },
         Command::Decode { input, ops } => {
             // Local only: no project needed.
             let steps = if ops.is_empty() {
