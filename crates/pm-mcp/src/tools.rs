@@ -219,6 +219,22 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "scan_active",
+            "Active checks on one recorded request: payloads in each query, form, JSON and numeric path value for \
+             sql_error, reflected_input, open_redirect, path_traversal and ssti; each probe is compared with a fresh \
+             baseline. Returns leads with evidence and, where an oracle fits, how to prove them (prove_with). Needs \
+             approval by default: ask the user, then call again with identical arguments plus approval_id.",
+            json!({
+                "exchange_id": {"type":"integer"},
+                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","reflected_input","open_redirect","path_traversal","ssti"]}},
+                "max_requests": {"type":"integer","minimum":1,"maximum":500},
+                "identity": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+                "approval_id": {"type":"string"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -461,6 +477,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;
             service.race_send(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_active" => {
+            let r: pm_service::ActiveScanRequest = args(a)?;
+            service.scan_active(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "scan_issues" => {
             let f: pm_service::ScanFilter = args(a)?;

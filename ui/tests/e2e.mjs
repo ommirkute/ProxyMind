@@ -491,6 +491,18 @@ try {
   check(await page.locator('[data-testid="issues"]').textContent().then((t) => t.includes("Password field on a page served over plain HTTP")), "passive scan flags the login form over HTTP");
   await page.screenshot({ path: join(SHOTS, "6c-issues.png") });
 
+  console.log("Active scan");
+  await viaProxy(proxy, shop, "GET /greet?name=ann HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const greet = await page.evaluate(async () => {
+    const r = await fetch("/api/v1/exchanges?path=/greet&limit=1");
+    return (await r.json()).exchanges[0].id;
+  });
+  await page.goto(link.replace(/\/auth.*/, `/#/issues/${greet}`));
+  await page.getByTestId("active-scan").click();
+  await page.waitForSelector('[data-testid="active-summary"]', { timeout: 60000 });
+  check(await page.getByText("server-side template injection").count() > 0, "active scan finds the template injection");
+  await page.screenshot({ path: join(SHOTS, "6d-active-scan.png") });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

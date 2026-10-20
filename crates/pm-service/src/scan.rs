@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::{Actor, ActorKind, Tier};
 use pm_scan::Severity;
 use pm_store::HistoryFilter;
 use serde::{Deserialize, Serialize};
@@ -186,5 +186,160 @@ impl Service {
             }
         }
         Ok(out)
+    }
+}
+
+// ------------------------------------------------------------ active --
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActiveScanRequest {
+    /// The recorded request to scan (its target is used).
+    pub exchange_id: i64,
+    /// Checks to run (default all): sql_error, reflected_input,
+    /// open_redirect, path_traversal, ssti.
+    pub checks: Vec<String>,
+    /// Most probe requests (default 100, max 500).
+    pub max_requests: Option<usize>,
+    pub identity: Option<String>,
+    pub approval_id: Option<String>,
+    pub hypothesis_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveFinding {
+    #[serde(flatten)]
+    pub issue: pm_scan::active::ActiveIssue,
+    pub exchange_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ActiveScanResult {
+    Done {
+        baseline_exchange_id: i64,
+        insertion_points: Vec<pm_scan::active::Point>,
+        requests: usize,
+        /// Leads to prove (see prove_with), not findings.
+        issues: Vec<ActiveFinding>,
+    },
+    PendingApproval {
+        approval_id: String,
+        summary: String,
+        reasons: Vec<String>,
+    },
+    Denied {
+        reasons: Vec<String>,
+    },
+}
+
+fn seen_of(resp: Option<&[u8]>) -> pm_scan::active::Seen {
+    let Some(r) = resp else { return Default::default() };
+    let converted;
+    let r = if pm_http::h2text::is_http2_response(r) {
+        match pm_http::h2text::to_http1_response(r) {
+            Some(c) => {
+                converted = c;
+                &converted[..]
+            }
+            None => r,
+        }
+    } else {
+        r
+    };
+    let (head, body) = pm_http::split_message(r);
+    let Ok(h) = pm_http::parse_response_head(head) else { return Default::default() };
+    let d = pm_ai::body::decode(&h.headers, body);
+    pm_scan::active::Seen {
+        status: Some(h.status),
+        location: pm_http::header(&h.headers, "location").map(|v| String::from_utf8_lossy(v).into_owned()),
+        content_type: d.content_type.clone(),
+        body: String::from_utf8_lossy(&d.bytes).into_owned(),
+    }
+}
+
+impl Service {
+    /// Active checks on one recorded request: one gate decision (at least
+    /// intrusive) covers every probe; probes go through rate limits and
+    /// into history like any send.
+    pub async fn scan_active(&self, actor: &Actor, req: ActiveScanRequest) -> Result<ActiveScanResult> {
+        use crate::Authorization;
+        if let Some(bad) = req.checks.iter().find(|c| !pm_scan::active::CHECKS.contains(&c.as_str())) {
+            return Err(crate::ServiceError::Invalid(format!(
+                "unknown check {bad}; use {}",
+                pm_scan::active::CHECKS.join(", ")
+            )));
+        }
+        let ex = self
+            .store
+            .lock()
+            .get_exchange(req.exchange_id)?
+            .ok_or_else(|| crate::ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
+        let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
+        // Work on what the actor may see: secrets stay placeholders until sent.
+        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
+        let marker = format!("pm{}", &pm_oast::new_token()[..10]);
+        let limit = req.max_requests.unwrap_or(100).clamp(1, 500);
+        let probes = pm_scan::active::probes(&raw, &req.checks, &marker, limit);
+        if probes.is_empty() {
+            return Err(crate::ServiceError::Invalid(
+                "no insertion points in this request (no query, form, JSON or numeric path values)".into(),
+            ));
+        }
+        let mut base = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        base.hypothesis_id = req.hypothesis_id;
+        let mut outs = Vec::with_capacity(probes.len());
+        let mut tier = Tier::ActiveIntrusive;
+        for p in &probes {
+            let mut o = self.outgoing(endpoint.clone(), &p.raw, true)?;
+            o.hypothesis_id = req.hypothesis_id;
+            tier = tier.max(Tier::for_http_request(&o.raw).0);
+            outs.push(o);
+        }
+        let extra = serde_json::json!({ "active_scan": { "checks": req.checks, "requests": probes.len() } });
+        match self.gate_send_with(
+            actor,
+            "scan_active",
+            &base,
+            req.identity.as_deref(),
+            true,
+            req.approval_id.as_deref(),
+            Some(tier),
+            extra,
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(ActiveScanResult::Denied { reasons }),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(ActiveScanResult::PendingApproval {
+                    approval_id,
+                    summary: format!("active scan ({} requests): {summary}", probes.len()),
+                    reasons,
+                });
+            }
+        }
+        let (b, _) = self.send_as(actor, &base, req.identity.as_deref(), true, "scan").await?;
+        let base_seen = seen_of(b.response.as_deref());
+        let mut issues: Vec<ActiveFinding> = Vec::new();
+        for (p, o) in probes.iter().zip(&outs) {
+            // One issue per check and parameter is enough.
+            if issues.iter().any(|f| f.issue.check == p.check && f.issue.point.ends_with(&p.point.name)) {
+                continue;
+            }
+            let (sent, _) = self.send_as(actor, o, req.identity.as_deref(), true, "scan").await?;
+            if let Some(issue) = pm_scan::active::analyze(p, &base_seen, &seen_of(sent.response.as_deref()), &marker) {
+                issues.push(ActiveFinding { issue, exchange_id: sent.exchange_id });
+            }
+        }
+        if actor.kind == ActorKind::Agent {
+            for f in &mut issues {
+                f.issue.evidence = pm_ai::wrap_untrusted(&f.issue.evidence);
+            }
+        }
+        Ok(ActiveScanResult::Done {
+            baseline_exchange_id: b.exchange_id,
+            insertion_points: pm_scan::active::points(&raw),
+            requests: probes.len(),
+            issues,
+        })
     }
 }

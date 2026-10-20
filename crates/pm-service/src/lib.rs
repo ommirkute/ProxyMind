@@ -40,7 +40,7 @@ pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
-pub use scan::{ScanFilter, ScanIssue};
+pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
 pub use ws::{WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 

@@ -73,11 +73,39 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/search",
         description: "The q parameter is written into the HTML results page without encoding (reflected XSS).",
     },
+    Vuln {
+        id: "VS-7",
+        class: "sqli_error_based",
+        method: "GET",
+        path: "/api/reviews",
+        description: "A quote in product breaks the SQL query and the database error is returned.",
+    },
+    Vuln {
+        id: "VS-8",
+        class: "open_redirect",
+        method: "GET",
+        path: "/go",
+        description: "Redirects to any url, including other sites.",
+    },
+    Vuln {
+        id: "VS-9",
+        class: "path_traversal",
+        method: "GET",
+        path: "/download",
+        description: "file is joined to the downloads folder without normalising, so ../ reaches /etc/passwd.",
+    },
+    Vuln {
+        id: "VS-10",
+        class: "ssti",
+        method: "GET",
+        path: "/greet",
+        description: "name is rendered as a template: {{7*191}} becomes 1337.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
 pub const SECURE_ENDPOINTS: &[&str] =
-    &["GET /api/invoices/{id}", "GET /api/admin/stats", "GET /api/orders", "GET /help"];
+    &["GET /api/invoices/{id}", "GET /api/admin/stats", "GET /api/orders", "GET /help", "GET /out", "GET /docs"];
 
 struct User {
     id: u32,
@@ -182,6 +210,52 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A pretend filesystem: resolves `..` the way a naive server would.
+fn fake_file(path: &str) -> Response {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split(['/', '\\']) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    let resolved = format!("/{}", parts.join("/"));
+    let body = match resolved.as_str() {
+        "/etc/passwd" => "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n",
+        "/srv/downloads/report.pdf" => "%PDF-1.4 VulnShop annual report",
+        "/srv/downloads/menu.txt" => "Coffee, Tea, Cake",
+        _ => return json_resp(404, json!({"error": "no such file"})),
+    };
+    Response { status: 200, headers: vec![], body: body.into(), content_type: "text/plain" }
+}
+
+/// Replaces `{{a*b}}` (integers) with the product, like a template engine would.
+fn render_template(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find("}}") else {
+            out.push_str(&rest[i..]);
+            return out;
+        };
+        let expr = rest[i + 2..i + j].trim();
+        let value = expr
+            .split_once('*')
+            .and_then(|(a, b)| {
+                Some(a.trim().parse::<i64>().ok()?.checked_mul(b.trim().parse::<i64>().ok()?)?.to_string())
+            })
+            .unwrap_or_default();
+        out.push_str(&value);
+        rest = &rest[i + j + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn html_escape(s: &str) -> String {
@@ -417,6 +491,68 @@ impl VulnShop {
                      <p>Results for {q}</p><ul><li>Coffee</li></ul></body></html>"
                 );
                 Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
+            ("GET", ["api", "reviews"]) => {
+                // VS-7: error-based SQL injection.
+                let product = req.query.get("product").cloned().unwrap_or_default();
+                if product.contains('\'') || product.contains('"') {
+                    return Response {
+                        status: 500,
+                        headers: vec![],
+                        body: format!(
+                            "You have an error in your SQL syntax; check the manual that corresponds to your MySQL \
+                             server version for the right syntax to use near '{product}' at line 1"
+                        ),
+                        content_type: "text/plain",
+                    };
+                }
+                json_resp(200, json!({"product": product, "reviews": [{"stars": 5, "text": "Great"}]}))
+            }
+            ("GET", ["go"]) => {
+                // VS-8: open redirect.
+                let url = req.query.get("url").cloned().unwrap_or_else(|| "/".into());
+                Response {
+                    status: 302,
+                    headers: vec![("Location".into(), url)],
+                    body: String::new(),
+                    content_type: "text/plain",
+                }
+            }
+            ("GET", ["out"]) => {
+                // Secure look-alike: only same-site paths.
+                let url = req.query.get("url").cloned().unwrap_or_else(|| "/".into());
+                if url.starts_with('/') && !url.starts_with("//") && !url.contains('\\') {
+                    Response {
+                        status: 302,
+                        headers: vec![("Location".into(), url)],
+                        body: String::new(),
+                        content_type: "text/plain",
+                    }
+                } else {
+                    json_resp(400, json!({"error": "only paths on this site"}))
+                }
+            }
+            ("GET", ["download"]) => {
+                // VS-9: path traversal (simulated files; nothing is read from disk).
+                let file = req.query.get("file").cloned().unwrap_or_default();
+                fake_file(&format!("/srv/downloads/{file}"))
+            }
+            ("GET", ["docs"]) => {
+                // Secure look-alike: only the base name is used.
+                let file = req.query.get("file").cloned().unwrap_or_default();
+                let base = file.rsplit(['/', '\\']).next().unwrap_or("");
+                fake_file(&format!("/srv/downloads/{base}"))
+            }
+            ("GET", ["greet"]) => {
+                // VS-10: server-side template injection ({{a*b}} is evaluated).
+                let name = req.query.get("name").cloned().unwrap_or_else(|| "friend".into());
+                let rendered = render_template(&name);
+                Response {
+                    status: 200,
+                    headers: vec![],
+                    body: format!("<!doctype html><p>Hello {}</p>", html_escape(&rendered)),
+                    content_type: "text/html; charset=utf-8",
+                }
             }
             ("GET", ["robots.txt"]) => Response {
                 status: 200,

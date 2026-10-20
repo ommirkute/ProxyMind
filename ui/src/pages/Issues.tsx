@@ -15,7 +15,7 @@ interface Issue {
 
 /** Passive issues in recorded traffic: leads to test, not findings. */
 export default function Issues() {
-  const { counters, go } = useNav();
+  const { counters, go, arg } = useNav();
   const [min, setMin] = useState("info");
   const [host, setHost] = useState("");
   const issues = useLoad(
@@ -37,6 +37,7 @@ export default function Issues() {
 
   return (
     <div className="content">
+      <ActiveScan key={String(arg ?? "")} initial={arg === undefined ? undefined : String(arg)} />
       <Panel
         title="Issues (passive)"
         actions={
@@ -70,5 +71,70 @@ export default function Issues() {
         )}
       </Panel>
     </div>
+  );
+}
+
+interface ActiveFinding {
+  check: string;
+  title: string;
+  severity: string;
+  point: string;
+  payload: string;
+  evidence: string;
+  prove_with?: string;
+  exchange_id: number;
+}
+type ActiveResult =
+  | { status: "done"; baseline_exchange_id: number; requests: number; issues: ActiveFinding[]; insertion_points: { kind: string; name: string }[] }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
+/** Active checks on one recorded request. */
+function ActiveScan({ initial }: { initial?: string }) {
+  const { go } = useNav();
+  const [ex, setEx] = useState(initial ?? "");
+  const [result, setResult] = useState<ActiveResult | null>(null);
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      setResult(await api.post<ActiveResult>("/scan/active", { exchange_id: Number(ex) }));
+    });
+  return (
+    <Panel title="Active scan">
+      <div className="row">
+        <span className="small">Probe every parameter of exchange</span>
+        <input aria-label="Exchange to scan" value={ex} onChange={(e) => setEx(e.target.value)} style={{ width: 80 }} />
+        <button className="btn primary" disabled={!ex || action.busy} onClick={run} data-testid="active-scan">{action.busy ? "Scanning…" : "Scan"}</button>
+        <span className="small muted">SQL errors, unencoded reflection, open redirect, path traversal, template injection. Sends requests; goes through the policy gate.</span>
+      </div>
+      <ErrorBox error={action.error} />
+      {result?.status === "pending_approval" && (
+        <div className="notice">Needs approval: {result.summary}. <a href="#" onClick={(e) => { e.preventDefault(); go("approvals"); }}>Approvals</a></div>
+      )}
+      {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
+      {result?.status === "done" && (
+        <>
+          <div className="small" data-testid="active-summary">
+            {result.insertion_points.length} insertion points · {result.requests} probes · {result.issues.length} leads
+          </div>
+          {result.issues.length > 0 && (
+            <table className="grid small">
+              <thead><tr><th>Severity</th><th>Lead</th><th>Where</th><th>Evidence</th><th>Prove with</th></tr></thead>
+              <tbody>
+                {result.issues.map((i) => (
+                  <tr key={i.exchange_id}>
+                    <td><Chip value={i.severity} /></td>
+                    <td>{i.title}</td>
+                    <td className="mono">{i.point} = {i.payload}</td>
+                    <td style={{ maxWidth: 320, wordBreak: "break-word" }}>{i.evidence} <ExchangeLink id={i.exchange_id} /></td>
+                    <td className="muted">{i.prove_with ?? "–"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </Panel>
   );
 }

@@ -92,6 +92,7 @@ pub fn api() -> Router<AppState> {
         .route("/model", get(model))
         .route("/coverage", get(coverage))
         .route("/scan/issues", get(scan_issues))
+        .route("/scan/active", post(scan_active))
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
@@ -238,6 +239,10 @@ async fn model(State(st): State<AppState>, Query(f): Query<ModelFilter>) -> ApiR
 #[derive(Deserialize)]
 struct CoverageQuery {
     all: Option<bool>,
+}
+
+async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {
+    ok(st.service.scan_active(&st.actor, r).await?)
 }
 
 async fn scan_issues(State(st): State<AppState>, Query(f): Query<pm_service::ScanFilter>) -> ApiResult {

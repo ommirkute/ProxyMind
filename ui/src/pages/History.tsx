@@ -200,6 +200,7 @@ function Detail({ id }: { id: number }) {
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn" onClick={() => go("repeater", id)}>Send to Repeater</button>
         <button className="btn" onClick={() => go("intruder", id)}>Send to Intruder</button>
+        <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
         <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
         <button className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>
       </div>

@@ -32,9 +32,31 @@ vulns:
     method: GET
     path: /search
     description: q is written into the HTML results page without encoding (reflected XSS).
+  - id: VS-7
+    class: sqli
+    method: GET
+    path: /api/reviews
+    description: A quote in product returns the database error (error-based SQL injection).
+  - id: VS-8
+    class: open_redirect
+    method: GET
+    path: /go
+    description: Redirects to any url, including other sites.
+  - id: VS-9
+    class: path_traversal
+    method: GET
+    path: /download
+    description: ../ in file reaches /etc/passwd.
+  - id: VS-10
+    class: ssti
+    method: GET
+    path: /greet
+    description: '{{7*191}} in name is evaluated to 1337.'
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats
   - GET /api/orders
   - GET /help
+  - GET /out
+  - GET /docs

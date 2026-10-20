@@ -194,6 +194,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Active checks on one recorded request (SQL errors, reflection, open redirect, traversal, SSTI).
+    ScanActive {
+        exchange_id: i64,
+        /// Only these checks (repeatable)
+        #[arg(long = "check")]
+        checks: Vec<String>,
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
     Crawl {
         url: String,
@@ -1212,6 +1223,44 @@ async fn run() -> Result<()> {
                     reg.save()?;
                     out!("✓ removed {name}");
                 }
+            }
+        }
+        Command::ScanActive { exchange_id, checks, identity, json } => {
+            let service = open_service(&cli.project, None)?;
+            let r = service
+                .scan_active(
+                    &human_actor(None)?,
+                    pm_service::ActiveScanRequest {
+                        exchange_id: *exchange_id,
+                        checks: checks.clone(),
+                        identity: identity.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (pm_service::ActiveScanResult::Done { requests, issues, insertion_points, .. }, false) => {
+                    out!(
+                        "{} insertion point(s), {requests} probe(s), {} lead(s)",
+                        insertion_points.len(),
+                        issues.len()
+                    );
+                    for f in issues {
+                        out!(
+                            "{:<6} {}  [{} = {}]  #{}",
+                            f.issue.severity,
+                            f.issue.title,
+                            f.issue.point,
+                            f.issue.payload,
+                            f.exchange_id
+                        );
+                        out!("         {}", f.issue.evidence);
+                        if let Some(p) = &f.issue.prove_with {
+                            out!("         prove: {p}");
+                        }
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {

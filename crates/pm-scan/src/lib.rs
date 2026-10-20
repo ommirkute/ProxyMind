@@ -7,6 +7,8 @@
 //! ProxyMind's rule is "no proof, no finding", and a human or agent decides
 //! what to test or report.
 
+pub mod active;
+
 use pm_http::Header;
 use serde::Serialize;
 
@@ -285,6 +287,13 @@ const SECRETS: &[(&str, &str, usize)] = &[
     ("sk_live_", "Stripe secret key", 20),
     ("aiza", "Google API key", 30),
 ];
+
+/// The first error signature in `text` (lowercased search): what it is,
+/// whether it's a database error, and where it starts.
+pub fn error_signature(text: &str) -> Option<(&'static str, bool, usize)> {
+    let lower = text.to_ascii_lowercase();
+    ERRORS.iter().find_map(|(needle, what)| lower.find(needle).map(|at| (*what, what.contains("SQL"), at)))
+}
 
 fn body(x: &Exchange, out: &mut Vec<Issue>) {
     if x.body.is_empty() {
