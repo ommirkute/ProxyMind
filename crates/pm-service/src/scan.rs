@@ -199,6 +199,11 @@ const DELAY_CONFIRM: u64 = 5;
 enum Plan {
     Bool(pm_scan::active::Point, Vec<pm_scan::active::BoolPair>),
     Time(&'static str, pm_scan::active::Point, Vec<pm_scan::active::TimeProbe>),
+    NoSql(pm_scan::active::Point, pm_scan::active::NoSqlProbes),
+    /// (trick, request, control on a missing path)
+    AuthBypass(Vec<(String, Vec<u8>, Vec<u8>)>),
+    /// The request with every guessed parameter added.
+    Params(Vec<u8>),
 }
 
 impl Plan {
@@ -207,6 +212,9 @@ impl Plan {
         match self {
             Plan::Bool(_, pairs) => pairs.len() * 2 + 3,
             Plan::Time(_, _, list) => list.len() + 2,
+            Plan::NoSql(..) => 5,
+            Plan::AuthBypass(v) => v.len() * 2,
+            Plan::Params(_) => 16,
         }
     }
 
@@ -216,6 +224,9 @@ impl Plan {
         match self {
             Plan::Bool(pt, pairs) => pairs.iter().filter_map(|p| inject(raw, pt, &p.falsy)).collect(),
             Plan::Time(_, pt, list) => list.iter().filter_map(|t| inject(raw, pt, &t.with_delay(DELAY))).collect(),
+            Plan::NoSql(_, n) => vec![n.ne.clone()],
+            Plan::AuthBypass(v) => v.iter().map(|(_, t, _)| t.clone()).collect(),
+            Plan::Params(r) => vec![r.clone()],
         }
     }
 }
@@ -291,6 +302,11 @@ fn seen_of(resp: Option<&[u8]>) -> pm_scan::active::Seen {
         location: pm_http::header(&h.headers, "location").map(|v| String::from_utf8_lossy(v).into_owned()),
         content_type: d.content_type.clone(),
         body: String::from_utf8_lossy(&d.bytes).into_owned(),
+        headers: h
+            .headers
+            .iter()
+            .map(|x| (x.name.to_ascii_lowercase(), String::from_utf8_lossy(&x.value).into_owned()))
+            .collect(),
     }
 }
 
@@ -335,7 +351,8 @@ impl Service {
         let limit = req.max_requests.unwrap_or(300).clamp(1, 2000);
         // Path segments the app model knows are identifiers (`/users/{username}`) are tested too.
         let id_segments = self.id_segments(req.exchange_id, &ex.summary.path);
-        let probes = act::probes_with(&raw, &req.checks, &marker, limit, &id_segments);
+        let mut probes = act::probes_with(&raw, &req.checks, &marker, limit, &id_segments);
+        probes.extend(act::request_probes(&raw, &req.checks, &marker));
         let points = act::points_with(&raw, &id_segments);
 
         // Multi-step plans: (check, point, payloads to try), most likely first.
@@ -351,6 +368,22 @@ impl Service {
             if want("cmd_time") && pt.kind != PointKind::Path {
                 plans.push(Plan::Time("cmd_time", pt.clone(), act::cmd_time_probes(&pt.original)));
             }
+            if want("nosql_operator")
+                && let Some(n) = act::nosql_probes(&raw, pt, &marker)
+            {
+                plans.push(Plan::NoSql(pt.clone(), n));
+            }
+        }
+        if want("auth_bypass") {
+            let v = act::auth_bypass_variants(&raw, &marker);
+            if !v.is_empty() {
+                plans.push(Plan::AuthBypass(v));
+            }
+        }
+        if want("hidden_params")
+            && let Some(r) = act::with_params(&raw, act::HIDDEN_PARAMS, &marker)
+        {
+            plans.push(Plan::Params(r));
         }
         // Out-of-band probes, when an OAST listener is configured.
         // One lock at a time: in one struct literal both guards would live
@@ -428,13 +461,14 @@ impl Service {
         let base_seen = seen_of(b.response.as_deref());
         let mut issues: Vec<ActiveFinding> = Vec::new();
         let found = |issues: &[ActiveFinding], family: &str, pt: &str| {
-            issues.iter().any(|f| f.issue.check.starts_with(family) && f.issue.point.ends_with(pt))
+            issues.iter().any(|f| f.issue.check.starts_with(family) && f.issue.point.ends_with(&pt.to_lowercase()))
         };
 
         // 1. One-shot probes (fast).
         for p in &probes {
             // One issue per check and parameter is enough.
-            if issues.iter().any(|f| f.issue.check == p.check && f.issue.point.ends_with(&p.point.name)) {
+            if issues.iter().any(|f| f.issue.check == p.check && f.issue.point.ends_with(&p.point.name.to_lowercase()))
+            {
                 continue;
             }
             if sent_count >= limit {
@@ -495,6 +529,7 @@ impl Service {
                 notes.push(format!("time-based checks skipped: the baseline is slow ({base_ms:?} ms)"));
             }
             plans.sort_by_key(|p| matches!(p, Plan::Time(..)));
+            let denied = base_seen.status.is_some_and(|s| s == 401 || s == 403);
             'plans: for plan in &plans {
                 match plan {
                     Plan::Bool(pt, pairs) => {
@@ -540,6 +575,122 @@ impl Service {
                                 let issue = act::multi_step_issue("sql_boolean", pt, &pair.falsy, evidence);
                                 issues.push(ActiveFinding { issue, exchange_id: fs.exchange_id });
                                 break;
+                            }
+                        }
+                    }
+                    Plan::NoSql(pt, n) => {
+                        if found(&issues, "nosql", &pt.name) || found(&issues, "sql", &pt.name) {
+                            continue;
+                        }
+                        if sent_count + 3 > limit {
+                            notes.push(format!("stopped at the request limit ({limit})"));
+                            break 'plans;
+                        }
+                        sent_count += 3;
+                        let plain = seen_of(send(n.plain.clone()).await?.response.as_deref());
+                        let eq = seen_of(send(n.eq.clone()).await?.response.as_deref());
+                        let ne_sent = send(n.ne.clone()).await?;
+                        let ne = seen_of(ne_sent.response.as_deref());
+                        if !act::nosql_differs(&plain, &eq, &ne) {
+                            continue;
+                        }
+                        // Confirm: a regex matching anything acts like $ne, one matching nothing like $eq.
+                        sent_count += 2;
+                        let all = seen_of(send(n.all.clone()).await?.response.as_deref());
+                        let none = seen_of(send(n.none.clone()).await?.response.as_deref());
+                        if act::nosql_differs(&none, &plain, &all) || act::nosql_differs(&plain, &none, &all) {
+                            let evidence = format!(
+                                "plain value → {} ({} bytes); {{\"$eq\"}} → {} (same); {{\"$ne\"}} → {} ({} bytes); \
+                                 confirmed with $regex",
+                                pm_proof::status_text(plain.status),
+                                plain.body.len(),
+                                pm_proof::status_text(eq.status),
+                                pm_proof::status_text(ne.status),
+                                ne.body.len()
+                            );
+                            let issue = act::multi_step_issue("nosql_operator", pt, "$ne operator", evidence);
+                            issues.push(ActiveFinding { issue, exchange_id: ne_sent.exchange_id });
+                        }
+                    }
+                    Plan::AuthBypass(variants) => {
+                        if !denied {
+                            continue; // nothing to bypass
+                        }
+                        for (trick, t, c) in variants {
+                            if sent_count + 2 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let got_sent = send(t.clone()).await?;
+                            let got = seen_of(got_sent.response.as_deref());
+                            if !got.status.is_some_and(|s| (200..300).contains(&s)) {
+                                continue;
+                            }
+                            sent_count += 1;
+                            let control = seen_of(send(c.clone()).await?.response.as_deref());
+                            if act::bypassed(&base_seen, &got, &control) {
+                                let evidence = format!(
+                                    "{} → {} ({} bytes) instead of {}; the same trick on a missing path → {}",
+                                    trick,
+                                    pm_proof::status_text(got.status),
+                                    got.body.len(),
+                                    pm_proof::status_text(base_seen.status),
+                                    pm_proof::status_text(control.status)
+                                );
+                                let pt = act::Point::request("path and headers");
+                                let issue = act::multi_step_issue("auth_bypass", &pt, trick, evidence);
+                                issues.push(ActiveFinding { issue, exchange_id: got_sent.exchange_id });
+                                break;
+                            }
+                        }
+                    }
+                    Plan::Params(all) => {
+                        if sent_count + 1 > limit {
+                            continue;
+                        }
+                        sent_count += 1;
+                        let names: Vec<&str> = act::HIDDEN_PARAMS.to_vec();
+                        let g_sent = send(all.clone()).await?;
+                        let g = seen_of(g_sent.response.as_deref());
+                        let reflected = act::reflected_params(&names, &marker, &g);
+                        let pt = act::Point::request("parameters");
+                        if !reflected.is_empty() {
+                            let evidence = format!("values of {} come back in the response", reflected.join(", "));
+                            let issue = act::multi_step_issue("hidden_params", &pt, &reflected.join(", "), evidence);
+                            issues.push(ActiveFinding { issue, exchange_id: g_sent.exchange_id });
+                            continue;
+                        }
+                        if !act::differs(&base_seen, &base2, &g) {
+                            continue;
+                        }
+                        // Halve the list until one name explains the difference.
+                        let mut cands = names.clone();
+                        while cands.len() > 1 && sent_count < limit {
+                            let (a, b) = cands.split_at(cands.len() / 2);
+                            let Some(r) = act::with_params(&raw, a, &marker) else { break };
+                            sent_count += 1;
+                            let seen = seen_of(send(r).await?.response.as_deref());
+                            cands = if act::differs(&base_seen, &base2, &seen) { a.to_vec() } else { b.to_vec() };
+                        }
+                        if cands.len() == 1
+                            && sent_count < limit
+                            && let Some(r) = act::with_params(&raw, &cands, &marker)
+                        {
+                            sent_count += 1;
+                            let one_sent = send(r).await?;
+                            let one = seen_of(one_sent.response.as_deref());
+                            if act::differs(&base_seen, &base2, &one) {
+                                let evidence = format!(
+                                    "adding {}= changes the response: {} ({} bytes) instead of {} ({} bytes)",
+                                    cands[0],
+                                    pm_proof::status_text(one.status),
+                                    one.body.len(),
+                                    pm_proof::status_text(base_seen.status),
+                                    base_seen.body.len()
+                                );
+                                let issue = act::multi_step_issue("hidden_params", &pt, cands[0], evidence);
+                                issues.push(ActiveFinding { issue, exchange_id: one_sent.exchange_id });
                             }
                         }
                     }
@@ -604,9 +755,9 @@ impl Service {
                 let mine: Vec<_> =
                     hits.iter().filter(|h| h.get("token").and_then(|t| t.as_str()) == Some(p.token.as_str())).collect();
                 let Some(first) = mine.last() else { continue };
-                let dup = issues
-                    .iter()
-                    .any(|f| f.issue.check == p.probe.check && f.issue.point.ends_with(&p.probe.point.name));
+                let dup = issues.iter().any(|f| {
+                    f.issue.check == p.probe.check && f.issue.point.ends_with(&p.probe.point.name.to_lowercase())
+                });
                 if dup {
                     continue;
                 }

@@ -83,6 +83,36 @@ vulns:
     method: POST
     path: /api/import
     description: XML import resolves external entities over http (blind XXE).
+  - id: VS-17
+    class: auth_bypass
+    method: GET
+    path: /api/internal/config
+    description: 403 unless X-Forwarded-For is 127.0.0.1, which any client can send.
+  - id: VS-18
+    class: crlf
+    method: GET
+    path: /api/lang
+    description: set parameter goes into Set-Cookie as is (header injection).
+  - id: VS-19
+    class: host_header_injection
+    method: GET
+    path: /api/share
+    description: share links built from the Host header.
+  - id: VS-20
+    class: cors
+    method: GET
+    path: /api/me
+    description: any Origin echoed with credentials allowed.
+  - id: VS-21
+    class: nosqli
+    method: POST
+    path: /api/v2/login
+    description: MongoDB-style login runs operators such as $ne in the JSON.
+  - id: VS-22
+    class: exposure
+    method: GET
+    path: /api/products
+    description: hidden debug parameter leaks internal settings.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats

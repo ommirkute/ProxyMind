@@ -42,7 +42,7 @@ The model-free baseline (`proxymind bench auto`) has three steps, all through th
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 7/16 | 2/16 | 0 |
+| VulnShop | 8/22 | 2/22 | 0 |
 | Juice Shop | 3/8 | 1/8 | 0 |
 | VAmPI | 2/7 | 1/7 | 0 |
 

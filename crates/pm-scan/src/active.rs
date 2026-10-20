@@ -41,6 +41,8 @@ pub enum PointKind {
     Header,
     /// The whole body (e.g. an XML document for XXE).
     Body,
+    /// The request as a whole (Host, Origin, path tricks).
+    Request,
 }
 
 /// Where a payload can go.
@@ -73,13 +75,20 @@ pub const CHECKS: &[&str] = &[
     "open_redirect",
     "path_traversal",
     "ssti",
+    "crlf",
+    "host_header",
+    "cors",
     "sql_boolean",
     "sql_time",
     "cmd_time",
+    "nosql_operator",
+    "auth_bypass",
+    "hidden_params",
 ];
 
 /// Checks that take several rounds (run after the one-shot ones).
-pub const MULTI_STEP: &[&str] = &["sql_boolean", "sql_time", "cmd_time"];
+pub const MULTI_STEP: &[&str] =
+    &["sql_boolean", "sql_time", "cmd_time", "nosql_operator", "auth_bypass", "hidden_params"];
 
 /// Headers that apps often pass to SQL (logging, analytics) or shells.
 const HEADERS: &[&str] = &["user-agent", "referer", "x-forwarded-for"];
@@ -102,6 +111,14 @@ pub struct Seen {
     pub content_type: Option<String>,
     /// Decoded body.
     pub body: String,
+    /// Response headers, names lower-cased.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Seen {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -232,6 +249,11 @@ impl Point {
     pub fn body() -> Self {
         Self { kind: PointKind::Body, name: "body".into(), original: String::new(), locator: Locator::None }
     }
+
+    /// The request as a whole, e.g. `Host header` or `Origin header`.
+    pub fn request(name: &str) -> Self {
+        Self { kind: PointKind::Request, name: name.into(), original: String::new(), locator: Locator::None }
+    }
 }
 
 /// Head and body of a raw request (`\r\n\r\n` or `\n\n`), for whole-body payloads.
@@ -314,7 +336,7 @@ pub fn points_with(raw: &str, id_segments: &[usize]) -> Vec<Point> {
 }
 
 /// The head lines after the request line, with one header replaced.
-fn replace_head_line(rest: &str, f: impl Fn(&str, &str) -> Option<String>) -> String {
+fn replace_head_line(rest: &str, mut f: impl FnMut(&str, &str) -> Option<String>) -> String {
     rest.lines()
         .map(|l| {
             let l = l.trim_end_matches('\r');
@@ -629,6 +651,11 @@ pub fn multi_step_issue(check: &str, point: &Point, payload: &str, evidence: Str
             "SQL injection (time-based blind)",
             Some("proof_run oracle timing with this payload to measure it statistically".into()),
         ),
+        "nosql_operator" => ("nosql_operator", "NoSQL injection: query operators in the input are run", None),
+        "auth_bypass" => {
+            ("auth_bypass", "Access control bypass: a denied page answers to a path or header trick", None)
+        }
+        "hidden_params" => ("hidden_params", "Hidden parameter accepted", None),
         _ => (
             "cmd_time",
             "OS command injection (time-based blind)",
@@ -638,7 +665,7 @@ pub fn multi_step_issue(check: &str, point: &Point, payload: &str, evidence: Str
     ActiveIssue {
         check,
         title,
-        severity: "high",
+        severity: if check == "hidden_params" { "low" } else { "high" },
         point: format!("{:?} {}", point.kind, point.name).to_lowercase(),
         payload: payload.to_string(),
         evidence,
@@ -664,9 +691,15 @@ pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_
             }
         };
         if want("sql_error") {
-            for s in ["'", "\"", "')", "\\"] {
+            // Quotes break SQL and XPath; `*)(` breaks LDAP filters. The
+            // error tells which (SQL, NoSQL, LDAP, XPath): see [`injection_error`].
+            for s in ["'", "\"", "')", "\\", "*)(", "']"] {
                 add("sql_error", format!("{}{s}", pt.original));
             }
+        }
+        if want("crlf") && matches!(pt.kind, PointKind::Query | PointKind::Form | PointKind::Path | PointKind::Cookie) {
+            add("crlf", format!("{}\r\nX-PM-Injected: {marker}", pt.original));
+            add("crlf", format!("{}%0d%0aX-PM-Injected:%20{marker}", pt.original));
         }
         if want("cmd_injection") && pt.kind != PointKind::Path {
             for p in cmd_output_payloads(&pt.original, marker) {
@@ -724,15 +757,79 @@ pub fn analyze(probe: &Probe, base: &Seen, got: &Seen, marker: &str) -> Option<A
     };
     match probe.check {
         "sql_error" => {
-            let (what, sql, at) = crate::error_signature(&got.body)?;
-            if !sql || crate::error_signature(&base.body).is_some_and(|b| b.1) {
+            let (family, what, at) = injection_error(&got.body)?;
+            if injection_error(&base.body).is_some_and(|b| b.0 == family) {
                 return None;
             }
+            let (check, title, prove_with) = match family {
+                "sql" => (
+                    "sql_error",
+                    "Database error caused by a quote (likely SQL injection)",
+                    Some("proof_run oracle timing with a delay payload in this parameter".to_string()),
+                ),
+                "nosql" => ("nosql_error", "NoSQL query error caused by the input (likely NoSQL injection)", None),
+                "ldap" => ("ldap_error", "LDAP filter error caused by the input (likely LDAP injection)", None),
+                _ => ("xpath_error", "XPath error caused by the input (likely XPath injection)", None),
+            };
+            let mut i = issue(title, "high", format!("{what}: {}", snippet(&got.body, at, 140)), prove_with);
+            i.check = check;
+            Some(i)
+        }
+        "crlf" => {
+            let v = got.header("x-pm-injected")?;
+            v.contains(marker).then(|| {
+                issue(
+                    "HTTP response header injection (CRLF): a header was added",
+                    "high",
+                    format!("X-PM-Injected: {v}"),
+                    None,
+                )
+            })
+        }
+        "host_header" => {
+            let host = format!("{marker}.example").to_ascii_lowercase();
+            let in_loc = got.location.as_deref().is_some_and(|l| l.to_ascii_lowercase().contains(&host));
+            let at = got.body.to_ascii_lowercase().find(&host);
+            if base.body.to_ascii_lowercase().contains(&host) || (!in_loc && at.is_none()) {
+                return None;
+            }
+            let evidence = match (in_loc, at) {
+                (true, _) => format!("Location: {}", got.location.clone().unwrap_or_default()),
+                (_, Some(at)) => snippet(&got.body, at, 100),
+                _ => String::new(),
+            };
             Some(issue(
-                "Database error caused by a quote (likely SQL injection)",
-                "high",
-                format!("{what}: {}", snippet(&got.body, at, 140)),
-                Some("proof_run oracle timing with a delay payload in this parameter".into()),
+                if in_loc {
+                    "Host header injection: redirects go to the host the client names"
+                } else {
+                    "Host header injection: the page builds links from the host the client names"
+                },
+                "medium",
+                format!("{} → {evidence}", probe.payload),
+                None,
+            ))
+        }
+        "cors" => {
+            let origin = probe.payload.strip_prefix("Origin: ")?;
+            let acao = got.header("access-control-allow-origin")?;
+            if acao != origin {
+                return None;
+            }
+            let creds = got.header("access-control-allow-credentials").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            let (title, severity) = match (origin == "null", creds) {
+                (false, true) => ("CORS: any origin may read responses with the user's cookies", "high"),
+                (true, true) => ("CORS: the null origin (sandboxed pages) may read with cookies", "medium"),
+                _ => ("CORS: any origin may read responses (without cookies)", "low"),
+            };
+            Some(issue(
+                title,
+                severity,
+                format!(
+                    "{} → Access-Control-Allow-Origin: {acao}{}",
+                    probe.payload,
+                    if creds { ", credentials: true" } else { "" }
+                ),
+                None,
             ))
         }
         "reflected_input" => {
@@ -800,6 +897,352 @@ pub fn analyze(probe: &Probe, base: &Seen, got: &Seen, marker: &str) -> Option<A
     }
 }
 
+/// NoSQL, LDAP and XPath error signatures (SQL ones come from the passive scanner).
+const INJECTION_ERRORS: &[(&str, &str, &str)] = &[
+    ("mongoerror", "nosql", "MongoDB error"),
+    ("mongoservererror", "nosql", "MongoDB error"),
+    ("mongo.errors", "nosql", "MongoDB error"),
+    ("bsontypeerror", "nosql", "BSON error"),
+    ("cast to objectid failed", "nosql", "Mongoose cast error"),
+    ("unknown operator: $", "nosql", "MongoDB operator error"),
+    ("$where", "nosql", "MongoDB $where error"),
+    ("couchdb", "nosql", "CouchDB error"),
+    ("javax.naming.directory", "ldap", "Java LDAP error"),
+    ("com.sun.jndi.ldap", "ldap", "Java LDAP error"),
+    ("ldapexception", "ldap", "LDAP error"),
+    ("ldap_search", "ldap", "PHP LDAP error"),
+    ("bad search filter", "ldap", "LDAP filter error"),
+    ("invalid dn syntax", "ldap", "LDAP DN error"),
+    ("xpathexception", "xpath", "XPath error"),
+    ("xpathevalerror", "xpath", "XPath error (lxml)"),
+    ("simplexmlelement::xpath", "xpath", "PHP XPath error"),
+    ("xmlxpatheval", "xpath", "libxml XPath error"),
+    ("org.apache.xpath", "xpath", "Java XPath error"),
+    ("ms.internal.xml.xpath", "xpath", ".NET XPath error"),
+    ("expression must evaluate to a node-set", "xpath", ".NET XPath error"),
+    ("invalid predicate", "xpath", "XPath error"),
+];
+
+/// The injection error in a response: family (`sql`, `nosql`, `ldap`,
+/// `xpath`), what it is, and where it starts.
+pub fn injection_error(text: &str) -> Option<(&'static str, &'static str, usize)> {
+    if let Some((what, true, at)) = crate::error_signature(text) {
+        return Some(("sql", what, at));
+    }
+    let lower = text.to_ascii_lowercase();
+    INJECTION_ERRORS.iter().find_map(|(needle, family, what)| lower.find(needle).map(|at| (*family, *what, at)))
+}
+
+/// `raw` with header `name` set to `value` (replaced, or added at the end of the head).
+pub fn set_header(raw: &str, name: &str, value: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let clean: String = value.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+    let lower = name.to_ascii_lowercase();
+    let mut found = false;
+    let mut rest = replace_head_line(p.rest_of_head, |k, _| {
+        (k == lower).then(|| {
+            found = true;
+            clean.clone()
+        })
+    });
+    if !found {
+        if !rest.is_empty() {
+            rest.push_str("\r\n");
+        }
+        rest.push_str(&format!("{name}: {clean}"));
+    }
+    Some(rebuild(&Parsed { rest_of_head: &rest, ..p }, p.target, p.body))
+}
+
+fn host_of(raw: &str) -> Option<String> {
+    let p = parse(raw)?;
+    p.rest_of_head.lines().find_map(|l| {
+        l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("host")).map(|(_, v)| v.trim().to_string())
+    })
+}
+
+/// Probes on the request as a whole: Host header injection and CORS origins.
+pub fn request_probes(raw: &str, checks: &[String], marker: &str) -> Vec<Probe> {
+    let want = |c: &str| checks.is_empty() || checks.iter().any(|x| x == c);
+    let mut out = Vec::new();
+    let mut add = |check: &'static str, point: &str, header: &str, value: String| {
+        if let Some(r) = set_header(raw, header, &value) {
+            out.push(Probe { check, point: Point::request(point), payload: format!("{header}: {value}"), raw: r });
+        }
+    };
+    let evil = format!("{marker}.example");
+    if want("host_header") {
+        add("host_header", "Host header", "Host", evil.clone());
+        add("host_header", "X-Forwarded-Host header", "X-Forwarded-Host", evil.clone());
+    }
+    if want("cors") {
+        let host = host_of(raw).unwrap_or_default();
+        let host = host.split(':').next().unwrap_or_default();
+        add("cors", "Origin header", "Origin", format!("https://{evil}"));
+        add("cors", "Origin header", "Origin", "null".into());
+        if !host.is_empty() {
+            // Suffix and prefix tricks against sloppy allow-lists.
+            add("cors", "Origin header", "Origin", format!("https://{host}.{evil}"));
+            add("cors", "Origin header", "Origin", format!("https://{marker}{host}"));
+        }
+    }
+    out
+}
+
+/// NoSQL operator injection for a value: `name[$ne]=v` in query and form
+/// data, `{"$ne": v}` in JSON. `value` is a JSON value.
+pub fn inject_operator(raw: &str, point: &Point, op: &str, value: &serde_json::Value) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let (path, query) = p.target.split_once('?').unwrap_or((p.target, ""));
+    let flat = |ps: &mut Vec<(String, String)>, i: usize| -> Option<()> {
+        let (k, _) = ps.get(i)?.clone();
+        let mut new: Vec<(String, String)> = match value {
+            serde_json::Value::Array(xs) => {
+                xs.iter().map(|x| (format!("{k}[{op}][]"), percent_encode(x.as_str().unwrap_or_default()))).collect()
+            }
+            v => vec![(format!("{k}[{op}]"), percent_encode(v.as_str().unwrap_or(&v.to_string())))],
+        };
+        ps.splice(i..=i, new.drain(..));
+        Some(())
+    };
+    match (&point.kind, &point.locator) {
+        (PointKind::Query, Locator::Pair(i)) => {
+            let mut ps = pairs(query);
+            flat(&mut ps, *i)?;
+            Some(rebuild(&p, &format!("{path}?{}", join(&ps)), p.body))
+        }
+        (PointKind::Form, Locator::Pair(i)) => {
+            let mut ps = pairs(p.body.trim());
+            flat(&mut ps, *i)?;
+            Some(rebuild(&p, p.target, &join(&ps)))
+        }
+        (PointKind::Json, Locator::Pointer(ptr)) => {
+            let mut v: serde_json::Value = serde_json::from_str(p.body).ok()?;
+            *v.pointer_mut(ptr)? = serde_json::json!({ op: value });
+            Some(rebuild(&p, p.target, &v.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Requests for the NoSQL operator check: a plain random value, `$eq`
+/// and `$ne` of it, and a confirming pair (`$regex` matching anything / nothing).
+pub struct NoSqlProbes {
+    pub plain: Vec<u8>,
+    pub eq: Vec<u8>,
+    pub ne: Vec<u8>,
+    pub all: Vec<u8>,
+    pub none: Vec<u8>,
+}
+
+pub fn nosql_probes(raw: &str, point: &Point, marker: &str) -> Option<NoSqlProbes> {
+    if !matches!(point.kind, PointKind::Query | PointKind::Form | PointKind::Json) {
+        return None;
+    }
+    let r = serde_json::Value::String(format!("{marker}zz"));
+    Some(NoSqlProbes {
+        plain: inject(raw, point, &format!("{marker}zz"))?,
+        eq: inject_operator(raw, point, "$eq", &r)?,
+        ne: inject_operator(raw, point, "$ne", &r)?,
+        all: inject_operator(raw, point, "$regex", &serde_json::json!(".*"))?,
+        none: inject_operator(raw, point, "$regex", &serde_json::json!(format!("^{marker}zz$")))?,
+    })
+}
+
+/// Operators are interpreted when `$eq r` answers like the plain value
+/// `r` and `$ne r` answers differently (and isn't an error).
+pub fn nosql_differs(plain: &Seen, eq: &Seen, ne: &Seen) -> bool {
+    let ok = |s: &Seen| s.status.is_some_and(|c| c < 500);
+    ok(ne)
+        && plain.status == eq.status
+        && similarity(&plain.body, &eq.body) >= 0.98
+        && (ne.status != plain.status || similarity(&ne.body, &plain.body) < 0.9)
+}
+
+/// Path and header tricks that sometimes get past a 401/403, each with a
+/// control: the same trick on a path that doesn't exist (if that works
+/// too, the trick only reaches a catch-all page).
+pub fn auth_bypass_variants(raw: &str, marker: &str) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    let Some(p) = parse(raw) else { return Vec::new() };
+    let (path, query) = p.target.split_once('?').map_or((p.target, String::new()), |(a, q)| (a, format!("?{q}")));
+    if path.len() < 2 || !path.starts_with('/') {
+        return Vec::new();
+    }
+    let fake = format!("/pm{marker}");
+    type Trick = (&'static str, fn(&str) -> String);
+    let path_tricks: [Trick; 8] = [
+        ("trailing slash", |p| format!("{p}/")),
+        ("trailing /.", |p| format!("{p}/.")),
+        ("leading /%2e", |p| format!("/%2e{p}")),
+        ("double slash", |p| format!("/{p}")),
+        ("..;/ (Tomcat)", |p| format!("{p}..;/")),
+        ("; suffix", |p| format!("{p};.css")),
+        ("%20 suffix", |p| format!("{p}%20")),
+        ("upper case", |p| p.to_ascii_uppercase()),
+    ];
+    let mut out = Vec::new();
+    for (name, f) in path_tricks {
+        let (t, c) = (f(path), f(&fake));
+        if t == path {
+            continue;
+        }
+        let tr = rebuild(&p, &format!("{t}{query}"), p.body);
+        let cr = rebuild(&p, &format!("{c}{query}"), p.body);
+        out.push((format!("path: {name} ({t})"), tr, cr));
+    }
+    let raw_str = raw.to_string();
+    for (h, v) in [("X-Original-URL", path), ("X-Rewrite-URL", path)] {
+        // Ask for / and name the real path in the header.
+        let root = rebuild(&p, "/", p.body);
+        let root = String::from_utf8_lossy(&root).into_owned();
+        if let (Some(t), Some(c)) = (set_header(&root, h, v), set_header(&root, h, &fake)) {
+            out.push((format!("header: {h}: {v}"), t, c));
+        }
+    }
+    for h in ["X-Forwarded-For", "X-Real-IP", "X-Originating-IP", "X-Client-IP"] {
+        let fake_req = String::from_utf8_lossy(&rebuild(&p, &format!("{fake}{query}"), p.body)).into_owned();
+        if let (Some(t), Some(c)) = (set_header(&raw_str, h, "127.0.0.1"), set_header(&fake_req, h, "127.0.0.1")) {
+            out.push((format!("header: {h}: 127.0.0.1"), t, c));
+        }
+    }
+    out
+}
+
+/// A bypass: the trick gets a 2xx unlike the denied baseline, and the same
+/// trick on a missing path doesn't get the same page.
+pub fn bypassed(base: &Seen, got: &Seen, control: &Seen) -> bool {
+    let ok = got.status.is_some_and(|s| (200..300).contains(&s));
+    let unlike_base = similarity(&base.body, &got.body) < 0.9;
+    let catch_all = control.status == got.status && similarity(&control.body, &got.body) >= 0.9;
+    ok && unlike_base && !got.body.trim().is_empty() && !catch_all
+}
+
+/// Common parameter names apps accept without showing them (param mining).
+pub const HIDDEN_PARAMS: &[&str] = &[
+    "debug",
+    "test",
+    "admin",
+    "is_admin",
+    "isAdmin",
+    "role",
+    "roles",
+    "user",
+    "user_id",
+    "userid",
+    "uid",
+    "id",
+    "account",
+    "email",
+    "token",
+    "access_token",
+    "api_key",
+    "apikey",
+    "key",
+    "secret",
+    "password",
+    "pass",
+    "mode",
+    "env",
+    "dev",
+    "verbose",
+    "trace",
+    "preview",
+    "draft",
+    "internal",
+    "callback",
+    "jsonp",
+    "format",
+    "lang",
+    "locale",
+    "redirect",
+    "next",
+    "url",
+    "file",
+    "path",
+    "template",
+    "view",
+    "page",
+    "limit",
+    "offset",
+    "sort",
+    "order",
+    "fields",
+    "include",
+    "expand",
+    "filter",
+    "q",
+    "search",
+    "query",
+    "cmd",
+    "exec",
+    "action",
+    "do",
+    "type",
+    "source",
+    "ref",
+    "show",
+    "hidden",
+    "all",
+    "raw",
+    "export",
+];
+
+/// `raw` with extra query parameters (or form fields / JSON keys, where the
+/// body is that kind) named `names`, valued `<marker><index>`.
+pub fn with_params(raw: &str, names: &[&str], marker: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let existing: Vec<String> = points(raw).into_iter().map(|pt| pt.name.to_ascii_lowercase()).collect();
+    let fresh: Vec<(usize, &str)> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !existing.contains(&n.to_ascii_lowercase()))
+        .map(|(i, n)| (i, *n))
+        .collect();
+    if fresh.is_empty() {
+        return None;
+    }
+    let val = |i: usize| format!("{marker}{i}");
+    if p.json
+        && let Ok(serde_json::Value::Object(mut o)) = serde_json::from_str::<serde_json::Value>(p.body)
+    {
+        for (i, n) in &fresh {
+            o.insert((*n).to_string(), serde_json::Value::String(val(*i)));
+        }
+        return Some(rebuild(&p, p.target, &serde_json::Value::Object(o).to_string()));
+    }
+    let extra = fresh.iter().map(|(i, n)| format!("{n}={}", val(*i))).collect::<Vec<_>>().join("&");
+    if p.form {
+        let body = if p.body.trim().is_empty() { extra } else { format!("{}&{extra}", p.body.trim()) };
+        return Some(rebuild(&p, p.target, &body));
+    }
+    let sep = if p.target.contains('?') { "&" } else { "?" };
+    Some(rebuild(&p, &format!("{}{sep}{extra}", p.target), p.body))
+}
+
+/// Names whose values (`<marker><index>`) come back in the response.
+pub fn reflected_params<'a>(names: &[&'a str], marker: &str, got: &Seen) -> Vec<&'a str> {
+    names
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let v = format!("{marker}{i}");
+            // `<marker>1` is a prefix of `<marker>10`: require a non-digit after it.
+            got.body
+                .match_indices(&v)
+                .any(|(at, _)| !got.body[at + v.len()..].starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .map(|(_, n)| *n)
+        .collect()
+}
+
+/// Whether a response differs from the baseline more than the page varies by itself.
+pub fn differs(base: &Seen, base2: &Seen, got: &Seen) -> bool {
+    let noise = 1.0 - similarity(&base.body, &base2.body);
+    base.status == base2.status
+        && noise <= 0.2
+        && (got.status != base.status || similarity(&base.body, &got.body) < 1.0 - noise - 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,7 +1305,13 @@ mod tests {
     }
 
     fn seen(status: u16, body: &str) -> Seen {
-        Seen { status: Some(status), body: body.into(), content_type: Some("text/html".into()), location: None }
+        Seen {
+            status: Some(status),
+            body: body.into(),
+            content_type: Some("text/html".into()),
+            location: None,
+            headers: vec![],
+        }
     }
 
     #[test]
@@ -968,5 +1417,117 @@ mod tests {
         let pairs = sql_bool_pairs("12");
         assert_eq!((pairs[0].context, pairs[0].falsy.as_str()), ("numeric", "12 AND 1=2"));
         assert_eq!(sql_bool_pairs("abc")[0].truthy, "abc' AND '1'='1");
+    }
+
+    fn seen_h(status: u16, body: &str, headers: &[(&str, &str)]) -> Seen {
+        Seen {
+            status: Some(status),
+            body: body.into(),
+            content_type: Some("text/html".into()),
+            location: None,
+            headers: headers.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+        }
+    }
+
+    #[test]
+    fn error_families() {
+        let ps = probes(GET, &["sql_error".into()], "pmX", 1000);
+        let p = ps.iter().find(|p| p.point.name == "q").unwrap();
+        let base = seen(200, "ok");
+        let check = |body: &str| analyze(p, &base, &seen(500, body), "pmX").map(|i| i.check);
+        assert_eq!(check("MongoServerError: unknown operator: $foo"), Some("nosql_error"));
+        assert_eq!(check("javax.naming.directory.InvalidSearchFilterException: Bad search filter"), Some("ldap_error"));
+        assert_eq!(check("lxml.etree.XPathEvalError: Invalid predicate"), Some("xpath_error"));
+        assert_eq!(check("You have an error in your SQL syntax"), Some("sql_error"));
+        assert_eq!(check("plain 500"), None);
+        assert!(ps.iter().any(|p| p.payload.ends_with("*)(")), "LDAP breaker sent");
+    }
+
+    #[test]
+    fn crlf_host_and_cors() {
+        let raw = "GET /lang?set=en HTTP/1.1\r\nHost: shop.test\r\n\r\n";
+        let ps = probes(raw, &["crlf".into()], "pmX", 1000);
+        assert_eq!(ps.len(), 2);
+        assert!(
+            String::from_utf8_lossy(&ps[0].raw).starts_with("GET /lang?set=en%0D%0AX-PM-Injected%3A%20pmX HTTP/1.1")
+        );
+        let base = seen(302, "");
+        assert!(analyze(&ps[0], &base, &seen_h(302, "", &[("x-pm-injected", "pmX")]), "pmX").is_some());
+        assert!(
+            analyze(&ps[0], &base, &seen_h(302, "", &[("set-cookie", "lang=en X-PM-Injected: pmX")]), "pmX").is_none()
+        );
+
+        let rp = request_probes(raw, &[], "pmX");
+        let host = rp.iter().find(|p| p.payload == "Host: pmX.example").unwrap();
+        assert!(String::from_utf8_lossy(&host.raw).contains("\r\nHost: pmX.example\r\n"));
+        let xfh = rp.iter().find(|p| p.payload.starts_with("X-Forwarded-Host")).unwrap();
+        assert!(String::from_utf8_lossy(&xfh.raw).contains("Host: shop.test\r\nX-Forwarded-Host: pmX.example\r\n\r\n"));
+        let link = seen(200, "{\"link\":\"http://pmX.example/products/1\"}");
+        assert!(analyze(host, &base, &link, "pmX").is_some());
+        assert!(analyze(host, &base, &seen(200, "{\"link\":\"/products/1\"}"), "pmX").is_none());
+
+        let cors: Vec<&Probe> = rp.iter().filter(|p| p.check == "cors").collect();
+        assert_eq!(cors.len(), 4);
+        assert!(cors.iter().any(|p| p.payload == "Origin: https://shop.test.pmX.example"));
+        let any = cors.iter().find(|p| p.payload == "Origin: https://pmX.example").unwrap();
+        let reflected = seen_h(
+            200,
+            "{}",
+            &[("access-control-allow-origin", "https://pmX.example"), ("access-control-allow-credentials", "true")],
+        );
+        assert_eq!(analyze(any, &base, &reflected, "pmX").unwrap().severity, "high");
+        assert!(analyze(any, &base, &seen_h(200, "{}", &[("access-control-allow-origin", "*")]), "pmX").is_none());
+    }
+
+    #[test]
+    fn nosql_operators() {
+        let json = "POST /login HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"user\":\"al\",\"pw\":\"x\"}";
+        let pw = points(json).into_iter().find(|p| p.name == "pw").unwrap();
+        let n = nosql_probes(json, &pw, "m").unwrap();
+        assert!(
+            String::from_utf8_lossy(&n.ne).ends_with("{\"pw\":{\"$ne\":\"mzz\"},\"user\":\"al\"}")
+                || String::from_utf8_lossy(&n.ne).ends_with("{\"user\":\"al\",\"pw\":{\"$ne\":\"mzz\"}}")
+        );
+        let q = points(GET).into_iter().next().unwrap();
+        let n = nosql_probes(GET, &q, "m").unwrap();
+        assert!(String::from_utf8_lossy(&n.ne).starts_with("GET /api/items/42?q[$ne]=mzz&next="));
+        let denied = seen(401, "{\"error\":\"bad login\"}");
+        let ok = seen(200, "{\"token\":\"abc\",\"user\":\"alice\"}");
+        assert!(nosql_differs(&denied, &denied, &ok));
+        assert!(!nosql_differs(&denied, &seen(400, "bad"), &ok), "$eq not understood like the plain value");
+        assert!(!nosql_differs(&denied, &denied, &seen(500, "error")), "an error isn't a bypass");
+    }
+
+    #[test]
+    fn auth_bypass_and_params() {
+        let raw = "GET /admin/stats?x=1 HTTP/1.1\r\nHost: s\r\n\r\n";
+        let v = auth_bypass_variants(raw, "m");
+        assert!(v.iter().any(|(n, t, c)| n.starts_with("path: trailing slash")
+            && String::from_utf8_lossy(t).starts_with("GET /admin/stats/?x=1 ")
+            && String::from_utf8_lossy(c).starts_with("GET /pmm/?x=1 ")));
+        assert!(v.iter().any(|(n, t, _)| n == "header: X-Original-URL: /admin/stats"
+            && String::from_utf8_lossy(t).starts_with("GET / HTTP/1.1")));
+        let denied = seen(403, "forbidden");
+        let page = seen(200, "<h1>Stats</h1> users 12 orders 40");
+        assert!(bypassed(&denied, &page, &seen(404, "not found")));
+        assert!(!bypassed(&denied, &page, &page), "the trick reaches a catch-all page");
+        assert!(!bypassed(&denied, &seen(200, "forbidden"), &seen(404, "x")));
+
+        let r = with_params(GET, &["debug", "q", "role"], "pmV").unwrap();
+        let r = String::from_utf8(r).unwrap();
+        assert!(r.starts_with("GET /api/items/42?q=shoe&next=/home&file=report.pdf&debug=pmV0&role=pmV2 "), "{r}");
+        let got = seen(200, "role is pmV2; debug pmV0x");
+        assert_eq!(reflected_params(&["debug", "q", "role"], "pmV", &got), ["debug", "role"]);
+        assert!(
+            reflected_params(&["a", "b"], "pmV", &seen(200, "pmV10 pmV11")).is_empty(),
+            "pmV1 is only a prefix there"
+        );
+        let base = seen(200, "<ul><li>a</li><li>b</li></ul>");
+        assert!(differs(
+            &base,
+            &base,
+            &seen(200, "<ul><li>a</li><li>b</li></ul><pre>internal: db=prod</pre><p>more debug data here</p>")
+        ));
+        assert!(!differs(&base, &base, &base));
     }
 }

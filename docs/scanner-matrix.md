@@ -23,12 +23,12 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Server-side template injection: evaluated | ✅ (3 engines) → step 1 adds more engines | ✅ | 1 |
 | Server-side template injection: blind | ✅ step 2 (6 engines, OOB) | ✅ (OOB) | 2 |
 | Expression language / code injection (PHP, Python, Node eval) | 🟡 step 2 (OOB) | 🟡 | 2 |
-| NoSQL injection (operators, JS) | ❌ | ✅ | 3 |
-| LDAP injection | ❌ | ✅ | 3 |
-| XPath injection | ❌ | ❌ | 3 |
+| NoSQL injection (operators, JS) | ✅ step 3 (errors, $ne/$regex differential) | ✅ | 3 |
+| LDAP injection | 🟡 step 3 (errors) | ✅ | 3 |
+| XPath injection | 🟡 step 3 (errors) | ❌ | 3 |
 | XML external entity (in-band and OOB) | 🟡 OOB step 2 (external DTD, entity) | ✅ | 2 (in-band file read: 3) |
 | XML injection / SOAP | ❌ | 🟡 | 3 |
-| CRLF / HTTP response header injection | ❌ | ❌ | 3 |
+| CRLF / HTTP response header injection | ✅ step 3 | ❌ | 3 |
 | SMTP / email header injection | ❌ | ❌ | 4 |
 | Log4Shell-style lookups (OOB) | ✅ step 2 (needs the DNS zone) | ✅ | 2 |
 | Server-side JavaScript / prototype pollution | ❌ | ✅ (client and server, blind) | 4 |
@@ -55,11 +55,11 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 |---|---|---|---|
 | SSRF (in-band and OOB) | ✅ OOB step 2 (URL-like parameters, Referer) | ✅ | 2 |
 | External service interaction (DNS / HTTP) | ✅ OAST server + scan | ✅ | 2 |
-| Host header injection / password-reset poisoning | ❌ | ✅ | 3 |
+| Host header injection / password-reset poisoning | ✅ step 3 (Host, X-Forwarded-Host) | ✅ | 3 |
 | Web cache poisoning (unkeyed inputs) | ❌ | ❌ | 4 |
 | Web cache deception | ❌ | ❌ | 4 |
 | HTTP request smuggling (CL.TE, TE.CL, H2) | ❌ | ✅ | 4 (approval; can affect others) |
-| CORS: arbitrary / null / trusted-subdomain origins | ✅ passive | ✅ | 3 (active origin probing) |
+| CORS: arbitrary / null / trusted-subdomain origins | ✅ passive + active (4 origins) | ✅ | 3 |
 | HTTP method override / TRACE | ❌ | ✅ (methods) | 3 |
 
 ## Access control and logic
@@ -67,13 +67,13 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Issue | ProxyMind | BurpMax | Step |
 |---|---|---|---|
 | IDOR / broken object authorization | ✅ (differential authz, proven) | ✅ | – |
-| Authentication bypass (path, header, method tricks) | ❌ | ✅ | 3 |
+| Authentication bypass (path, header, method tricks) | ✅ step 3 (8 path tricks, rewrite and IP headers, with a control) | ✅ | 3 |
 | Mass assignment | ❌ | ✅ | 4 (approval) |
 | Race conditions | ✅ (Repeater race, single-packet) | ✅ | 4 (as a scan check) |
 | JWT (none alg, weak secret, kid/jku) | ❌ | ✅ | 4 |
 | OAuth / OIDC (redirect_uri, state, PKCE) | ❌ | ✅ | 4 |
 | GraphQL (introspection, batching, depth) | 🟡 (introspection, passive) | ✅ | 4 |
-| Hidden parameters (param mining) | ❌ | ✅ | 3 |
+| Hidden parameters (param mining) | ✅ step 3 (70 names, reflection or difference, bisected) | ✅ | 3 |
 
 ## Information disclosure and configuration (mostly passive)
 
@@ -119,7 +119,9 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
    collected while the slower checks run)*
 3. Stored and DOM XSS, CSRF, Host header, active CORS, NoSQL/LDAP/XPath,
    CRLF, auth bypass, hidden parameters, richer insertion points, one
-   crawl-and-audit task.
+   crawl-and-audit task. *(3a done: NoSQL/LDAP/XPath, CRLF, Host header,
+   CORS, auth bypass, hidden parameters; 3b next: stored and DOM XSS, CSRF,
+   insertion points, crawl-and-audit)*
 4. JWT, OAuth, GraphQL depth, request smuggling, cache poisoning and
    deception, prototype pollution, deserialization, file upload, mass
    assignment, race checks: the risky ones behind approval.

@@ -141,3 +141,48 @@ async fn agents_need_approval_and_get_a_proof_hint() {
     let bad = ActiveScanRequest { exchange_id: ex, checks: vec!["nope".into()], ..Default::default() };
     assert!(s.scan_active(&human(), bad).await.is_err());
 }
+
+#[tokio::test]
+async fn header_operator_and_access_checks() {
+    let (s, url) = setup().await;
+    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: shop.test\r\n\r\n");
+    let cases: [(String, &str, &str); 6] = [
+        (get("/api/lang?set=en"), "crlf", "query set"),
+        (get("/api/share?product=1"), "host_header", "request host header"),
+        (get("/api/me"), "cors", "request origin header"),
+        (get("/api/internal/config"), "auth_bypass", "request path and headers"),
+        (
+            "POST /api/v2/login HTTP/1.1\r\nHost: shop.test\r\nContent-Type: application/json\r\n\r\n\
+             {\"username\":\"alice\",\"password\":\"wrong\"}"
+                .to_string(),
+            "nosql_operator",
+            "json password",
+        ),
+        (get("/api/products"), "hidden_params", "request parameters"),
+    ];
+    for (raw, check, point) in cases {
+        let ex = record_raw(&s, &url, &raw).await;
+        let found = checks_with(&s, ex, &[check]).await;
+        assert_eq!(
+            found.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect::<Vec<_>>(),
+            [(check, point)],
+            "{check}: {found:?}"
+        );
+        if check == "cors" {
+            assert!(found[0].2.contains("credentials: true"));
+        }
+        if check == "auth_bypass" {
+            assert!(found[0].2.contains("X-Forwarded-For"), "{}", found[0].2);
+        }
+        if check == "hidden_params" {
+            assert!(found[0].2.contains("debug="), "{}", found[0].2);
+        }
+    }
+    // Correctly built look-alikes stay quiet.
+    let quiet = ["crlf", "host_header", "cors", "auth_bypass", "nosql_operator", "hidden_params", "sql_error"];
+    for trap in ["/help?topic=orders", "/api/admin/stats", "/api/invoices/5001", "/out?url=/home"] {
+        let ex = record_raw(&s, &url, &get(trap)).await;
+        let found = checks_with(&s, ex, &quiet).await;
+        assert!(found.is_empty(), "{trap}: {found:?}");
+    }
+}

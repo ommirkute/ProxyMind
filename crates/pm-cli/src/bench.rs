@@ -74,6 +74,18 @@ pub fn class_family(c: &str) -> &'static str {
         "command_injection"
     } else if c.contains("xxe") || c.contains("xml_external") {
         "xxe"
+    } else if c.contains("host_header") {
+        "host_header"
+    } else if c.contains("crlf") || c.contains("header_injection") || c.contains("response_splitting") {
+        "crlf"
+    } else if c.contains("cors") {
+        "cors"
+    } else if c.contains("ldap") {
+        "ldap_injection"
+    } else if c.contains("xpath") {
+        "xpath_injection"
+    } else if c.contains("bypass") {
+        "auth_bypass"
     } else if c.contains("code_injection") || c.contains("eval") || c.contains("log4") || c.contains("jndi") {
         "code_injection"
     } else if c.contains("ssrf") {
@@ -206,6 +218,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn scanner_classes_map_to_their_families() {
+        for (class, family) in [
+            ("host_header_injection", "host_header"),
+            ("crlf", "crlf"),
+            ("auth_bypass", "auth_bypass"),
+            ("nosqli", "nosqli"),
+            ("sqli_blind", "sqli"),
+            ("cors", "cors"),
+            ("command_injection", "command_injection"),
+            ("xxe", "xxe"),
+            ("resource", "resource"),
+        ] {
+            assert_eq!(class_family(class), family, "{class}");
+        }
+    }
+
+    #[test]
     fn scores_found_proven_and_false_positives() {
         let truth = load_truth(None).unwrap();
         let findings = vec![
@@ -215,7 +244,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 16));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 22));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

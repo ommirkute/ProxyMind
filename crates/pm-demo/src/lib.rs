@@ -147,6 +147,49 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         description: "Product imports are XML; the parser resolves external entities and fetches their http:// URLs \
                       (blind XXE, seen out of band).",
     },
+    Vuln {
+        id: "VS-17",
+        class: "auth_bypass",
+        method: "GET",
+        path: "/api/internal/config",
+        description: "Internal-only config is denied (403) unless X-Forwarded-For says 127.0.0.1, which any client \
+                      can send.",
+    },
+    Vuln {
+        id: "VS-18",
+        class: "crlf",
+        method: "GET",
+        path: "/api/lang",
+        description: "The set parameter goes into a Set-Cookie header undecoded-safe: CR LF adds headers.",
+    },
+    Vuln {
+        id: "VS-19",
+        class: "host_header_injection",
+        method: "GET",
+        path: "/api/share",
+        description: "Share links are built from the Host header, so a forged Host poisons them.",
+    },
+    Vuln {
+        id: "VS-20",
+        class: "cors",
+        method: "GET",
+        path: "/api/me",
+        description: "Any Origin is echoed back with Access-Control-Allow-Credentials: true.",
+    },
+    Vuln {
+        id: "VS-21",
+        class: "nosqli",
+        method: "POST",
+        path: "/api/v2/login",
+        description: "A MongoDB-style login: {\"$ne\": …} as the password logs in as anyone.",
+    },
+    Vuln {
+        id: "VS-22",
+        class: "exposure",
+        method: "GET",
+        path: "/api/products",
+        description: "A hidden debug parameter adds internal settings (with a database password) to the product list.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -381,7 +424,7 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
-<a href='/help?topic=orders'>Help</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<a href='/help?topic=orders'>Help</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
 
 /// An in-memory SQLite database for the SQL injection demos, with MySQL's
@@ -466,6 +509,28 @@ async fn fake_shell(line: &str) -> String {
         let _ = fetch(url).await;
     }
     out
+}
+
+/// A MongoDB-style match of one field: a plain value, or an operator object.
+fn mongo_match(cond: &Value, actual: &str) -> bool {
+    match cond {
+        Value::String(s) => s == actual,
+        Value::Object(o) => o.iter().all(|(op, v)| {
+            let s = v.as_str().unwrap_or_default();
+            match op.as_str() {
+                "$eq" => s == actual,
+                "$ne" => s != actual,
+                "$gt" => actual > s,
+                "$lt" => actual < s,
+                "$in" => v.as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(actual))),
+                "$nin" => v.as_array().is_some_and(|a| !a.iter().any(|x| x.as_str() == Some(actual))),
+                // Only the patterns the demo needs: anything, or an exact anchored string.
+                "$regex" => s == ".*" || s.strip_prefix('^').and_then(|x| x.strip_suffix('$')) == Some(actual),
+                _ => false,
+            }
+        }),
+        _ => false,
+    }
 }
 
 /// URLs of external entities an XML document declares and uses.
@@ -848,7 +913,12 @@ impl VulnShop {
             ("GET", ["out"]) => {
                 // Secure look-alike: only same-site paths.
                 let url = req.query.get("url").cloned().unwrap_or_else(|| "/".into());
-                if url.starts_with('/') && !url.starts_with("//") && !url.contains('\\') {
+                // (Control characters too: a CR LF here would split the header.)
+                if url.starts_with('/')
+                    && !url.starts_with("//")
+                    && !url.contains('\\')
+                    && !url.contains(char::is_control)
+                {
                     Response {
                         status: 302,
                         headers: vec![("Location".into(), url)],
@@ -888,7 +958,7 @@ impl VulnShop {
             ("GET", ["robots.txt"]) => Response {
                 status: 200,
                 headers: vec![],
-                body: "User-agent: *\nDisallow: /api/admin/\nDisallow: /*.bak$\n".into(),
+                body: "User-agent: *\nDisallow: /api/admin/\nDisallow: /api/internal/\nDisallow: /*.bak$\n".into(),
                 content_type: "text/plain",
             },
             ("GET", ["help"]) => {
@@ -925,23 +995,77 @@ impl VulnShop {
                 }
                 json_resp(200, json!({"ok": true}))
             }
-            ("GET", ["api", "me"]) => match self.user(req) {
-                Some(u) => json_resp(
-                    200,
-                    json!({"id": u.id, "username": u.name, "email": format!("{}@vulnshop.test", u.name), "role": u.role, "meta": self.meta()}),
-                ),
-                None => unauthorized(),
-            },
+            ("GET", ["api", "me"]) => {
+                let mut r = match self.user(req) {
+                    Some(u) => json_resp(
+                        200,
+                        json!({"id": u.id, "username": u.name, "email": format!("{}@vulnshop.test", u.name), "role": u.role, "meta": self.meta()}),
+                    ),
+                    None => unauthorized(),
+                };
+                // VS-20: any Origin is trusted, with cookies.
+                if let Some(o) = req.header("origin") {
+                    r.headers.push(("Access-Control-Allow-Origin".into(), o.to_string()));
+                    r.headers.push(("Access-Control-Allow-Credentials".into(), "true".into()));
+                }
+                r
+            }
+            ("GET", ["api", "internal", "config"]) => {
+                // VS-17: "internal only", judged by a header any client can set.
+                if req.header("x-forwarded-for").is_some_and(|v| v.trim() == "127.0.0.1") {
+                    json_resp(
+                        200,
+                        json!({"database": "postgres://shop:s3cret@db/shop", "debug": true, "feature_flags": ["beta"]}),
+                    )
+                } else {
+                    json_resp(403, json!({"error": "internal only"}))
+                }
+            }
+            ("GET", ["api", "lang"]) => {
+                // VS-18: the value goes into a header as is (CR LF splits it).
+                let lang = req.query.get("set").cloned().unwrap_or_else(|| "en".into());
+                Response {
+                    status: 302,
+                    headers: vec![
+                        ("Location".into(), "/".into()),
+                        ("Set-Cookie".into(), format!("lang={lang}; Path=/")),
+                    ],
+                    body: String::new(),
+                    content_type: "text/plain",
+                }
+            }
+            ("GET", ["api", "share"]) => {
+                // VS-19: links built from the Host header.
+                let host = req.header("host").unwrap_or("localhost").to_string();
+                let id = req.query.get("product").cloned().unwrap_or_else(|| "1".into());
+                json_resp(200, json!({"link": format!("http://{host}/products/{id}")}))
+            }
+            ("POST", ["api", "v2", "login"]) => {
+                // VS-21: a MongoDB-style match: operators in the JSON are run.
+                let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                    return json_resp(400, json!({"error": "send JSON"}));
+                };
+                let user = USERS
+                    .iter()
+                    .find(|u| mongo_match(&body["username"], u.name) && mongo_match(&body["password"], u.password));
+                match user {
+                    Some(u) => json_resp(200, json!({"token": format!("v2-{}", u.id), "user": u.name})),
+                    None => json_resp(401, json!({"error": "invalid username or password"})),
+                }
+            }
             ("GET", ["api", "products"]) => {
                 // VS-15: the User-Agent goes into a visit-log lookup as is (blind; the result isn't shown).
                 let ua = req.header("user-agent").unwrap_or_default().to_string();
                 let _ = demo_query(format!("SELECT count(*) FROM visits WHERE ua = '{ua}'")).await;
-                json_resp(
-                    200,
-                    json!({"products": [
-                        {"id": 1, "name": "Coffee", "price": 4.5}, {"id": 2, "name": "Tea", "price": 3.0}, {"id": 3, "name": "Cake", "price": 6.25}
-                    ]}),
-                )
+                let mut body = json!({"products": [
+                    {"id": 1, "name": "Coffee", "price": 4.5}, {"id": 2, "name": "Tea", "price": 3.0}, {"id": 3, "name": "Cake", "price": 6.25}
+                ]});
+                // VS-22: an undocumented debug switch.
+                if req.query.contains_key("debug") {
+                    body["internal"] =
+                        json!({"db_password": "s3cret", "cache": "redis://10.0.0.7:6379", "build": "4.2.1-dev"});
+                }
+                json_resp(200, body)
             }
             ("POST", ["api", "import"]) => {
                 // VS-16: an XML parser that resolves external entities (http:// only).

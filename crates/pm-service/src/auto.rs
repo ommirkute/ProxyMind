@@ -69,6 +69,13 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("ssti_oob", "ssti"),
     ("log4shell", "rce"),
     ("code_oob", "code_injection"),
+    ("crlf", "crlf"),
+    ("nosql_operator", "nosqli"),
+    ("auth_bypass", "auth_bypass"),
+    // Issues the sql_error probes report for other query languages.
+    ("nosql_error", "nosqli"),
+    ("ldap_error", "ldap_injection"),
+    ("xpath_error", "xpath_injection"),
 ];
 
 /// Most operations with parameters one sweep scans, and most without.
@@ -205,14 +212,18 @@ impl Service {
     pub async fn auto_active_sweep(&self, actor: &Actor) -> Result<ScanSweep> {
         let model = self.model()?;
         let mut sweep = ScanSweep::default();
-        let checks: Vec<String> = SWEEP_CHECKS.iter().map(|(c, _)| c.to_string()).collect();
+        // The checks to request (issue-only names like nosql_error come from sql_error).
+        let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
+        let checks: Vec<String> =
+            SWEEP_CHECKS.iter().filter(|(c, _)| runnable(c)).map(|(c, _)| c.to_string()).collect();
         // GETs that worked, minus ones whose name says they change state
         // (`/createdb`, `/logout`…: a GET is not always harmless).
         let candidates: Vec<_> = model
             .operations
             .iter()
             .filter(|o| o.method == "GET" && !changes_state(&o.template))
-            .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
+            // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass candidates).
+            .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
             .collect();
         // Operations with parameters first; then a few without, whose
         // cookies and headers (User-Agent…) are the insertion points.
