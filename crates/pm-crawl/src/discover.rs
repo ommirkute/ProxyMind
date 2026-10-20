@@ -46,6 +46,8 @@ pub const BUILTIN_WORDS: &[&str] = &[
     "docs",
     "dump.sql",
     "env",
+    "files/",
+    "ftp/",
     "graphql",
     "graphiql",
     "health",
@@ -241,6 +243,7 @@ pub fn interesting(path: &str) -> Option<&'static str> {
         ("api-docs", "API description"),
         ("graphql", "GraphQL endpoint"),
         ("metrics", "metrics"),
+        ("ftp/", "file share"),
         ("config", "configuration"),
         ("web.config", "configuration"),
     ];

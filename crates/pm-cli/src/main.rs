@@ -456,9 +456,17 @@ enum BenchAction {
         #[arg(long)]
         json: bool,
     },
-    /// The model-free baseline: check every access-control candidate as the
-    /// other identities, then record and prove each leak.
+    /// The model-free baseline: look for hidden files and an API description
+    /// (imported, GET examples sent), check every access-control candidate
+    /// as the other identities and prove each leak, then sweep the recorded
+    /// GET operations with the active scanner.
     Auto {
+        /// Skip content discovery
+        #[arg(long)]
+        no_discover: bool,
+        /// Skip the active-scanner sweep
+        #[arg(long)]
+        no_scan: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1899,12 +1907,32 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Auto { json } } => {
+        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, json } } => {
             let service = open_service(&cli.project, None)?;
-            let r = service.auto_access_control(&human_actor(None)?).await?;
+            let me = human_actor(None)?;
+            let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
+            let r = service.auto_access_control(&me).await?;
+            let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
             if *json {
-                out!("{}", serde_json::to_string_pretty(&r)?);
+                out!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "discover": disc, "access_control": r, "scan": sweep })
+                    )?
+                );
             } else {
+                if let Some(d) = &disc {
+                    out!("discovery: {} found on {} origin(s)", d.found, d.origins.len());
+                    for l in &d.leads {
+                        out!("  ? suspected exposure {} (finding #{})", l.operation, l.finding_id);
+                    }
+                    if let Some((url, ops, sent)) = &d.openapi {
+                        out!("  API description {url}: {ops} operations, {sent} GET examples sent");
+                    }
+                    for s in d.skipped.iter().take(10) {
+                        out!("  skipped {s}");
+                    }
+                }
                 out!("{} candidates, {} checked, {} leaks", r.candidates, r.checks, r.leaks);
                 for p in &r.results {
                     out!(
@@ -1916,6 +1944,20 @@ async fn run() -> Result<()> {
                         p.finding_id
                     );
                 }
+                if let Some(sw) = &sweep {
+                    out!(
+                        "active sweep: {} operations, {} requests, {} leads",
+                        sw.operations,
+                        sw.requests,
+                        sw.leads.len()
+                    );
+                    for l in &sw.leads {
+                        out!("  ? suspected {} {} (finding #{})", l.check, l.operation, l.finding_id);
+                    }
+                    for s in sw.skipped.iter().take(10) {
+                        out!("  skipped {s}");
+                    }
+                }
             }
         }
         Command::Bench { action: BenchAction::Score { truth, app, json } } => {
@@ -1924,7 +1966,16 @@ async fn run() -> Result<()> {
                 Some(a) => bench::builtin_truth(a)?,
                 None => bench::load_truth(truth.as_deref())?,
             };
-            let score = bench::score(&truth, &service.finding_list(None)?);
+            // The method comes from each finding's first evidence exchange, so a
+            // GET finding never matches a DELETE endpoint with the same path.
+            let mut findings = service.finding_list(None)?;
+            for f in &mut findings {
+                let first = f["evidence"].as_array().and_then(|e| e.first()).and_then(serde_json::Value::as_i64);
+                if let Some(ex) = first.and_then(|id| service.exchange_raw(id).ok()) {
+                    f["method"] = serde_json::json!(ex.summary.method);
+                }
+            }
+            let score = bench::score(&truth, &findings);
             if *json {
                 out!("{}", serde_json::to_string_pretty(&score)?);
             } else {

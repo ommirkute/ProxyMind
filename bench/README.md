@@ -22,7 +22,7 @@ cargo build --release
 PROXYMIND=$PWD/target/release/proxymind bench/run.sh vampi      # or juice-shop, vulnshop
 ```
 
-The runner starts the app, browses it through the proxy as two users (profiles in [`apps/`](apps/)), captures their sessions, crawls, runs the **model-free access-control pass** (`proxymind bench auto`: check every candidate the app model suggests as the other identities, record and prove each leak, and drop what can't be proven), runs the passive scan, then scores with `proxymind bench score --app <app>`.
+The runner starts the app, browses it through the proxy as two users (profiles in [`apps/`](apps/)), captures their sessions, crawls, runs the **model-free baseline** (`proxymind bench auto`), runs the passive scan, then scores with `proxymind bench score --app <app>`.
 
 To score an agent, set `BENCH_AGENT` to a command; it runs with `PROXYMIND_PROJECT` pointing at the project, after the baseline steps:
 
@@ -32,12 +32,18 @@ BENCH_AGENT='claude -p "Use the proxymind MCP server to find and prove vulnerabi
 
 The nightly workflow runs the baseline on VulnShop, VAmPI and Juice Shop and posts the scores in the job summary.
 
+The model-free baseline (`proxymind bench auto`) has three steps, all through the policy gate:
+
+1. **Discovery**: hidden files at each origin's root. Sensitive ones (source control, `.env`, dumps, metrics) become suspected *exposure* findings, one per kind. An API description that turns up is imported and its GET examples sent, so the next steps see those endpoints.
+2. **Access control**: every candidate the app model suggests (objects with a known owner, admin-looking operations) is replayed as the other identities; leaks are recorded and proven, unprovable ones dropped. Data an anonymous request also gets is public, not a leak.
+3. **Active sweep**: the active scanner runs once over each recorded GET operation with parameters (query values and path identifiers, including words like `/users/v1/{username}`); SQL errors, template evaluation, file reads and open redirects become suspected findings.
+
 ## Baseline today (no agent)
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 2/6 | 2/6 | 0 |
-| Juice Shop | 1/8 | 1/8 | 0 |
-| VAmPI | 0/7 | 0/7 | 0 |
+| VulnShop | 4/13 | 2/13 | 0 |
+| Juice Shop | 3/8 | 1/8 | 0 |
+| VAmPI | 2/7 | 1/7 | 0 |
 
-The baseline only tests access control on objects the model recognises by numeric or UUID ids; VAmPI identifies objects by name (book titles, usernames), which the model doesn't template yet. Everything else is for agents.
+Measured 2026-10-20 against the pinned images. VulnShop's other bugs sit on endpoints that nothing links to and its OpenAPI file doesn't list, or need a browser (XSS), timing (blind SQLi), concurrency (race) or a second step (GraphQL, reset codes): that's what agents are for.

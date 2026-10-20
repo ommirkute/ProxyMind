@@ -110,6 +110,11 @@ fn endpoint_of(f: &Value) -> (String, String) {
     (pm_model::template_path(&path).0, path)
 }
 
+/// A finding's method (when known, from its evidence) must match the endpoint's.
+fn same_method(f: &Value, method: &str) -> bool {
+    f["method"].as_str().is_none_or(|m| m.eq_ignore_ascii_case(method))
+}
+
 /// `/users/v1/{username}` matches `/users/v1/name1`: each `{…}` segment of
 /// the ground truth matches any one non-empty segment.
 pub fn path_matches(pattern: &str, path: &str) -> bool {
@@ -129,7 +134,7 @@ pub fn score(truth: &Truth, findings: &[Value]) -> Score {
         for f in &live {
             let (template, raw_path) = endpoint_of(f);
             let same_class = class_family(f["vuln_class"].as_str().unwrap_or("")) == class_family(&v.class);
-            if same_class && (template == v.path || path_matches(&v.path, &raw_path)) {
+            if same_class && same_method(f, &v.method) && (template == v.path || path_matches(&v.path, &raw_path)) {
                 let id = f["id"].as_i64().unwrap_or(0);
                 ids.push(id);
                 matched.insert(id);
@@ -152,10 +157,10 @@ pub fn score(truth: &Truth, findings: &[Value]) -> Score {
         .iter()
         .filter(|f| {
             let (template, raw_path) = endpoint_of(f);
-            truth
-                .secure
-                .iter()
-                .any(|s| s.split_once(' ').is_some_and(|(_, p)| p == template || path_matches(p, &raw_path)))
+            truth.secure.iter().any(|s| {
+                s.split_once(' ')
+                    .is_some_and(|(m, p)| same_method(f, m) && (p == template || path_matches(p, &raw_path)))
+            })
         })
         .filter_map(|f| f["id"].as_i64())
         .collect();
@@ -205,6 +210,10 @@ mod tests {
         ];
         let s = score(&truth, &findings);
         assert_eq!((s.found, s.proven, s.total), (2, 1, 13));
+        // A known method must match: the same path with another method is another endpoint.
+        let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
+            "url": "http://x/api/orders/1001"})];
+        assert_eq!(score(&truth, &delete).found, 0);
         assert_eq!(s.unmatched_findings, vec![3]);
         assert_eq!(s.findings_on_secure_endpoints, vec![3]);
         let race = vec![json!({"id": 9, "vuln_class": "race condition (TOCTOU)", "status": "proven",

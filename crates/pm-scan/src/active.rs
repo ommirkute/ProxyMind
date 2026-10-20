@@ -3,7 +3,8 @@
 //! sends the probes through the policy gate.
 //!
 //! Insertion points are query parameters, form fields, JSON string and
-//! number values, and numeric path segments. Checks:
+//! number values, numeric path segments, and other path segments the caller
+//! knows are identifiers (from the app model, e.g. `/users/{username}`). Checks:
 //!
 //! | check | payloads | flagged when |
 //! |---|---|---|
@@ -192,6 +193,12 @@ fn json_leaves(v: &serde_json::Value, ptr: String, out: &mut Vec<(String, String
 
 /// Places where payloads can go in `raw`.
 pub fn points(raw: &str) -> Vec<Point> {
+    points_with(raw, &[])
+}
+
+/// Like [`points`], plus the path segments at `id_segments` (indices in
+/// `path.split('/')`), for identifiers that aren't numbers.
+pub fn points_with(raw: &str, id_segments: &[usize]) -> Vec<Point> {
     let Some(p) = parse(raw) else { return Vec::new() };
     let mut out = Vec::new();
     let (path, query) = p.target.split_once('?').unwrap_or((p.target, ""));
@@ -204,7 +211,8 @@ pub fn points(raw: &str) -> Vec<Point> {
         });
     }
     for (i, seg) in path.split('/').enumerate() {
-        if !seg.is_empty() && seg.len() <= 20 && seg.chars().all(|c| c.is_ascii_digit()) {
+        let numeric = seg.len() <= 20 && seg.chars().all(|c| c.is_ascii_digit());
+        if !seg.is_empty() && (numeric || (id_segments.contains(&i) && seg.len() <= 200)) {
             out.push(Point {
                 kind: PointKind::Path,
                 name: format!("path segment {i}"),
@@ -301,9 +309,14 @@ pub const REDIRECT_TARGET: &str = "https://pm-redirect.example/";
 
 /// The probes for `checks` (all when empty), at most `limit`.
 pub fn probes(raw: &str, checks: &[String], marker: &str, limit: usize) -> Vec<Probe> {
+    probes_with(raw, checks, marker, limit, &[])
+}
+
+/// Like [`probes`], with extra identifier path segments (see [`points_with`]).
+pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_segments: &[usize]) -> Vec<Probe> {
     let want = |c: &str| checks.is_empty() || checks.iter().any(|x| x == c);
     let mut out = Vec::new();
-    for pt in points(raw) {
+    for pt in points_with(raw, id_segments) {
         let mut add = |check: &'static str, payload: String| {
             if out.len() < limit
                 && let Some(r) = inject(raw, &pt, &payload)
@@ -461,6 +474,16 @@ mod tests {
         assert_eq!(pts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["b", "n"]);
         let raw = String::from_utf8(inject(json, &pts[0], "'").unwrap()).unwrap();
         assert!(raw.ends_with("{\"a\":{\"b\":\"'\"},\"n\":5,\"t\":true}"), "{raw}");
+    }
+
+    #[test]
+    fn word_identifiers_in_paths_when_known() {
+        let raw = "GET /users/v1/name1 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(points(raw).is_empty(), "words aren't guessed");
+        let pts = points_with(raw, &[3]);
+        assert_eq!((pts.len(), pts[0].original.as_str()), (1, "name1"));
+        let sql = probes_with(raw, &["sql_error".into()], "m", 10, &[3]);
+        assert!(String::from_utf8_lossy(&sql[0].raw).starts_with("GET /users/v1/name1%27 HTTP/1.1"));
     }
 
     #[test]

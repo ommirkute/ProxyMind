@@ -279,6 +279,14 @@ const ERRORS: &[(&str, &str)] = &[
     ("psqlexception", "PostgreSQL error"),
     ("sqlstate[", "SQL error (PDO)"),
     ("sqlite3::", "SQLite error"),
+    ("sqlite3.operationalerror", "SQLite error"),
+    ("sqlite3.databaseerror", "SQLite error"),
+    ("sqlalchemy.exc.", "SQL error (SQLAlchemy)"),
+    ("psycopg2.errors.", "PostgreSQL error"),
+    ("syntax error at or near", "PostgreSQL error"),
+    ("pymysql.err.", "MySQL error"),
+    ("mysql.connector.errors", "MySQL error"),
+    ("django.db.utils.", "SQL error (Django)"),
     ("sqlite_error", "SQLite error"),
     ("traceback (most recent call last)", "Python traceback"),
     ("at java.", "Java stack trace"),
@@ -464,6 +472,8 @@ mod tests {
             vec!["version_disclosure", "sql_error"]
         );
         assert_eq!(run("https", GET, 500, &[], "Traceback (most recent call last):\n  File"), vec!["verbose_error"]);
+        let flask = "<title>sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) unrecognized token</title>";
+        assert_eq!(run("https", GET, 500, &[], flask), vec!["sql_error"]);
         assert_eq!(run("https", GET, 200, &[], "{\"key\":\"AKIAABCDEFGHIJKLMNOP\"}"), vec!["secret_in_response"]);
         assert!(run("https", GET, 200, &[], "{\"word\":\"MAKIAVELLI\"}").is_empty(), "inside a word");
         assert_eq!(run("https", GET, 200, &[], "-----BEGIN PRIVATE KEY-----\nMII"), vec!["secret_in_response"]);

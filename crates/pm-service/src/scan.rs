@@ -262,6 +262,19 @@ impl Service {
     /// Active checks on one recorded request: one gate decision (at least
     /// intrusive) covers every probe; probes go through rate limits and
     /// into history like any send.
+    /// Indices of path segments that the app model's template for this
+    /// exchange marks as parameters.
+    fn id_segments(&self, exchange_id: i64, path: &str) -> Vec<usize> {
+        let Ok(model) = self.model() else { return Vec::new() };
+        let Some(op) = model.operations.iter().find(|o| o.examples.contains(&exchange_id)) else { return Vec::new() };
+        let segs: Vec<&str> = path.split(['?', '#']).next().unwrap_or("/").split('/').collect();
+        let tpl: Vec<&str> = op.template.split('/').collect();
+        if segs.len() != tpl.len() {
+            return Vec::new();
+        }
+        tpl.iter().enumerate().filter(|(_, t)| t.starts_with('{')).map(|(i, _)| i).collect()
+    }
+
     pub async fn scan_active(&self, actor: &Actor, req: ActiveScanRequest) -> Result<ActiveScanResult> {
         use crate::Authorization;
         if let Some(bad) = req.checks.iter().find(|c| !pm_scan::active::CHECKS.contains(&c.as_str())) {
@@ -280,7 +293,9 @@ impl Service {
         let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
         let marker = format!("pm{}", &pm_oast::new_token()[..10]);
         let limit = req.max_requests.unwrap_or(100).clamp(1, 500);
-        let probes = pm_scan::active::probes(&raw, &req.checks, &marker, limit);
+        // Path segments the app model knows are identifiers (`/users/{username}`) are tested too.
+        let id_segments = self.id_segments(req.exchange_id, &ex.summary.path);
+        let probes = pm_scan::active::probes_with(&raw, &req.checks, &marker, limit, &id_segments);
         if probes.is_empty() {
             return Err(crate::ServiceError::Invalid(
                 "no insertion points in this request (no query, form, JSON or numeric path values)".into(),

@@ -56,3 +56,32 @@ async fn agents_out_of_scope_are_denied() {
         .unwrap();
     assert!(matches!(r, DiscoverResult::Denied { .. }), "{r:?}");
 }
+
+#[tokio::test]
+async fn the_baseline_discovers_imports_and_sweeps() {
+    let (s, url) = setup().await;
+    let human = Actor::parse("human:t").unwrap();
+    // A little browsing so the model knows the origin.
+    let get = |path: &str| pm_service::ReplayRequest {
+        url: Some(url.clone()),
+        raw: Some(format!("GET {path} HTTP/1.1\r\nHost: shop\r\n\r\n")),
+        ..Default::default()
+    };
+    s.replay_send(&human, get("/")).await.unwrap();
+
+    let d = s.auto_discover(&human).await.unwrap();
+    assert_eq!(d.origins, std::slice::from_ref(&url));
+    let exposed: Vec<&str> = d.leads.iter().map(|l| l.operation.as_str()).collect();
+    assert_eq!(exposed, [format!("GET {url}/.git/config").as_str()], "one finding per kind of exposure");
+    let (spec, ops, sent) = d.openapi.clone().expect("openapi.json imported");
+    assert!(spec.ends_with("/openapi.json"));
+    assert_eq!(ops, 9);
+    assert!(sent > 0);
+
+    // The sweep reaches what the spec's examples recorded: error-based SQLi in /api/reviews.
+    let sweep = s.auto_active_sweep(&human).await.unwrap();
+    assert!(sweep.leads.iter().any(|l| l.check == "sql_error" && l.operation.ends_with("/api/reviews")), "{sweep:?}");
+    let findings = s.finding_list(None).unwrap();
+    let classes: Vec<&str> = findings.iter().filter_map(|f| f["vuln_class"].as_str()).collect();
+    assert!(classes.contains(&"exposure") && classes.contains(&"sqli"), "{classes:?}");
+}

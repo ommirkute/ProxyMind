@@ -34,7 +34,7 @@ mod ws_replay;
 
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
-pub use auto::{AutoProven, AutoReport};
+pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use findings::{FindingUpdate, NewFinding};
