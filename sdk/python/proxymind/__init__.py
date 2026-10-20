@@ -199,6 +199,11 @@ class Client:
     def crawl(self, url: str, **extra: Any) -> dict:
         return self._check(self._post("/crawl", self._args(url=url, **extra)))
 
+    def discover(self, url: str, words: Optional[list] = None, extensions: Optional[list] = None,
+                 **extra: Any) -> dict:
+        """Looks for hidden files and folders under url (GET only; built-in list unless words are given)."""
+        return self._check(self._post("/discover", self._args(url=url, words=words, extensions=extensions, **extra)))
+
     def scan_active(self, exchange_id: int, checks: Optional[list] = None, **extra: Any) -> dict:
         return self._check(self._post("/scan/active", self._args(exchange_id=exchange_id, checks=checks, **extra)))
 

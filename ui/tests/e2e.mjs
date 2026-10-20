@@ -535,6 +535,13 @@ try {
   await page.waitForSelector('[data-testid="openapi-summary"]');
   check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 9 operations")), "the spec's 9 operations are listed");
 
+  console.log("Content discovery");
+  await page.getByRole("button", { name: "Find hidden paths…" }).click();
+  await page.getByLabel("Discover under").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByTestId("discover").click();
+  await page.waitForSelector('[data-testid="discover-summary"]', { timeout: 60000 });
+  check(await page.locator('[data-testid="discovered"]', { hasText: "/.git/config" }).count() === 1, "discovery finds /.git/config");
+
   console.log("GraphQL");
   await page.getByRole("button", { name: "Import GraphQL schema…" }).click();
   await page.getByLabel("GraphQL endpoint").fill(`http://127.0.0.1:${shop}/graphql`);

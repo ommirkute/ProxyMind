@@ -322,6 +322,25 @@ enum Command {
         #[arg(long)]
         identity: Option<String>,
     },
+    /// Look for hidden files and folders under a URL (GET only, in scope only).
+    Discover {
+        url: String,
+        /// Word list file (one path per line); default: the built-in list
+        #[arg(long)]
+        wordlist: Option<PathBuf>,
+        /// Also use the built-in list with --wordlist
+        #[arg(long)]
+        builtin: bool,
+        /// Extensions to try on words without one (repeatable), e.g. -x bak -x old
+        #[arg(long = "ext", short = 'x')]
+        extensions: Vec<String>,
+        #[arg(long, default_value_t = 500)]
+        max_requests: usize,
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
     Crawl {
         url: String,
@@ -1630,6 +1649,54 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             out!("{}", serde_json::to_string_pretty(&r)?);
+        }
+        Command::Discover { url, wordlist, builtin, extensions, max_requests, identity, json } => {
+            let service = open_service(&cli.project, None)?;
+            let words = match wordlist {
+                Some(f) => std::fs::read_to_string(f)
+                    .with_context(|| format!("reading {}", f.display()))?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(String::from)
+                    .collect(),
+                None => Vec::new(),
+            };
+            let r = service
+                .discover(
+                    &human_actor(None)?,
+                    pm_service::DiscoverRequest {
+                        url: url.clone(),
+                        words,
+                        builtin: *builtin,
+                        extensions: extensions.clone(),
+                        max_requests: Some(*max_requests),
+                        identity: identity.clone(),
+                        approval_id: None,
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (pm_service::DiscoverResult::Done { base, tried, found, soft_404, skipped, errors }, false) => {
+                    for f in found {
+                        let note = f.note.map(|n| format!("  ({n})")).unwrap_or_default();
+                        let loc = f.location.as_deref().map(|l| format!(" → {l}")).unwrap_or_default();
+                        out!("{:>5}  {:>8}  #{:<6} {}{loc}{note}", f.status, f.length, f.exchange_id, f.url);
+                    }
+                    out!(
+                        "\n{} found in {tried} requests under {base}{}",
+                        found.len(),
+                        if *soft_404 { " (the server answers missing pages with a soft 404; filtered)" } else { "" }
+                    );
+                    for s in skipped.iter().take(20) {
+                        out!("  skipped {s}");
+                    }
+                    for e in errors {
+                        out!("  error {e}");
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
+            }
         }
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
             let service = open_service(&cli.project, None)?;

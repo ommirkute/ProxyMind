@@ -62,6 +62,11 @@ vulns:
     method: POST
     path: /graphql
     description: The GraphQL invoice(id) resolver returns any user's invoice (REST checks ownership).
+  - id: VS-13
+    class: exposure
+    method: GET
+    path: /.git/config
+    description: The .git folder is served; its config has a deploy token in the remote URL.
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}

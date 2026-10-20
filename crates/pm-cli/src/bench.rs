@@ -204,7 +204,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 12));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 13));
         assert_eq!(s.unmatched_findings, vec![3]);
         assert_eq!(s.findings_on_secure_endpoints, vec![3]);
         let race = vec![json!({"id": 9, "vuln_class": "race condition (TOCTOU)", "status": "proven",

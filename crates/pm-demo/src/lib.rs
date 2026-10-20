@@ -115,6 +115,13 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/graphql",
         description: "The GraphQL invoice(id) resolver returns any user's invoice; the REST endpoint checks ownership.",
     },
+    Vuln {
+        id: "VS-13",
+        class: "exposure",
+        method: "GET",
+        path: "/.git/config",
+        description: "The git metadata folder is served; its config holds a deploy token in the remote URL.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -863,6 +870,37 @@ impl VulnShop {
                 match fetch(&url).await {
                     Ok(status) => json_resp(200, json!({"fetched": url, "status_line": status})),
                     Err(e) => json_resp(502, json!({"error": e})),
+                }
+            }
+            ("GET", [".git", "config"]) => {
+                // VS-13: source control metadata left on the server, with a credential.
+                Response {
+                    status: 200,
+                    headers: vec![],
+                    body: "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = \
+                           https://deploy:vs13-deploy-token-0f9a@git.vulnshop.test/shop.git\n"
+                        .into(),
+                    content_type: "text/plain",
+                }
+            }
+            ("GET", [".git", "HEAD"]) => Response {
+                status: 200,
+                headers: vec![],
+                body: "ref: refs/heads/main\n".into(),
+                content_type: "text/plain",
+            },
+            ("GET", ["app", "config.json"]) => json_resp(200, json!({"apiBase": "/api", "features": ["cart"]})),
+            ("GET", ["app", ..]) => {
+                // A single-page app: every other path gets the same shell with
+                // status 200 (a soft 404, a trap for content discovery).
+                Response {
+                    status: 200,
+                    headers: vec![],
+                    body: format!(
+                        "<!doctype html><title>VulnShop</title><div id=app data-path=\"{}\"></div>",
+                        html_escape(&req.path)
+                    ),
+                    content_type: "text/html; charset=utf-8",
                 }
             }
             _ => json_resp(404, json!({"error": "not found"})),

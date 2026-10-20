@@ -24,6 +24,7 @@ export default function Model() {
   return (
     <div className="content">
       <CrawlPanel />
+      <DiscoverPanel />
       <OpenApiPanel />
       <GraphQlPanel />
       <Panel
@@ -339,6 +340,73 @@ function GraphQlPanel() {
                   ))}
                 </tbody>
               </table>
+            </>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+type DiscoverResult =
+  | { status: "done"; base: string; tried: number; soft_404: boolean; skipped: string[]; errors: string[];
+      found: { url: string; status: number; length: number; exchange_id: number; location?: string; note?: string }[] }
+  | { status: "pending_approval"; approval_id: string; summary: string }
+  | { status: "denied"; reasons: string[] };
+
+/** Forced browsing: GET common hidden paths, in scope only, soft 404s filtered. */
+function DiscoverPanel() {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [words, setWords] = useState("");
+  const [exts, setExts] = useState("");
+  const [result, setResult] = useState<DiscoverResult | null>(null);
+  const [approval, setApproval] = useState<string | null>(null);
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      const list = words.split("\n").map((w) => w.trim()).filter(Boolean);
+      const extensions = exts.split(/[\s,]+/).filter(Boolean);
+      const r = await api.post<DiscoverResult>("/discover", { url, words: list, extensions, approval_id: approval || undefined });
+      setApproval(r.status === "pending_approval" ? r.approval_id : null);
+      setResult(r);
+    });
+  return (
+    <Panel title="Content discovery" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Find hidden paths…"}</button>}>
+      {open && (
+        <>
+          <p className="small muted">GET only, in scope only. Tries common hidden files and folders (.git, .env, backups, admin, actuator…) or your words; the server's not-found page is learned first so soft 404s aren't reported.</p>
+          <div className="row">
+            <input aria-label="Discover under" className="grow mono" placeholder="https://host/" value={url} onChange={(e) => setUrl(e.target.value)} />
+            <input aria-label="Extensions" placeholder="extensions: bak old" value={exts} onChange={(e) => setExts(e.target.value)} style={{ width: 160 }} />
+            <button className="btn primary" disabled={!url || action.busy} onClick={run} data-testid="discover">
+              {action.busy ? "Looking…" : approval ? "Run approved" : "Discover"}
+            </button>
+          </div>
+          <textarea aria-label="Words" className="mono" rows={3} value={words} onChange={(e) => setWords(e.target.value)} placeholder="your words, one per line (empty: built-in list)" style={{ width: "100%", marginTop: 6 }} />
+          <ErrorBox error={action.error} />
+          {result?.status === "pending_approval" && <div className="notice">Needs approval: {result.summary}. Approve it, then run again.</div>}
+          {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
+          {result?.status === "done" && (
+            <>
+              <div className="small" data-testid="discover-summary">
+                {result.found.length} found in {result.tried} requests{result.soft_404 ? " (soft 404s filtered)" : ""}
+              </div>
+              <table className="grid small">
+                <thead><tr><th>Status</th><th>URL</th><th>Size</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  {result.found.map((f) => (
+                    <tr key={f.url} data-testid="discovered">
+                      <td><StatusCode status={f.status} /></td>
+                      <td className="mono" style={{ wordBreak: "break-all" }}>{f.url}{f.location ? ` → ${f.location}` : ""}</td>
+                      <td>{f.length}</td>
+                      <td>{f.note ? <Chip value={f.note} /> : null}</td>
+                      <td><ExchangeLink id={f.exchange_id} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {result.skipped.length > 0 && <p className="small muted">Skipped: {result.skipped.join("; ")}</p>}
             </>
           )}
         </>

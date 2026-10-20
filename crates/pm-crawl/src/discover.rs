@@ -1,0 +1,308 @@
+//! Content discovery (forced browsing): candidate paths from a word list,
+//! and telling real pages from a server's "soft 404s".
+
+use url::Url;
+
+/// Common hidden files and folders. Short on purpose: a first look, not a
+/// brute force. Users can pass their own list.
+pub const BUILTIN_WORDS: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".git/HEAD",
+    ".git/config",
+    ".svn/entries",
+    ".hg/hgrc",
+    ".DS_Store",
+    ".htaccess",
+    ".htpasswd",
+    ".well-known/security.txt",
+    ".well-known/openid-configuration",
+    "admin",
+    "admin/",
+    "administrator",
+    "api",
+    "api/v1",
+    "api/v2",
+    "api/docs",
+    "api-docs",
+    "api/swagger.json",
+    "backup",
+    "backup.zip",
+    "backup.tar.gz",
+    "backup.sql",
+    "backups/",
+    "bak",
+    "config",
+    "config.json",
+    "config.yml",
+    "config.php.bak",
+    "console",
+    "crossdomain.xml",
+    "dashboard",
+    "db.sql",
+    "debug",
+    "dev",
+    "docs",
+    "dump.sql",
+    "env",
+    "graphql",
+    "graphiql",
+    "health",
+    "healthz",
+    "info.php",
+    "internal",
+    "jenkins",
+    "login",
+    "manage",
+    "management",
+    "metrics",
+    "monitoring",
+    "old",
+    "openapi.json",
+    "openapi.yaml",
+    "phpinfo.php",
+    "phpmyadmin/",
+    "private",
+    "prometheus",
+    "robots.txt",
+    "server-status",
+    "server-info",
+    "sitemap.xml",
+    "staging",
+    "status",
+    "swagger",
+    "swagger-ui.html",
+    "swagger.json",
+    "swagger/index.html",
+    "test",
+    "tmp",
+    "upload",
+    "uploads/",
+    "v1",
+    "v2",
+    "web.config",
+    "wp-admin/",
+    "wp-login.php",
+    "actuator",
+    "actuator/env",
+    "actuator/health",
+    "actuator/heapdump",
+    "_debug",
+    "__debug__/",
+    "trace.axd",
+    "elmah.axd",
+];
+
+/// Most candidates in one run.
+pub const MAX_CANDIDATES: usize = 5000;
+
+/// Candidate URLs under `base` (a directory: a trailing `/` is added), from
+/// `words` and each word with each extension. Words that are absolute URLs,
+/// climb out of the base (`..`) or contain a query are dropped.
+pub fn candidates(base: &Url, words: &[String], extensions: &[String]) -> Vec<Url> {
+    let mut dir = base.clone();
+    dir.set_query(None);
+    dir.set_fragment(None);
+    if !dir.path().ends_with('/') {
+        let p = format!("{}/", dir.path());
+        dir.set_path(&p);
+    }
+    let mut out: Vec<Url> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |w: &str, out: &mut Vec<Url>| {
+        let w = w.trim().trim_start_matches('/');
+        if w.is_empty()
+            || w.contains("://")
+            || w.contains(['?', '#', '\\'])
+            || w.split('/').any(|seg| seg == ".." || seg == ".")
+            || w.chars().any(|c| c.is_control() || c == ' ')
+        {
+            return;
+        }
+        if let Ok(u) = dir.join(w)
+            && u.as_str().starts_with(dir.as_str())
+            && seen.insert(u.to_string())
+            && out.len() < MAX_CANDIDATES
+        {
+            out.push(u);
+        }
+    };
+    for w in words {
+        add(w, &mut out);
+        let last = w.rsplit('/').next().unwrap_or_default();
+        if !w.ends_with('/') && !last.contains('.') {
+            for e in extensions {
+                let e = e.trim().trim_start_matches('.');
+                if !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    add(&format!("{w}.{e}"), &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a missing page looks like on this server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotFound {
+    pub status: u16,
+    pub length: usize,
+    /// Redirect target with the probe token removed, if it redirected.
+    pub location: Option<String>,
+    /// The body with the probe token removed, for comparison.
+    pub body: Vec<u8>,
+}
+
+impl NotFound {
+    /// Builds a fingerprint from a probe response; `token` is the random
+    /// part of the probe path, removed so it doesn't skew comparison.
+    pub fn new(status: u16, location: Option<&str>, body: &[u8], token: &str) -> Self {
+        let body = strip(body, token.as_bytes());
+        Self { status, length: body.len(), location: location.map(|l| l.replace(token, "")), body }
+    }
+
+    /// True when a response looks like this "not found" page: same status,
+    /// same redirect, and a body of near-identical size and content.
+    /// `word` is the requested candidate, which a soft 404 page may echo.
+    pub fn matches(&self, status: u16, location: Option<&str>, body: &[u8], word: &str) -> bool {
+        if status != self.status {
+            return false;
+        }
+        if (300..400).contains(&status) {
+            let loc = location.map(|l| l.replace(word, ""));
+            return loc == self.location;
+        }
+        let body = strip(body, word.as_bytes());
+        let (a, b) = (body.len() as f64, self.length as f64);
+        if (a - b).abs() > (b * 0.1).max(32.0) {
+            return false;
+        }
+        similarity(&body, &self.body) >= 0.9
+    }
+}
+
+fn strip(body: &[u8], needle: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return body.to_vec();
+    }
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i..].starts_with(needle) {
+            i += needle.len();
+        } else {
+            out.push(body[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Share of 4-byte shingles two bodies have in common (Jaccard), from
+/// their first 64 KB.
+fn similarity(a: &[u8], b: &[u8]) -> f64 {
+    use std::collections::HashSet;
+    let shingles = |x: &[u8]| -> HashSet<[u8; 4]> {
+        x[..x.len().min(64 * 1024)].windows(4).map(|w| [w[0], w[1], w[2], w[3]]).collect()
+    };
+    let (sa, sb) = (shingles(a), shingles(b));
+    if sa.is_empty() && sb.is_empty() {
+        return if a == b { 1.0 } else { 0.0 };
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    inter / (sa.len() + sb.len()) as f64 * 2.0
+}
+
+/// Why a found path deserves a look, if it does.
+pub fn interesting(path: &str) -> Option<&'static str> {
+    let p = path.to_ascii_lowercase();
+    const MARKERS: &[(&str, &str)] = &[
+        (".git/", "source control metadata"),
+        (".svn", "source control metadata"),
+        (".hg/", "source control metadata"),
+        (".env", "environment file (often secrets)"),
+        (".htpasswd", "password file"),
+        ("backup", "backup"),
+        (".bak", "backup"),
+        (".sql", "database dump"),
+        (".zip", "archive"),
+        (".tar", "archive"),
+        ("phpinfo", "server configuration"),
+        ("info.php", "server configuration"),
+        ("server-status", "server status page"),
+        ("actuator", "Spring Boot actuator"),
+        ("heapdump", "memory dump"),
+        ("debug", "debug endpoint"),
+        ("console", "admin console"),
+        ("admin", "admin area"),
+        ("swagger", "API description"),
+        ("openapi", "API description"),
+        ("api-docs", "API description"),
+        ("graphql", "GraphQL endpoint"),
+        ("metrics", "metrics"),
+        ("config", "configuration"),
+        ("web.config", "configuration"),
+    ];
+    MARKERS.iter().find(|(m, _)| p.contains(m)).map(|(_, why)| *why)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn builds_candidates_under_the_base() {
+        let base = Url::parse("https://a.test/app?x=1").unwrap();
+        let c = candidates(
+            &base,
+            &w(&["admin", "/backup", "x.php", "dir/", "../etc/passwd", "http://evil/", "a?b", "admin"]),
+            &w(&["bak", ".old", "b@d"]),
+        );
+        let got: Vec<&str> = c.iter().map(Url::as_str).collect();
+        assert_eq!(
+            got,
+            [
+                "https://a.test/app/admin",
+                "https://a.test/app/admin.bak",
+                "https://a.test/app/admin.old",
+                "https://a.test/app/backup",
+                "https://a.test/app/backup.bak",
+                "https://a.test/app/backup.old",
+                "https://a.test/app/x.php",
+                "https://a.test/app/dir/",
+            ]
+        );
+        let builtin: Vec<String> = BUILTIN_WORDS.iter().map(|s| s.to_string()).collect();
+        let all = candidates(&Url::parse("http://a.test/").unwrap(), &builtin, &[]);
+        assert_eq!(all.len(), BUILTIN_WORDS.len(), "no duplicates, nothing dropped");
+    }
+
+    #[test]
+    fn soft_404s() {
+        let page = |p: &str| format!("<html><h1>Not found</h1><p>The page /{p} does not exist.</p></html>");
+        let nf = NotFound::new(200, None, page("pm-x1y2z3").as_bytes(), "pm-x1y2z3");
+        assert!(nf.matches(200, None, page("admin").as_bytes(), "admin"), "same page, echoing the path");
+        assert!(!nf.matches(200, None, b"<html><h1>Admin</h1><form>...</form></html>", "admin"));
+        assert!(!nf.matches(403, None, page("admin").as_bytes(), "admin"));
+
+        let r = NotFound::new(302, Some("/login?next=/pm-abc"), b"", "pm-abc");
+        assert!(r.matches(302, Some("/login?next=/admin"), b"", "admin"), "redirects everything to login");
+        assert!(!r.matches(302, Some("/admin/"), b"", "admin"));
+
+        let real404 = NotFound::new(404, None, b"Cannot GET /pm-q9z", "pm-q9z");
+        assert!(real404.matches(404, None, b"Cannot GET /admin", "admin"));
+        assert!(!real404.matches(200, None, b"Cannot GET /admin", "admin"));
+    }
+
+    #[test]
+    fn interesting_paths() {
+        assert_eq!(interesting("/.git/config"), Some("source control metadata"));
+        assert_eq!(interesting("/backup.zip"), Some("backup"));
+        assert_eq!(interesting("/about"), None);
+    }
+}

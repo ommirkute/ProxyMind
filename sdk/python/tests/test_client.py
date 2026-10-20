@@ -98,6 +98,10 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(r["imported"], 1)
         self.assertTrue(self.pm.history(source="import", path="/copied"))
 
+    def test_discover(self):
+        r = self.pm.discover(f"{self.url}/", words=[".git/config", "nothing-here"])
+        self.assertEqual([f["url"] for f in r["found"]], [f"{self.url}/.git/config"])
+
     def test_graphql(self):
         r = self.pm.graphql_import(url=f"{self.url}/graphql", fetch=True)
         self.assertEqual([o["name"] for o in r["operations"]], ["me", "invoice", "products"])

@@ -333,6 +333,23 @@ pub fn tool_definitions() -> Vec<Value> {
             &["exchange_id", "locator"],
         ),
         tool(
+            "discover_content",
+            "Look for hidden files and folders under url (forced browsing): GET each word once (built-in list of \
+             common paths such as .git/config, .env, backup.zip, admin, actuator; or your words, optionally with \
+             extensions), in scope only, skipping paths that look like log out or delete. Tells real pages from the \
+             server's not-found page (soft 404). One approval covers the run.",
+            json!({
+                "url": {"type":"string","description":"The folder, e.g. https://app.example.com/"},
+                "words": {"type":"array","items":{"type":"string"}},
+                "builtin": {"type":"boolean","description":"Also use the built-in list when giving words"},
+                "extensions": {"type":"array","items":{"type":"string"}},
+                "max_requests": {"type":"integer","minimum":1,"maximum":5000},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &["url"],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -635,6 +652,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "sequencer_run" => {
             let r: pm_service::SequencerRequest = args(a)?;
             service.sequencer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "discover_content" => {
+            let r: pm_service::DiscoverRequest = args(a)?;
+            service.discover(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;

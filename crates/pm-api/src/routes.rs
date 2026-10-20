@@ -89,6 +89,7 @@ pub fn api() -> Router<AppState> {
         .route("/race", post(race))
         .route("/intruder", post(intruder))
         .route("/crawl", post(crawl))
+        .route("/discover", post(discover))
         .route("/tools/decode", post(tools_decode))
         .route("/tools/compare", post(tools_compare))
         .route("/tools/sequencer", post(tools_sequencer))
@@ -396,6 +397,10 @@ struct SiteQuery {
 
 async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiResult {
     ok(st.service.site_map(&st.actor, q.host.as_deref().filter(|h| !h.is_empty()))?)
+}
+
+async fn discover(State(st): State<AppState>, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
+    ok(st.service.discover(&st.actor, r).await?)
 }
 
 async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

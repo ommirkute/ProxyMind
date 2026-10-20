@@ -6,6 +6,8 @@
 //! the scanner is a small tolerant tokenizer that never panics and never
 //! executes anything.
 
+pub mod discover;
+
 use std::collections::{HashSet, VecDeque};
 
 use serde::Serialize;
