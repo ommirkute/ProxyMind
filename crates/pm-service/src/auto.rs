@@ -54,13 +54,28 @@ pub struct ScanSweep {
 /// difference from the baseline the server can't produce by accident).
 const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("sql_error", "sqli"),
+    ("cmd_injection", "command_injection"),
     ("ssti", "ssti"),
     ("path_traversal", "path_traversal"),
     ("open_redirect", "open_redirect"),
+    ("sql_boolean", "sqli"),
+    ("sql_time", "sqli"),
+    ("cmd_time", "command_injection"),
 ];
 
-/// Most operations one sweep scans.
+/// Most operations with parameters one sweep scans, and most without.
 const SWEEP_MAX_OPERATIONS: usize = 40;
+const SWEEP_MAX_PLAIN: usize = 20;
+
+/// Whether a path's words suggest that requesting it changes state.
+fn changes_state(template: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "logout", "signout", "sign-out", "log-out", "createdb", "initdb", "reset", "delete", "remove", "destroy",
+        "drop", "purge", "flush", "clear", "truncate", "shutdown", "restart", "reboot", "install", "setup", "seed",
+    ];
+    let t = template.to_ascii_lowercase();
+    WORDS.iter().any(|w| t.contains(w))
+}
 
 /// What content discovery added to the baseline.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -183,21 +198,40 @@ impl Service {
         let model = self.model()?;
         let mut sweep = ScanSweep::default();
         let checks: Vec<String> = SWEEP_CHECKS.iter().map(|(c, _)| c.to_string()).collect();
-        let ops = model
+        // GETs that worked, minus ones whose name says they change state
+        // (`/createdb`, `/logout`…: a GET is not always harmless).
+        let candidates: Vec<_> = model
             .operations
             .iter()
-            .filter(|o| o.method == "GET" && (!o.path_params.is_empty() || !o.query_params.is_empty()))
+            .filter(|o| o.method == "GET" && !changes_state(&o.template))
             .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
-            .take(SWEEP_MAX_OPERATIONS);
+            .collect();
+        // Operations with parameters first; then a few without, whose
+        // cookies and headers (User-Agent…) are the insertion points.
+        let has_params = |o: &&pm_model::Operation| !o.path_params.is_empty() || !o.query_params.is_empty();
+        let ops = candidates
+            .iter()
+            .filter(|o| has_params(o))
+            .take(SWEEP_MAX_OPERATIONS)
+            .chain(candidates.iter().filter(|o| !has_params(o)).take(SWEEP_MAX_PLAIN));
         for op in ops {
-            let Some(&example) = op.examples.last() else { continue };
+            // The recent example with the most insertion points (an imported
+            // example may lack the browser's cookies and headers).
+            let points = |id: i64| {
+                self.exchange_raw(id)
+                    .map(|e| pm_scan::active::points(&String::from_utf8_lossy(&e.request)).len())
+                    .unwrap_or(0)
+            };
+            let Some(&example) = op.examples.iter().rev().take(5).max_by_key(|&&id| (points(id), id)) else {
+                continue;
+            };
             let r = self
                 .scan_active(
                     actor,
                     ActiveScanRequest {
                         exchange_id: example,
                         checks: checks.clone(),
-                        max_requests: Some(40),
+                        max_requests: Some(150),
                         ..Default::default()
                     },
                 )
@@ -224,7 +258,8 @@ impl Service {
             let mut seen = std::collections::BTreeSet::new();
             for f in issues {
                 let Some((_, class)) = SWEEP_CHECKS.iter().find(|(c, _)| *c == f.issue.check) else { continue };
-                if !seen.insert(f.issue.check) {
+                // One finding per class and operation (boolean and time SQLi are one bug).
+                if !seen.insert(*class) {
                     continue;
                 }
                 let finding = self.finding_create(

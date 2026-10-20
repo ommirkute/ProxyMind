@@ -16,7 +16,7 @@ vulns:
     class: sqli
     method: GET
     path: /api/products/search
-    description: Time-based SQL injection in q.
+    description: Blind SQL injection in q (boolean and time based, errors hidden).
   - id: VS-4
     class: ssrf
     method: GET
@@ -68,6 +68,16 @@ vulns:
     path: /.git/config
     description: The .git folder is served; its config has a deploy token in the remote URL.
 # Correctly protected look-alikes. A finding here is a false positive.
+  - id: VS-14
+    class: command_injection
+    method: GET
+    path: /api/tools/ping
+    description: host parameter goes into a shell command line (simulated shell).
+  - id: VS-15
+    class: sqli
+    method: GET
+    path: /api/products
+    description: Time-based blind SQL injection in the User-Agent header.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats

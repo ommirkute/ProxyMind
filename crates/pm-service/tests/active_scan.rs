@@ -36,9 +36,67 @@ async fn record(s: &Service, url: &str, path: &str) -> i64 {
 }
 
 async fn checks_found(s: &Service, ex: i64) -> Vec<String> {
-    match s.scan_active(&human(), ActiveScanRequest { exchange_id: ex, ..Default::default() }).await.unwrap() {
-        ActiveScanResult::Done { issues, .. } => issues.iter().map(|i| i.issue.check.to_string()).collect(),
+    checks_with(s, ex, &[]).await.into_iter().map(|(c, _, _)| c).collect()
+}
+
+/// (check, point, evidence) of each issue.
+async fn checks_with(s: &Service, ex: i64, checks: &[&str]) -> Vec<(String, String, String)> {
+    let req = ActiveScanRequest {
+        exchange_id: ex,
+        checks: checks.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    match s.scan_active(&human(), req).await.unwrap() {
+        ActiveScanResult::Done { issues, .. } => issues
+            .iter()
+            .map(|i| (i.issue.check.to_string(), i.issue.point.clone(), i.issue.evidence.clone()))
+            .collect(),
         other => panic!("{other:?}"),
+    }
+}
+
+async fn record_raw(s: &Service, url: &str, raw: &str) -> i64 {
+    let req = ReplayRequest { url: Some(url.into()), raw: Some(raw.into()), ..Default::default() };
+    match s.replay_send(&human(), req).await.unwrap() {
+        ReplayResult::Sent { exchange_id, .. } => exchange_id,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn blind_sql_and_command_injection_are_confirmed() {
+    let (s, url) = setup().await;
+    // VS-3: boolean-based (fast), then time-based on its own.
+    let ex = record(&s, &url, "/api/products/search?q=Coffee").await;
+    let found = checks_with(&s, ex, &["sql_boolean"]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].0.as_str(), found[0].1.as_str()), ("sql_boolean", "query q"));
+    assert!(found[0].2.contains("confirmed with"), "{}", found[0].2);
+    let found = checks_with(&s, ex, &["sql_time"]).await;
+    assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["sql_time"], "{found:?}");
+    assert!(found[0].2.contains("sleep 0 →"), "{}", found[0].2);
+
+    // VS-15: time-based SQL injection in the User-Agent header.
+    let ua = "GET /api/products HTTP/1.1\r\nHost: x\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n";
+    let ex = record_raw(&s, &url, ua).await;
+    let found = checks_with(&s, ex, &["sql_time"]).await;
+    assert_eq!(
+        found.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect::<Vec<_>>(),
+        [("sql_time", "header user-agent")]
+    );
+
+    // VS-14: command injection, output-based, and time-based on its own.
+    let ex = record(&s, &url, "/api/tools/ping?host=127.0.0.1").await;
+    let found = checks_with(&s, ex, &["cmd_injection", "sql_error", "ssti"]).await;
+    assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["cmd_injection"], "{found:?}");
+    let found = checks_with(&s, ex, &["cmd_time"]).await;
+    assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["cmd_time"], "{found:?}");
+
+    // Look-alikes stay quiet under the blind checks too.
+    for trap in ["/help?topic=orders", "/search?q=coffee"] {
+        let ex = record(&s, &url, trap).await;
+        let found = checks_with(&s, ex, &["sql_boolean", "sql_time", "cmd_injection", "cmd_time"]).await;
+        assert!(found.is_empty(), "{trap}: {found:?}");
     }
 }
 
@@ -78,7 +136,7 @@ async fn agents_need_approval_and_get_a_proof_hint() {
         .await
         .unwrap();
     let ActiveScanResult::Done { issues, requests, .. } = r else { panic!() };
-    assert_eq!(requests, 1);
+    assert_eq!(requests, 2, "the baseline and one probe");
     assert!(issues[0].issue.prove_with.as_deref().unwrap().contains("reflection"));
     let bad = ActiveScanRequest { exchange_id: ex, checks: vec!["nope".into()], ..Default::default() };
     assert!(s.scan_active(&human(), bad).await.is_err());

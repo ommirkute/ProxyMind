@@ -222,7 +222,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Active checks on one recorded request (SQL errors, reflection, open redirect, traversal, SSTI).
+    /// Active checks on one recorded request (SQL injection: error, boolean and time based; command
+    /// injection; reflection, open redirect, traversal, SSTI), in parameters, cookies and headers.
     ScanActive {
         exchange_id: i64,
         /// Only these checks (repeatable)

@@ -46,10 +46,11 @@ pub const GROUND_TRUTH: &[Vuln] = &[
     },
     Vuln {
         id: "VS-3",
-        class: "sqli_time_based",
+        class: "sqli_blind",
         method: "GET",
         path: "/api/products/search",
-        description: "The q parameter is concatenated into a query; SLEEP() payloads delay the response.",
+        description: "The q parameter is concatenated into a real SQLite query; errors are hidden, but true/false \
+                      conditions change the results and SLEEP(n) delays the response (blind SQL injection).",
     },
     Vuln {
         id: "VS-4",
@@ -121,6 +122,22 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         method: "GET",
         path: "/.git/config",
         description: "The git metadata folder is served; its config holds a deploy token in the remote URL.",
+    },
+    Vuln {
+        id: "VS-14",
+        class: "command_injection",
+        method: "GET",
+        path: "/api/tools/ping",
+        description: "The host parameter is put into a shell command line (simulated shell: echo, sleep and \
+                      $((a*b)) are emulated, nothing is executed).",
+    },
+    Vuln {
+        id: "VS-15",
+        class: "sqli_blind",
+        method: "GET",
+        path: "/api/products",
+        description: "The User-Agent header is looked up in a visit log with string concatenation (time-based \
+                      blind SQL injection in a header).",
     },
 ];
 
@@ -355,8 +372,134 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
-<a href='/help?topic=orders'>Help</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<a href='/help?topic=orders'>Help</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
+
+/// An in-memory SQLite database for the SQL injection demos, with MySQL's
+/// `SLEEP(n)` (at most 10 s) so time-based payloads behave as on MySQL.
+fn demo_db() -> rusqlite::Result<rusqlite::Connection> {
+    use rusqlite::functions::FunctionFlags;
+    let c = rusqlite::Connection::open_in_memory()?;
+    c.create_scalar_function("sleep", 1, FunctionFlags::SQLITE_UTF8, |ctx| {
+        let secs = ctx.get::<f64>(0).unwrap_or(0.0).clamp(0.0, 10.0);
+        std::thread::sleep(Duration::from_secs_f64(secs));
+        Ok(0i64)
+    })?;
+    c.execute_batch(
+        "CREATE TABLE products(id INTEGER, name TEXT);
+         INSERT INTO products VALUES (1, 'Coffee'), (2, 'Tea'), (3, 'Cake');
+         CREATE TABLE visits(ua TEXT);
+         INSERT INTO visits VALUES ('Mozilla/5.0');",
+    )?;
+    Ok(c)
+}
+
+/// Runs SQL built from user input (deliberately) and returns the first
+/// column of each row. Errors give no rows: the injection is blind.
+async fn demo_query(sql: String) -> Vec<String> {
+    tokio::task::spawn_blocking(move || {
+        let Ok(c) = demo_db() else { return Vec::new() };
+        let Ok(mut st) = c.prepare(&sql) else { return Vec::new() };
+        let Ok(rows) = st.query_map([], |r| r.get::<_, rusqlite::types::Value>(0)) else { return Vec::new() };
+        rows.filter_map(Result::ok)
+            .map(|v| match v {
+                rusqlite::types::Value::Text(s) => s,
+                rusqlite::types::Value::Integer(i) => i.to_string(),
+                _ => String::new(),
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// A pretend `sh -c` for VS-14: understands `;`, `|`, `&&`, `||`, new
+/// lines, `$(…)` and backticks, and the commands ping, echo (with
+/// `$((a*b))`) and sleep (at most 10 s in all). Nothing is executed.
+async fn fake_shell(line: &str) -> String {
+    let mut line = line.to_string();
+    let mut slept = 0.0;
+    // Command substitution first: $(cmd) and `cmd` (but not $((…)) arithmetic).
+    for _ in 0..5 {
+        let found = match (line.find("$("), line.find('`')) {
+            (Some(i), _) if !line[i + 2..].starts_with('(') => {
+                // The matching `)`, skipping nested ones such as $((…)).
+                let mut depth = 0usize;
+                line[i + 1..]
+                    .char_indices()
+                    .find_map(|(k, c)| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        (depth == 0).then_some(i + 1 + k)
+                    })
+                    .map(|close| (i, close + 1, i + 2, close))
+            }
+            (_, Some(i)) => line[i + 1..].find('`').map(|j| (i, i + j + 2, i + 1, i + 1 + j)),
+            _ => None,
+        };
+        let Some((start, end, a, b)) = found else { break };
+        let (out, s) = shell_commands(&line[a..b]);
+        slept += s;
+        line.replace_range(start..end, out.trim());
+    }
+    let (out, s) = shell_commands(&line);
+    slept += s;
+    tokio::time::sleep(Duration::from_secs_f64(f64::min(slept, 10.0))).await;
+    out
+}
+
+fn shell_commands(line: &str) -> (String, f64) {
+    let mut cmds = Vec::new();
+    let mut cur = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        let two = |n: char, chars: &mut std::iter::Peekable<std::str::Chars>| chars.next_if_eq(&n).is_some();
+        let split = match c {
+            ';' | '\n' => true,
+            '|' => {
+                two('|', &mut chars);
+                true
+            }
+            '&' if two('&', &mut chars) => true,
+            _ => false,
+        };
+        if split {
+            cmds.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    cmds.push(cur);
+    let (mut out, mut slept) = (String::new(), 0.0);
+    for cmd in cmds {
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        match words.first().copied() {
+            None => {}
+            Some("ping") => {
+                out.push_str(&format!("PING {}: 1 packets transmitted, 1 received\n", words.last().unwrap_or(&"")))
+            }
+            Some("echo") => {
+                let mut text = words[1..].join(" ");
+                while let Some(i) = text.find("$((") {
+                    let Some(j) = text[i..].find("))") else { break };
+                    let expr = &text[i + 3..i + j];
+                    let v = expr
+                        .split_once('*')
+                        .and_then(|(a, b)| Some(a.trim().parse::<i64>().ok()? * b.trim().parse::<i64>().ok()?));
+                    text.replace_range(i..i + j + 2, &v.map(|v| v.to_string()).unwrap_or_default());
+                }
+                out.push_str(&text);
+                out.push('\n');
+            }
+            Some("sleep") => slept += words.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+            Some(other) => out.push_str(&format!("sh: {other}: not found\n")),
+        }
+    }
+    (out, slept)
+}
 
 /// The introspection result for VulnShop's GraphQL schema.
 fn graphql_schema() -> Value {
@@ -742,25 +885,28 @@ impl VulnShop {
                 ),
                 None => unauthorized(),
             },
-            ("GET", ["api", "products"]) => json_resp(
-                200,
-                json!({"products": [
-                    {"id": 1, "name": "Coffee", "price": 4.5}, {"id": 2, "name": "Tea", "price": 3.0}, {"id": 3, "name": "Cake", "price": 6.25}
-                ]}),
-            ),
+            ("GET", ["api", "products"]) => {
+                // VS-15: the User-Agent goes into a visit-log lookup as is (blind; the result isn't shown).
+                let ua = req.header("user-agent").unwrap_or_default().to_string();
+                let _ = demo_query(format!("SELECT count(*) FROM visits WHERE ua = '{ua}'")).await;
+                json_resp(
+                    200,
+                    json!({"products": [
+                        {"id": 1, "name": "Coffee", "price": 4.5}, {"id": 2, "name": "Tea", "price": 3.0}, {"id": 3, "name": "Cake", "price": 6.25}
+                    ]}),
+                )
+            }
+            ("GET", ["api", "tools", "ping"]) => {
+                // VS-14: OS command injection into a simulated shell (nothing is executed).
+                let host = req.query.get("host").cloned().unwrap_or_default();
+                let out = fake_shell(&format!("ping -c 1 {host}")).await;
+                Response { status: 200, headers: vec![], body: out, content_type: "text/plain" }
+            }
             ("GET", ["api", "products", "search"]) => {
-                // VS-3: fake time-based SQL injection.
+                // VS-3: blind SQL injection: q goes into a real query as is; errors are hidden.
                 let q = req.query.get("q").cloned().unwrap_or_default();
-                if q.to_ascii_lowercase().contains("sleep(") {
-                    tokio::time::sleep(Duration::from_millis(1200)).await;
-                }
-                if q.contains('\'') && !q.to_ascii_lowercase().contains("sleep(") {
-                    return json_resp(200, json!({"results": [], "note": "no results"}));
-                }
-                let results: Vec<&str> = ["Coffee", "Tea", "Cake"]
-                    .into_iter()
-                    .filter(|n| n.to_lowercase().contains(&q.to_lowercase()))
-                    .collect();
+                let results =
+                    demo_query(format!("SELECT name FROM products WHERE name LIKE '%{q}%' ORDER BY id")).await;
                 json_resp(200, json!({"results": results}))
             }
             ("GET", ["api", "orders"]) => match self.user(req) {
@@ -995,8 +1141,26 @@ mod tests {
         assert!(call(addr, get("/api/admin/users", &bob)).await.starts_with("HTTP/1.1 200"), "admin list open");
         assert!(call(addr, get("/api/admin/stats", &bob)).await.starts_with("HTTP/1.1 403"), "stats secure");
         assert!(call(addr, "GET /api/orders/1001 HTTP/1.1\r\n\r\n".into()).await.starts_with("HTTP/1.1 401"));
+        // VS-3: a real query: delays and true/false conditions, errors hidden.
+        let search = |q: &str| call(addr, format!("GET /api/products/search?q={q} HTTP/1.1\r\n\r\n"));
         let t = std::time::Instant::now();
-        call(addr, "GET /api/products/search?q=x%27%20AND%20SLEEP(1)--%20 HTTP/1.1\r\n\r\n".into()).await;
-        assert!(t.elapsed() >= Duration::from_millis(1100));
+        search("Coffee%27%20AND%20SLEEP(1)--%20").await;
+        assert!(t.elapsed() >= Duration::from_millis(1000));
+        assert!(search("Coffee%27%20AND%201=1--").await.contains("[\"Coffee\"]"));
+        assert!(search("Coffee%27%20AND%201=2--").await.contains("\"results\":[]"));
+        assert!(search("%27").await.contains("\"results\":[]"), "errors are hidden");
+        // VS-15: the User-Agent goes into SQL.
+        let t = std::time::Instant::now();
+        call(addr, "GET /api/products HTTP/1.1\r\nUser-Agent: x'||SLEEP(1)||'\r\n\r\n".into()).await;
+        assert!(t.elapsed() >= Duration::from_millis(1000));
+        // VS-14: a simulated shell.
+        let ping = |h: &str| call(addr, format!("GET /api/tools/ping?host={h} HTTP/1.1\r\n\r\n"));
+        assert!(ping("127.0.0.1").await.contains("PING 127.0.0.1: 1 packets"));
+        assert!(ping("x;echo%20M$((7*191))").await.contains("\nM1337"));
+        assert!(ping("x$(echo%20M$((7*191)))").await.contains("PING xM1337"));
+        assert!(ping("x;cat%20/etc/passwd").await.contains("sh: cat: not found"));
+        let t = std::time::Instant::now();
+        ping("x|sleep%201").await;
+        assert!(t.elapsed() >= Duration::from_millis(1000));
     }
 }

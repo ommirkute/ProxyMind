@@ -42,8 +42,8 @@ The model-free baseline (`proxymind bench auto`) has three steps, all through th
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 4/13 | 2/13 | 0 |
+| VulnShop | 7/15 | 2/15 | 0 |
 | Juice Shop | 3/8 | 1/8 | 0 |
 | VAmPI | 2/7 | 1/7 | 0 |
 
-Measured 2026-10-20 against the pinned images. VulnShop's other bugs sit on endpoints that nothing links to and its OpenAPI file doesn't list, or need a browser (XSS), timing (blind SQLi), concurrency (race) or a second step (GraphQL, reset codes): that's what agents are for.
+Measured 2026-10-20 against the pinned images, after scanner step 1 (blind SQL injection by true/false pairs and delays, in parameters and headers; command injection; error confirmation): VulnShop's blind SQLi (VS-3), command injection (VS-14) and User-Agent SQLi (VS-15) are now found. Its other bugs sit on endpoints that nothing links to and its OpenAPI file doesn't list, or need a browser (XSS), concurrency (race) or a second step (GraphQL, reset codes): that's what agents are for. The sweep scans GETs with parameters first, then up to 20 without (headers and cookies), and skips paths whose names change state (`/createdb`, `/logout`…).

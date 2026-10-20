@@ -263,14 +263,16 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "scan_active",
-            "Active checks on one recorded request: payloads in each query, form, JSON and numeric path value for \
-             sql_error, reflected_input, open_redirect, path_traversal and ssti; each probe is compared with a fresh \
-             baseline. Returns leads with evidence and, where an oracle fits, how to prove them (prove_with). Needs \
-             approval by default: ask the user, then call again with identical arguments plus approval_id.",
+            "Active checks on one recorded request: payloads in each query, form, JSON and numeric/ID path value, \
+             cookie and User-Agent/Referer/X-Forwarded-For header. One-shot: sql_error, cmd_injection, \
+             reflected_input, open_redirect, path_traversal, ssti. Multi-step with confirmation: sql_boolean \
+             (true/false pairs), sql_time and cmd_time (the delay must follow the payload: sleep 0 fast, a longer \
+             sleep longer). Returns leads with evidence and, where an oracle fits, how to prove them (prove_with). \
+             Needs approval by default: ask the user, then call again with identical arguments plus approval_id.",
             json!({
                 "exchange_id": {"type":"integer"},
-                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","reflected_input","open_redirect","path_traversal","ssti"]}},
-                "max_requests": {"type":"integer","minimum":1,"maximum":500},
+                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time"]}},
+                "max_requests": {"type":"integer","minimum":1,"maximum":2000},
                 "identity": {"type":"string"},
                 "hypothesis_id": {"type":"integer"},
                 "approval_id": {"type":"string"},

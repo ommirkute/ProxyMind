@@ -3,16 +3,28 @@
 //! sends the probes through the policy gate.
 //!
 //! Insertion points are query parameters, form fields, JSON string and
-//! number values, numeric path segments, and other path segments the caller
-//! knows are identifiers (from the app model, e.g. `/users/{username}`). Checks:
+//! number values, numeric path segments, other path segments the caller
+//! knows are identifiers (from the app model, e.g. `/users/{username}`),
+//! cookies, and the User-Agent, Referer and X-Forwarded-For headers.
+//!
+//! One-shot checks (a probe, then [`analyze`]):
 //!
 //! | check | payloads | flagged when |
 //! |---|---|---|
-//! | `sql_error` | `'`, `"`, `')` | a database error appears that the baseline didn't show |
+//! | `sql_error` | `'`, `"`, `')`, `\` | a database error appears that the baseline didn't show |
+//! | `cmd_injection` | `;echo M$((7*191))` and other separators | `M1337` comes back (the shell did the sum) |
 //! | `reflected_input` | a unique marker with `<"'>` | the marker comes back with `<` and `"` unencoded in HTML |
 //! | `open_redirect` | `https://pm-redirect.example/` (redirect-like parameters) | a 3xx points at that host |
 //! | `path_traversal` | `../` sequences to `/etc/passwd` and `win.ini` (file-like parameters) | the file's content comes back |
-//! | `ssti` | `{{7*191}}`, `${7*191}`, `<%= 7*191 %>` | `1337` appears and wasn't in the baseline |
+//! | `ssti` | `{{7*191}}`, `${7*191}`, `#{…}`, `*{…}`, `@(…)`, `<%= … %>`… | `1337` appears and wasn't in the baseline |
+//!
+//! Multi-step checks (the caller sends, these functions judge):
+//!
+//! | check | how | confirmed when |
+//! |---|---|---|
+//! | `sql_boolean` | [`sql_bool_pairs`]: a true and a false condition | true looks like the baseline, false doesn't, twice, and a second formulation agrees |
+//! | `sql_time` | [`sql_time_probes`]: sleep N in MySQL, PostgreSQL, SQL Server, Oracle syntax | N seconds slower, sleep 0 is fast, and a longer sleep is longer ([`delayed`]) |
+//! | `cmd_time` | [`cmd_time_probes`]: `;sleep N`, `$(sleep N)`, `ping -n`… | the same three timings |
 //!
 //! Every issue is a lead to prove, not a finding.
 
@@ -25,6 +37,8 @@ pub enum PointKind {
     Form,
     Json,
     Path,
+    Cookie,
+    Header,
 }
 
 /// Where a payload can go.
@@ -45,9 +59,28 @@ enum Locator {
     Pair(usize),
     Segment(usize),
     Pointer(String),
+    Cookie(usize),
+    /// Lower-case header name.
+    Header(String),
 }
 
-pub const CHECKS: &[&str] = &["sql_error", "reflected_input", "open_redirect", "path_traversal", "ssti"];
+pub const CHECKS: &[&str] = &[
+    "sql_error",
+    "cmd_injection",
+    "reflected_input",
+    "open_redirect",
+    "path_traversal",
+    "ssti",
+    "sql_boolean",
+    "sql_time",
+    "cmd_time",
+];
+
+/// Checks that take several rounds (run after the one-shot ones).
+pub const MULTI_STEP: &[&str] = &["sql_boolean", "sql_time", "cmd_time"];
+
+/// Headers that apps often pass to SQL (logging, analytics) or shells.
+const HEADERS: &[&str] = &["user-agent", "referer", "x-forwarded-for"];
 
 /// One request to send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -120,6 +153,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+#[derive(Clone, Copy)]
 struct Parsed<'a> {
     method: &'a str,
     target: &'a str,
@@ -240,7 +274,44 @@ pub fn points_with(raw: &str, id_segments: &[usize]) -> Vec<Point> {
             out.push(Point { kind: PointKind::Json, name, original: val, locator: Locator::Pointer(ptr) });
         }
     }
+    for line in p.rest_of_head.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+        if k == "cookie" {
+            for (i, c) in v.split(';').map(str::trim).filter(|c| !c.is_empty()).take(20).enumerate() {
+                let (name, value) = c.split_once('=').unwrap_or((c, ""));
+                out.push(Point {
+                    kind: PointKind::Cookie,
+                    name: name.to_string(),
+                    original: percent_decode(value),
+                    locator: Locator::Cookie(i),
+                });
+            }
+        } else if HEADERS.contains(&k.as_str()) {
+            out.push(Point {
+                kind: PointKind::Header,
+                name: k.clone(),
+                original: v.to_string(),
+                locator: Locator::Header(k),
+            });
+        }
+    }
     out
+}
+
+/// The head lines after the request line, with one header replaced.
+fn replace_head_line(rest: &str, f: impl Fn(&str, &str) -> Option<String>) -> String {
+    rest.lines()
+        .map(|l| {
+            let l = l.trim_end_matches('\r');
+            match l.split_once(':') {
+                Some((k, v)) => f(&k.trim().to_ascii_lowercase(), v.trim())
+                    .map_or_else(|| l.to_string(), |v| format!("{}: {v}", k.trim())),
+                None => l.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 /// `raw` with `value` in place of the point's original value.
@@ -268,6 +339,30 @@ pub fn inject(raw: &str, point: &Point, value: &str) -> Option<Vec<u8>> {
             let mut v: serde_json::Value = serde_json::from_str(p.body).ok()?;
             *v.pointer_mut(ptr)? = serde_json::Value::String(value.to_string());
             Some(rebuild(&p, p.target, &v.to_string()))
+        }
+        (PointKind::Cookie, Locator::Cookie(i)) => {
+            let rest = replace_head_line(p.rest_of_head, |k, v| {
+                (k == "cookie").then(|| {
+                    v.split(';')
+                        .map(str::trim)
+                        .filter(|c| !c.is_empty())
+                        .enumerate()
+                        .map(|(j, c)| match (j == *i, c.split_once('=')) {
+                            (true, Some((n, _))) => format!("{n}={}", percent_encode(value)),
+                            (true, None) => format!("{c}={}", percent_encode(value)),
+                            _ => c.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+            });
+            Some(rebuild(&Parsed { rest_of_head: &rest, ..p }, p.target, p.body))
+        }
+        (PointKind::Header, Locator::Header(name)) => {
+            // Header values can't hold line breaks; everything else goes as is.
+            let clean: String = value.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+            let rest = replace_head_line(p.rest_of_head, |k, _| (k == name).then(|| clean.clone()));
+            Some(rebuild(&Parsed { rest_of_head: &rest, ..p }, p.target, p.body))
         }
         _ => None,
     }
@@ -307,6 +402,236 @@ fn file_like(p: &Point) -> bool {
 
 pub const REDIRECT_TARGET: &str = "https://pm-redirect.example/";
 
+/// Template expressions that make `1337`, and the engines that evaluate them.
+const SSTI: &[(&str, &str)] = &[
+    ("Jinja2, Twig, Nunjucks, Handlebars-like", "{{7*191}}"),
+    ("FreeMarker, Velocity, JSP EL, Mako, Groovy, JS template literals", "${7*191}"),
+    ("ERB, EJS, JSP", "<%= 7*191 %>"),
+    ("Ruby (Slim, Haml), Java EL (JSF), Pug", "#{7*191}"),
+    ("Thymeleaf (Spring)", "*{7*191}"),
+    ("Razor (.NET)", "@(7*191)"),
+    ("Smarty", "{7*191}"),
+    ("Velocity", "#set($pm=7*191)$pm"),
+];
+
+/// Output-based command injection: the shell computes `$((7*191))`, so
+/// `M1337` only comes back if a shell ran it (an echo of the input
+/// contains the literal `$((7*191))`).
+pub fn cmd_output_payloads(original: &str, marker: &str) -> Vec<String> {
+    let cmd = format!("echo {marker}$((7*191))");
+    vec![
+        format!("{original};{cmd};"),
+        format!("{original}|{cmd}"),
+        format!("{original}$({cmd})"),
+        format!("{original}`{cmd}`"),
+        format!("{original}\n{cmd}\n"),
+        format!("{original}&&{cmd}"),
+        format!("{original}||{cmd}"),
+    ]
+}
+
+/// A true and a false condition for boolean-based SQL injection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BoolPair {
+    /// Quoting context, e.g. `string`, `string-comment`, `numeric`.
+    pub context: &'static str,
+    pub truthy: String,
+    pub falsy: String,
+    /// Another way to say the same, to confirm a hit.
+    pub truthy2: String,
+    pub falsy2: String,
+}
+
+/// Boolean pairs for a value, most likely contexts first. Numeric values
+/// also get unquoted forms; comment forms cover values inside `LIKE '%…%'`
+/// or followed by more SQL.
+pub fn sql_bool_pairs(original: &str) -> Vec<BoolPair> {
+    let o = original;
+    let pair = |context, t: String, f: String, t2: String, f2: String| BoolPair {
+        context,
+        truthy: t,
+        falsy: f,
+        truthy2: t2,
+        falsy2: f2,
+    };
+    let mut out = Vec::new();
+    let numeric = !o.is_empty() && o.len() <= 20 && o.chars().all(|c| c.is_ascii_digit());
+    if numeric {
+        out.push(pair(
+            "numeric",
+            format!("{o} AND 1=1"),
+            format!("{o} AND 1=2"),
+            format!("{o} AND 3>2"),
+            format!("{o} AND 2>3"),
+        ));
+    }
+    out.push(pair(
+        "string",
+        format!("{o}' AND '1'='1"),
+        format!("{o}' AND '1'='2"),
+        format!("{o}' AND 'b'>'a"),
+        format!("{o}' AND 'a'>'b"),
+    ));
+    out.push(pair(
+        "string-comment",
+        format!("{o}' AND 1=1-- -"),
+        format!("{o}' AND 1=2-- -"),
+        format!("{o}' AND 3>2-- -"),
+        format!("{o}' AND 2>3-- -"),
+    ));
+    out.push(pair(
+        "double-quoted",
+        format!("{o}\" AND \"1\"=\"1"),
+        format!("{o}\" AND \"1\"=\"2"),
+        format!("{o}\" AND \"b\">\"a"),
+        format!("{o}\" AND \"a\">\"b"),
+    ));
+    out
+}
+
+/// A delay payload: `slow(n)` sleeps n seconds; `slow(0)` is the control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TimeProbe {
+    /// e.g. `MySQL`, `PostgreSQL (stacked)`, `sh`, `Windows cmd`
+    pub family: &'static str,
+    /// The payload with `{N}` where the seconds go.
+    pub template: String,
+}
+
+impl TimeProbe {
+    pub fn with_delay(&self, secs: u64) -> String {
+        // `ping -n K` waits about K-1 seconds.
+        self.template.replace("{N1}", &(secs + 1).to_string()).replace("{N}", &secs.to_string())
+    }
+}
+
+/// Time-based SQL injection payloads.
+pub fn sql_time_probes(original: &str) -> Vec<TimeProbe> {
+    let o = original;
+    let numeric = !o.is_empty() && o.len() <= 20 && o.chars().all(|c| c.is_ascii_digit());
+    let t = |family, template: String| TimeProbe { family, template };
+    let mut out = vec![
+        t("MySQL", format!("{o}' AND SLEEP({{N}})-- -")),
+        t("MySQL", format!("{o}' AND (SELECT 1 FROM (SELECT SLEEP({{N}}))pm)-- -")),
+        t("MySQL", format!("{o}\" AND SLEEP({{N}})-- -")),
+        t("PostgreSQL", format!("{o}' AND 1=(SELECT 1 FROM PG_SLEEP({{N}}))-- -")),
+        t("PostgreSQL (stacked)", format!("{o}';SELECT PG_SLEEP({{N}})-- -")),
+        t("SQL Server (stacked)", format!("{o}';WAITFOR DELAY '0:0:{{N}}'-- -")),
+        t("Oracle", format!("{o}' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('pm',{{N}})-- -")),
+        // Inside a string compared in WHERE: runs even when no row matches the value.
+        t("MySQL/SQLite (concatenation)", format!("{o}'||SLEEP({{N}})||'")),
+        t("PostgreSQL (concatenation)", format!("{o}'||(SELECT '' FROM PG_SLEEP({{N}}))||'")),
+    ];
+    if numeric {
+        out.insert(0, t("MySQL", format!("{o} AND SLEEP({{N}})")));
+        out.insert(1, t("PostgreSQL", format!("{o} AND 1=(SELECT 1 FROM PG_SLEEP({{N}}))")));
+        out.insert(2, t("SQL Server (stacked)", format!("{o};WAITFOR DELAY '0:0:{{N}}'-- -")));
+    }
+    out
+}
+
+/// Time-based OS command injection payloads.
+pub fn cmd_time_probes(original: &str) -> Vec<TimeProbe> {
+    let o = original;
+    let t = |family, template: String| TimeProbe { family, template };
+    vec![
+        t("sh", format!("{o};sleep {{N}};")),
+        t("sh", format!("{o}|sleep {{N}}")),
+        t("sh", format!("{o}$(sleep {{N}})")),
+        t("sh", format!("{o}`sleep {{N}}`")),
+        t("sh", format!("{o}\nsleep {{N}}\n")),
+        t("sh", format!("{o}&&sleep {{N}}")),
+        t("sh", format!("{o}||sleep {{N}}")),
+        t("Windows cmd", format!("{o}&ping -n {{N1}} 127.0.0.1&")),
+        t("Windows cmd", format!("{o}|ping -n {{N1}} 127.0.0.1")),
+    ]
+}
+
+/// Similarity of two responses, 0 (nothing alike) to 1 (same words):
+/// the overlap of their word multisets. Numbers count as one token kind
+/// so counters and timestamps don't make identical pages look different.
+pub fn similarity(a: &str, b: &str) -> f64 {
+    fn tokens(s: &str) -> std::collections::HashMap<String, usize> {
+        let mut m = std::collections::HashMap::new();
+        for t in s.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|t| !t.is_empty()) {
+            let t = if t.chars().all(|c| c.is_ascii_digit()) { "#".to_string() } else { t.to_ascii_lowercase() };
+            *m.entry(t).or_insert(0) += 1;
+        }
+        m
+    }
+    let (x, y) = (tokens(a), tokens(b));
+    let (nx, ny): (usize, usize) = (x.values().sum(), y.values().sum());
+    if nx + ny == 0 {
+        return 1.0;
+    }
+    let common: usize = x.iter().map(|(k, n)| (*n).min(*y.get(k).unwrap_or(&0))).sum();
+    2.0 * common as f64 / (nx + ny) as f64
+}
+
+/// How a response compares with the baseline, for boolean checks.
+fn alike(base: &Seen, other: &Seen, noise: f64) -> bool {
+    base.status == other.status && similarity(&base.body, &other.body) >= 1.0 - noise - 0.02
+}
+
+/// Boolean-based SQL injection: the true condition looks like the
+/// baseline and the false one clearly doesn't. `base2` is a second send
+/// of the original request: how much the page varies on its own.
+pub fn bool_differs(base: &Seen, base2: &Seen, truthy: &Seen, falsy: &Seen) -> bool {
+    let noise = 1.0 - similarity(&base.body, &base2.body);
+    if noise > 0.2 || base.status != base2.status {
+        return false; // the page changes too much by itself to tell
+    }
+    let far = |x: &Seen| x.status != base.status || similarity(&base.body, &x.body) < 1.0 - noise - 0.1;
+    alike(base, truthy, noise)
+        && far(falsy)
+        && (truthy.status != falsy.status || similarity(&truthy.body, &falsy.body) < 0.9)
+}
+
+/// Whether `ms` is at least most of `secs` slower than the baseline
+/// (`base_ms`: a few sends of the original request).
+pub fn delayed(base_ms: &[u64], ms: u64, secs: u64) -> bool {
+    let mut b = base_ms.to_vec();
+    b.sort_unstable();
+    let median = b.get(b.len() / 2).copied().unwrap_or(0);
+    ms >= median + secs * 1000 * 8 / 10
+}
+
+/// Whether a delay check can work here: the baseline is quick and steady.
+pub fn timing_usable(base_ms: &[u64]) -> bool {
+    let max = base_ms.iter().copied().max().unwrap_or(u64::MAX);
+    !base_ms.is_empty() && max < 3000
+}
+
+/// The issue for a confirmed multi-step check.
+pub fn multi_step_issue(check: &str, point: &Point, payload: &str, evidence: String) -> ActiveIssue {
+    let (check, title, prove_with): (&'static str, &'static str, Option<String>) = match check {
+        "sql_boolean" => (
+            "sql_boolean",
+            "SQL injection (boolean-based blind)",
+            Some("proof_run oracle timing with a delay payload in this parameter".into()),
+        ),
+        "sql_time" => (
+            "sql_time",
+            "SQL injection (time-based blind)",
+            Some("proof_run oracle timing with this payload to measure it statistically".into()),
+        ),
+        _ => (
+            "cmd_time",
+            "OS command injection (time-based blind)",
+            Some("proof_run oracle timing with this payload to measure it statistically".into()),
+        ),
+    };
+    ActiveIssue {
+        check,
+        title,
+        severity: "high",
+        point: format!("{:?} {}", point.kind, point.name).to_lowercase(),
+        payload: payload.to_string(),
+        evidence,
+        prove_with,
+    }
+}
+
 /// The probes for `checks` (all when empty), at most `limit`.
 pub fn probes(raw: &str, checks: &[String], marker: &str, limit: usize) -> Vec<Probe> {
     probes_with(raw, checks, marker, limit, &[])
@@ -325,9 +650,18 @@ pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_
             }
         };
         if want("sql_error") {
-            for s in ["'", "\"", "')"] {
+            for s in ["'", "\"", "')", "\\"] {
                 add("sql_error", format!("{}{s}", pt.original));
             }
+        }
+        if want("cmd_injection") && pt.kind != PointKind::Path {
+            for p in cmd_output_payloads(&pt.original, marker) {
+                add("cmd_injection", p);
+            }
+        }
+        // Headers and cookies get the injection checks only.
+        if matches!(pt.kind, PointKind::Header | PointKind::Cookie) {
+            continue;
         }
         if want("reflected_input") && pt.kind != PointKind::Path {
             add("reflected_input", format!("{marker}\"'<>"));
@@ -346,8 +680,8 @@ pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_
             }
         }
         if want("ssti") && pt.kind != PointKind::Path {
-            for t in ["{{7*191}}", "${7*191}", "<%= 7*191 %>"] {
-                add("ssti", t.into());
+            for (_, t) in SSTI {
+                add("ssti", (*t).into());
             }
         }
     }
@@ -427,11 +761,25 @@ pub fn analyze(probe: &Probe, base: &Seen, got: &Seen, marker: &str) -> Option<A
             if base.body.contains("1337") || got.body.contains(&probe.payload) {
                 return None;
             }
+            let engines = SSTI.iter().find(|(_, p)| *p == probe.payload).map_or("unknown", |(e, _)| e);
             Some(issue(
                 "Template expression evaluated (server-side template injection)",
                 "high",
-                snippet(&got.body, at, 80),
+                format!("{} (syntax of: {engines})", snippet(&got.body, at, 80)),
                 None,
+            ))
+        }
+        "cmd_injection" => {
+            let want = format!("{marker}1337");
+            let at = got.body.find(&want)?;
+            if base.body.contains(&want) {
+                return None;
+            }
+            Some(issue(
+                "OS command injection: the shell ran an echo",
+                "high",
+                snippet(&got.body, at, 80),
+                Some("proof_run oracle timing with ;sleep N in this parameter".into()),
             ))
         }
         _ => None,
@@ -495,7 +843,7 @@ mod tests {
         assert_eq!(for_point("file", "path_traversal"), 3);
         assert_eq!(for_point("q", "path_traversal"), 0);
         assert_eq!(for_point("path segment 3", "reflected_input"), 0);
-        assert_eq!(probes(GET, &["ssti".into()], "pmX", 1000).len(), 9);
+        assert_eq!(probes(GET, &["ssti".into()], "pmX", 1000).len(), 3 * SSTI.len());
         assert_eq!(probes(GET, &[], "pmX", 5).len(), 5);
     }
 
@@ -535,5 +883,76 @@ mod tests {
             analyze(&p("ssti", "q"), &base, &seen(200, "Hello {{7*191}} 1337"), "pmX").is_none(),
             "echoed, not evaluated"
         );
+    }
+
+    #[test]
+    fn cookies_and_headers_are_insertion_points() {
+        let raw = "GET /p?id=1 HTTP/1.1\r\nHost: x\r\nUser-Agent: Mozilla/5.0\r\nCookie: sid=abc; theme=dark\r\nAccept: */*\r\n\r\n";
+        let pts = points(raw);
+        let kinds: Vec<(PointKind, &str)> = pts.iter().map(|p| (p.kind, p.name.as_str())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (PointKind::Query, "id"),
+                (PointKind::Header, "user-agent"),
+                (PointKind::Cookie, "sid"),
+                (PointKind::Cookie, "theme")
+            ]
+        );
+        let ua = String::from_utf8(inject(raw, &pts[1], "x' AND SLEEP(3)-- -\r\nEvil: 1").unwrap()).unwrap();
+        assert!(ua.contains("\r\nUser-Agent: x' AND SLEEP(3)-- -Evil: 1\r\nCookie: sid=abc; theme=dark\r\n"), "{ua}");
+        let ck = String::from_utf8(inject(raw, &pts[3], "dark'").unwrap()).unwrap();
+        assert!(ck.contains("\r\nCookie: sid=abc; theme=dark%27\r\nAccept: */*\r\n\r\n"), "{ck}");
+        // Headers and cookies get injection checks, not reflection or redirects.
+        let ps = probes(raw, &[], "m", 1000);
+        assert!(ps.iter().any(|p| p.point.kind == PointKind::Cookie && p.check == "sql_error"));
+        assert!(ps.iter().any(|p| p.point.kind == PointKind::Header && p.check == "cmd_injection"));
+        assert!(!ps.iter().any(|p| p.point.kind == PointKind::Header && p.check == "reflected_input"));
+    }
+
+    #[test]
+    fn command_injection_needs_the_shell_to_compute() {
+        let ps = probes(GET, &["cmd_injection".into()], "pmX", 1000);
+        let p = ps.iter().find(|p| p.point.name == "q").unwrap();
+        assert!(p.payload.starts_with("shoe;echo pmX$((7*191))"));
+        let base = seen(200, "ok");
+        assert!(analyze(p, &base, &seen(200, "PING shoe\npmX1337\n"), "pmX").is_some());
+        assert!(
+            analyze(p, &base, &seen(200, "you searched shoe;echo pmX$((7*191));"), "pmX").is_none(),
+            "an echo of the input"
+        );
+    }
+
+    #[test]
+    fn boolean_verdicts() {
+        let page =
+            |rows: &str| seen(200, &format!("<html><h1>Results</h1><ul>{rows}</ul><footer>shop 2026</footer></html>"));
+        let base = page("<li>Coffee</li><li>Tea</li>");
+        let empty = page("");
+        assert!(bool_differs(&base, &base, &base, &empty));
+        assert!(!bool_differs(&base, &base, &empty, &empty), "both empty: the quote broke the query");
+        assert!(!bool_differs(&base, &base, &base, &base), "no difference");
+        let error = seen(500, "<html>error</html>");
+        assert!(bool_differs(&base, &base, &base, &error), "the false condition fails differently");
+        let other = page("<li>Cake</li><li>Bread</li><li>Wine</li><li>Milk</li>");
+        assert!(!bool_differs(&base, &other, &base, &empty), "the page varies by itself");
+        // Timestamps and counters don't count as differences.
+        assert!(similarity("<p>Updated 1700000000 views 12</p>", "<p>Updated 1700000099 views 13</p>") > 0.99);
+    }
+
+    #[test]
+    fn timing_and_payloads() {
+        assert!(delayed(&[120, 100, 140], 3100, 3));
+        assert!(!delayed(&[120, 100, 140], 1500, 3));
+        assert!(timing_usable(&[100, 200]) && !timing_usable(&[100, 4000]) && !timing_usable(&[]));
+        let ps = sql_time_probes("7");
+        assert_eq!(ps[0].with_delay(3), "7 AND SLEEP(3)");
+        assert!(ps.iter().any(|p| p.with_delay(0) == "7';WAITFOR DELAY '0:0:0'-- -"));
+        let c = cmd_time_probes("x");
+        assert_eq!(c[0].with_delay(4), "x;sleep 4;");
+        assert!(c.iter().any(|p| p.with_delay(4) == "x&ping -n 5 127.0.0.1&"));
+        let pairs = sql_bool_pairs("12");
+        assert_eq!((pairs[0].context, pairs[0].falsy.as_str()), ("numeric", "12 AND 1=2"));
+        assert_eq!(sql_bool_pairs("abc")[0].truthy, "abc' AND '1'='1");
     }
 }

@@ -66,8 +66,12 @@ pub fn class_family(c: &str) -> &'static str {
         "idor"
     } else if c.contains("bfla") || c.contains("function") || c.contains("privilege") || c.contains("role") {
         "bfla"
+    } else if c.contains("nosql") {
+        "nosqli"
     } else if c.contains("sql") {
         "sqli"
+    } else if c.contains("command") || c.contains("cmd") || c == "rce" || c.contains("os_injection") {
+        "command_injection"
     } else if c.contains("ssrf") {
         "ssrf"
     } else if c.contains("xss") {
@@ -90,8 +94,6 @@ pub fn class_family(c: &str) -> &'static str {
         "enumeration"
     } else if c.contains("redos") || c.contains("dos") || c.contains("rate") || c.contains("resource") {
         "resource"
-    } else if c.contains("nosql") {
-        "nosqli"
     } else if c.contains("auth")
         || c.contains("password")
         || c.contains("session")
@@ -209,7 +211,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 13));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 15));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

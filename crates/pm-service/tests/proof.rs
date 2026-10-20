@@ -194,13 +194,13 @@ async fn timing_proof_needs_approval_for_agents_and_separates_signal_from_noise(
     };
     // Agents need approval for payload sends.
     assert!(matches!(
-        s.proof_run(&agent(), req("x%27%20AND%20SLEEP(1)--")).await.unwrap(),
+        s.proof_run(&agent(), req("Coffee%27%20AND%20SLEEP(1)--")).await.unwrap(),
         ProofResult::PendingApproval { .. }
     ));
     // A human runs it directly.
-    let (proven, _, reasons) = completed(s.proof_run(&human(), req("x%27%20AND%20SLEEP(1)--")).await.unwrap());
+    let (proven, _, reasons) = completed(s.proof_run(&human(), req("Coffee%27%20AND%20SLEEP(1)--")).await.unwrap());
     assert!(proven, "{reasons:?}");
-    let (proven, _, reasons) = completed(s.proof_run(&human(), req("x%27%20AND%201=1--")).await.unwrap());
+    let (proven, _, reasons) = completed(s.proof_run(&human(), req("Coffee%27%20AND%201=1--")).await.unwrap());
     assert!(!proven, "no delay, no proof: {reasons:?}");
 }
 
