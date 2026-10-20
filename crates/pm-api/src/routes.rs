@@ -313,9 +313,26 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
     }
 }
 
-async fn report(State(st): State<AppState>) -> Result<Response, ApiError> {
-    let md = st.service.report_markdown()?;
-    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+#[derive(serde::Deserialize)]
+struct ReportQuery {
+    format: Option<String>,
+}
+
+async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
+    let (ct, body) = match q.format.as_deref().unwrap_or("md") {
+        "md" | "markdown" => ("text/markdown; charset=utf-8", st.service.report_markdown()?),
+        "json" => ("application/json", st.service.report_json()?),
+        "sarif" => ("application/sarif+json", st.service.report_sarif()?),
+        // Served as a download only, and with its own CSP: it contains target content.
+        "html" => ("text/html; charset=utf-8", st.service.report_html()?),
+        other => {
+            return Err(pm_service::ServiceError::Invalid(format!(
+                "unknown format {other}; use md, json, sarif or html"
+            ))
+            .into());
+        }
+    };
+    Ok(([(header::CONTENT_TYPE, ct), (header::CONTENT_DISPOSITION, "attachment")], body).into_response())
 }
 
 async fn intercept_state(State(st): State<AppState>) -> ApiResult {

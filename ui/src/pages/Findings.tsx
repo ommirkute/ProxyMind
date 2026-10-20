@@ -20,9 +20,13 @@ export default function Findings() {
           title="Findings"
           actions={
             <>
-              <a className="btn" href="/api/v1/report" download="proxymind-report.md" style={{ textDecoration: "none", padding: "6px 12px", border: "1px solid var(--border)", borderRadius: 6 }}>
-                Download report
-              </a>
+              <span className="small muted">Report:</span>
+              {[["md", "Markdown"], ["html", "HTML"], ["json", "JSON"], ["sarif", "SARIF"]].map(([f, label]) => (
+                <a key={f} className="btn" href={`/api/v1/report?format=${f}`} download={`proxymind-report.${f}`} data-testid={`report-${f}`}
+                  style={{ textDecoration: "none", padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6 }}>
+                  {label}
+                </a>
+              ))}
               <button className="btn primary" onClick={() => setCreating((c) => !c)}>New finding</button>
             </>
           }

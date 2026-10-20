@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Report exports: Markdown, JSON, SARIF 2.1.0 and a self-contained HTML page (everything escaped, its own `default-src 'none'` CSP), all from one structured report; `proxymind report --format` / `--out x.html`, `/api/v1/report?format=`, download buttons on the Findings page
 - OpenAPI import (`openapi_import`, Model page, `proxymind openapi`): OpenAPI 3 and Swagger 2, JSON or YAML, local-only `$ref`s with depth and cycle limits, example requests with bodies from schemas; optional gated sending of GET examples; VulnShop serves /openapi.json
 - Active scanner (`scan_active`, Issues page and History, `proxymind scan-active`): insertion points in query, form, JSON and numeric path values; checks for SQL errors, unencoded reflection (handed to the reflection oracle), open redirect, path traversal and SSTI against a fresh baseline; one approval per scan. VulnShop gained VS-7…VS-10 and two traps
 - Plugins (ADR-0014): acting plugins are MCP clients as `plugin:<name>` under stricter tiers; passive-check plugins are any executable speaking a JSON-lines protocol, installed per user (`proxymind plugin add`), merged into the Issues list; example `examples/plugins/jwt-check`

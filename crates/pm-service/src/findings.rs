@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{Result, Service, ServiceError, now_ms};
 
-const SEVERITIES: &[&str] = &["critical", "high", "medium", "low", "info"];
+pub(crate) const SEVERITIES: &[&str] = &["critical", "high", "medium", "low", "info"];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +247,7 @@ impl Service {
 }
 
 /// Start of a raw message for a report, with long bodies cut.
-fn excerpt(raw: &[u8], max: usize) -> String {
+pub(crate) fn excerpt(raw: &[u8], max: usize) -> String {
     let text = String::from_utf8_lossy(raw);
     let text = text.replace("\r\n", "\n");
     if text.len() <= max {

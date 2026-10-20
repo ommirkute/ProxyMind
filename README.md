@@ -24,7 +24,7 @@ cargo build --release
 PROXYMIND=./target/release/proxymind bench/demo.sh
 ```
 
-The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a Markdown report.
+The script starts **VulnShop** (a small, deliberately vulnerable API built into ProxyMind), browses it through the proxy as three users, captures their sessions, replays requests as other users, and has ProxyMind **prove** the access-control bugs it finds, while correctly refusing to "prove" the protected endpoint. It ends with a benchmark score, an audit-log check and a report (`proxymind report --out report.html`; also Markdown, JSON and SARIF).
 
 Then connect an AI agent ([docs/agents.md](docs/agents.md)) and ask it to find the remaining bugs.
 

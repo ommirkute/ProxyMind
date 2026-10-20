@@ -299,6 +299,9 @@ enum Command {
         /// Output file (default: print)
         #[arg(long, short)]
         out: Option<PathBuf>,
+        /// md, json, sarif or html (default: from --out's extension, else md)
+        #[arg(long)]
+        format: Option<String>,
     },
     /// Review actions waiting for human approval.
     Approvals {
@@ -1582,9 +1585,17 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Report { out: file } => {
+        Command::Report { out: file, format } => {
             let service = open_service(&cli.project, None)?;
-            let md = service.report_markdown()?;
+            let from_ext =
+                file.as_ref().and_then(|f| f.extension()).and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+            let md = match format.as_deref().or(from_ext.as_deref()).unwrap_or("md") {
+                "md" | "markdown" => service.report_markdown()?,
+                "json" => service.report_json()?,
+                "sarif" => service.report_sarif()?,
+                "html" | "htm" => service.report_html()?,
+                other => anyhow::bail!("unknown report format {other}; use md, json, sarif or html"),
+            };
             match file {
                 Some(f) => {
                     std::fs::write(f, md)?;

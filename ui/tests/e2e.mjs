@@ -141,6 +141,11 @@ try {
   await page.waitForSelector('[data-testid="findings"] >> text=proven');
   check(true, "finding status becomes proven");
   await page.screenshot({ path: join(SHOTS, "4-findings.png") });
+  for (const f of ["html", "sarif"]) {
+    const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId(`report-${f}`).click()]);
+    const text = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c).toString());
+    check(f === "html" ? text.includes("Any user can read any order") && text.includes("default-src 'none'") : JSON.parse(text).version === "2.1.0", `${f} report downloads`);
+  }
 
   console.log("XSS proof");
   await page.getByRole("button", { name: "New finding" }).click();
