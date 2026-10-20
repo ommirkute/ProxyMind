@@ -186,3 +186,62 @@ impl Service {
         self.listeners_get()
     }
 }
+
+/// Project setting: what the proxy records in history.
+pub const RECORDING_SETTING: &str = "history_recording";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecordingSettings {
+    /// Keep only exchanges whose target is in the rules of engagement's
+    /// scope (everything else is still proxied, just not recorded).
+    pub in_scope_only: bool,
+}
+
+fn load_recording(store: &Store) -> Result<RecordingSettings> {
+    match store.get_setting(RECORDING_SETTING)? {
+        Some(t) => serde_json::from_str(&t)
+            .map_err(|e| ServiceError::Invalid(format!("saved recording settings are unreadable: {e}"))),
+        None => Ok(RecordingSettings::default()),
+    }
+}
+
+impl Service {
+    pub fn recording_get(&self) -> Result<RecordingSettings> {
+        load_recording(&self.store.lock())
+    }
+
+    /// Changes what the proxy records. Humans only.
+    pub fn recording_set(&self, actor: &Actor, s: RecordingSettings) -> Result<RecordingSettings> {
+        if actor.kind != ActorKind::Human {
+            return Err(ServiceError::Invalid("only humans can change what is recorded".into()));
+        }
+        let text = serde_json::to_string(&s).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        self.store.lock().set_setting(RECORDING_SETTING, &text)?;
+        self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
+        self.audit(&actor.id(), "history_recording", json!(s), "allow")?;
+        Ok(s)
+    }
+
+    /// Re-reads the recording settings (changes from another process).
+    pub fn sync_recording(&self) -> Result<()> {
+        let s = load_recording(&self.store.lock())?;
+        self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether the proxy should record this exchange.
+    pub fn should_record(&self, ex: &pm_store::NewExchange) -> bool {
+        !self.record_in_scope_only.load(std::sync::atomic::Ordering::Relaxed)
+            || pm_policy::Target::from_parts(&ex.scheme, &ex.host, ex.port, &ex.path)
+                .is_ok_and(|t| self.policy.scope_check(&t).is_ok())
+    }
+
+    /// Makes the proxy's recorder follow these settings.
+    pub fn attach_recorder(self: &Arc<Self>, recorder: &pm_proxy::Recorder) -> Result<()> {
+        self.sync_recording()?;
+        let me = Arc::downgrade(self);
+        recorder.set_filter(Some(Arc::new(move |ex| me.upgrade().is_none_or(|s| s.should_record(ex)))));
+        Ok(())
+    }
+}

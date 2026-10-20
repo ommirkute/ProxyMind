@@ -3,6 +3,10 @@ import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, ty
 import { Chip, ContextMenu, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
 
 const ROW = 28;
+/** Bytes of a message shown before "Show all". */
+const MAX_SHOWN = 1_000_000;
+/** Rows kept in the table while live updates arrive. */
+const MAX_ROWS = 20_000;
 
 const DEFAULT_HIDE = "png,jpg,jpeg,gif,svg,ico,webp,css,woff,woff2,ttf,eot,map";
 
@@ -15,6 +19,71 @@ interface Filters {
   hideList: string;
   inScope: boolean;
   annotated: boolean;
+  /** Query language (see QueryHelp). */
+  q: string;
+}
+
+interface SavedFilter {
+  name: string;
+  q: string;
+}
+
+/** Fields of the history query language (mirrors pm_tools::hql::FIELDS). */
+const QUERY_FIELDS: [string, string][] = [
+  ["host", "host name (glob with *)"],
+  ["path", "path and query"],
+  ["url", "scheme://host:port/path"],
+  ["method", "GET, POST… (comma list)"],
+  ["status", "200, 4xx, >=500, 300..399"],
+  ["ext", "file extension (comma list)"],
+  ["len", "response length in bytes"],
+  ["reqlen", "request length in bytes"],
+  ["time", "response time in ms"],
+  ["id", "exchange number"],
+  ["source", "proxy, replay, intruder…"],
+  ["actor", "who sent it, e.g. agent:claude"],
+  ["identity", "test identity used"],
+  ["comment", "your comment"],
+  ["highlight", "highlight colour"],
+  ["mime", "response Content-Type"],
+  ["req", "request text (head and decoded body)"],
+  ["resp", "response text (head and decoded body)"],
+  ["any", "request or response text"],
+  ["reqheader", "request header name, or name=value"],
+  ["respheader", "response header name, or name=value"],
+  ["param", "query or form parameter name"],
+  ["is", "error, annotated, inscope, response, redirect"],
+];
+
+function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
+  const examples = [
+    'status:>=400 -ext:png,js,css',
+    'resp:"stack trace" OR resp~"(?i)sql syntax"',
+    "host:*.example.com method:POST param:id",
+    "respheader:set-cookie -respheader:set-cookie=httponly",
+    "len:>100000 time:>1000",
+    "is:inscope -source:intruder comment:idor",
+  ];
+  return (
+    <div className="query-help small" data-testid="query-help">
+      <p style={{ marginTop: 0 }}>
+        <code>field:value</code> terms side by side must all match; combine with <code>OR</code>, <code>-</code> (not) and
+        parentheses. <code>field~regex</code> matches a regular expression (add <code>(?i)</code> to ignore case). Quote
+        values with spaces. Numbers take <code>&gt;N</code>, <code>&lt;=N</code>, <code>N..M</code>; status also{" "}
+        <code>4xx</code>. A bare word matches host, path or comment. Text terms (req, resp…) read the messages, so they
+        take longer on big histories: results come in pages.
+      </p>
+      <div className="query-fields">
+        {QUERY_FIELDS.map(([f, d]) => (
+          <span key={f}><code>{f}</code> <span className="muted">{d}</span></span>
+        ))}
+      </div>
+      <p className="muted" style={{ marginBottom: 2 }}>Examples (click to use):</p>
+      {examples.map((e) => (
+        <button key={e} className="btn small mono" style={{ margin: "2px 4px 2px 0" }} onClick={() => onPick(e)}>{e}</button>
+      ))}
+    </div>
+  );
 }
 
 const INITIAL: Filters = {
@@ -26,6 +95,7 @@ const INITIAL: Filters = {
   hideList: DEFAULT_HIDE,
   inScope: false,
   annotated: false,
+  q: "",
 };
 
 type SortKey = "id" | "host" | "method" | "path" | "status" | "resp_len" | "ext" | "duration_ms" | "source" | "comment";
@@ -42,6 +112,17 @@ export default function History() {
   const [filters, setFiltersRaw] = usePref<Filters>("pm.history.filters", INITIAL);
   const [rows, setRows] = useState<ExchangeSummary[]>([]);
   const [olderFrom, setOlderFrom] = useState<number | undefined>();
+  const [scanned, setScanned] = useState<number | undefined>();
+  const [qDraft, setQDraft] = useState(filters.q ?? "");
+  const [help, setHelp] = useState(false);
+  const [saved, setSaved] = useState<SavedFilter[]>([]);
+  useEffect(() => {
+    api.get<SavedFilter[] | null>("/ui/history-filters").then((v) => setSaved(Array.isArray(v) ? v : [])).catch(() => {});
+  }, []);
+  const storeSaved = (list: SavedFilter[]) => {
+    setSaved(list);
+    api.put("/ui/history-filters", list).catch((e) => setError(e.message));
+  };
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "id", desc: true });
@@ -58,6 +139,7 @@ export default function History() {
       hide_ext: filters.hideExt ? filters.hideList : "",
       in_scope: filters.inScope || undefined,
       annotated: filters.annotated || undefined,
+      q: filters.q || undefined,
     }),
     [filters],
   );
@@ -70,6 +152,7 @@ export default function History() {
         .then((p) => {
           setRows(p.exchanges);
           setOlderFrom(p.next_before_id);
+          setScanned(p.scanned);
           setError(null);
         })
         .catch((e) => setError(e.message));
@@ -83,7 +166,21 @@ export default function History() {
     if (!counters || counters.last_exchange_id <= newest) return;
     api
       .get<ExchangePage>(`/exchanges${qs({ ...query, after_id: newest, limit: 500 })}`)
-      .then((p) => p.exchanges.length && setRows((r) => [...p.exchanges, ...r]))
+      .then((p) => {
+        if (!p.exchanges.length) return;
+        if (p.exchanges.length >= 500) {
+          // More arrived than one page: start again from the newest instead of leaving a gap.
+          setRows(p.exchanges);
+          setOlderFrom(p.exchanges[p.exchanges.length - 1].id);
+          return;
+        }
+        setRows((r) => {
+          const next = [...p.exchanges, ...r];
+          if (next.length <= MAX_ROWS) return next;
+          setOlderFrom(next[MAX_ROWS - 1].id);
+          return next.slice(0, MAX_ROWS);
+        });
+      })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [counters?.last_exchange_id]);
@@ -94,6 +191,7 @@ export default function History() {
       .then((p) => {
         setRows((r) => [...r, ...p.exchanges]);
         setOlderFrom(p.next_before_id);
+        setScanned((n) => (p.scanned === undefined ? undefined : (n ?? 0) + p.scanned));
       })
       .catch((e) => setError(e.message));
 
@@ -194,6 +292,8 @@ export default function History() {
         status_class: query.status_class || undefined,
         hide_ext: query.hide_ext || undefined,
         annotated: query.annotated,
+        in_scope: query.in_scope,
+        q: query.q,
       })
       .then((har) => saveText("proxymind.har", JSON.stringify(har)))
       .catch((e) => setError(e.message));
@@ -236,6 +336,54 @@ export default function History() {
               <span>{sorted.length}{olderFrom ? "+" : ""} shown</span>
             </div>
           </div>
+          <div className="filters query-bar">
+            <input
+              className="grow mono"
+              aria-label="Query"
+              placeholder='query: status:>=400 -ext:png resp:"error"  (Enter to apply)'
+              value={qDraft}
+              onChange={(e) => setQDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && setFilters({ q: qDraft.trim() })}
+            />
+            <button className="btn" data-testid="apply-query" onClick={() => setFilters({ q: qDraft.trim() })}>Apply</button>
+            {filters.q && <button className="btn" data-testid="clear-query" onClick={() => { setQDraft(""); setFilters({ q: "" }); }}>Clear</button>}
+            <select
+              aria-label="Saved filters"
+              value=""
+              onChange={(e) => {
+                const f = saved.find((x) => x.name === e.target.value);
+                if (f) {
+                  setQDraft(f.q);
+                  setFilters({ q: f.q });
+                }
+              }}
+            >
+              <option value="">saved filters…</option>
+              {saved.map((f) => <option key={f.name} value={f.name}>{f.name}</option>)}
+            </select>
+            <button
+              className="btn"
+              data-testid="save-filter"
+              disabled={!qDraft.trim()}
+              title="Save this query for the project"
+              onClick={() => {
+                const name = window.prompt("Name for this filter", saved.find((f) => f.q === qDraft.trim())?.name ?? "");
+                if (name?.trim()) storeSaved([...saved.filter((f) => f.name !== name.trim()), { name: name.trim(), q: qDraft.trim() }]);
+              }}
+            >
+              Save
+            </button>
+            {saved.some((f) => f.q === filters.q) && (
+              <button className="btn" title="Delete this saved filter" onClick={() => storeSaved(saved.filter((f) => f.q !== filters.q))}>Delete</button>
+            )}
+            <button className="btn" aria-label="Query help" aria-pressed={help} onClick={() => setHelp(!help)}>?</button>
+          </div>
+          {help && <QueryHelp onPick={(q) => { setQDraft(q); setFilters({ q }); }} />}
+          {filters.q && scanned !== undefined && (
+            <div className="small muted" style={{ padding: "2px 8px" }} data-testid="query-scanned">
+              {sorted.length} match{sorted.length === 1 ? "" : "es"} in {scanned.toLocaleString()} exchanges looked at{olderFrom ? " · Load older to keep looking" : ""}
+            </div>
+          )}
           <ErrorBox error={error} />
           {note && <div className="notice" data-testid="import-note">{note}</div>}
           <VirtualRows
@@ -361,19 +509,22 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   const action = useAction();
   const [note, setNote] = useState<string | null>(null);
   const [curl, setCurl] = useState<string | null>(null);
+  // Big messages load cut to MAX_SHOWN until asked for in full.
+  const [full, setFull] = useState(false);
+  const cap = full ? "" : `max=${MAX_SHOWN}`;
 
   useEffect(() => {
-    setEx(null);
     setCurl(null);
     setNote(null);
     api
-      .get<ExchangeDetail>(`/exchanges/${id}`)
+      .get<ExchangeDetail>(`/exchanges/${id}${cap ? `?${cap}` : ""}`)
       .then((d) => {
         setEx(d);
-        if (d.summary.status === 101) setTab("websocket");
+        if (d.summary.status === 101 && !full) setTab("websocket");
       })
       .catch((e) => setError(e.message));
-  }, [id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, full]);
 
   if (error) return <div className="detail"><ErrorBox error={error} /></div>;
   if (!ex) return <div className="detail muted">Loading…</div>;
@@ -397,7 +548,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
 
   // Exact bytes for the hex view, fetched once when first asked for.
   const loadBytes = (k: "request_b64" | "response_b64") => () =>
-    api.get<ExchangeDetail>(`/exchanges/${id}?bytes=1`).then((d) => d[k] ?? null);
+    api.get<ExchangeDetail>(`/exchanges/${id}?bytes=1${cap ? `&${cap}` : ""}`).then((d) => d[k] ?? null);
 
   const saveAnnotation = (highlight: string | null | undefined, comment: string | null | undefined) =>
     action.run(async () => {
@@ -472,13 +623,15 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         </>
       )}
       {tab === "request" && (
-        <MessageView text={ex.request} decodedBody={ex.view.request.body?.text} loadB64={loadBytes("request_b64")} testid="request-view" />
+        <MessageView text={ex.request} decodedBody={ex.view.request.body?.text} loadB64={loadBytes("request_b64")} truncated={ex.request_truncated} onShowAll={() => setFull(true)} testid="request-view" />
       )}
       {tab === "response" && (
         <MessageView
           text={ex.response ?? s.error}
           decodedBody={ex.response ? resp?.text : undefined}
           loadB64={ex.response ? loadBytes("response_b64") : undefined}
+          truncated={ex.response_truncated}
+          onShowAll={() => setFull(true)}
           empty="No response"
           testid="response-view"
         />

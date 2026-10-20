@@ -137,6 +137,9 @@ pub fn watch_roe(service: Arc<Service>) {
                 Ok(false) => {}
                 Err(e) => tracing::warn!("{e}"),
             }
+            if let Err(e) = service.sync_recording() {
+                tracing::warn!("{e}");
+            }
         }
     });
 }

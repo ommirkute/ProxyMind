@@ -141,6 +141,7 @@ pub fn api() -> Router<AppState> {
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
         .route("/proxy/listeners", get(listeners_get).put(listeners_put))
+        .route("/history/recording", get(recording_get).put(recording_put))
         .route("/session", get(session_get).put(session_put))
         .route("/session/jar", get(session_jar).delete(session_jar_clear))
         .route("/session/macros/{name}/run", post(session_macro_run))
@@ -201,20 +202,48 @@ struct BytesQuery {
     /// Also return the exact bytes, base64-encoded (for hex views).
     #[serde(default)]
     bytes: Option<u8>,
+    /// Cut request and response text to this many bytes (`*_truncated`
+    /// then gives the full length). Large bodies stay fast in a browser.
+    #[serde(default)]
+    max: Option<usize>,
+}
+
+/// Text of at most `max` bytes (on a character boundary) and, if cut, the full length.
+fn capped(raw: &[u8], max: Option<usize>) -> (String, Option<usize>) {
+    match max {
+        Some(m) if raw.len() > m => {
+            let mut s = String::from_utf8_lossy(&raw[..m]).into_owned();
+            if s.ends_with('\u{fffd}') {
+                s.pop(); // a character cut in half
+            }
+            (s, Some(raw.len()))
+        }
+        _ => (String::from_utf8_lossy(raw).into_owned(), None),
+    }
 }
 
 async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
     let ex = st.service.exchange_raw(id)?;
     let view = st.service.exchange_get(&st.actor, id, View::Full, 6000)?;
+    let max = q.max.map(|m| m.max(1024));
+    let (request, request_truncated) = capped(&ex.request, max);
+    let response = ex.response.as_deref().map(|r| capped(r, max));
     let mut v = json!({
         "summary": ex.summary,
-        "request": String::from_utf8_lossy(&ex.request),
-        "response": ex.response.as_deref().map(String::from_utf8_lossy),
+        "request": request,
+        "response": response.as_ref().map(|r| &r.0),
         "view": view,
     });
+    if let Some(n) = request_truncated {
+        v["request_truncated"] = json!(n);
+    }
+    if let Some(n) = response.and_then(|r| r.1) {
+        v["response_truncated"] = json!(n);
+    }
     if q.bytes == Some(1) {
-        v["request_b64"] = json!(pm_core::base64(&ex.request));
-        v["response_b64"] = json!(ex.response.as_deref().map(pm_core::base64));
+        let cut = |b: &[u8]| pm_core::base64(&b[..max.map_or(b.len(), |m| m.min(b.len()))]);
+        v["request_b64"] = json!(cut(&ex.request));
+        v["response_b64"] = json!(ex.response.as_deref().map(cut));
     }
     Ok(Json(v))
 }
@@ -663,6 +692,14 @@ async fn network_get(State(st): State<AppState>) -> ApiResult {
 
 async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
     ok(st.service.network_set(&st.actor, cfg)?)
+}
+
+async fn recording_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.recording_get()?)
+}
+
+async fn recording_put(State(st): State<AppState>, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
+    ok(st.service.recording_set(&st.actor, r)?)
 }
 
 async fn session_get(State(st): State<AppState>) -> ApiResult {

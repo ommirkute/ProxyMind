@@ -908,7 +908,12 @@ async fn run() -> Result<()> {
             // them only rules marked "any host" apply.
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
             match open_service(&cli.project, None) {
-                Ok(service) => service.attach_rewriter(rewriter.clone())?,
+                Ok(service) => {
+                    let service = Arc::new(service);
+                    service.attach_rewriter(rewriter.clone())?;
+                    service.attach_recorder(&recorder)?;
+                    pm_service::watch_roe(service);
+                }
                 Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
             }
             let network = pm_service::pm_replay::Network::new();
@@ -1205,6 +1210,7 @@ async fn run() -> Result<()> {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
                 setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
                 let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
+                service.attach_recorder(&recorder)?;
                 let queue = Arc::new(pm_proxy::InterceptQueue::new());
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());

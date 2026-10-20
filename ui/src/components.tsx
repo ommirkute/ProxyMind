@@ -222,18 +222,27 @@ export type ViewMode = "pretty" | "raw" | "hex";
  * A request or response with Pretty / Raw / Hex views and a search box.
  * `loadB64` fetches the exact bytes for the hex view on demand.
  */
+const HEX_MAX = 256 * 1024;
+const PRETTY_MAX = 2_000_000;
+const fmtSize = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
+
 export function MessageView({
   text,
   decodedBody,
   loadB64,
   empty,
   testid,
+  truncated,
+  onShowAll,
 }: {
   text: string | null | undefined;
   decodedBody?: string | null;
   loadB64?: () => Promise<string | null | undefined>;
   empty?: string;
   testid?: string;
+  /** Full length in bytes when `text` was cut. */
+  truncated?: number | null;
+  onShowAll?: () => void;
 }) {
   const [mode, setMode] = useState<ViewMode>(() => {
     try {
@@ -247,10 +256,12 @@ export function MessageView({
   useEffect(() => setHex(null), [text]);
   useEffect(() => {
     if (mode !== "hex" || hex !== null || text == null) return;
-    const fallback = () => setHex(hexDump(new TextEncoder().encode(text)));
+    // Hex is four times the size of the bytes: show the start of big ones.
+    const dump = (b: Uint8Array) => setHex(hexDump(b.subarray(0, HEX_MAX)) + (b.length > HEX_MAX ? `\n… ${fmtSize(b.length - HEX_MAX)} more` : ""));
+    const fallback = () => dump(new TextEncoder().encode(text));
     if (!loadB64) return fallback();
     loadB64()
-      .then((b) => (b ? setHex(hexDump(b64ToBytes(b))) : fallback()))
+      .then((b) => (b ? dump(b64ToBytes(b)) : fallback()))
       .catch(fallback);
   }, [mode, hex, text, loadB64]);
   const choose = (m: ViewMode) => {
@@ -262,7 +273,9 @@ export function MessageView({
     }
   };
   if (text == null) return <Empty>{empty ?? "Nothing to show"}</Empty>;
-  const shown = mode === "hex" ? (hex ?? "Loading…") : mode === "pretty" ? prettyMessage(text, decodedBody) : text;
+  // Pretty-printing very large messages would freeze the page.
+  const pretty = mode === "pretty" && text.length <= PRETTY_MAX;
+  const shown = mode === "hex" ? (hex ?? "Loading…") : pretty ? prettyMessage(text, decodedBody) : text;
   const count = q ? shown.split(new RegExp(escapeRe(q), "i")).length - 1 : 0;
   return (
     <div className="msgview" data-testid={testid}>
@@ -276,6 +289,13 @@ export function MessageView({
         {q && <span className="small muted" data-testid="search-count">{count} match{count === 1 ? "" : "es"}</span>}
         <button className="seg" title="Copy" onClick={() => copyText(shown)}>Copy</button>
       </div>
+      {truncated ? (
+        <div className="notice small" data-testid="truncated">
+          Showing the first {fmtSize(text.length)} of {fmtSize(truncated)}.{" "}
+          {onShowAll && <button className="btn small" onClick={onShowAll}>Show all</button>}
+        </div>
+      ) : null}
+      {mode === "pretty" && !pretty && <div className="small muted">Too large to pretty-print; showing raw.</div>}
       <pre className={`raw ${mode === "hex" ? "hex" : ""}`}>
         <Highlighted text={shown} q={q} />
       </pre>

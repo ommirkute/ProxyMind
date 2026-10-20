@@ -22,6 +22,7 @@ use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings};
 pub use listeners::{ListenerConfig, ListenerStatus, Listeners, Redirect};
+pub use pm_store::NewExchange as RecordedExchange;
 use pm_store::{NewExchange, NewWsMessage, Store};
 use pm_tls::{CertAuthority, TlsAcceptor};
 pub use rewrite::{Rewriter, Rule as RewriteRule};
@@ -34,12 +35,16 @@ enum Record {
     WsDone(u64),
 }
 
+/// Decides whether an exchange goes into history (e.g. in scope only).
+pub type RecordFilter = Arc<dyn Fn(&NewExchange) -> bool + Send + Sync>;
+
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
 /// never waits on the database.
 #[derive(Clone)]
 pub struct Recorder {
     tx: std::sync::mpsc::Sender<Record>,
     next_key: Arc<std::sync::atomic::AtomicU64>,
+    filter: Arc<parking_lot::RwLock<Option<RecordFilter>>>,
 }
 
 impl Recorder {
@@ -74,17 +79,31 @@ impl Recorder {
                 }
             }
         });
-        (Self { tx, next_key: Arc::default() }, handle)
+        (Self { tx, next_key: Arc::default(), filter: Arc::default() }, handle)
+    }
+
+    /// Sets (or removes) the filter for every clone of this recorder.
+    pub fn set_filter(&self, f: Option<RecordFilter>) {
+        *self.filter.write() = f;
+    }
+
+    fn keep(&self, ex: &NewExchange) -> bool {
+        self.filter.read().as_ref().is_none_or(|f| f(ex))
     }
 
     pub fn record(&self, ex: NewExchange) {
-        let _ = self.tx.send(Record::Exchange(Box::new(ex), None));
+        if self.keep(&ex) {
+            let _ = self.tx.send(Record::Exchange(Box::new(ex), None));
+        }
     }
 
-    /// Records an upgraded exchange; the key links its WebSocket messages.
+    /// Records an upgraded exchange; the key links its WebSocket messages
+    /// (which are dropped too when the exchange isn't kept).
     fn record_upgrade(&self, ex: NewExchange) -> u64 {
         let key = self.next_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.tx.send(Record::Exchange(Box::new(ex), Some(key)));
+        if self.keep(&ex) {
+            let _ = self.tx.send(Record::Exchange(Box::new(ex), Some(key)));
+        }
         key
     }
 

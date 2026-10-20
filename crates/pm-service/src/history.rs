@@ -3,6 +3,7 @@
 use pm_ai::{ExchangeView, View, render_exchange};
 use pm_policy::Actor;
 use pm_store::{ExchangeSummary, HistoryFilter};
+use pm_tools::hql;
 use serde::Serialize;
 
 use crate::{Result, Service, ServiceError};
@@ -14,12 +15,91 @@ pub struct ExchangePage {
     /// Pass as `before_id` to get the next (older) page, if there may be more.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before_id: Option<i64>,
+    /// With a query: how many exchanges were looked at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<usize>,
+}
+
+/// How long one query page may take before it returns what it has.
+const QUERY_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Bytes for a query, loaded on first use.
+struct Lazy<'a> {
+    svc: &'a Service,
+    actor: &'a Actor,
+    row: &'a ExchangeSummary,
+    loaded: Option<(Vec<u8>, Option<Vec<u8>>)>,
+    scope: Option<bool>,
+}
+
+impl Lazy<'_> {
+    fn load(&mut self) -> &(Vec<u8>, Option<Vec<u8>>) {
+        if self.loaded.is_none() {
+            let ex = self.svc.store.lock().get_exchange(self.row.id).ok().flatten();
+            let redactor = self.svc.redactor_for(self.actor);
+            let prep = |raw: &[u8]| {
+                let hay = crate::search::searchable(raw);
+                match redactor {
+                    Some(r) => r.redact(&String::from_utf8_lossy(&hay)).into_bytes(),
+                    None => hay,
+                }
+            };
+            self.loaded = Some(match ex {
+                Some(ex) => (prep(&ex.request), ex.response.as_deref().map(prep)),
+                None => (Vec::new(), None),
+            });
+        }
+        self.loaded.as_ref().expect("loaded above")
+    }
+}
+
+impl hql::Fetch for Lazy<'_> {
+    fn request(&mut self) -> &[u8] {
+        &self.load().0
+    }
+
+    fn response(&mut self) -> Option<&[u8]> {
+        self.load().1.as_deref()
+    }
+
+    fn in_scope(&mut self) -> bool {
+        let (svc, r) = (self.svc, self.row);
+        *self.scope.get_or_insert_with(|| {
+            pm_policy::Target::from_parts(&r.scheme, &r.host, r.port, &r.path)
+                .is_ok_and(|t| svc.policy.scope_check(&t).is_ok())
+        })
+    }
+}
+
+fn meta(r: &ExchangeSummary) -> hql::Meta<'_> {
+    hql::Meta {
+        id: r.id,
+        scheme: &r.scheme,
+        host: &r.host,
+        port: r.port,
+        method: &r.method,
+        path: &r.path,
+        status: r.status,
+        req_len: r.req_len,
+        resp_len: r.resp_len,
+        duration_ms: r.duration_ms,
+        source: &r.source,
+        actor: &r.actor_id,
+        identity: r.identity.as_deref(),
+        comment: r.comment.as_deref(),
+        highlight: r.highlight.as_deref(),
+        error: r.error.as_deref(),
+    }
 }
 
 impl Service {
     /// Searches history (a `read` action: always allowed, not audited).
     pub fn history_search(&self, actor: &Actor, filter: &HistoryFilter) -> Result<ExchangePage> {
         let limit = filter.limit.unwrap_or(50).clamp(1, 500);
+        if let Some(q) = filter.q.as_deref().filter(|q| !q.trim().is_empty()) {
+            let query = hql::Query::parse(q).map_err(|e| ServiceError::Invalid(format!("query: {e}")))?;
+            return self.query_rows(actor, filter, &query, limit);
+        }
         let mut rows = if filter.in_scope == Some(true) {
             self.in_scope_rows(filter, limit)?
         } else {
@@ -31,7 +111,50 @@ impl Service {
             }
         }
         let next_before_id = (rows.len() == limit).then(|| rows.last().map(|r| r.id)).flatten();
-        Ok(ExchangePage { exchanges: rows, next_before_id })
+        Ok(ExchangePage { exchanges: rows, next_before_id, scanned: None })
+    }
+
+    /// Rows matching a query (and the other filters), newest first. Stops
+    /// after `limit` matches or the time budget; `next_before_id` then says
+    /// where to continue.
+    fn query_rows(
+        &self,
+        actor: &Actor,
+        filter: &HistoryFilter,
+        query: &hql::Query,
+        limit: usize,
+    ) -> Result<ExchangePage> {
+        let deadline = std::time::Instant::now() + QUERY_BUDGET;
+        let mut f = filter.clone();
+        f.q = None;
+        f.limit = Some(500);
+        let (mut out, mut scanned, mut last, mut more) = (Vec::new(), 0usize, None, true);
+        'pages: while more {
+            let page = self.store.lock().search_exchanges(&f)?;
+            more = page.len() == 500 && filter.after_id.is_none();
+            for row in &page {
+                scanned += 1;
+                last = Some(row.id);
+                let mut lazy = Lazy { svc: self, actor, row, loaded: None, scope: None };
+                let ok = (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy))
+                    && query.matches(&meta(row), &mut lazy);
+                if ok {
+                    out.push(row.clone());
+                }
+                if out.len() >= limit || std::time::Instant::now() > deadline {
+                    more = !(out.len() < limit && Some(row.id) == page.last().map(|r| r.id) && !more);
+                    break 'pages;
+                }
+            }
+            f.before_id = last;
+        }
+        if let Some(r) = self.redactor_for(actor) {
+            for row in &mut out {
+                row.path = r.redact(&row.path);
+            }
+        }
+        let next_before_id = if more { last } else { None };
+        Ok(ExchangePage { exchanges: out, next_before_id, scanned: Some(scanned) })
     }
 
     /// Rows whose targets are in scope, reading pages until `limit` are found

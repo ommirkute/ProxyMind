@@ -100,6 +100,8 @@ export interface ExchangeSummary {
 }
 
 export interface ExchangePage {
+  /** With a query: how many exchanges were looked at. */
+  scanned?: number;
   exchanges: ExchangeSummary[];
   next_before_id?: number;
 }
@@ -120,6 +122,9 @@ export interface ExchangeDetail {
   response: string | null;
   request_b64?: string;
   response_b64?: string | null;
+  /** Full length when the text was cut (`?max=`). */
+  request_truncated?: number;
+  response_truncated?: number;
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };

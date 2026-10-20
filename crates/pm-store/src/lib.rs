@@ -419,6 +419,8 @@ pub struct HistoryFilter {
     pub in_scope: Option<bool>,
     /// Host, path or comment contains this text (case-insensitive).
     pub text: Option<String>,
+    /// A history query (`pm_tools::hql`), applied by the service.
+    pub q: Option<String>,
 }
 
 pub struct Store {
@@ -470,7 +472,7 @@ impl Store {
             anyhow::bail!("project was created by a newer ProxyMind (schema {version})");
         }
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
-            let tx = self.conn.transaction()?;
+            let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;
             tx.commit()?;
@@ -498,7 +500,10 @@ impl Store {
     }
 
     pub fn insert_exchange(&mut self, ex: &NewExchange) -> Result<i64> {
-        let tx = self.conn.transaction()?;
+        // IMMEDIATE takes the write lock up front (waiting on busy_timeout). A
+        // deferred one reads first and fails at once (SQLITE_BUSY_SNAPSHOT)
+        // if another connection commits in between, losing the exchange.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let req_hash = Self::put_blob(&tx, &ex.request)?;
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
         tx.execute(
@@ -1245,6 +1250,30 @@ mod tests {
             identity: None,
             hypothesis_id: None,
         }
+    }
+
+    #[test]
+    fn concurrent_writers_never_lose_exchanges() {
+        // Two connections to one project, like the proxy's recorder and the
+        // UI's service: every insert must land while the other one writes.
+        let dir = std::env::temp_dir().join(format!("pm-store-conc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.pmproj");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            for i in 0..300 {
+                b.set_setting("busy", &i.to_string()).unwrap();
+                b.insert_exchange(&sample(&format!("/b/{i}"), b"HTTP/1.1 200 OK\r\n\r\nb")).unwrap();
+            }
+        });
+        for i in 0..300 {
+            a.insert_exchange(&sample(&format!("/a/{i}"), format!("HTTP/1.1 200 OK\r\n\r\n{i}").as_bytes())).unwrap();
+        }
+        writer.join().unwrap();
+        assert_eq!(a.count_exchanges().unwrap(), 600);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -48,8 +48,8 @@ pub use intruder::{
 };
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
-    LISTENERS_SETTING, ListenersView, NETWORK_SETTING, load_listeners, load_network, sync_listeners, sync_network,
-    watch_project,
+    LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,
+    load_network, sync_listeners, sync_network, watch_project,
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use pm_store::ApprovalRow;
@@ -134,6 +134,8 @@ pub struct Service {
     session: parking_lot::Mutex<session::SessionState>,
     /// One macro run at a time.
     session_lock: tokio::sync::Mutex<()>,
+    /// The proxy records only in-scope exchanges.
+    record_in_scope_only: std::sync::atomic::AtomicBool,
 }
 
 impl Service {
@@ -162,6 +164,7 @@ impl Service {
             listeners: std::sync::OnceLock::new(),
             session: parking_lot::Mutex::default(),
             session_lock: tokio::sync::Mutex::new(()),
+            record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

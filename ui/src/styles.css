@@ -272,3 +272,7 @@ span.good { color: var(--ok); font-weight: 600; }
 .session-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 10px; }
 .macro-step { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .macro-step textarea { width: 100%; margin-top: 4px; }
+.query-bar { padding-top: 0; }
+.query-bar input[aria-label="Query"] { min-width: 260px; }
+.query-help { padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.query-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 12px; margin: 6px 0; }

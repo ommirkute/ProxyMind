@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Empty, ErrorBox, Panel, useLoad, useNav } from "../components";
+import { Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
 import Listeners from "./Listeners";
 
 interface SetupInfo {
@@ -74,6 +74,7 @@ export default function Setup() {
         </Panel>
       </div>
       <Listeners />
+      <Recording />
     </div>
   );
 }
@@ -117,4 +118,27 @@ export NODE_EXTRA_CA_CERTS=$PWD/proxymind-ca.pem                                
     ),
   };
   return <div className="small" data-testid="ca-instructions" style={{ marginTop: 8 }}>{steps[os]}</div>;
+}
+
+/** What the proxy keeps in HTTP history. */
+function Recording() {
+  const rec = useLoad(() => api.get<{ in_scope_only: boolean }>("/history/recording"), []);
+  const action = useAction();
+  const set = (in_scope_only: boolean) => {
+    const before = rec.data;
+    rec.setData({ in_scope_only }); // show the change at once; undo if saving fails
+    action
+      .run(() => api.put<{ in_scope_only: boolean }>("/history/recording", { in_scope_only }))
+      .then((r) => rec.setData(r ?? before));
+  };
+  return (
+    <Panel title="4. What to record">
+      <label className="row small" style={{ gap: 6 }}>
+        <input type="checkbox" data-testid="record-in-scope" checked={!!rec.data?.in_scope_only} disabled={!rec.data} onChange={(e) => set(e.target.checked)} />
+        Record only in-scope traffic in HTTP history. Everything is still proxied; out-of-scope requests (and their
+        WebSocket messages) just aren't saved, which keeps big projects small and fast.
+      </label>
+      <ErrorBox error={rec.error ?? action.error} />
+    </Panel>
+  );
 }

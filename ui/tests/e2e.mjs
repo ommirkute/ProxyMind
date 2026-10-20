@@ -160,6 +160,43 @@ try {
   await page.locator('[data-testid="response-view"]').getByRole("button", { name: "Pretty" }).click();
   await page.locator('[data-testid="response-view"]').getByLabel("Search in message").fill("HTTP/1.1");
   check(await page.locator('[data-testid="response-view"] [data-testid="search-count"]').textContent() === "1 match", "search in a message counts matches");
+  await page.getByLabel("Query", { exact: true }).fill('path:/api/orders/ resp:"alice@"');
+  await page.getByLabel("Query", { exact: true }).press("Enter");
+  await page.waitForSelector('[data-testid="query-scanned"]');
+  const qRows = await page.locator('[data-testid^="row-"]').allTextContents();
+  check(qRows.length > 0 && qRows.every((t) => t.includes("/api/orders/")), `a query filters by path and response text (${qRows.length} rows)`);
+  page.once("dialog", (d) => d.accept("alice orders"));
+  await page.getByTestId("save-filter").click();
+  const errorsBefore = consoleErrors.length;
+  await page.getByLabel("Query", { exact: true }).fill("stauts:200");
+  await page.getByLabel("Query", { exact: true }).press("Enter");
+  await page.locator(".error", { hasText: "unknown field" }).waitFor();
+  // The browser logs the expected 400 for the mistyped query.
+  for (let i = consoleErrors.length - 1; i >= errorsBefore; i--) if (consoleErrors[i].includes("400")) consoleErrors.splice(i, 1);
+  check(true, "a mistyped field is reported");
+  await page.getByLabel("Saved filters").selectOption("alice orders");
+  await page.waitForFunction(() => document.querySelector('input[aria-label="Query"]').value.includes("alice@"));
+  await page.waitForSelector('[data-testid="query-scanned"]');
+  check(true, "a saved filter comes back from the list");
+  await page.getByRole("button", { name: "Query help" }).click();
+  await page.getByTestId("query-help").waitFor();
+  await page.screenshot({ path: join(SHOTS, "1c-history-query.png") });
+  await page.getByRole("button", { name: "Query help" }).click();
+  await page.getByTestId("clear-query").click();
+  await sleep(400);
+  await viaProxy(proxy, shop, "GET /openapi.json HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+  const capped = await page.evaluate(async () => {
+    for (let i = 0; i < 20; i++) {
+      const big = (await (await fetch("/api/v1/exchanges?q=len:>1500&limit=1")).json()).exchanges[0];
+      if (big) {
+        const d = await (await fetch(`/api/v1/exchanges/${big.id}?max=1024`)).json();
+        return d.response_truncated > 1500 && d.response.length <= 1024 ? "ok" : JSON.stringify(d).slice(0, 200);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return "none";
+  });
+  check(capped === "ok", `big messages can be fetched cut short (${capped})`);
   await page.screenshot({ path: join(SHOTS, "1b-history-tools.png") });
   const order = await rowFor("/api/orders/1001", 0);
   const orderId = Number((await order.getAttribute("data-testid")).replace("row-", ""));
@@ -676,7 +713,15 @@ try {
   await page.waitForSelector('[data-testid="decode-step"]');
   check(await page.getByTestId("decode-step").last().textContent() === "<script>", "smart decode peels base64 then URL encoding");
   await viaProxy(proxy, shop, "POST /api/password/reset HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\n\r\n");
-  const resetId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=/api/password/reset&limit=1")).json()).exchanges[0].id);
+  const resetId = await page.evaluate(async () => {
+    // The proxy records in the background: wait for the row.
+    for (let i = 0; i < 50; i++) {
+      const row = (await (await fetch("/api/v1/exchanges?path=/api/password/reset&limit=1")).json()).exchanges[0];
+      if (row) return row.id;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  });
   await page.getByLabel("Token exchange").fill(String(resetId));
   await page.getByLabel("Samples").fill("20");
   await page.getByLabel("Token locator").fill("json:/debug_code");
@@ -712,6 +757,12 @@ try {
   const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
   check(caShown === new X509Certificate(pem).fingerprint256, "the CA fingerprint matches the downloaded certificate");
   check(await page.getByTestId("setup-proxy").textContent() === `127.0.0.1:${proxy}`, "the proxy address is shown");
+
+  await page.getByTestId("record-in-scope").check();
+  await page.waitForFunction(async () => (await (await fetch("/api/v1/history/recording")).json()).in_scope_only === true);
+  check(true, "recording only in-scope traffic can be switched on");
+  await page.getByTestId("record-in-scope").uncheck();
+  await page.waitForFunction(async () => (await (await fetch("/api/v1/history/recording")).json()).in_scope_only === false);
 
   console.log("Proxy listeners");
   const extra = await freePort();

@@ -115,6 +115,7 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
     let proxy = match tokio::net::TcpListener::bind(proxy_addr).await {
         Ok(l) => {
             let (recorder, writer) = Recorder::spawn(Store::open(project)?);
+            service.attach_recorder(&recorder)?;
             // The recorder's writer thread lives as long as the app.
             std::mem::forget(writer);
             let queue = Arc::new(pm_proxy::InterceptQueue::new());

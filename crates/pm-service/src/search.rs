@@ -59,7 +59,7 @@ pub struct SiteView {
 }
 
 /// Head as recorded plus the body decoded (chunked, gzip…), for searching.
-fn searchable(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn searchable(raw: &[u8]) -> Vec<u8> {
     let (head, body) = pm_http::split_message(raw);
     let headers = pm_http::parse_request_head(head)
         .map(|h| h.headers)

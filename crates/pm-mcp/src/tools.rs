@@ -40,6 +40,12 @@ pub fn tool_definitions() -> Vec<Value> {
                 "before_id": {"type":"integer","description":"Paging: pass next_before_id from the previous result"},
                 "after_id": {"type":"integer","description":"Only exchanges newer than this id"},
                 "limit": {"type":"integer","minimum":1,"maximum":500,"description":"Default 50"},
+                "q": {"type":"string","description":"Query: field:value terms (all must match), OR, -term, \
+                      parentheses; field~regex. Fields: host path url method status ext len reqlen time id source \
+                      actor identity comment highlight mime req resp any reqheader respheader param is. Numbers take \
+                      >N <=N N..M, status 4xx. E.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. \
+                      Text terms read messages: a page may stop early (see scanned, next_before_id)."},
+                "in_scope": {"type":"boolean","description":"Only targets in scope"},
             }),
             &[],
         ),

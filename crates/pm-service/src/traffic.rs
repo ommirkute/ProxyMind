@@ -100,31 +100,30 @@ impl Service {
 
     /// Exchanges as a HAR 1.2 document (newest first unless `ids` are given).
     pub fn traffic_export_har(&self, actor: &Actor, req: &ExportRequest) -> Result<Value> {
-        let mut rows = Vec::new();
-        {
-            let store = self.store.lock();
-            if let Some(ids) = &req.ids {
-                for &id in ids.iter().take(MAX_EXPORT) {
-                    rows.push(store.get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?);
-                }
-            } else {
+        let ids: Vec<i64> = match &req.ids {
+            Some(ids) => ids.iter().take(MAX_EXPORT).copied().collect(),
+            None => {
+                // The same search as history (queries and scope included).
                 let want = req.filter.limit.unwrap_or(MAX_EXPORT).clamp(1, MAX_EXPORT);
                 let mut filter = req.filter.clone();
-                while rows.len() < want {
-                    filter.limit = Some((want - rows.len()).min(500));
-                    let page = store.search_exchanges(&filter)?;
-                    let Some(last) = page.last().map(|r| r.id) else { break };
-                    let full = page.len() == filter.limit.unwrap_or(0);
-                    for s in page {
-                        if let Some(ex) = store.get_exchange(s.id)? {
-                            rows.push(ex);
-                        }
+                let mut ids = Vec::new();
+                while ids.len() < want {
+                    filter.limit = Some((want - ids.len()).min(500));
+                    let page = self.history_search(actor, &filter)?;
+                    ids.extend(page.exchanges.iter().map(|r| r.id));
+                    match page.next_before_id {
+                        Some(b) => filter.before_id = Some(b),
+                        None => break,
                     }
-                    if !full {
-                        break;
-                    }
-                    filter.before_id = Some(last);
                 }
+                ids
+            }
+        };
+        let mut rows = Vec::with_capacity(ids.len());
+        {
+            let store = self.store.lock();
+            for id in ids {
+                rows.push(store.get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?);
             }
         }
         let redactor = self.redactor_for(actor);

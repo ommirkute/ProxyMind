@@ -1590,6 +1590,7 @@ dependencies = [
  "pm-replay",
  "pm-scan",
  "pm-store",
+ "pm-tls",
  "pm-tools",
  "regex",
  "ring",

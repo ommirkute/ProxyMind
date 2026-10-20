@@ -10,6 +10,7 @@
 pub mod codec;
 pub mod curl;
 pub mod har;
+pub mod hql;
 pub mod linediff;
 pub mod search;
 pub mod sequencer;

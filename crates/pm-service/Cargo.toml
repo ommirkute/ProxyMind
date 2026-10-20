@@ -50,4 +50,5 @@ workspace = true
 [dev-dependencies]
 flate2 = "1.1.10"
 pm-demo = { path = "../pm-demo" }
+pm-tls = { path = "../pm-tls" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
