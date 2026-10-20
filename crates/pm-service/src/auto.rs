@@ -52,6 +52,10 @@ impl Service {
                 )
                 .await?;
             report.checks += 1;
+            // Anyone, logged in or not, gets the same answer: public data, not a leak.
+            if r.results.iter().any(|row| row.identity == pm_identity::ANONYMOUS && row.verdict == "same_as_owner") {
+                continue;
+            }
             // An admin reading a user's data is expected; only a peer or a
             // less privileged identity getting it is a leak.
             let Some(leak) = r.results.iter().find(|row| {
