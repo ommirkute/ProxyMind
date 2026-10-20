@@ -125,6 +125,8 @@ Want your own checks? A passive-check plugin is any program that reads exchanges
 
 Handing a project to a client or storing it? `proxymind -p client.pmproj project lock --remove` seals it into an encrypted `client.pmlock` (Argon2id passphrase, authenticated encryption); `proxymind project unlock client.pmlock` restores it.
 
+Scripting? `sdk/python` is a dependency-free Python client for the REST API (Apache-2.0): `pip install ./sdk/python`, then `from proxymind import Client`.
+
 Prefer a desktop app? `desktop/` wraps the same UI in a Tauri window with a tray icon (see [ADR-0012](docs/adr/0012-desktop-shell.md) for how to build it).
 
 ```bash
@@ -166,6 +168,7 @@ crates/
   pm-mcp       MCP server                                       ✅ working
   pm-assistant built-in assistant (local or cloud models)       ✅ working
 ui/           web UI (React + TypeScript), built into the binary
+sdk/python/   Python client for the REST API (Apache-2.0)
 desktop/      desktop app (Tauri 2) around the same web UI
 fuzz/         fuzz targets for the parsers (nightly)
 docs/          plan, decision records (ADRs), RFCs

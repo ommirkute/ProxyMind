@@ -135,6 +135,9 @@ Transparent project encryption (sealing is done: `project lock/unlock`, ADR-0013
 
 ## 5. How to work on it
 
+### Python SDK
+`sdk/python` (Apache-2.0, no dependencies). Tests start a real `proxymind ui` and VulnShop: `PROXYMIND=target/debug/proxymind python3 -m unittest discover -s sdk/python/tests` (also in the CI `ui` job). Add a method there when you add an API route.
+
 ### Releases, container, fuzzing
 See `docs/releasing.md`: tag `v*` → `.github/workflows/release.yml` (binaries, checksums, SBOM, attestations, GHCR image). `.github/workflows/nightly.yml` fuzzes parsers (`fuzz/`, needs nightly + cargo-fuzz) and builds the image. In the sandbox, `dockerd` can be started by hand and builds work with `--secret id=extra_ca,src=/root/.ccr/ca-bundle.crt` and the proxy as build args.
 

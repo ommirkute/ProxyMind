@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Python SDK (`sdk/python`, Apache-2.0, stdlib only): typed errors (`ApiError`, `Denied`, `PendingApproval`), approval waiting, live events, every main API action; integration tests against the real binary in CI
 - Decoder, Comparer and Sequencer (Tools page, `decode`/`compare`/`sequencer` CLI, MCP `decode`, `compare_exchanges`, `sequencer_run`): codec chains and smart decode, LCS line diffs plus semantic diff, token randomness (per-position entropy, constant positions, duplicates, counters; statistics only, never the tokens). VulnShop gained VS-11 (sequential reset codes)
 - Report exports: Markdown, JSON, SARIF 2.1.0 and a self-contained HTML page (everything escaped, its own `default-src 'none'` CSP), all from one structured report; `proxymind report --format` / `--out x.html`, `/api/v1/report?format=`, download buttons on the Findings page
 - OpenAPI import (`openapi_import`, Model page, `proxymind openapi`): OpenAPI 3 and Swagger 2, JSON or YAML, local-only `$ref`s with depth and cycle limits, example requests with bodies from schemas; optional gated sending of GET examples; VulnShop serves /openapi.json
