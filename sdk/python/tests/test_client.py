@@ -72,6 +72,11 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(self.pm.status()["you_are"], "human:sdk")
         self.assertIn('"version": "2.1.0"', self.pm.report("sarif"))
         self.assertTrue(self.pm.audit_verify()["intact"])
+        row = self.pm.annotate(ex, highlight="green", comment="sdk")
+        self.assertEqual((row["highlight"], row["comment"]), ("green", "sdk"))
+        self.assertEqual([e["id"] for e in self.pm.history(annotated="true")], [ex])
+        self.pm.annotate(ex)
+        self.assertEqual(self.pm.ws_history(), [])
 
     def test_scans_tools_and_errors(self):
         ex = self.get("/greet?name=ann")

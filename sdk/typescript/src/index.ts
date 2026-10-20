@@ -65,6 +65,8 @@ export interface ExchangeSummary {
   error: string | null;
   identity?: string;
   hypothesis_id?: number;
+  highlight?: string;
+  comment?: string;
 }
 
 export interface ClientOptions {
@@ -175,6 +177,16 @@ export class Client {
 
   exchange(id: number): Promise<Json> {
     return this.get(`/exchanges/${id}`);
+  }
+
+  /** Sets (or clears) a history row's highlight and comment. */
+  annotate(exchange_id: number, opts: { highlight?: string; comment?: string } = {}): Promise<ExchangeSummary> {
+    return this.request("PUT", `/exchanges/${exchange_id}/annotation`, strip(opts));
+  }
+
+  /** WebSocket messages across connections, newest first. */
+  async wsHistory(filters: Query = {}): Promise<Json[]> {
+    return (await this.get<{ messages: Json[] }>("/ws/history", filters)).messages;
   }
 
   model(filters: Query = {}): Promise<Json> {

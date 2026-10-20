@@ -57,7 +57,7 @@ pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, S
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
 pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
-pub use ws::{WsMessageView, WsPage};
+pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
 use parking_lot::Mutex;

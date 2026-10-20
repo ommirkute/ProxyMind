@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup";
+export type Page = "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory";
 
 export interface Nav {
   page: Page;
@@ -138,4 +138,222 @@ export function ExchangeLink({ id }: { id: number | null | undefined }) {
       #{id}
     </a>
   );
+}
+
+/** Copies text; falls back to a hidden textarea where the clipboard API is blocked (plain http). */
+export async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const t = document.createElement("textarea");
+    t.value = text;
+    document.body.append(t);
+    t.select();
+    document.execCommand("copy");
+    t.remove();
+  }
+}
+
+/** Hex dump: offset, 16 bytes, printable ASCII. */
+export function hexDump(bytes: Uint8Array, max = 256 * 1024): string {
+  const lines: string[] = [];
+  const n = Math.min(bytes.length, max);
+  for (let off = 0; off < n; off += 16) {
+    const row = bytes.subarray(off, Math.min(off + 16, n));
+    const hex = Array.from(row, (b) => b.toString(16).padStart(2, "0")).join(" ").padEnd(47, " ");
+    const ascii = Array.from(row, (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+    lines.push(`${off.toString(16).padStart(8, "0")}  ${hex}  ${ascii}`);
+  }
+  if (bytes.length > n) lines.push(`… ${bytes.length - n} more bytes`);
+  return lines.join("\n");
+}
+
+export function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** The head as is and the body pretty-printed when it's JSON (or a decoded body is given). */
+/** Removes the wrapper that marks target content for models; people see the content itself. */
+export function unwrapUntrusted(s: string | null | undefined): string | null | undefined {
+  const m = s?.match(/^<untrusted_target_content>\n?([\s\S]*?)\n?<\/untrusted_target_content>$/);
+  return m ? m[1] : s;
+}
+
+export function prettyMessage(raw: string, decodedBody?: string | null): string {
+  decodedBody = unwrapUntrusted(decodedBody);
+  const i = raw.indexOf("\r\n\r\n");
+  const j = i >= 0 ? i + 4 : raw.indexOf("\n\n") >= 0 ? raw.indexOf("\n\n") + 2 : raw.length;
+  const head = raw.slice(0, j).replace(/\r\n/g, "\n");
+  const body = decodedBody ?? raw.slice(j);
+  const t = body.trim();
+  if ((t.startsWith("{") || t.startsWith("[")) && t.length < 2_000_000) {
+    try {
+      return head + JSON.stringify(JSON.parse(t), null, 2);
+    } catch {
+      /* not JSON after all */
+    }
+  }
+  return head + body;
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Text with every match of `q` highlighted (case-insensitive, at most 1000 marks). */
+export function Highlighted({ text, q }: { text: string; q: string }) {
+  if (!q) return <>{text}</>;
+  const parts = text.split(new RegExp(`(${escapeRe(q)})`, "i"));
+  const out: ReactNode[] = [];
+  let marks = 0;
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1 && marks < 1000) {
+      out.push(<mark key={i}>{parts[i]}</mark>);
+      marks++;
+    } else out.push(parts[i]);
+  }
+  return <>{out}</>;
+}
+
+export type ViewMode = "pretty" | "raw" | "hex";
+
+/**
+ * A request or response with Pretty / Raw / Hex views and a search box.
+ * `loadB64` fetches the exact bytes for the hex view on demand.
+ */
+export function MessageView({
+  text,
+  decodedBody,
+  loadB64,
+  empty,
+  testid,
+}: {
+  text: string | null | undefined;
+  decodedBody?: string | null;
+  loadB64?: () => Promise<string | null | undefined>;
+  empty?: string;
+  testid?: string;
+}) {
+  const [mode, setMode] = useState<ViewMode>(() => {
+    try {
+      return (localStorage.getItem("pm.viewMode") as ViewMode) || "pretty";
+    } catch {
+      return "pretty";
+    }
+  });
+  const [q, setQ] = useState("");
+  const [hex, setHex] = useState<string | null>(null);
+  useEffect(() => setHex(null), [text]);
+  useEffect(() => {
+    if (mode !== "hex" || hex !== null || text == null) return;
+    const fallback = () => setHex(hexDump(new TextEncoder().encode(text)));
+    if (!loadB64) return fallback();
+    loadB64()
+      .then((b) => (b ? setHex(hexDump(b64ToBytes(b))) : fallback()))
+      .catch(fallback);
+  }, [mode, hex, text, loadB64]);
+  const choose = (m: ViewMode) => {
+    setMode(m);
+    try {
+      localStorage.setItem("pm.viewMode", m);
+    } catch {
+      /* storage blocked */
+    }
+  };
+  if (text == null) return <Empty>{empty ?? "Nothing to show"}</Empty>;
+  const shown = mode === "hex" ? (hex ?? "Loading…") : mode === "pretty" ? prettyMessage(text, decodedBody) : text;
+  const count = q ? shown.split(new RegExp(escapeRe(q), "i")).length - 1 : 0;
+  return (
+    <div className="msgview" data-testid={testid}>
+      <div className="msgbar">
+        {(["pretty", "raw", "hex"] as ViewMode[]).map((m) => (
+          <button key={m} className={`seg ${mode === m ? "on" : ""}`} onClick={() => choose(m)} aria-pressed={mode === m}>
+            {m[0].toUpperCase() + m.slice(1)}
+          </button>
+        ))}
+        <input className="grow" aria-label="Search in message" placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
+        {q && <span className="small muted" data-testid="search-count">{count} match{count === 1 ? "" : "es"}</span>}
+        <button className="seg" title="Copy" onClick={() => copyText(shown)}>Copy</button>
+      </div>
+      <pre className={`raw ${mode === "hex" ? "hex" : ""}`}>
+        <Highlighted text={shown} q={q} />
+      </pre>
+    </div>
+  );
+}
+
+export interface MenuItem {
+  label: string;
+  hint?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  /** Colour swatch rows (highlights). */
+  swatches?: { color: string | null; onClick: () => void }[];
+}
+
+/** A right-click menu at (x, y); closes on any click, scroll or Escape. */
+export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+  useEffect(() => {
+    const close = () => onClose();
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("click", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", key);
+    };
+  }, [onClose]);
+  const left = Math.min(x, window.innerWidth - 260);
+  const top = Math.min(y, window.innerHeight - items.length * 30 - 20);
+  return (
+    <div className="ctxmenu" role="menu" style={{ left, top }} onContextMenu={(e) => e.preventDefault()}>
+      {items.map((it, i) =>
+        it.swatches ? (
+          <div key={i} className="ctx-swatches" role="group" aria-label={it.label}>
+            <span className="small muted">{it.label}</span>
+            {it.swatches.map((sw) => (
+              <button
+                key={sw.color ?? "none"}
+                className={`swatch ${sw.color ? `hl-${sw.color}` : "none"}`}
+                title={sw.color ?? "none"}
+                aria-label={`Highlight ${sw.color ?? "none"}`}
+                onClick={sw.onClick}
+              />
+            ))}
+          </div>
+        ) : (
+          <button key={i} role="menuitem" className="ctx-item" disabled={it.disabled} onClick={it.onClick}>
+            <span>{it.label}</span>
+            {it.hint && <span className="muted small">{it.hint}</span>}
+          </button>
+        ),
+      )}
+    </div>
+  );
+}
+
+export const HIGHLIGHTS = ["red", "orange", "yellow", "green", "blue", "purple", "gray"] as const;
+
+/** Reads and writes a per-browser preference; storage may be blocked. */
+export function usePref<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [v, setV] = useState<T>(() => {
+    try {
+      const s = localStorage.getItem(key);
+      return s ? { ...initial, ...JSON.parse(s) } : initial;
+    } catch {
+      return initial;
+    }
+  });
+  const set = (x: T) => {
+    setV(x);
+    try {
+      localStorage.setItem(key, JSON.stringify(x));
+    } catch {
+      /* storage blocked */
+    }
+  };
+  return [v, set];
 }

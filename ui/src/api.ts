@@ -94,6 +94,8 @@ export interface ExchangeSummary {
   error: string | null;
   identity?: string;
   hypothesis_id?: number;
+  highlight?: string;
+  comment?: string;
 }
 
 export interface ExchangePage {
@@ -115,6 +117,8 @@ export interface ExchangeDetail {
   summary: ExchangeSummary;
   request: string;
   response: string | null;
+  request_b64?: string;
+  response_b64?: string | null;
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };

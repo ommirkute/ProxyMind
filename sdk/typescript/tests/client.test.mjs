@@ -61,6 +61,10 @@ test("replay, history and reports", { skip }, async () => {
   assert.equal((await pm.status()).you_are, "human:sdk");
   assert.match(await pm.report("sarif"), /"version": "2.1.0"/);
   assert.equal((await pm.auditVerify()).intact, true);
+  assert.equal((await pm.annotate(ex, { highlight: "blue", comment: "ts" })).highlight, "blue");
+  assert.deepEqual((await pm.history({ annotated: true })).map((e) => e.id), [ex]);
+  await pm.annotate(ex);
+  assert.deepEqual(await pm.wsHistory(), []);
 });
 
 test("scans, tools and errors", { skip }, async () => {

@@ -18,26 +18,46 @@ import Audit from "./pages/Audit";
 import SiteMap from "./pages/SiteMap";
 import Engagement from "./pages/Engagement";
 import Setup from "./pages/Setup";
+import WsHistory from "./pages/WsHistory";
 
-const PAGES: { id: Page; label: string }[] = [
-  { id: "history", label: "History" },
-  { id: "sitemap", label: "Site map & Search" },
-  { id: "assistant", label: "Assistant" },
-  { id: "intercept", label: "Intercept" },
-  { id: "rules", label: "Match & replace" },
-  { id: "repeater", label: "Repeater" },
-  { id: "intruder", label: "Intruder" },
-  { id: "tools", label: "Tools" },
-  { id: "approvals", label: "Approvals" },
-  { id: "authz", label: "Identities & Authz" },
-  { id: "model", label: "Model & Coverage" },
-  { id: "issues", label: "Issues" },
-  { id: "findings", label: "Findings" },
-  { id: "audit", label: "Audit log" },
-  { id: "engagement", label: "Engagement" },
-  { id: "network", label: "Network" },
-  { id: "setup", label: "Proxy setup" },
+interface Group {
+  id: string;
+  label: string;
+  pages: { id: Page; label: string }[];
+}
+
+/** Top tabs and their sub-tabs, laid out like Burp. */
+const GROUPS: Group[] = [
+  { id: "dashboard", label: "Dashboard", pages: [
+    { id: "findings", label: "Findings" },
+    { id: "issues", label: "Scanner issues" },
+    { id: "approvals", label: "Approvals" },
+    { id: "audit", label: "Audit log" },
+  ] },
+  { id: "target", label: "Target", pages: [
+    { id: "sitemap", label: "Site map & Search" },
+    { id: "model", label: "Model & Coverage" },
+    { id: "engagement", label: "Scope & rules" },
+  ] },
+  { id: "proxy", label: "Proxy", pages: [
+    { id: "intercept", label: "Intercept" },
+    { id: "history", label: "HTTP history" },
+    { id: "wshistory", label: "WebSockets history" },
+    { id: "rules", label: "Match & replace" },
+    { id: "setup", label: "Proxy setup" },
+  ] },
+  { id: "intruder", label: "Intruder", pages: [{ id: "intruder", label: "Intruder" }] },
+  { id: "repeater", label: "Repeater", pages: [{ id: "repeater", label: "Repeater" }] },
+  { id: "authz", label: "Authz", pages: [{ id: "authz", label: "Identities & Authz" }] },
+  { id: "tools", label: "Tools", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }] },
+  { id: "assistant", label: "Assistant", pages: [{ id: "assistant", label: "Assistant" }] },
+  { id: "settings", label: "Settings", pages: [{ id: "network", label: "Network" }] },
 ];
+
+const PAGES = GROUPS.flatMap((g) => g.pages);
+const groupOf = (p: Page) => GROUPS.find((g) => g.pages.some((x) => x.id === p)) ?? GROUPS[2];
+/** The sub-tab last opened in each group, so a top tab returns to it. */
+const lastIn: Record<string, Page> = {};
 
 function parseHash(): { page: Page; arg?: string } {
   const [p, arg] = window.location.hash.replace(/^#\/?/, "").split("/");
@@ -124,53 +144,81 @@ export default function App() {
     sitemap: SiteMap,
     engagement: Engagement,
     setup: Setup,
+    wshistory: WsHistory,
     findings: Findings,
     audit: Audit,
     network: Network,
   }[route.page];
 
+  const group = groupOf(route.page);
+  lastIn[group.id] = route.page;
+  const badge = (id: Page) =>
+    id === "intercept" ? counters?.intercepted ?? 0 : id === "approvals" ? counters?.pending_approvals ?? 0 : 0;
+  const groupBadge = (g: Group) => g.pages.reduce((n, p) => n + badge(p.id), 0);
+
   return (
     <NavContext.Provider value={nav}>
       <div className="app">
-        <nav className="sidebar" aria-label="Main">
-          <div className="brand">
-            Proxy<span>Mind</span>
-          </div>
-          {PAGES.map((p) => (
-            <button
-              key={p.id}
-              className={`nav ${route.page === p.id ? "active" : ""}`}
-              onClick={() => nav.go(p.id)}
-              aria-current={route.page === p.id ? "page" : undefined}
-            >
-              <span>{p.label}</span>
-              {p.id === "intercept" && (counters?.intercepted ?? 0) > 0 && (
-                <span className="badge" data-testid="intercept-badge">{counters?.intercepted}</span>
-              )}
-              {p.id === "approvals" && (counters?.pending_approvals ?? 0) > 0 && (
-                <span className="badge" data-testid="approvals-badge">{counters?.pending_approvals}</span>
-              )}
-              {p.id === "findings" && (counters?.findings ?? 0) > 0 && (
-                <span className="chip">{counters?.findings}</span>
-              )}
-            </button>
-          ))}
-          <div className="sidebar-foot">
-            <div>
-              <span className={`live ${live ? "" : "off"}`} />
-              {live ? "Live" : "Reconnecting…"}
+        <header className="topnav">
+          <div className="topnav-row">
+            <div className="brand">
+              Proxy<span>Mind</span>
             </div>
-            <div>{counters?.exchanges ?? 0} exchanges</div>
-            <div title={status?.project}>{status?.you_are}</div>
-            <div>v{status?.version}</div>
+            <nav className="maintabs" aria-label="Main">
+              {GROUPS.map((g) => (
+                <button
+                  key={g.id}
+                  className={`maintab ${group.id === g.id ? "active" : ""}`}
+                  aria-current={group.id === g.id ? "page" : undefined}
+                  onClick={() => nav.go(lastIn[g.id] ?? g.pages[0].id)}
+                  data-testid={`tab-${g.id}`}
+                >
+                  {g.label}
+                  {groupBadge(g) > 0 && (
+                    <span
+                      className="badge"
+                      data-testid={g.id === "proxy" ? "intercept-badge" : g.id === "dashboard" ? "approvals-badge" : undefined}
+                    >
+                      {groupBadge(g)}
+                    </span>
+                  )}
+                  {g.id === "dashboard" && (counters?.findings ?? 0) > 0 && <span className="chip">{counters?.findings}</span>}
+                </button>
+              ))}
+            </nav>
+            <div className="topnav-status">
+              <span title={live ? "Live" : "Reconnecting…"}>
+                <span className={`live ${live ? "" : "off"}`} />
+                {counters?.exchanges ?? 0} exchanges
+              </span>
+              <span title={status?.project}>{status?.you_are}</span>
+              <span className="muted">v{status?.version}</span>
+            </div>
           </div>
-        </nav>
+          <div className="topnav-row sub">
+            {group.pages.length > 1 ? (
+              <nav className="subtabs" aria-label={group.label}>
+                {group.pages.map((p) => (
+                  <button
+                    key={p.id}
+                    className={`subtab ${route.page === p.id ? "active" : ""}`}
+                    aria-current={route.page === p.id ? "page" : undefined}
+                    onClick={() => nav.go(p.id)}
+                  >
+                    {p.label}
+                    {badge(p.id) > 0 && <span className="badge">{badge(p.id)}</span>}
+                  </button>
+                ))}
+              </nav>
+            ) : (
+              <span className="subtitle">{group.pages[0].label}</span>
+            )}
+            <span className="meta grow" title={status?.in_scope.join(", ")}>
+              {status?.engagement ?? "No engagement name"} · Scope: {status?.in_scope.join(", ")}
+            </span>
+          </div>
+        </header>
         <main className="main">
-          <header className="topbar">
-            <h1>{PAGES.find((p) => p.id === route.page)?.label}</h1>
-            <span className="meta">{status?.engagement ?? "No engagement name"}</span>
-            <span className="meta grow">Scope: {status?.in_scope.join(", ")}</span>
-          </header>
           <PageView />
         </main>
       </div>

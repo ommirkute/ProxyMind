@@ -82,6 +82,8 @@ pub fn api() -> Router<AppState> {
         .route("/search", post(search))
         .route("/sitemap", get(sitemap))
         .route("/exchanges/{id}/ws", get(ws_messages))
+        .route("/exchanges/{id}/annotation", axum::routing::put(annotate))
+        .route("/ws/history", get(ws_history))
         .route("/exchanges/{id}/curl", get(exchange_curl))
         .route(
             "/import/har",
@@ -183,15 +185,27 @@ async fn exchanges(State(st): State<AppState>, Query(f): Query<HistoryFilter>) -
     ok(st.service.history_search(&st.actor, &f)?)
 }
 
-async fn exchange(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+#[derive(serde::Deserialize)]
+struct BytesQuery {
+    /// Also return the exact bytes, base64-encoded (for hex views).
+    #[serde(default)]
+    bytes: Option<u8>,
+}
+
+async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
     let ex = st.service.exchange_raw(id)?;
     let view = st.service.exchange_get(&st.actor, id, View::Full, 6000)?;
-    ok(json!({
+    let mut v = json!({
         "summary": ex.summary,
         "request": String::from_utf8_lossy(&ex.request),
         "response": ex.response.as_deref().map(String::from_utf8_lossy),
         "view": view,
-    }))
+    });
+    if q.bytes == Some(1) {
+        v["request_b64"] = json!(pm_core::base64(&ex.request));
+        v["response_b64"] = json!(ex.response.as_deref().map(pm_core::base64));
+    }
+    Ok(Json(v))
 }
 
 async fn replay(State(st): State<AppState>, Json(r): Json<ReplayRequest>) -> ApiResult {
@@ -446,6 +460,30 @@ async fn roe_put(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResul
 
 async fn roe_check(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
     ok(st.service.roe_check(&b.text)?)
+}
+
+#[derive(serde::Deserialize)]
+struct AnnotationBody {
+    #[serde(default)]
+    highlight: Option<String>,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+async fn annotate(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AnnotationBody>) -> ApiResult {
+    ok(st.service.exchange_annotate(&st.actor, id, b.highlight.as_deref(), b.comment.as_deref())?)
+}
+
+#[derive(serde::Deserialize)]
+struct WsHistoryQuery {
+    host: Option<String>,
+    before_id: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn ws_history(State(st): State<AppState>, Query(q): Query<WsHistoryQuery>) -> ApiResult {
+    let host = q.host.as_deref().filter(|h| !h.is_empty());
+    ok(st.service.ws_history(&st.actor, host, q.before_id, q.limit.unwrap_or(500), 2000)?)
 }
 
 async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

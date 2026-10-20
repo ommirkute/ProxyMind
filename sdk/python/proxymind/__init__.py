@@ -157,6 +157,14 @@ class Client:
         """Recorded traffic as a tree per origin."""
         return self._get("/sitemap", host=host)
 
+    def annotate(self, exchange_id: int, highlight: Optional[str] = None, comment: Optional[str] = None) -> dict:
+        """Sets (or clears) a history row's highlight (red, orange, yellow, green, blue, purple, gray) and comment."""
+        return self.request("PUT", f"/exchanges/{exchange_id}/annotation", body=self._args(highlight=highlight, comment=comment))
+
+    def ws_history(self, **filters: Any) -> list:
+        """WebSocket messages across connections, newest first. Filters: host, before_id, limit."""
+        return self._get("/ws/history", **filters)["messages"]
+
     def model(self, **filters: Any) -> dict:
         return self._get("/model", **filters)
 

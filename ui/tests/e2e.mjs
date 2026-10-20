@@ -34,6 +34,12 @@ function start(args, onLine) {
   children.push(c);
   return c;
 }
+/** Goes to a page by its route (the top tabs and sub-tabs are tested separately). */
+let page;
+async function open(id) {
+  await page.evaluate((h) => (window.location.hash = h), `#/${id}`);
+  await page.waitForFunction((h) => window.location.hash === h, `#/${id}`);
+}
 function check(cond, msg) {
   if (cond) console.log(`  ✓ ${msg}`);
   else {
@@ -81,7 +87,7 @@ try {
   await browseAs(proxy, shop, "bob", ["/api/me"]);
 
   const browser = await chromium.launch({ executablePath: exe });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const consoleErrors = [];
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
@@ -95,7 +101,7 @@ try {
 
   // Capture alice from her /api/me request and bob from his.
   const rowFor = async (path, nth) => {
-    await page.getByLabel("Path", { exact: true }).fill(path);
+    await page.getByLabel("Filter", { exact: true }).fill(path);
     await sleep(500);
     const rows = page.locator('[data-testid^="row-"]');
     const n = await rows.count();
@@ -109,6 +115,41 @@ try {
     await page.waitForSelector(`text=Identity "${who}" captured`);
   }
   check(true, "captured alice and bob from history");
+
+  console.log("Proxy: top tabs, HTTP history tools");
+  await page.getByTestId("tab-dashboard").click();
+  await page.getByRole("button", { name: "Findings" }).waitFor();
+  await page.getByTestId("tab-proxy").click();
+  await page.getByRole("button", { name: "HTTP history" }).click();
+  check(await page.evaluate(() => location.hash) === "#/history", "top tab and sub-tab open HTTP history");
+  await page.getByLabel("Filter", { exact: true }).fill("");
+  await sleep(400);
+  const firstRow = page.locator('[data-testid^="row-"]').first();
+  await firstRow.click({ button: "right" });
+  await page.getByLabel("Highlight red").first().click();
+  await page.waitForSelector('[data-testid^="row-"].hl-red');
+  page.once("dialog", (d) => d.accept("check this one"));
+  await page.locator('[data-testid^="row-"].hl-red').click({ button: "right" });
+  await page.getByRole("menuitem", { name: /comment/ }).click();
+  await page.locator('[data-testid="comment-cell"]', { hasText: "check this one" }).waitFor();
+  check(true, "right-click menu highlights and comments a row");
+  await page.getByTestId("annotated-only").check();
+  await sleep(500);
+  check((await page.locator('[data-testid^="row-"]').count()) === 1, "filter shows only annotated rows");
+  await page.getByTestId("annotated-only").uncheck();
+  await sleep(400);
+  await page.getByRole("columnheader", { name: /Status/ }).click();
+  check(await page.getByRole("columnheader", { name: /Status/ }).getAttribute("aria-sort") === "ascending", "columns sort");
+  await page.getByRole("columnheader", { name: /^#/ }).click();
+  await page.locator('[data-testid^="row-"]').first().click();
+  await page.getByRole("tab", { name: "Response" }).click();
+  await page.locator('[data-testid="response-view"]').getByRole("button", { name: "Hex" }).click();
+  await page.locator('[data-testid="response-view"] pre', { hasText: "00000000  48 54 54 50" }).waitFor();
+  check(true, "hex view shows the exact bytes");
+  await page.locator('[data-testid="response-view"]').getByRole("button", { name: "Pretty" }).click();
+  await page.locator('[data-testid="response-view"]').getByLabel("Search in message").fill("HTTP/1.1");
+  check(await page.locator('[data-testid="response-view"] [data-testid="search-count"]').textContent() === "1 match", "search in a message counts matches");
+  await page.screenshot({ path: join(SHOTS, "1b-history-tools.png") });
   const order = await rowFor("/api/orders/1001", 0);
   const orderId = Number((await order.getAttribute("data-testid")).replace("row-", ""));
   await order.click();
@@ -130,7 +171,7 @@ try {
   await page.screenshot({ path: join(SHOTS, "3-authz.png") });
 
   console.log("Findings and proof");
-  await page.getByRole("button", { name: "Findings" }).click();
+  await open("findings");
   await page.getByRole("button", { name: "New finding" }).click();
   await page.getByLabel("Title").fill("Any user can read any order");
   await page.getByLabel("Severity").selectOption("high");
@@ -194,9 +235,10 @@ try {
   check(true, "imported exchange is listed");
   const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("export-har").click()]);
   check(dl.suggestedFilename() === "proxymind.har", "HAR export downloads a file");
+  await page.getByLabel("Source").selectOption(""); // filters persist per browser
 
   console.log("Site map and search");
-  await page.getByRole("button", { name: "Site map & Search" }).click();
+  await open("sitemap");
   await page.locator('[data-testid="sitemap-node"][data-path="/api/orders"]').first().waitFor({ state: "attached" });
   check(true, "site map shows /api/orders");
   await page.getByLabel("Search text").fill("alice@");
@@ -226,7 +268,7 @@ try {
   rpc(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } });
   rpc(2, "tools/call", { name: "replay_send", arguments: { url: `http://127.0.0.1:${shop}`, raw: "POST /api/orders HTTP/1.1\nHost: x\n\n{\"product_id\":1,\"qty\":-5}" } });
   for (let i = 0; i < 50 && replies.length < 2; i++) await sleep(100);
-  await page.getByRole("button", { name: /^Approvals/ }).click();
+  await open("approvals");
   await page.waitForSelector('[data-testid="approvals-badge"]');
   check(true, "sidebar shows a pending approval badge (live update)");
   await page.screenshot({ path: join(SHOTS, "6-approvals.png") });
@@ -235,7 +277,7 @@ try {
   check(true, "approved from the UI");
 
   console.log("Intercept");
-  await page.getByRole("button", { name: /^Intercept/ }).click();
+  await open("intercept");
   await page.getByLabel("Path filter").fill("/api/products/search");
   await page.getByRole("button", { name: "Apply" }).click();
   await page.getByTestId("intercept-toggle").click();
@@ -256,14 +298,14 @@ try {
   check((await dropped).startsWith("HTTP/1.1 403"), "dropped request gets 403 from ProxyMind");
   await page.getByTestId("intercept-toggle").click();
   await page.waitForSelector("text=Intercept is OFF");
-  await page.getByRole("button", { name: "History" }).click();
-  await page.getByLabel("Path", { exact: true }).fill("held-");
+  await open("history");
+  await page.getByLabel("Filter", { exact: true }).fill("held-");
   await sleep(500);
   const heldRows = await page.locator('[data-testid^="row-"]').allTextContents();
   check(heldRows.length === 1 && heldRows[0].includes("held-edited"), "history records the edited request only");
 
   console.log("Match and replace");
-  await page.getByRole("button", { name: "Match & replace" }).click();
+  await open("rules");
   await page.getByRole("button", { name: "Add rule" }).click();
   await page.getByLabel("Rule 1 replace").fill("X-E2E: rewritten");
   await page.getByRole("button", { name: "Add rule" }).click();
@@ -275,8 +317,8 @@ try {
   await page.screenshot({ path: join(SHOTS, "6c-rules.png") });
   const rewritten = await search("rules-check");
   check(rewritten.includes("REWRITTEN") && !rewritten.includes("results"), "response rule rewrites what the client gets");
-  await page.getByRole("button", { name: "History" }).click();
-  await page.getByLabel("Path", { exact: true }).fill("rules-check");
+  await open("history");
+  await page.getByLabel("Filter", { exact: true }).fill("rules-check");
   await sleep(500);
   await page.locator('[data-testid^="row-"]').first().click();
   await page.getByRole("tab", { name: "request" }).click();
@@ -314,8 +356,8 @@ try {
   );
   check(chatReplies.length === 2 && chatReplies[1].includes("Where is order 1001?"), "browser WebSocket works through the proxy");
   await viaPm.close();
-  await page.getByRole("button", { name: "History" }).click();
-  await page.getByLabel("Path", { exact: true }).fill("/ws/support");
+  await open("history");
+  await page.getByLabel("Filter", { exact: true }).fill("/ws/support");
   await sleep(500);
   await page.locator('[data-testid^="row-"]').first().click();
   const wsLogged = await page
@@ -323,6 +365,14 @@ try {
     .waitFor({ timeout: 8000 })
     .then(() => true, () => false);
   check(wsLogged, "History shows the WebSocket messages both ways");
+  await open("wshistory");
+  await page.locator('[data-testid="ws-history"] tr', { hasText: "Where is order 1001?" }).first().waitFor();
+  check(true, "WebSockets history lists messages across connections");
+  await open("history");
+  await page.getByLabel("Filter", { exact: true }).fill("/ws/support");
+  await sleep(500);
+  await page.locator('[data-testid^="row-"]').first().click();
+  await page.getByRole("tab", { name: "WebSocket" }).click().catch(() => {});
   await page.screenshot({ path: join(SHOTS, "6d-websocket.png") });
   await page.getByRole("button", { name: "Replay on a new connection…" }).click();
   await page.getByLabel("Messages to send").fill("replayed from the UI");
@@ -338,7 +388,7 @@ try {
   check(replyShown, "the replayed session shows the server's answer");
 
   console.log("WebSocket intercept (edit a browser's message in the queue)");
-  await page.getByRole("button", { name: /^Intercept/ }).click();
+  await open("intercept");
   await page.getByLabel("Path filter").fill("/ws/support");
   await page.getByLabel("WebSocket messages").check();
   await page.getByRole("button", { name: "Apply" }).click();
@@ -393,7 +443,7 @@ try {
   await page.waitForSelector("text=Intercept is OFF");
 
   console.log("Race condition (Repeater races VulnShop's one-time gift card)");
-  await page.getByRole("button", { name: "Repeater" }).click();
+  await open("repeater");
   await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
   const card = '{"code":"WELCOME10"}';
   await page.getByLabel("Raw request").fill(
@@ -428,8 +478,8 @@ try {
   check(hop === "h2" && seen === "server saw HTTP/2.0 /h2-check", `browser and server both speak HTTP/2 through ProxyMind (${hop}; ${seen})`);
   await viaPm2.close();
   h2srv.close();
-  await page.getByRole("button", { name: "History" }).click();
-  await page.getByLabel("Path", { exact: true }).fill("/h2-check");
+  await open("history");
+  await page.getByLabel("Filter", { exact: true }).fill("/h2-check");
   await sleep(500);
   await page.locator('[data-testid^="row-"]').first().click();
   await page.getByRole("tab", { name: "request" }).click();
@@ -463,7 +513,7 @@ try {
     c.on("error", () => {});
   });
   await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
-  await page.getByRole("button", { name: "Network" }).click();
+  await open("network");
   await page.getByTestId("upstream-toggle").check();
   await page.getByLabel("Proxy host").fill("127.0.0.1");
   await page.getByLabel("Proxy port").fill(String(upstream.address().port));
@@ -499,10 +549,10 @@ try {
     });
   });
   await new Promise((r) => model.listen(0, "127.0.0.1", r));
-  await page.getByRole("button", { name: "Assistant", exact: true }).click();
+  await open("assistant");
   await page.waitForSelector('[data-testid="assistant-problem"]');
   check(true, "without a model the page explains what to set up");
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("main").getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Ollama (local)" }).click();
   await page.getByLabel("Base URL").fill(`http://127.0.0.1:${model.address().port}/v1`);
   await page.getByLabel("Model").fill("mock-model");
@@ -518,7 +568,7 @@ try {
   model.close();
 
   console.log("Crawl");
-  await page.getByRole("button", { name: "Model & Coverage" }).click();
+  await open("model");
   await page.getByRole("button", { name: "Discover pages…" }).click();
   await page.getByLabel("Crawl start URL").fill(`http://127.0.0.1:${shop}/`);
   await page.getByTestId("crawl-run").click();
@@ -554,10 +604,10 @@ try {
   await page.getByTestId("graphql-repeater-invoice").click();
   await page.waitForFunction(() => document.querySelector("textarea")?.value.includes("query Invoice"));
   check(true, "an example opens in Repeater");
-  await page.getByRole("button", { name: "Model & Coverage" }).click();
+  await open("model");
 
   console.log("Passive issues");
-  await page.getByRole("button", { name: "Issues" }).click();
+  await open("issues");
   await page.waitForSelector('[data-testid="issues"]');
   check(await page.locator('[data-testid="issues"]').textContent().then((t) => t.includes("Password field on a page served over plain HTTP")), "passive scan flags the login form over HTTP");
   await page.screenshot({ path: join(SHOTS, "6c-issues.png") });
@@ -575,7 +625,7 @@ try {
   await page.screenshot({ path: join(SHOTS, "6d-active-scan.png") });
 
   console.log("Tools");
-  await page.getByRole("button", { name: "Tools" }).click();
+  await open("tools");
   await page.getByLabel("Decoder input").fill("JTNDc2NyaXB0JTNF");
   await page.getByTestId("decode").click();
   await page.waitForSelector('[data-testid="decode-step"]');
@@ -591,7 +641,7 @@ try {
   await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
 
   console.log("Engagement (rules of engagement)");
-  await page.getByRole("button", { name: "Engagement" }).click();
+  await open("engagement");
   await page.waitForSelector('[data-testid="roe-summary"]');
   check(await page.getByTestId("roe-summary").textContent().then((t) => t.includes(`http://127.0.0.1:${shop}/`)), "the scope in force is shown");
   await page.getByLabel("ROE YAML").fill(`version: 1\nengagement:\n  name: e2e engagement\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n  exclude: ["http://127.0.0.1:${shop}/api/admin/"]\n`);
@@ -611,7 +661,7 @@ try {
   await page.screenshot({ path: join(SHOTS, "7c-engagement.png"), fullPage: true });
 
   console.log("Proxy setup");
-  await page.getByRole("button", { name: "Proxy setup" }).click();
+  await open("setup");
   await page.waitForSelector('[data-testid="ca-fingerprint"]');
   const caShown = await page.getByTestId("ca-fingerprint").textContent();
   const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
@@ -619,11 +669,11 @@ try {
   check(await page.getByTestId("setup-proxy").textContent() === `127.0.0.1:${proxy}`, "the proxy address is shown");
 
   console.log("Model, coverage and audit");
-  await page.getByRole("button", { name: "Model & Coverage" }).click();
+  await open("model");
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();
   check(true, "model shows /api/orders/{id}");
   await page.screenshot({ path: join(SHOTS, "7-model.png"), fullPage: true });
-  await page.getByRole("button", { name: "Audit log" }).click();
+  await open("audit");
   await page.waitForSelector('[data-testid="audit-verify"]');
   check(await page.getByTestId("audit-verify").textContent().then((t) => t.includes("intact")), "audit log verified intact");
   await page.screenshot({ path: join(SHOTS, "8-audit.png") });
