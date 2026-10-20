@@ -15,7 +15,7 @@ use pm_http::h2text::{H2Request, h2_response, render_h2_request};
 use pm_replay::{Endpoint, Io};
 use pm_store::NewExchange;
 
-use crate::{DROPPED_MSG, Proxy, SelfAddr};
+use crate::{Ctx, DROPPED_MSG, Proxy, SelfAddr};
 
 /// Largest request body accepted from the browser over HTTP/2.
 const MAX_BODY: usize = 64 << 20;
@@ -26,8 +26,9 @@ impl Proxy {
         io: S,
         host: String,
         port: u16,
-        me: Option<SelfAddr>,
+        ctx: Ctx,
     ) -> Result<()> {
+        let me = ctx.me;
         let mut conn = h2::server::handshake(io).await.context("HTTP/2 handshake with client")?;
         while let Some(next) = conn.accept().await {
             let (req, respond) = next.context("HTTP/2 stream from client")?;

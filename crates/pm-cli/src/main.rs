@@ -912,14 +912,15 @@ async fn run() -> Result<()> {
                 Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
             }
             let network = pm_service::pm_replay::Network::new();
-            pm_service::watch_project(&cli.project, Some(rewriter.clone()), network.clone())?;
             let hooks = pm_proxy::Hooks {
-                rewrite: Some(rewriter),
-                network: Some(network),
+                rewrite: Some(rewriter.clone()),
+                network: Some(network.clone()),
                 http2: !*no_http2,
                 ..Default::default()
             };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
+            let extra = pm_proxy::Listeners::new(proxy.clone(), Some(*listen));
+            pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra))?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             eprintln!("ProxyMind listening on http://{listen}");
             eprintln!("Project: {}", cli.project.display());
@@ -1183,7 +1184,7 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
-            pm_service::watch_project(&cli.project, None, service.network().clone())?;
+            pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
             pm_service::watch_roe(service.clone());
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
@@ -1208,20 +1209,22 @@ async fn run() -> Result<()> {
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());
                 service.attach_rewriter(rewriter.clone())?;
-                pm_service::watch_project(&cli.project, Some(rewriter.clone()), service.network().clone())?;
                 let hooks = pm_proxy::Hooks {
-                    rewrite: Some(rewriter),
+                    rewrite: Some(rewriter.clone()),
                     intercept: Some(queue),
                     network: Some(service.network().clone()),
                     http2: !*no_http2,
                 };
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
+                let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
+                service.attach_listeners(extra.clone())?;
+                pm_service::watch_project(&cli.project, Some(rewriter), service.network().clone(), Some(extra))?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
             } else {
-                pm_service::watch_project(&cli.project, None, service.network().clone())?;
+                pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
             }
             pm_service::watch_roe(service.clone());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?

@@ -140,6 +140,10 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
+        .route("/proxy/listeners", get(listeners_get).put(listeners_put))
+        .route("/session", get(session_get).put(session_put))
+        .route("/session/jar", get(session_jar).delete(session_jar_clear))
+        .route("/session/macros/{name}/run", post(session_macro_run))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/chats/{id}", get(assistant_chat))
@@ -659,6 +663,40 @@ async fn network_get(State(st): State<AppState>) -> ApiResult {
 
 async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
     ok(st.service.network_set(&st.actor, cfg)?)
+}
+
+async fn session_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.session_get(&st.actor)?)
+}
+
+async fn session_put(State(st): State<AppState>, Json(cfg): Json<pm_service::SessionConfig>) -> ApiResult {
+    ok(st.service.session_set(&st.actor, cfg)?)
+}
+
+async fn session_jar(State(st): State<AppState>) -> ApiResult {
+    ok(json!({ "cookies": st.service.session_jar(&st.actor)? }))
+}
+
+async fn session_jar_clear(State(st): State<AppState>) -> ApiResult {
+    st.service.session_jar_clear(&st.actor)?;
+    ok(json!({ "cleared": true }))
+}
+
+async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.session_macro_run(&st.actor, &name).await?)
+}
+
+#[derive(Deserialize)]
+struct ListenersBody {
+    listeners: Vec<pm_service::pm_proxy::ListenerConfig>,
+}
+
+async fn listeners_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.listeners_get()?)
+}
+
+async fn listeners_put(State(st): State<AppState>, Json(b): Json<ListenersBody>) -> ApiResult {
+    ok(st.service.listeners_set(&st.actor, b.listeners)?)
 }
 
 #[derive(Deserialize)]

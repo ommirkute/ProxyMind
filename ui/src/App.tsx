@@ -19,6 +19,7 @@ import SiteMap from "./pages/SiteMap";
 import Engagement from "./pages/Engagement";
 import Setup from "./pages/Setup";
 import WsHistory from "./pages/WsHistory";
+import Sessions from "./pages/Sessions";
 
 interface Group {
   id: string;
@@ -51,7 +52,7 @@ const GROUPS: Group[] = [
   { id: "authz", label: "Authz", pages: [{ id: "authz", label: "Identities & Authz" }] },
   { id: "tools", label: "Tools", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }] },
   { id: "assistant", label: "Assistant", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", pages: [{ id: "network", label: "Network" }] },
+  { id: "settings", label: "Settings", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
 
 const PAGES = GROUPS.flatMap((g) => g.pages);
@@ -145,6 +146,7 @@ export default function App() {
     engagement: Engagement,
     setup: Setup,
     wshistory: WsHistory,
+    sessions: Sessions,
     findings: Findings,
     audit: Audit,
     network: Network,

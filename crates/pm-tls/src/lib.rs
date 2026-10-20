@@ -193,6 +193,89 @@ pub fn server_name(host: &str) -> Result<ServerName<'static>> {
     ServerName::try_from(host.to_string()).context("invalid TLS server name")
 }
 
+/// What the start of a TLS connection says about the server name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hello {
+    /// More bytes are needed to see the whole first record.
+    Incomplete,
+    /// A complete ClientHello with this server name (None: no SNI).
+    Sni(Option<String>),
+    /// Not a TLS ClientHello.
+    NotHello,
+}
+
+/// Reads the server name (SNI) from the first TLS record of a connection
+/// without consuming it, so the bytes can still be tunnelled or handed to
+/// the TLS acceptor. Pure parsing; never panics on bad input.
+pub fn peek_client_hello(buf: &[u8]) -> Hello {
+    if buf.len() < 5 {
+        return Hello::Incomplete;
+    }
+    if buf[0] != 0x16 {
+        return Hello::NotHello;
+    }
+    let len = usize::from(u16::from_be_bytes([buf[3], buf[4]]));
+    if buf.len() < 5 + len {
+        return Hello::Incomplete;
+    }
+    match sni_in_handshake(&buf[5..5 + len]) {
+        Some(sni) => Hello::Sni(sni),
+        None => Hello::NotHello,
+    }
+}
+
+/// `Some(None)`: a ClientHello without SNI; `None`: malformed.
+fn sni_in_handshake(h: &[u8]) -> Option<Option<String>> {
+    struct R<'a>(&'a [u8]);
+    impl<'a> R<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            if self.0.len() < n {
+                return None;
+            }
+            let (a, b) = self.0.split_at(n);
+            self.0 = b;
+            Some(a)
+        }
+        fn u8(&mut self) -> Option<usize> {
+            self.take(1).map(|b| usize::from(b[0]))
+        }
+        fn u16(&mut self) -> Option<usize> {
+            self.take(2).map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+        }
+    }
+    let mut r = R(h);
+    if r.u8()? != 1 {
+        return None; // not a ClientHello
+    }
+    r.take(3)?; // length: the record may hold only part of a large hello
+    r.take(2 + 32)?; // version, random
+    let n = r.u8()?;
+    r.take(n)?; // session id
+    let n = r.u16()?;
+    r.take(n)?; // cipher suites
+    let n = r.u8()?;
+    r.take(n)?; // compression
+    if r.0.is_empty() {
+        return Some(None);
+    }
+    let n = r.u16()?;
+    let mut ext = R(r.take(n).unwrap_or(r.0));
+    while let (Some(kind), Some(len)) = (ext.u16(), ext.u16()) {
+        let data = ext.take(len)?;
+        if kind == 0 {
+            let mut d = R(data);
+            d.u16()?;
+            if d.u8()? != 0 {
+                return Some(None);
+            }
+            let n = d.u16()?;
+            let name = std::str::from_utf8(d.take(n)?).ok()?;
+            return Some(Some(name.to_ascii_lowercase()));
+        }
+    }
+    Some(None)
+}
+
 /// Accepts any upstream certificate but still checks handshake signatures,
 /// so the TLS session itself is sound.
 #[derive(Debug)]
@@ -252,5 +335,22 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn reads_sni_from_a_real_client_hello() {
+        let cfg = upstream_client_config(false).unwrap();
+        let mut conn = rustls::ClientConnection::new(cfg, server_name("Pinned.Example.com").unwrap()).unwrap();
+        let mut hello = Vec::new();
+        conn.write_tls(&mut hello).unwrap();
+        assert_eq!(peek_client_hello(&hello), Hello::Sni(Some("pinned.example.com".into())));
+        assert_eq!(peek_client_hello(&hello[..hello.len() - 1]), Hello::Incomplete);
+        assert_eq!(peek_client_hello(b"GET / HTTP/1.1\r\n"), Hello::NotHello);
+        // Truncated or garbled records never panic.
+        for cut in 5..hello.len() {
+            let mut b = hello[..cut].to_vec();
+            b[3..5].copy_from_slice(&((cut - 5) as u16).to_be_bytes());
+            let _ = peek_client_hello(&b);
+        }
     }
 }

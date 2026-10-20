@@ -27,6 +27,7 @@ mod roe;
 mod rules;
 mod scan;
 mod search;
+mod session;
 mod tools;
 mod traffic;
 mod ws;
@@ -46,7 +47,10 @@ pub use intruder::{
     AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
 };
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
-pub use network::{NETWORK_SETTING, load_network, sync_network, watch_project};
+pub use network::{
+    LISTENERS_SETTING, ListenersView, NETWORK_SETTING, load_listeners, load_network, sync_listeners, sync_network,
+    watch_project,
+};
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
@@ -57,6 +61,10 @@ pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
+pub use session::{
+    ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
+    SessionRule, SessionView, SetValue, SetWhere, Validity,
+};
 pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
@@ -120,6 +128,12 @@ pub struct Service {
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
     /// Recent Intruder attacks (running ones keep going in the background).
     attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// Extra proxy listeners, when this process runs the proxy.
+    listeners: std::sync::OnceLock<std::sync::Arc<pm_proxy::Listeners>>,
+    /// Session handling: cookie jar, macro variables.
+    session: parking_lot::Mutex<session::SessionState>,
+    /// One macro run at a time.
+    session_lock: tokio::sync::Mutex<()>,
 }
 
 impl Service {
@@ -145,6 +159,9 @@ impl Service {
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             attacks: parking_lot::Mutex::new(Vec::new()),
+            listeners: std::sync::OnceLock::new(),
+            session: parking_lot::Mutex::default(),
+            session_lock: tokio::sync::Mutex::new(()),
         })
     }
 

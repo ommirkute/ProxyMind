@@ -2749,6 +2749,9 @@ dependencies = [
 name = "pm-fuzz"
 version = "0.0.1"
 dependencies = [
+ "pm-core",
+ "regex",
+ "ring",
  "serde",
 ]
 
@@ -2917,6 +2920,7 @@ name = "pm-service"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "futures-util",
  "jiff",
  "parking_lot",
  "pm-ai",
@@ -2940,6 +2944,7 @@ dependencies = [
  "pm-scan",
  "pm-store",
  "pm-tools",
+ "regex",
  "ring",
  "serde",
  "serde-saphyr",

@@ -58,6 +58,17 @@ function viaProxy(proxyPort, shopPort, raw) {
     setTimeout(() => s.destroy(), 5000);
   });
 }
+/** One raw request straight to a port (an invisible client), returns the raw response. */
+function rawTo(port, raw) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect(port, "127.0.0.1", () => s.write(raw));
+    let out = "";
+    s.on("data", (d) => (out += d));
+    s.on("end", () => resolve(out));
+    s.on("error", reject);
+    setTimeout(() => s.destroy(), 5000);
+  });
+}
 async function browseAs(proxy, shop, user, paths) {
   const body = JSON.stringify({ username: user, password: `${user}123` });
   const login = await viaProxy(proxy, shop, `POST /api/login HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
@@ -701,6 +712,76 @@ try {
   const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
   check(caShown === new X509Certificate(pem).fingerprint256, "the CA fingerprint matches the downloaded certificate");
   check(await page.getByTestId("setup-proxy").textContent() === `127.0.0.1:${proxy}`, "the proxy address is shown");
+
+  console.log("Proxy listeners");
+  const extra = await freePort();
+  await page.getByTestId("add-listener").click();
+  await page.getByLabel("Listener 1 address").fill(`127.0.0.1:${extra}`);
+  await page.getByLabel("Listener 1 redirect host").fill("127.0.0.1");
+  await page.getByLabel("Listener 1 redirect port").fill(String(shop));
+  await page.getByTestId("listeners-save").click();
+  await page.locator('[data-testid="listener-status"]', { hasText: "listening" }).waitFor({ timeout: 5000 });
+  check(true, "an extra listener starts without a restart");
+  const invisible = await rawTo(extra, "GET /api/products HTTP/1.1\r\nHost: device.invalid\r\nConnection: close\r\n\r\n");
+  check(invisible.startsWith("HTTP/1.1 200"), "a client that ignores proxies is redirected to the target");
+  await page.screenshot({ path: join(SHOTS, "7d-listeners.png"), fullPage: true });
+  await page.getByLabel("Delete listener 1").click();
+  await page.getByTestId("listeners-save").click();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
+  check(await rawTo(extra, "GET / HTTP/1.1\r\n\r\n").then(() => false, () => true), "a removed listener stops");
+
+  console.log("Network: hostname overrides and TLS pass-through");
+  await open("network");
+  await page.getByTestId("add-host").click();
+  await page.getByLabel("Override 1 host").fill("*.staging.invalid");
+  await page.getByLabel("Override 1 address").fill("10.9.8.7");
+  await page.getByLabel("TLS pass-through hosts").fill("pinned.invalid\n*.telemetry.invalid");
+  await page.getByTestId("network-save").click();
+  await page.waitForSelector("text=Saved. The proxy");
+  const savedNet = await page.evaluate(async () => (await fetch("/api/v1/network")).json());
+  check(savedNet.hosts[0].address === "10.9.8.7" && savedNet.tls_passthrough.length === 2, "overrides and pass-through hosts are saved");
+  await page.getByLabel("Delete override 1").click();
+  await page.getByLabel("TLS pass-through hosts").fill("");
+  await page.getByTestId("network-save").click();
+  await page.waitForSelector("text=Saved. The proxy");
+
+  console.log("Session handling");
+  await open("sessions");
+  await page.getByTestId("add-macro").click();
+  await page.getByLabel("Macro 1 name").fill("login");
+  await page.getByLabel("Macro 1 step 1 target").fill(`http://127.0.0.1:${shop}`);
+  const macroBody = JSON.stringify({ username: "alice", password: "alice123" });
+  await page.getByLabel("Macro 1 step 1 request").fill(`POST /api/login HTTP/1.1\nHost: shop\nContent-Type: application/json\n\n${macroBody}`);
+  await page.getByRole("button", { name: "Extract a variable" }).click();
+  await page.getByLabel("Step 1 variable 1", { exact: true }).fill("token");
+  await page.getByLabel("Step 1 variable 1 source").selectOption("json");
+  await page.getByLabel("Step 1 variable 1 expression").fill("/token");
+  await page.getByTestId("add-rule").click();
+  await page.getByLabel("Rule 1 cookie jar").uncheck();
+  await page.getByLabel("Rule 1 macro").selectOption("login");
+  await page.getByRole("button", { name: "Add value" }).click();
+  await page.getByLabel("Rule 1 set 1 name").fill("Authorization");
+  await page.getByLabel("Rule 1 set 1 value").fill("Bearer {{token}}");
+  await page.getByTestId("session-save").click();
+  await page.waitForSelector("text=Saved. Rules apply");
+  const meStatus = await page.evaluate(async (shop) => {
+    const r = await fetch("/api/v1/replay", { method: "POST", headers: { "Content-Type": "application/json", "X-ProxyMind": "1" },
+      body: JSON.stringify({ url: `http://127.0.0.1:${shop}`, raw: "GET /api/me HTTP/1.1\r\nHost: shop\r\n\r\n" }) });
+    const j = await r.json();
+    const ex = await (await fetch(`/api/v1/exchanges/${j.exchange_id}`)).json();
+    return [ex.summary.status, ex.request.includes("Bearer ")];
+  }, shop);
+  check(meStatus[0] === 200 && meStatus[1], `a request without credentials gets logged in by the rule (${meStatus})`);
+  await page.getByTestId("macro-run").click();
+  await page.waitForSelector('[data-testid="macro-result"]');
+  check((await page.getByTestId("macro-result").textContent()).includes("token = "), "Run now shows the variables a macro sets");
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.locator('[data-testid="jar"] td', { hasText: "session" }).first().waitFor({ timeout: 5000 });
+  check(true, "the cookie jar holds the session cookie from the login");
+  await page.screenshot({ path: join(SHOTS, "7e-sessions.png"), fullPage: true });
+  await page.getByLabel("Delete rule 1").click();
+  await page.getByTestId("session-save").click();
+  await page.waitForSelector("text=Saved. Rules apply");
 
   console.log("Model, coverage and audit");
   await open("model");

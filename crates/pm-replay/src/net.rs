@@ -1,5 +1,6 @@
 //! Network settings for outgoing connections: an upstream proxy (HTTP or
-//! SOCKS5) and client certificates for mutual TLS.
+//! SOCKS5), client certificates for mutual TLS, hostname overrides, and
+//! hosts whose TLS the proxy passes through without interception.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -18,6 +19,22 @@ pub struct NetConfig {
     pub upstream: Option<UpstreamProxy>,
     /// Client certificates, by host. The first matching entry is used.
     pub client_certs: Vec<ClientCert>,
+    /// Fixed addresses for host names (like a hosts file). The first
+    /// matching entry wins. TLS still uses the name (SNI, certificate).
+    pub hosts: Vec<HostOverride>,
+    /// The proxy tunnels connections to these hosts without decrypting them
+    /// (`example.com`, `*.example.com`): for certificate pinning or noise.
+    /// Nothing inside such a tunnel is recorded.
+    pub tls_passthrough: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostOverride {
+    /// `api.example.com` or `*.example.com`.
+    pub host: String,
+    /// The address to connect to instead of what DNS says.
+    pub address: IpAddr,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +83,15 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// A host name or `*.` pattern: letters, digits, `-`, `.` and `_` (or `*`).
+fn valid_pattern(p: &str) -> bool {
+    let rest = p.strip_prefix("*.").unwrap_or(p);
+    p == "*"
+        || (!rest.is_empty()
+            && rest.len() <= 253
+            && rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':')))
+}
+
 impl UpstreamProxy {
     pub fn applies_to(&self, host: &str) -> bool {
         !self.bypass.iter().any(|b| host_matches(b, host))
@@ -87,6 +113,14 @@ impl NetConfig {
         for c in &self.client_certs {
             ensure!(!c.host.trim().is_empty(), "each client certificate needs a host pattern");
             load_cert(c, false)?;
+        }
+        ensure!(self.hosts.len() <= 500, "at most 500 hostname overrides");
+        for h in &self.hosts {
+            ensure!(valid_pattern(&h.host), "bad host name in a hostname override: {:?}", h.host);
+        }
+        ensure!(self.tls_passthrough.len() <= 500, "at most 500 TLS pass-through hosts");
+        for p in &self.tls_passthrough {
+            ensure!(valid_pattern(p), "bad host pattern for TLS pass-through: {p:?}");
         }
         Ok(())
     }
@@ -150,6 +184,16 @@ impl Network {
 
     pub(crate) fn upstream_for(&self, host: &str) -> Option<UpstreamProxy> {
         self.0.read().config.upstream.as_ref().filter(|u| u.applies_to(host)).cloned()
+    }
+
+    /// The fixed address for a host name, if an override matches.
+    pub fn address_for(&self, host: &str) -> Option<IpAddr> {
+        self.0.read().config.hosts.iter().find(|h| host_matches(&h.host, host)).map(|h| h.address)
+    }
+
+    /// Whether the proxy should tunnel TLS to this host without intercepting it.
+    pub fn passthrough(&self, host: &str) -> bool {
+        self.0.read().config.tls_passthrough.iter().any(|p| host_matches(p, host))
     }
 
     pub(crate) fn tls_for(&self, host: &str, verify: bool) -> Option<TlsConnector> {
@@ -329,7 +373,7 @@ mod tests {
                 password: "hunter2".into(),
                 ..Default::default()
             }),
-            client_certs: vec![],
+            ..Default::default()
         };
         assert_eq!(c.masked().upstream.unwrap().password, "********");
         assert!(c.validate().is_ok());
@@ -342,5 +386,18 @@ mod tests {
             ..Default::default()
         };
         assert!(missing.validate().is_err());
+        let hosts = NetConfig {
+            hosts: vec![HostOverride { host: "*.corp.test".into(), address: "10.0.0.5".parse().unwrap() }],
+            tls_passthrough: vec!["pinned.test".into()],
+            ..Default::default()
+        };
+        assert!(hosts.validate().is_ok());
+        let net = Network::new();
+        net.set(hosts).unwrap();
+        assert_eq!(net.address_for("api.corp.test"), Some("10.0.0.5".parse().unwrap()));
+        assert_eq!(net.address_for("other.test"), None);
+        assert!(net.passthrough("PINNED.test") && !net.passthrough("x.pinned.test"));
+        let bad = NetConfig { tls_passthrough: vec!["a b".into()], ..Default::default() };
+        assert!(bad.validate().is_err());
     }
 }

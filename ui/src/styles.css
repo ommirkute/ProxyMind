@@ -267,3 +267,8 @@ textarea.editor-small { min-height: 200px; }
 table.grid th.sortable { cursor: pointer; user-select: none; }
 table.grid tr.anomalous td { background: var(--warn-soft); }
 table.grid tr.baseline td { color: var(--muted); font-style: italic; }
+span.good { color: var(--ok); font-weight: 600; }
+.notice.warn { background: var(--warn-soft); color: var(--warn); }
+.session-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 10px; }
+.macro-step { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.macro-step textarea { width: 100%; margin-top: 4px; }

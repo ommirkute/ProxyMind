@@ -56,6 +56,8 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - REST API with live events, hardened for browsers; web UI (history, viewer, Repeater, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
 - Intercept-and-edit queue: hold requests and responses by scope, host, path and type; edit, forward or drop from the UI; edits and drops are audited, and the project keeps the server's original responses. Humans only: agents use Repeater through the policy gate
 - Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Repeater, agents and proofs; policy address checks still apply
+- Extra proxy listeners (more ports or interfaces, invisible clients, per-listener redirect with force TLS), hostname resolution overrides and TLS pass-through hosts
+- Session handling: cookie jar, macros with variable extraction, rules per tool and host (jar cookies, set header/cookie/parameter, run a macro before each request or when logged out, then resend)
 - Built-in assistant (`pm-assistant`): Anthropic and OpenAI-compatible APIs (Ollama, LM Studio, vLLM), local by default, cloud only with `allow_cloud_models`; acts as `agent:assistant` through the same MCP tools and policy gate; chats saved in the project; every model call audited; UI page and `proxymind assistant ask`
 - Match-and-replace rules for first line, headers and bodies (literal or regex), in scope only by default, saved in the project, audited, live-reloaded by a running proxy
 

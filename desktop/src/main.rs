@@ -121,20 +121,22 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
             service.attach_intercept(queue.clone());
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
             service.attach_rewriter(rewriter.clone())?;
-            pm_service::watch_project(project, Some(rewriter.clone()), service.network().clone())?;
             let hooks = pm_proxy::Hooks {
-                rewrite: Some(rewriter),
+                rewrite: Some(rewriter.clone()),
                 intercept: Some(queue),
                 network: Some(service.network().clone()),
                 http2: true,
             };
             let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
+            let extra = pm_proxy::Listeners::new(p.clone(), Some(proxy_addr));
+            service.attach_listeners(extra.clone())?;
+            pm_service::watch_project(project, Some(rewriter), service.network().clone(), Some(extra))?;
             tokio::spawn(p.run(l));
             Some(proxy_addr)
         }
         Err(e) => {
             eprintln!("proxy not started on {proxy_addr}: {e}");
-            pm_service::watch_project(project, None, service.network().clone())?;
+            pm_service::watch_project(project, None, service.network().clone(), None)?;
             None
         }
     };

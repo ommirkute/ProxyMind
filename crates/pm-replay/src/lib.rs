@@ -18,7 +18,7 @@ mod h2send;
 pub mod net;
 pub mod race;
 
-pub use net::{ClientCert, NetConfig, Network, ProxyKind, UpstreamProxy};
+pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy};
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -197,6 +197,13 @@ impl Sender {
         Ok(self.connect_with(ep, check, false).await?.0)
     }
 
+    /// A raw TCP connection to `host:port` (through the upstream proxy if one
+    /// applies, with CONNECT for HTTP proxies), for tunnels that pass bytes
+    /// through untouched.
+    pub async fn connect_tunnel(&self, host: &str, port: u16, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        Ok(self.connect_with(&Endpoint::new("tcp", host, port), check, false).await?.0)
+    }
+
     /// Like [`Sender::connect`]; with `h2`, offers HTTP/2 over TLS (or assumes
     /// it for plain HTTP). Returns whether HTTP/2 is in use.
     pub(crate) async fn connect_with(
@@ -206,17 +213,24 @@ impl Sender {
         h2: bool,
     ) -> Result<(Box<dyn Io>, bool)> {
         let upstream = self.net.upstream_for(&ep.host);
-        let remote_dns = upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
-            || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http);
+        // A hostname override replaces DNS (for SOCKS5 too: the proxy gets the address).
+        let pinned = self.net.address_for(&ep.host);
+        let remote_dns = pinned.is_none()
+            && (upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
+                || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http));
         // Direct connections and IP-based SOCKS need the target's addresses;
         // checks need them in every case.
         let addrs: Vec<SocketAddr> = if upstream.is_none() || check.is_some() || !remote_dns {
-            let addrs: Vec<SocketAddr> =
-                tokio::time::timeout(self.connect_timeout, tokio::net::lookup_host((ep.host.as_str(), ep.port)))
-                    .await
-                    .context("DNS lookup timed out")?
-                    .with_context(|| format!("cannot resolve {}", ep.host))?
-                    .collect();
+            let addrs: Vec<SocketAddr> = match pinned {
+                Some(ip) => vec![SocketAddr::new(ip, ep.port)],
+                None => {
+                    tokio::time::timeout(self.connect_timeout, tokio::net::lookup_host((ep.host.as_str(), ep.port)))
+                        .await
+                        .context("DNS lookup timed out")?
+                        .with_context(|| format!("cannot resolve {}", ep.host))?
+                        .collect()
+                }
+            };
             if addrs.is_empty() {
                 bail!("{} did not resolve to any address", ep.host);
             }
@@ -240,7 +254,7 @@ impl Sender {
                 // SOCKS5 with local DNS tries each checked address in turn,
                 // like a direct connection; everything else makes one attempt.
                 let targets: Vec<net::SocksTarget<'_>> = match p.kind {
-                    ProxyKind::Socks5 if !p.remote_dns && !addrs.is_empty() => {
+                    ProxyKind::Socks5 if (!p.remote_dns || pinned.is_some()) && !addrs.is_empty() => {
                         addrs.iter().map(|a| net::SocksTarget::Ip(a.ip())).collect()
                     }
                     _ => vec![net::SocksTarget::Name(&ep.host)],
@@ -252,8 +266,9 @@ impl Sender {
                         let mut tcp = self.tcp_any(&proxy_addrs).await.context("connecting to the upstream proxy")?;
                         match p.kind {
                             ProxyKind::Socks5 => net::socks5_connect(&mut tcp, p, target, ep.port).await?,
-                            ProxyKind::Http if ep.scheme == "https" => {
-                                net::http_connect(&mut tcp, p, &ep.host, ep.port).await?
+                            ProxyKind::Http if ep.scheme == "https" || ep.scheme == "tcp" => {
+                                let host = pinned.map_or_else(|| ep.host.clone(), |ip| ip.to_string());
+                                net::http_connect(&mut tcp, p, &host, ep.port).await?
                             }
                             ProxyKind::Http => {} // plain HTTP: absolute-form requests
                         }

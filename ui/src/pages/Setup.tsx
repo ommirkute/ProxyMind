@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { Empty, ErrorBox, Panel, useLoad, useNav } from "../components";
+import Listeners from "./Listeners";
 
 interface SetupInfo {
   proxy: string | null;
@@ -72,6 +73,7 @@ export default function Setup() {
           )}
         </Panel>
       </div>
+      <Listeners />
     </div>
   );
 }

@@ -228,8 +228,8 @@ impl Service {
     }
 
     /// Sends now (the caller has already passed the gate) and records the
-    /// exchange. Applies rate limits, secrets, identity credentials and the
-    /// DNS check.
+    /// exchange. Applies session rules (without an identity), rate limits,
+    /// secrets, identity credentials and the DNS check.
     pub(crate) async fn send_now(
         &self,
         actor: &Actor,
@@ -238,11 +238,30 @@ impl Service {
         fix_cl: bool,
         source: &str,
     ) -> Result<Sent> {
-        let _permit = self.acquire_slot(&out.endpoint.host).await?;
+        if identity.is_none()
+            && let Some(sent) = self.send_with_session(actor, out, fix_cl, source).await?
+        {
+            return Ok(sent);
+        }
         let mut wire = self.redactor.unredact(&out.raw);
         if let Some(id) = identity {
             wire = pm_identity::apply(&wire, &id.auth);
         }
+        self.transmit(actor, out, wire, identity, fix_cl, source).await
+    }
+
+    /// Sends `wire` (the bytes for `out`, secrets already filled in) and
+    /// records the exchange. Applies rate limits and the DNS check.
+    pub(crate) async fn transmit(
+        &self,
+        actor: &Actor,
+        out: &Outgoing,
+        mut wire: Vec<u8>,
+        identity: Option<&pm_identity::Identity>,
+        fix_cl: bool,
+        source: &str,
+    ) -> Result<Sent> {
+        let _permit = self.acquire_slot(&out.endpoint.host).await?;
         if fix_cl {
             wire = pm_http::fix_content_length(&wire);
         }

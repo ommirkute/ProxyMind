@@ -1052,6 +1052,20 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Ids of exchanges with a response recorded after `after`, oldest first.
+    pub fn exchange_ids_after(&self, after: i64, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM exchanges WHERE id > ?1 AND resp_hash IS NOT NULL ORDER BY id LIMIT ?2")?;
+        let rows = stmt.query_map([after, limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The highest exchange id (0 when there are none).
+    pub fn max_exchange_id(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM exchanges", [], |r| r.get(0))?)
+    }
+
     /// The most recent `limit` exchanges with their bytes, oldest first.
     pub fn recent_exchanges(&self, limit: usize) -> Result<Vec<Exchange>> {
         let ids: Vec<i64> = {

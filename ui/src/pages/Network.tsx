@@ -18,9 +18,16 @@ interface ClientCert {
   key_file: string;
 }
 
+interface HostOverride {
+  host: string;
+  address: string;
+}
+
 interface NetConfig {
   upstream: Upstream | null;
   client_certs: ClientCert[];
+  hosts: HostOverride[];
+  tls_passthrough: string[];
 }
 
 const DEFAULT_UPSTREAM: Upstream = {
@@ -38,7 +45,8 @@ export default function Network() {
   const [draft, setDraft] = useState<NetConfig | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const action = useAction();
-  const cfg = draft ?? saved.data;
+  const loaded = draft ?? saved.data;
+  const cfg = loaded ? { ...loaded, hosts: loaded.hosts ?? [], tls_passthrough: loaded.tls_passthrough ?? [] } : null;
   if (!cfg) return <div className="content"><ErrorBox error={saved.error} /></div>;
 
   const set = (patch: Partial<NetConfig>) => {
@@ -47,11 +55,13 @@ export default function Network() {
   };
   const up = cfg.upstream;
   const setUp = (patch: Partial<Upstream>) => up && set({ upstream: { ...up, ...patch } });
+  const setHost = (i: number, patch: Partial<HostOverride>) =>
+    set({ hosts: cfg.hosts.map((h, j) => (j === i ? { ...h, ...patch } : h)) });
   const setCert = (i: number, patch: Partial<ClientCert>) =>
     set({ client_certs: cfg.client_certs.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   const save = () =>
     action.run(async () => {
-      const r = await api.put<NetConfig>("/network", cfg);
+      const r = await api.put<NetConfig>("/network", { ...cfg, tls_passthrough: cfg.tls_passthrough.filter(Boolean) });
       saved.setData(r);
       setDraft(null);
       setNotice("Saved. The proxy, Repeater and agents use these settings from now on.");
@@ -145,6 +155,53 @@ export default function Network() {
             </tbody>
           </table>
         )}
+      </Panel>
+      <Panel
+        title="Hostname resolution"
+        actions={
+          <button className="btn" data-testid="add-host" onClick={() => set({ hosts: [...cfg.hosts, { host: "", address: "" }] })}>
+            Add override
+          </button>
+        }
+      >
+        <p className="small muted" style={{ marginTop: 0 }}>
+          Connect to a fixed address instead of what DNS says, like a hosts file (<code>*.example.com</code> works).
+          TLS still uses the name. Applies to the proxy, Repeater, Intruder, scans and agents; with an HTTP upstream
+          proxy, plain-HTTP requests are resolved by that proxy.
+        </p>
+        {cfg.hosts.length > 0 && (
+          <table className="grid">
+            <thead>
+              <tr><th>Host</th><th>Address</th><th /></tr>
+            </thead>
+            <tbody>
+              {cfg.hosts.map((h, i) => (
+                <tr key={i}>
+                  <td><input aria-label={`Override ${i + 1} host`} placeholder="api.staging.example" value={h.host} onChange={(e) => setHost(i, { host: e.target.value })} /></td>
+                  <td><input className="mono" aria-label={`Override ${i + 1} address`} placeholder="10.0.0.5" value={h.address} onChange={(e) => setHost(i, { address: e.target.value })} /></td>
+                  <td>
+                    <button className="btn" aria-label={`Delete override ${i + 1}`} onClick={() => set({ hosts: cfg.hosts.filter((_, j) => j !== i) })}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+      <Panel title="TLS pass-through">
+        <p className="small muted" style={{ marginTop: 0 }}>
+          The proxy tunnels HTTPS to these hosts without decrypting it: for apps that pin certificates, or noisy hosts
+          you don't want in history. Nothing inside these tunnels is recorded. One per line; <code>*.example.com</code>{" "}
+          also matches <code>example.com</code>.
+        </p>
+        <textarea
+          aria-label="TLS pass-through hosts"
+          rows={4}
+          placeholder={"*.googleapis.com\nupdates.example.com"}
+          value={cfg.tls_passthrough.join("\n")}
+          onChange={(e) => set({ tls_passthrough: e.target.value.split(/\n/).map((x) => x.trim()) })}
+          onBlur={() => set({ tls_passthrough: cfg.tls_passthrough.filter(Boolean) })}
+        />
       </Panel>
       <ErrorBox error={saved.error ?? action.error} />
       {notice && <div className="notice" role="status">{notice}</div>}

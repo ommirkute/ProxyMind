@@ -36,6 +36,7 @@ export const api = {
   post: <T>(path: string, body?: unknown) => call<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body: unknown) => call<T>("PATCH", path, body),
   put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
+  del: <T>(path: string) => call<T>("DELETE", path),
 };
 
 /** Saves text as a file in the browser (for downloads that need a POST). */
