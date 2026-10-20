@@ -80,6 +80,8 @@ pub fn api() -> Router<AppState> {
         .route("/race", post(race))
         .route("/intruder", post(intruder))
         .route("/crawl", post(crawl))
+        .route("/openapi", get(openapi_get))
+        .route("/openapi/import", post(openapi_import))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -349,6 +351,14 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn openapi_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.openapi_get()?)
+}
+
+async fn openapi_import(State(st): State<AppState>, Json(r): Json<pm_service::OpenApiImportRequest>) -> ApiResult {
+    ok(st.service.openapi_import(&st.actor, r).await?)
 }
 
 async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {

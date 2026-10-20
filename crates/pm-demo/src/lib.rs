@@ -305,6 +305,28 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
+/// VulnShop's API description (served at /openapi.json).
+const OPENAPI: &str = r##"{
+  "openapi": "3.0.3",
+  "info": {"title": "VulnShop API", "version": "1.0"},
+  "servers": [{"url": "/"}],
+  "components": {
+    "securitySchemes": {"session": {"type": "apiKey", "in": "cookie", "name": "session"}},
+    "schemas": {"Login": {"type": "object", "properties": {"username": {"type": "string", "example": "alice"}, "password": {"type": "string", "example": "alice123"}}}}
+  },
+  "security": [{"session": []}],
+  "paths": {
+    "/api/login": {"post": {"summary": "Log in", "security": [], "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Login"}}}}}},
+    "/api/me": {"get": {"summary": "Current user"}},
+    "/api/products": {"get": {"summary": "List products", "security": []}},
+    "/api/products/search": {"get": {"summary": "Search products", "security": [], "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string", "example": "Coffee"}}]}},
+    "/api/orders": {"get": {"summary": "Your orders"}, "post": {"summary": "Place an order"}},
+    "/api/orders/{id}": {"get": {"summary": "One order", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "example": 1001}}]}},
+    "/api/reviews": {"get": {"summary": "Product reviews", "security": [], "parameters": [{"name": "product", "in": "query", "required": true, "schema": {"type": "integer", "example": 1}}]}},
+    "/api/giftcard/redeem": {"post": {"summary": "Redeem the welcome gift card"}}
+  }
+}"##;
+
 const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><body>\
 <h1>VulnShop</h1><p>A deliberately vulnerable demo shop. Do not expose it to a network.</p>\
 <form method=post action=/api/login><input name=username><input type=password name=password>\
@@ -553,6 +575,9 @@ impl VulnShop {
                     body: format!("<!doctype html><p>Hello {}</p>", html_escape(&rendered)),
                     content_type: "text/html; charset=utf-8",
                 }
+            }
+            ("GET", ["openapi.json"]) => {
+                Response { status: 200, headers: vec![], body: OPENAPI.into(), content_type: "application/json" }
             }
             ("GET", ["robots.txt"]) => Response {
                 status: 200,

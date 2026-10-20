@@ -235,6 +235,21 @@ pub fn tool_definitions() -> Vec<Value> {
             &["exchange_id"],
         ),
         tool(
+            "openapi_import",
+            "Import an OpenAPI 3 / Swagger 2 description (spec text, or exchange_id of a recorded spec response such as \
+             /openapi.json): returns every operation with an example request and whether it needs auth. With \
+             send_examples, the GET examples are sent once (in scope only) so history and the app model learn them.",
+            json!({
+                "spec": {"type":"string","description":"JSON or YAML"},
+                "exchange_id": {"type":"integer"},
+                "base_url": {"type":"string","description":"When the spec's servers aren't absolute"},
+                "send_examples": {"type":"boolean"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &[],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -485,6 +500,10 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "scan_issues" => {
             let f: pm_service::ScanFilter = args(a)?;
             service.scan_passive(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "openapi_import" => {
+            let r: pm_service::OpenApiImportRequest = args(a)?;
+            service.openapi_import(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;

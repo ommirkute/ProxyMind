@@ -24,6 +24,7 @@ export default function Model() {
   return (
     <div className="content">
       <CrawlPanel />
+      <OpenApiPanel />
       <Panel
         title="Operations"
         actions={
@@ -182,6 +183,70 @@ function CrawlPanel() {
                   <ul>{result.skipped.map((s) => <li key={s.url}><span className="mono">{s.url}</span>: {s.reason}</li>)}</ul>
                 </details>
               )}
+            </>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+interface ApiOperation { method: string; path: string; summary?: string; auth: boolean; example_request: string }
+type ImportResult =
+  | { status: "imported"; title: string; version: string; base_url?: string; operations: ApiOperation[]; sent: { method: string; path: string; exchange_id: number; status?: number }[]; skipped: string[] }
+  | { status: "pending_approval"; summary: string }
+  | { status: "denied"; reasons: string[] };
+
+/** Import an OpenAPI / Swagger description from a recorded response or pasted text. */
+function OpenApiPanel() {
+  const [open, setOpen] = useState(false);
+  const [exchange, setExchange] = useState("");
+  const [spec, setSpec] = useState("");
+  const [send, setSend] = useState(false);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      const body = exchange ? { exchange_id: Number(exchange), send_examples: send } : { spec, send_examples: send };
+      setResult(await api.post<ImportResult>("/openapi/import", body));
+    });
+  return (
+    <Panel title="API description" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import OpenAPI…"}</button>}>
+      {open && (
+        <>
+          <div className="row">
+            <span className="small">From recorded exchange</span>
+            <input aria-label="Spec exchange" value={exchange} onChange={(e) => setExchange(e.target.value)} placeholder="id" style={{ width: 70 }} />
+            <span className="small muted">or paste the spec below</span>
+            <label className="small"><input type="checkbox" checked={send} onChange={(e) => setSend(e.target.checked)} /> send GET examples (in scope only)</label>
+            <button className="btn primary" disabled={(!exchange && !spec) || action.busy} onClick={run} data-testid="openapi-import">{action.busy ? "Importing…" : "Import"}</button>
+          </div>
+          {!exchange && <textarea aria-label="OpenAPI spec" className="mono" rows={4} value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="JSON or YAML" style={{ width: "100%", marginTop: 6 }} />}
+          <ErrorBox error={action.error} />
+          {result?.status === "pending_approval" && <div className="notice">Needs approval: {result.summary}</div>}
+          {result?.status === "denied" && <div className="error">Denied: {result.reasons.join("; ")}</div>}
+          {result?.status === "imported" && (
+            <>
+              <div className="small" data-testid="openapi-summary">
+                {result.title} {result.version}: {result.operations.length} operations{result.sent.length ? `, ${result.sent.length} examples sent` : ""}
+              </div>
+              <table className="grid small">
+                <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Summary</th><th>Sent</th></tr></thead>
+                <tbody>
+                  {result.operations.map((o) => {
+                    const sent = result.sent.find((x) => x.method === o.method && x.path === o.path);
+                    return (
+                      <tr key={o.method + o.path} title={o.example_request}>
+                        <td><Chip value={o.method} /></td>
+                        <td className="mono">{o.path}</td>
+                        <td>{o.auth ? "yes" : "no"}</td>
+                        <td className="muted">{o.summary}</td>
+                        <td>{sent ? <><StatusCode status={sent.status ?? null} /> <ExchangeLink id={sent.exchange_id} /></> : "–"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </>
           )}
         </>

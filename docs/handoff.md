@@ -54,6 +54,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-diff` | Semantic diff with learned noise | `lib.rs` |
 | `pm-model` | App model: path templating, objects, ownership | `lib.rs` |
 | `pm-ledger` | Hypotheses + coverage map | `lib.rs` |
+| `pm-openapi` | OpenAPI 3 / Swagger 2 parsing (pure): operations, example requests, `$ref` resolution | `lib.rs` |
 | `pm-scan` | Passive checks (pure) over one exchange, and active checks: insertion points, probes, analysis | `lib.rs`, `active.rs` |
 | `pm-plugin` | Plugin manifests, the per-user registry, the passive JSON-lines protocol and runner | `lib.rs` |
 | `pm-vault` | Passphrase sealing of project files (Argon2id, chunked ChaCha20-Poly1305) | `lib.rs` |
@@ -63,7 +64,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-browser` | Headless Chromium over CDP (own WebSocket codec): renders a recorded response offline, blocks every other request, reports binding calls and dialogs | `lib.rs` |
 | `pm-oast` | HTTP callback listener, authoritative DNS responder (sans-I/O parser), token helpers | `lib.rs`, `dns.rs` |
 | `pm-service` | The service layer (history, replay, ws replay, race, intercept, rules, network, identities, authz, model, ledger, proofs, findings, approvals, assistant storage) | one module per area in `src/` |
-| `pm-mcp` | MCP server over stdio; 29 tools | `lib.rs` (instructions), `tools.rs` |
+| `pm-mcp` | MCP server over stdio; 30 tools | `lib.rs` (instructions), `tools.rs` |
 | `pm-assistant` | Built-in assistant: Anthropic + OpenAI-compatible wire formats, tool loop through `pm_mcp::call_tool` as `agent:assistant` | `lib.rs`, `llm.rs` |
 | `pm-api` | axum REST API + SSE event stream, token auth, serves `ui/dist` | `lib.rs`, `routes.rs` |
 | `pm-cli` | `proxymind` binary | `main.rs`, `bench.rs` |
@@ -77,10 +78,10 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 
 ### Interfaces
 
-- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `plugin` (`add`, `list`, `remove`), `project` (`lock`, `unlock`), `bench` (`score --app`, `auto`), `scan`, `scan-active`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
-- **MCP tools (29):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_active scan_issues crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
-- **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, `scan/active`, approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
-- **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl), Issues, Findings, Audit log, Network.
+- **CLI:** `proxy`, `ui`, `mcp`, `history`, `show`, `roe`, `rules`, `network`, `assistant`, `audit`, `oast-server`, `model`, `coverage`, `hypotheses`, `findings`, `plugin` (`add`, `list`, `remove`), `project` (`lock`, `unlock`), `bench` (`score --app`, `auto`), `scan`, `scan-active`, `openapi`, `crawl`, `intruder`, `proof` (`authz`, `timing`, `xss`, `browser`, `show`, `rerun`), `bench`, `report`, `approvals`, `identity`, `authz`, `demo-target`.
+- **MCP tools (30):** `roe_get history_search exchange_get exchange_raw_request ws_messages ws_send scan_active scan_issues openapi_import crawl intruder_run race_send replay_send identity_list identity_capture identity_check authz_check authz_results authz_candidates model_get hypothesis_create hypothesis_update hypothesis_list coverage proof_run proof_get finding_create finding_update finding_list approval_status`. Documented in `docs/agents.md` and RFC 0001.
+- **REST API** (`/api/v1`, token auth): status, events (SSE), exchanges (+ `/ws`), replay, `ws/replay`, race, intruder, crawl, `scan/issues`, `scan/active`, `openapi` (+ `/import`), approvals, identities, authz, model, coverage, hypotheses, findings, proofs (+ rerun), audit (+ verify), report, intercept (settings, forward, drop, forward-all), match-replace, network, assistant (config, chats, send).
+- **Web UI pages** (`ui/src/pages`): History (viewer, WebSocket tab with replay), Assistant, Intercept, Match & replace, Repeater (with Race bar), Intruder, Approvals, Identities & Authz, Model & Coverage (with Crawl and OpenAPI import), Issues, Findings, Audit log, Network.
 
 ### Storage (`pm-store` tables)
 

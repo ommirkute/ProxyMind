@@ -16,6 +16,7 @@ mod intercept;
 mod intruder;
 mod model;
 mod network;
+mod openapi;
 mod proof;
 mod race;
 mod replay;
@@ -35,6 +36,7 @@ pub use intercept::InterceptState;
 pub use intruder::{IntruderRequest, IntruderResult, IntruderRow};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{NETWORK_SETTING, load_network, sync_network, watch_project};
+pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
@@ -55,8 +57,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_plugin, pm_policy,
-    pm_proof, pm_proxy, pm_replay, pm_scan, pm_store,
+    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi, pm_plugin,
+    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store,
 };
 
 #[derive(Debug, Error)]

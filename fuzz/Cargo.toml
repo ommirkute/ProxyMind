@@ -20,6 +20,7 @@ pm-policy = { path = "../crates/pm-policy" }
 pm-crawl = { path = "../crates/pm-crawl" }
 pm-fuzz = { path = "../crates/pm-fuzz" }
 pm-scan = { path = "../crates/pm-scan" }
+pm-openapi = { path = "../crates/pm-openapi" }
 url = "2"
 
 # Not part of the main workspace.
@@ -71,6 +72,13 @@ bench = false
 [[bin]]
 name = "passive_checks"
 path = "fuzz_targets/passive_checks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "openapi_spec"
+path = "fuzz_targets/openapi_spec.rs"
 test = false
 doc = false
 bench = false

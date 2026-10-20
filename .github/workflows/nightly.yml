@@ -25,6 +25,7 @@ jobs:
           - crawl_extract
           - intruder_template
           - passive_checks
+          - openapi_spec
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

@@ -485,6 +485,15 @@ try {
   check((await page.getByText("the link probably logs out").count()) === 1, "the logout link is skipped");
   await page.screenshot({ path: join(SHOTS, "6b-crawl.png") });
 
+  console.log("OpenAPI import");
+  await viaProxy(proxy, shop, "GET /openapi.json HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const specId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=/openapi.json&limit=1")).json()).exchanges[0].id);
+  await page.getByRole("button", { name: "Import OpenAPI…" }).click();
+  await page.getByLabel("Spec exchange").fill(String(specId));
+  await page.getByTestId("openapi-import").click();
+  await page.waitForSelector('[data-testid="openapi-summary"]');
+  check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 9 operations")), "the spec's 9 operations are listed");
+
   console.log("Passive issues");
   await page.getByRole("button", { name: "Issues" }).click();
   await page.waitForSelector('[data-testid="issues"]');

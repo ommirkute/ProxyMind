@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- OpenAPI import (`openapi_import`, Model page, `proxymind openapi`): OpenAPI 3 and Swagger 2, JSON or YAML, local-only `$ref`s with depth and cycle limits, example requests with bodies from schemas; optional gated sending of GET examples; VulnShop serves /openapi.json
 - Active scanner (`scan_active`, Issues page and History, `proxymind scan-active`): insertion points in query, form, JSON and numeric path values; checks for SQL errors, unencoded reflection (handed to the reflection oracle), open redirect, path traversal and SSTI against a fresh baseline; one approval per scan. VulnShop gained VS-7…VS-10 and two traps
 - Plugins (ADR-0014): acting plugins are MCP clients as `plugin:<name>` under stricter tiers; passive-check plugins are any executable speaking a JSON-lines protocol, installed per user (`proxymind plugin add`), merged into the Issues list; example `examples/plugins/jwt-check`
 - Desktop app (`desktop/`, Tauri 2, ADR-0012): runs the proxy and API in-process and shows the same web UI (remote page, no IPC), tray menu, setup page when the project can't open; built and linted in its own CI job
@@ -35,7 +36,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
 - WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (29 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (30 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map

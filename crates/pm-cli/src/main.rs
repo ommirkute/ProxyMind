@@ -205,6 +205,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Import an OpenAPI 3 / Swagger 2 description.
+    Openapi {
+        /// Spec file (JSON or YAML); or use --exchange
+        file: Option<PathBuf>,
+        /// A recorded exchange whose response is the spec
+        #[arg(long, conflicts_with = "file")]
+        exchange: Option<i64>,
+        /// scheme://host[:port][/base] when the spec's servers aren't absolute
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Send each GET example once (in scope only) so the model learns them
+        #[arg(long)]
+        send: bool,
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
     Crawl {
         url: String,
@@ -1258,6 +1276,63 @@ async fn run() -> Result<()> {
                         if let Some(p) = &f.issue.prove_with {
                             out!("         prove: {p}");
                         }
+                    }
+                }
+                _ => out!("{}", serde_json::to_string_pretty(&r)?),
+            }
+        }
+        Command::Openapi { file, exchange, base_url, send, identity, json } => {
+            let service = open_service(&cli.project, None)?;
+            let spec = match file {
+                Some(f) => Some(std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?),
+                None => None,
+            };
+            anyhow::ensure!(spec.is_some() || exchange.is_some(), "give a spec file or --exchange");
+            let r = service
+                .openapi_import(
+                    &human_actor(None)?,
+                    pm_service::OpenApiImportRequest {
+                        spec,
+                        exchange_id: *exchange,
+                        base_url: base_url.clone(),
+                        send_examples: *send,
+                        identity: identity.clone(),
+                        approval_id: None,
+                    },
+                )
+                .await?;
+            match (&r, *json) {
+                (
+                    pm_service::OpenApiImportResult::Imported {
+                        title,
+                        version,
+                        base_url,
+                        operations,
+                        sent,
+                        skipped,
+                        ..
+                    },
+                    false,
+                ) => {
+                    out!(
+                        "{title} {version} ({}): {} operations",
+                        base_url.as_deref().unwrap_or("no base URL"),
+                        operations.len()
+                    );
+                    for o in operations {
+                        out!("  {:<7} {}{}  {}", o.method, o.path, if o.auth { "  🔒" } else { "" }, o.summary);
+                    }
+                    for x in sent {
+                        out!(
+                            "  sent {} {} → {} (#{})",
+                            x.method,
+                            x.path,
+                            x.status.map_or("err".into(), |s| s.to_string()),
+                            x.exchange_id
+                        );
+                    }
+                    for x in skipped {
+                        out!("  skipped {x}");
                     }
                 }
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
