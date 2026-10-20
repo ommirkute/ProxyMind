@@ -88,7 +88,8 @@ try {
 
   console.log("History");
   await page.goto(link);
-  await page.waitForSelector('[role="row"][data-testid^="row-"]');
+  // The proxy records on a background thread: wait for all 7 to arrive (live updates add them).
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid^="row-"]').length >= 7, null, { timeout: 15000 }).catch(() => {});
   check((await page.locator('[data-testid^="row-"]').count()) === 7, "history lists the 7 proxied requests");
   await page.screenshot({ path: join(SHOTS, "1-history.png") });
 
