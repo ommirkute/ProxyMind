@@ -84,6 +84,10 @@ pub fn api() -> Router<AppState> {
         .route("/exchanges/{id}/ws", get(ws_messages))
         .route("/exchanges/{id}/annotation", axum::routing::put(annotate))
         .route("/ws/history", get(ws_history))
+        .route(
+            "/ui/{key}",
+            get(ui_get).put(ui_put).layer(axum::extract::DefaultBodyLimit::max(pm_service::UI_STATE_MAX + 1024)),
+        )
         .route("/exchanges/{id}/curl", get(exchange_curl))
         .route(
             "/import/har",
@@ -484,6 +488,15 @@ struct WsHistoryQuery {
 async fn ws_history(State(st): State<AppState>, Query(q): Query<WsHistoryQuery>) -> ApiResult {
     let host = q.host.as_deref().filter(|h| !h.is_empty());
     ok(st.service.ws_history(&st.actor, host, q.before_id, q.limit.unwrap_or(500), 2000)?)
+}
+
+async fn ui_get(State(st): State<AppState>, Path(key): Path<String>) -> ApiResult {
+    ok(st.service.ui_state_get(&key)?)
+}
+
+async fn ui_put(State(st): State<AppState>, Path(key): Path<String>, Json(v): Json<Value>) -> ApiResult {
+    st.service.ui_state_put(&st.actor, &key, &v)?;
+    ok(json!({ "saved": key }))
 }
 
 async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

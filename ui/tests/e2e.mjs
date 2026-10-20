@@ -205,11 +205,36 @@ try {
 
   console.log("Repeater");
   await page.goto(link.replace(/\/auth.*/, `/#/repeater/${orderId}`));
+  await page.locator(".rtab.active", { hasText: `#${orderId}` }).waitFor();
+  check(await page.evaluate(() => location.hash) === "#/repeater", "a request sent from History opens in its own tab");
   await page.getByLabel("Send as").selectOption("anonymous");
   await page.getByTestId("send").click();
   await page.waitForSelector('[data-testid="replay-result"]');
   check(await page.getByTestId("replay-result").textContent().then((t) => t.includes("401")), "anonymous replay gets 401");
+  // Second send as written, then back to the first: history per tab.
+  await page.getByLabel("Send as").selectOption("");
+  await page.getByLabel("Raw request").press("Control+Enter");
+  await page.locator('[data-testid="replay-result"]', { hasText: "200" }).waitFor();
+  await page.getByLabel("Previous request").click();
+  await page.locator('[data-testid="replay-result"]', { hasText: "401" }).waitFor();
+  check(true, "Ctrl+Enter sends, and ‹ › step through the tab's history");
+  await page.getByLabel("Next request").click();
+  // Inspector: edit a header value in place.
+  await page.getByLabel("Raw request").fill(`GET /search?q=shoes&page=1 HTTP/1.1\nHost: shop\nCookie: a=1; theme=dark\n\n`);
+  const qField = page.getByLabel("Query parameters q");
+  await qField.fill("boots");
+  await qField.press("Enter");
+  check(await page.getByLabel("Raw request").inputValue().then((v) => v.startsWith("GET /search?q=boots&page=1 ")), "Inspector edits a query parameter");
+  await page.getByLabel("Cookies theme").fill("light");
+  await page.getByLabel("Cookies theme").press("Enter");
+  check(await page.getByLabel("Raw request").inputValue().then((v) => v.includes("Cookie: a=1; theme=light")), "Inspector edits a cookie");
+  await page.getByRole("button", { name: "New tab" }).click();
+  check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
   await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
+  await sleep(900); // saved after a short pause
+  await page.reload();
+  await page.locator(".rtab", { hasText: `#${orderId}` }).waitFor();
+  check(true, "Repeater tabs survive a reload (saved in the project)");
 
   console.log("cURL and HAR");
   await page.goto(link.replace(/\/auth.*/, `/#/history/${orderId}`));

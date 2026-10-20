@@ -227,3 +227,28 @@ mark { background: #fde047; color: #111; border-radius: 2px; }
 .filter-group label { display: flex; gap: 3px; align-items: center; }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 table.grid tr.selected td { background: var(--accent-soft); }
+
+/* repeater */
+.repeater { display: flex; flex-direction: column; gap: 8px; }
+.rtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.rtab {
+  display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 12px; border: 1px solid var(--border);
+  border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--panel-2); cursor: pointer; white-space: nowrap; font-size: 13px;
+}
+.rtab.active { background: var(--panel); font-weight: 600; box-shadow: inset 0 2px 0 var(--accent); }
+.rtab.add { padding: 5px 10px; font-weight: 600; }
+.rtab-x { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0 4px; border-radius: 4px; }
+.rtab-x:hover { background: var(--bad-soft); color: var(--bad); }
+.repeater-bar { gap: 6px; }
+.repeater-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 300px; gap: 10px; min-height: 0; }
+.repeater-grid.no-inspector { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@media (max-width: 1200px) { .repeater-grid, .repeater-grid.no-inspector { grid-template-columns: 1fr; } }
+.pane { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; min-width: 0; display: flex; flex-direction: column; }
+.pane-title { font-size: 12px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+textarea.editor { min-height: 52vh; flex: 1; }
+.pane pre.raw { max-height: 58vh; }
+.inspector details { margin-bottom: 6px; }
+.inspector summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; }
+.inspector-table td { padding: 3px 4px; font-size: 12px; }
+.inspector-table td:first-child { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-table input { width: 100%; padding: 2px 6px; font-size: 12px; }

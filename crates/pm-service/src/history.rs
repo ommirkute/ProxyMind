@@ -100,3 +100,39 @@ impl Service {
         })
     }
 }
+
+/// Most bytes of UI state kept per key (e.g. Repeater tabs).
+pub const UI_STATE_MAX: usize = 8 * 1024 * 1024;
+
+impl Service {
+    /// Saved UI state for this project (e.g. Repeater tabs), if any.
+    pub fn ui_state_get(&self, key: &str) -> Result<serde_json::Value> {
+        check_ui_key(key)?;
+        Ok(self
+            .store
+            .lock()
+            .get_setting(&format!("ui:{key}"))?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Saves UI state for this project. People only: it's their workspace.
+    pub fn ui_state_put(&self, actor: &Actor, key: &str, value: &serde_json::Value) -> Result<()> {
+        check_ui_key(key)?;
+        if actor.kind != pm_policy::ActorKind::Human {
+            return Err(ServiceError::Invalid("only people have UI state".into()));
+        }
+        let text = value.to_string();
+        if text.len() > UI_STATE_MAX {
+            return Err(ServiceError::Invalid(format!("UI state larger than {} MB", UI_STATE_MAX / 1024 / 1024)));
+        }
+        self.store.lock().set_setting(&format!("ui:{key}"), &text)?;
+        Ok(())
+    }
+}
+
+fn check_ui_key(key: &str) -> Result<()> {
+    let ok =
+        !key.is_empty() && key.len() <= 40 && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok { Ok(()) } else { Err(ServiceError::Invalid(format!("bad UI state key {key:?}"))) }
+}

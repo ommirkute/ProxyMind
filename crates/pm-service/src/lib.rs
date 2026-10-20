@@ -39,7 +39,7 @@ pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use findings::{FindingUpdate, NewFinding};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
-pub use history::ExchangePage;
+pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
 pub use intruder::{IntruderRequest, IntruderResult, IntruderRow};
