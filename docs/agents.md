@@ -91,6 +91,9 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
 | `scan_issues` | Passive scan of recorded traffic (sends nothing): security headers, cookies, CORS, version disclosure, database errors, secrets, directory listings, plus installed passive-check plugins (`<plugin>/<check>`); grouped, most severe first. Leads to test, not findings |
 | `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
+| `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |
+| `compare_exchanges` | Semantic response similarity and line diffs of two recorded exchanges |
+| `sequencer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
 | `crawl` | Discover pages from a URL: GET only, in scope only, skips links that log out or delete, reads robots.txt and sitemaps; pages feed history and the app model; forms are listed, never submitted |
 | `intruder_run` | Fuzz a request: positions marked `§like this§`, payload sets (lists, number ranges, built-in lists), four attack modes; returns per-request status/length/time/grep/reflection and the anomalies. One approval covers the whole attack |
 | `race_send` | Race-condition test: send copies of a request so they arrive together (HTTP/2 single-packet or last-byte sync); responses grouped |

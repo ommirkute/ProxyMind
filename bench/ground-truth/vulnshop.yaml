@@ -52,6 +52,11 @@ vulns:
     method: GET
     path: /greet
     description: '{{7*191}} in name is evaluated to 1337.'
+  - id: VS-11
+    class: weak_token
+    method: POST
+    path: /api/password/reset
+    description: Reset codes are a counter (each is the previous plus one).
 # Correctly protected look-alikes. A finding here is a false positive.
 secure:
   - GET /api/invoices/{id}

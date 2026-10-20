@@ -74,6 +74,8 @@ pub fn class_family(c: &str) -> &'static str {
         "xss"
     } else if c.contains("race") || c.contains("toctou") || c.contains("concurren") {
         "race"
+    } else if c.contains("token") || c.contains("random") || c.contains("predictab") {
+        "weak_token"
     } else if c.contains("redirect") {
         "open_redirect"
     } else if c.contains("traversal") || c.contains("lfi") || c.contains("file_inclusion") {
@@ -202,7 +204,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 10));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 11));
         assert_eq!(s.unmatched_findings, vec![3]);
         assert_eq!(s.findings_on_secure_endpoints, vec![3]);
         let race = vec![json!({"id": 9, "vuln_class": "race condition (TOCTOU)", "status": "proven",

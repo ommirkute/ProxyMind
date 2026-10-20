@@ -101,6 +101,13 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/greet",
         description: "name is rendered as a template: {{7*191}} becomes 1337.",
     },
+    Vuln {
+        id: "VS-11",
+        class: "weak_token",
+        method: "POST",
+        path: "/api/password/reset",
+        description: "Password-reset codes are a counter: each one is the previous plus one.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -142,6 +149,8 @@ struct State {
 pub struct VulnShop {
     state: Arc<Mutex<State>>,
     counter: Arc<AtomicU64>,
+    /// VS-11: password-reset codes.
+    reset_codes: Arc<AtomicU64>,
 }
 
 impl Default for VulnShop {
@@ -352,6 +361,7 @@ impl VulnShop {
                 credit: HashMap::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
+            reset_codes: Arc::new(AtomicU64::new(400_000)),
         }
     }
 
@@ -529,6 +539,11 @@ impl VulnShop {
                     };
                 }
                 json_resp(200, json!({"product": product, "reviews": [{"stars": 5, "text": "Great"}]}))
+            }
+            ("POST", ["api", "password", "reset"]) => {
+                // VS-11: predictable reset codes (a counter).
+                let code = self.reset_codes.fetch_add(1, Ordering::Relaxed);
+                json_resp(200, json!({"sent": true, "debug_code": code.to_string()}))
             }
             ("GET", ["go"]) => {
                 // VS-8: open redirect.

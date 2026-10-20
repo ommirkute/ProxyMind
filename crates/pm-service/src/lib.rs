@@ -23,6 +23,7 @@ mod replay;
 mod report;
 mod rules;
 mod scan;
+mod tools;
 mod ws;
 mod ws_replay;
 
@@ -45,6 +46,7 @@ pub use replay::{ReplayRequest, ReplayResult};
 pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
+pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
 pub use ws::{WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
@@ -60,7 +62,7 @@ use thiserror::Error;
 
 pub use {
     pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi, pm_plugin,
-    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store,
+    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
 };
 
 #[derive(Debug, Error)]

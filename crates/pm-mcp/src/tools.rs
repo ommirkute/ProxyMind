@@ -250,6 +250,34 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "decode",
+            "Encode/decode locally (nothing is sent): give ops in order (base64_decode, url_decode, html_decode, \
+             hex_decode, unicode_unescape, gzip_decode, jwt_decode, the *_encode forms, sha1, sha256, …), or no ops \
+             for a smart decode that peels JWT, URL, HTML, base64, hex and unicode layers.",
+            json!({ "input": {"type":"string"}, "ops": {"type":"array","items":{"type":"string"}} }),
+            &["input"],
+        ),
+        tool(
+            "compare_exchanges",
+            "Compare two recorded exchanges: semantic response similarity and line diffs of requests and responses.",
+            json!({ "a": {"type":"integer"}, "b": {"type":"integer"} }),
+            &["a", "b"],
+        ),
+        tool(
+            "sequencer_run",
+            "Token randomness: re-send a token-issuing request samples times (default 100) and analyse the tokens at \
+             locator (cookie:<name>, header:<name>, json:/pointer, between:<a>|<b>): entropy estimate, constant \
+             positions, duplicates, counters. Returns statistics only, never the tokens. May need approval.",
+            json!({
+                "exchange_id": {"type":"integer"},
+                "locator": {"type":"string"},
+                "samples": {"type":"integer","minimum":10,"maximum":500},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &["exchange_id", "locator"],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -504,6 +532,24 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "openapi_import" => {
             let r: pm_service::OpenApiImportRequest = args(a)?;
             service.openapi_import(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "decode" => {
+            let r: pm_service::DecodeRequest = args(a)?;
+            service.decode(&r).map_err(|e| e.to_string())
+        }
+        "compare_exchanges" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                a: i64,
+                b: i64,
+            }
+            let g: A = args(a)?;
+            service.compare_exchanges(actor, g.a, g.b).map_err(|e| e.to_string())
+        }
+        "sequencer_run" => {
+            let r: pm_service::SequencerRequest = args(a)?;
+            service.sequencer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;

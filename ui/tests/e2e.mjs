@@ -517,6 +517,22 @@ try {
   check(await page.getByText("server-side template injection").count() > 0, "active scan finds the template injection");
   await page.screenshot({ path: join(SHOTS, "6d-active-scan.png") });
 
+  console.log("Tools");
+  await page.getByRole("button", { name: "Tools" }).click();
+  await page.getByLabel("Decoder input").fill("JTNDc2NyaXB0JTNF");
+  await page.getByTestId("decode").click();
+  await page.waitForSelector('[data-testid="decode-step"]');
+  check(await page.getByTestId("decode-step").last().textContent() === "<script>", "smart decode peels base64 then URL encoding");
+  await viaProxy(proxy, shop, "POST /api/password/reset HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\n\r\n");
+  const resetId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=/api/password/reset&limit=1")).json()).exchanges[0].id);
+  await page.getByLabel("Token exchange").fill(String(resetId));
+  await page.getByLabel("Samples").fill("20");
+  await page.getByLabel("Token locator").fill("json:/debug_code");
+  await page.getByTestId("sequencer").click();
+  await page.waitForSelector('[data-testid="sequencer-result"]', { timeout: 60000 });
+  check(await page.getByTestId("sequencer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "sequencer spots the counter");
+  await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

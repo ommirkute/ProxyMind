@@ -80,6 +80,10 @@ pub fn api() -> Router<AppState> {
         .route("/race", post(race))
         .route("/intruder", post(intruder))
         .route("/crawl", post(crawl))
+        .route("/tools/decode", post(tools_decode))
+        .route("/tools/compare", post(tools_compare))
+        .route("/tools/sequencer", post(tools_sequencer))
+        .route("/tools/sequencer/analyze", post(tools_sequencer_analyze))
         .route("/openapi", get(openapi_get))
         .route("/openapi/import", post(openapi_import))
         .route("/replay", post(replay))
@@ -376,6 +380,33 @@ async fn openapi_get(State(st): State<AppState>) -> ApiResult {
 
 async fn openapi_import(State(st): State<AppState>, Json(r): Json<pm_service::OpenApiImportRequest>) -> ApiResult {
     ok(st.service.openapi_import(&st.actor, r).await?)
+}
+
+async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::DecodeRequest>) -> ApiResult {
+    ok(st.service.decode(&r)?)
+}
+
+#[derive(serde::Deserialize)]
+struct CompareBody {
+    a: i64,
+    b: i64,
+}
+
+async fn tools_compare(State(st): State<AppState>, Json(r): Json<CompareBody>) -> ApiResult {
+    ok(st.service.compare_exchanges(&st.actor, r.a, r.b)?)
+}
+
+async fn tools_sequencer(State(st): State<AppState>, Json(r): Json<pm_service::SequencerRequest>) -> ApiResult {
+    ok(st.service.sequencer_run(&st.actor, r).await?)
+}
+
+#[derive(serde::Deserialize)]
+struct TokensBody {
+    tokens: Vec<String>,
+}
+
+async fn tools_sequencer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
+    ok(st.service.sequencer_analyze(&r.tokens)?)
 }
 
 async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {

@@ -223,6 +223,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Encode or decode text locally (no ops: smart decode).
+    Decode {
+        input: String,
+        /// Operation, repeatable and applied in order (e.g. --op url_decode --op base64_decode)
+        #[arg(long = "op")]
+        ops: Vec<String>,
+    },
+    /// Compare two recorded exchanges.
+    Compare { a: i64, b: i64 },
+    /// Token randomness: re-send a token-issuing request and analyse the tokens.
+    Sequencer {
+        exchange_id: i64,
+        /// cookie:<name>, header:<name>, json:/pointer or between:<a>|<b>
+        #[arg(long)]
+        locator: String,
+        #[arg(long, default_value_t = 100)]
+        samples: usize,
+        #[arg(long)]
+        identity: Option<String>,
+    },
     /// Crawl from a URL (GET only, in scope only, skipping links that log out or delete).
     Crawl {
         url: String,
@@ -1340,6 +1360,57 @@ async fn run() -> Result<()> {
                 }
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
+        }
+        Command::Decode { input, ops } => {
+            // Local only: no project needed.
+            let steps = if ops.is_empty() {
+                pm_service::pm_tools::codec::smart_decode(input)
+            } else {
+                pm_service::pm_tools::codec::chain(ops, input)?
+            };
+            let r = serde_json::json!({ "steps": steps });
+            for step in r["steps"].as_array().into_iter().flatten() {
+                out!("[{}]\n{}\n", step["op"].as_str().unwrap_or(""), step["output"].as_str().unwrap_or(""));
+            }
+            if r["steps"].as_array().is_none_or(|a| a.is_empty()) {
+                out!("nothing to decode");
+            }
+        }
+        Command::Compare { a, b } => {
+            let service = open_service(&cli.project, None)?;
+            let r = service.compare_exchanges(&human_actor(None)?, *a, *b)?;
+            if let Some(s) = r["response_semantic"]["summary"].as_str() {
+                out!("Responses: {s}");
+            }
+            for part in ["request_lines", "response_lines"] {
+                out!("\n== {} (+{} -{})", part.replace('_', " "), r[part]["added"], r[part]["removed"]);
+                for l in r[part]["lines"].as_array().into_iter().flatten() {
+                    let sign = match l["op"].as_str() {
+                        Some("added") => "+",
+                        Some("removed") => "-",
+                        _ => " ",
+                    };
+                    if sign != " " {
+                        out!("{sign} {}", l["text"].as_str().unwrap_or(""));
+                    }
+                }
+            }
+        }
+        Command::Sequencer { exchange_id, locator, samples, identity } => {
+            let service = open_service(&cli.project, None)?;
+            let r = service
+                .sequencer_run(
+                    &human_actor(None)?,
+                    pm_service::SequencerRequest {
+                        exchange_id: *exchange_id,
+                        locator: locator.clone(),
+                        samples: Some(*samples),
+                        identity: identity.clone(),
+                        approval_id: None,
+                    },
+                )
+                .await?;
+            out!("{}", serde_json::to_string_pretty(&r)?);
         }
         Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
             let service = open_service(&cli.project, None)?;

@@ -13,6 +13,7 @@ import Model from "./pages/Model";
 import Network from "./pages/Network";
 import Findings from "./pages/Findings";
 import Issues from "./pages/Issues";
+import Tools from "./pages/Tools";
 import Audit from "./pages/Audit";
 
 const PAGES: { id: Page; label: string }[] = [
@@ -22,6 +23,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "rules", label: "Match & replace" },
   { id: "repeater", label: "Repeater" },
   { id: "intruder", label: "Intruder" },
+  { id: "tools", label: "Tools" },
   { id: "approvals", label: "Approvals" },
   { id: "authz", label: "Identities & Authz" },
   { id: "model", label: "Model & Coverage" },
@@ -106,6 +108,7 @@ export default function App() {
     authz: Authz,
     model: Model,
     issues: Issues,
+    tools: Tools,
     findings: Findings,
     audit: Audit,
     network: Network,
