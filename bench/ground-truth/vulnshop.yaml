@@ -113,6 +113,21 @@ vulns:
     method: GET
     path: /api/products
     description: hidden debug parameter leaks internal settings.
+  - id: VS-23
+    class: stored_xss
+    method: POST
+    path: /api/guestbook
+    description: guestbook messages are shown on /guestbook without encoding.
+  - id: VS-24
+    class: csrf
+    method: POST
+    path: /api/profile
+    description: email change needs only the session cookie (no token, no Origin check).
+  - id: VS-25
+    class: dom_xss
+    method: GET
+    path: /welcome
+    description: welcome.js writes the name parameter into the page with innerHTML.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats
@@ -120,3 +135,5 @@ secure:
   - GET /help
   - GET /out
   - GET /docs
+  - POST /api/settings
+  - GET /hello

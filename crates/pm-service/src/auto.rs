@@ -76,7 +76,16 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("nosql_error", "nosqli"),
     ("ldap_error", "ldap_injection"),
     ("xpath_error", "xpath_injection"),
+    ("dom_xss", "dom_xss"),
+    // Submissions only (see SWEEP_SUBMIT_CHECKS).
+    ("stored_xss", "stored_xss"),
+    ("csrf", "csrf"),
 ];
+
+/// Checks run on recorded submissions (POST, PUT, PATCH): these re-send the
+/// request, so they change state on the target like the original did.
+const SWEEP_SUBMIT_CHECKS: &[&str] = &["stored_xss", "csrf"];
+const SWEEP_MAX_SUBMITS: usize = 10;
 
 /// Most operations with parameters one sweep scans, and most without.
 const SWEEP_MAX_OPERATIONS: usize = 40;
@@ -207,15 +216,20 @@ impl Service {
 
     /// Runs the active scanner once over each recorded GET operation that
     /// takes parameters (path identifiers or query), and records strong hits
-    /// as suspected findings, one per operation and check. GET only, so it
-    /// changes nothing on the target; everything goes through the gate.
+    /// as suspected findings, one per operation and check. Recorded
+    /// submissions get only the stored XSS and CSRF checks, which re-send
+    /// them (as a browser would); everything goes through the gate.
     pub async fn auto_active_sweep(&self, actor: &Actor) -> Result<ScanSweep> {
         let model = self.model()?;
         let mut sweep = ScanSweep::default();
         // The checks to request (issue-only names like nosql_error come from sql_error).
         let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
-        let checks: Vec<String> =
-            SWEEP_CHECKS.iter().filter(|(c, _)| runnable(c)).map(|(c, _)| c.to_string()).collect();
+        let checks: Vec<String> = SWEEP_CHECKS
+            .iter()
+            .filter(|(c, _)| runnable(c) && !SWEEP_SUBMIT_CHECKS.contains(c))
+            .map(|(c, _)| c.to_string())
+            .collect();
+        let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
         // GETs that worked, minus ones whose name says they change state
         // (`/createdb`, `/logout`…: a GET is not always harmless).
         let candidates: Vec<_> = model
@@ -232,8 +246,19 @@ impl Service {
             .iter()
             .filter(|o| has_params(o))
             .take(SWEEP_MAX_OPERATIONS)
-            .chain(candidates.iter().filter(|o| !has_params(o)).take(SWEEP_MAX_PLAIN));
-        for op in ops {
+            .chain(candidates.iter().filter(|o| !has_params(o)).take(SWEEP_MAX_PLAIN))
+            .map(|o| (*o, &checks));
+        // Submissions that worked, minus logins and ones whose name says they
+        // delete or reset something.
+        let submits = model
+            .operations
+            .iter()
+            .filter(|o| matches!(o.method.as_str(), "POST" | "PUT" | "PATCH"))
+            .filter(|o| !changes_state(&o.template) && !o.template.to_ascii_lowercase().contains("login"))
+            .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
+            .take(SWEEP_MAX_SUBMITS)
+            .map(|o| (o, &submit_checks));
+        for (op, checks) in ops.chain(submits) {
             // The recent example with the most insertion points (an imported
             // example may lack the browser's cookies and headers).
             let points = |id: i64| {

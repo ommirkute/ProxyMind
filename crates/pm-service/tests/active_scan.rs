@@ -186,3 +186,60 @@ async fn header_operator_and_access_checks() {
         assert!(found.is_empty(), "{trap}: {found:?}");
     }
 }
+
+#[tokio::test]
+async fn stored_xss_csrf_and_dom_xss() {
+    let (s, url) = setup().await;
+    let login = record_raw(
+        &s,
+        &url,
+        "POST /api/login HTTP/1.1\r\nHost: shop.test\r\nContent-Type: application/json\r\n\r\n\
+         {\"username\":\"alice\",\"password\":\"alice123\"}",
+    )
+    .await;
+    let resp = s.exchange_raw(login).unwrap().response.unwrap();
+    let body = String::from_utf8_lossy(&resp);
+    let token = body.split("\"token\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    let form = |path: &str, body: &str| {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: shop.test\r\nCookie: session={token}\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\n\r\n{body}"
+        )
+    };
+
+    // Stored XSS: needs a page that shows the stored values in history.
+    let gb = record_raw(&s, &url, &form("/api/guestbook", "name=carol&message=hi")).await;
+    let none = checks_with(&s, gb, &["stored_xss"]).await;
+    assert!(none.is_empty(), "no pages to look at yet: {none:?}");
+    record(&s, &url, "/guestbook").await;
+    let found = checks_with(&s, gb, &["stored_xss"]).await;
+    // The message is shown as stored; the name is encoded.
+    assert_eq!(
+        found.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect::<Vec<_>>(),
+        [("stored_xss", "form message")]
+    );
+    assert!(found[0].2.contains("/guestbook"), "{}", found[0].2);
+
+    // CSRF: the profile change is accepted from another origin; settings checks it.
+    let p = record_raw(&s, &url, &form("/api/profile", "email=a%40b.c")).await;
+    let found = checks_with(&s, p, &["csrf"]).await;
+    assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["csrf"], "{found:?}");
+    let st = record_raw(&s, &url, &form("/api/settings", "newsletter=1")).await;
+    assert!(checks_with(&s, st, &["csrf"]).await.is_empty());
+
+    // DOM XSS (needs a browser).
+    if pm_browser_available() {
+        let w = record(&s, &url, "/welcome?name=guest").await;
+        let found = checks_with(&s, w, &["dom_xss"]).await;
+        assert_eq!(found.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect::<Vec<_>>(), [("dom_xss", "query name")]);
+        assert!(found[0].2.contains("innerHTML"), "{}", found[0].2);
+        let h = record(&s, &url, "/hello?name=guest").await;
+        assert!(checks_with(&s, h, &["dom_xss"]).await.is_empty());
+    } else {
+        eprintln!("skipping the DOM XSS part: no Chromium");
+    }
+}
+
+fn pm_browser_available() -> bool {
+    pm_service::pm_browser::find_chromium().is_some()
+}

@@ -84,11 +84,23 @@ pub const CHECKS: &[&str] = &[
     "nosql_operator",
     "auth_bypass",
     "hidden_params",
+    "stored_xss",
+    "dom_xss",
+    "csrf",
 ];
 
 /// Checks that take several rounds (run after the one-shot ones).
-pub const MULTI_STEP: &[&str] =
-    &["sql_boolean", "sql_time", "cmd_time", "nosql_operator", "auth_bypass", "hidden_params"];
+pub const MULTI_STEP: &[&str] = &[
+    "sql_boolean",
+    "sql_time",
+    "cmd_time",
+    "nosql_operator",
+    "auth_bypass",
+    "hidden_params",
+    "stored_xss",
+    "dom_xss",
+    "csrf",
+];
 
 /// Headers that apps often pass to SQL (logging, analytics) or shells.
 const HEADERS: &[&str] = &["user-agent", "referer", "x-forwarded-for"];
@@ -656,6 +668,9 @@ pub fn multi_step_issue(check: &str, point: &Point, payload: &str, evidence: Str
             ("auth_bypass", "Access control bypass: a denied page answers to a path or header trick", None)
         }
         "hidden_params" => ("hidden_params", "Hidden parameter accepted", None),
+        "stored_xss" => ("stored_xss", "Stored input shown unencoded on another page (stored XSS)", None),
+        "dom_xss" => ("dom_xss", "DOM-based XSS: a URL value reaches a dangerous sink in page scripts", None),
+        "csrf" => ("csrf", "Cross-site request forgery: a state-changing request is accepted from another site", None),
         _ => (
             "cmd_time",
             "OS command injection (time-based blind)",
@@ -665,7 +680,11 @@ pub fn multi_step_issue(check: &str, point: &Point, payload: &str, evidence: Str
     ActiveIssue {
         check,
         title,
-        severity: if check == "hidden_params" { "low" } else { "high" },
+        severity: match check {
+            "hidden_params" => "low",
+            "csrf" => "medium",
+            _ => "high",
+        },
         point: format!("{:?} {}", point.kind, point.name).to_lowercase(),
         payload: payload.to_string(),
         evidence,
@@ -735,7 +754,7 @@ pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_
     out
 }
 
-fn snippet(text: &str, at: usize, n: usize) -> String {
+pub fn snippet(text: &str, at: usize, n: usize) -> String {
     let mut start = at.saturating_sub(20);
     while !text.is_char_boundary(start) {
         start -= 1;
@@ -1243,6 +1262,207 @@ pub fn differs(base: &Seen, base2: &Seen, got: &Seen) -> bool {
         && (got.status != base.status || similarity(&base.body, &got.body) < 1.0 - noise - 0.05)
 }
 
+/// JavaScript run before the page's own scripts: wraps the dangerous DOM
+/// sinks and reports `{"sink", "value"}` through `window[binding]` when a
+/// value holding `marker` reaches one.
+pub fn dom_hooks(marker: &str, binding: &str) -> String {
+    let m = serde_json::to_string(marker).unwrap_or_default();
+    let b = serde_json::to_string(binding).unwrap_or_default();
+    format!(
+        r#"(() => {{
+  const M = {m}, B = {b};
+  const report = (sink, v) => {{
+    try {{
+      const s = String(v);
+      if (s.includes(M) && typeof window[B] === 'function') window[B](JSON.stringify({{ sink, value: s.slice(0, 300) }}));
+    }} catch (e) {{}}
+  }};
+  const setter = (proto, prop, sink) => {{
+    try {{
+      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!d || !d.set) return;
+      Object.defineProperty(proto, prop, {{
+        ...d,
+        set(v) {{ report(sink, v); return d.set.call(this, v); }},
+      }});
+    }} catch (e) {{}}
+  }};
+  const wrap = (obj, name, sink, pick) => {{
+    try {{
+      const f = obj[name];
+      if (typeof f !== 'function') return;
+      obj[name] = function (...a) {{ report(sink, pick(a)); return f.apply(this, a); }};
+    }} catch (e) {{}}
+  }};
+  setter(Element.prototype, 'innerHTML', 'innerHTML');
+  setter(Element.prototype, 'outerHTML', 'outerHTML');
+  setter(HTMLIFrameElement.prototype, 'srcdoc', 'iframe.srcdoc');
+  setter(HTMLScriptElement.prototype, 'src', 'script.src');
+  setter(HTMLScriptElement.prototype, 'text', 'script.text');
+  setter(HTMLAnchorElement.prototype, 'href', 'a.href');
+  setter(HTMLFormElement.prototype, 'action', 'form.action');
+  wrap(Element.prototype, 'insertAdjacentHTML', 'insertAdjacentHTML', a => a[1]);
+  wrap(Element.prototype, 'setAttribute', 'setAttribute', a => /^(on|href$|src$|action$|srcdoc$)/i.test(String(a[0])) ? a[1] : '');
+  wrap(document, 'write', 'document.write', a => a.join(''));
+  wrap(document, 'writeln', 'document.writeln', a => a.join(''));
+  wrap(Range.prototype, 'createContextualFragment', 'createContextualFragment', a => a[0]);
+  wrap(window, 'eval', 'eval', a => a[0]);
+  wrap(window, 'setTimeout', 'setTimeout', a => typeof a[0] === 'string' ? a[0] : '');
+  wrap(window, 'setInterval', 'setInterval', a => typeof a[0] === 'string' ? a[0] : '');
+  wrap(window, 'open', 'window.open', a => a[0]);
+  wrap(Location.prototype, 'assign', 'location.assign', a => a[0]);
+  wrap(Location.prototype, 'replace', 'location.replace', a => a[0]);
+  try {{
+    const F = window.Function;
+    window.Function = function (...a) {{ report('Function', a.join(',')); return F.apply(this, a); }};
+  }} catch (e) {{}}
+}})();"#
+    )
+}
+
+/// The `(sink, value)` pairs reported by [`dom_hooks`] that mention `marker`.
+pub fn dom_reports(calls: &[String], marker: &str) -> Vec<(String, String)> {
+    calls
+        .iter()
+        .filter_map(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+        .filter_map(|v| Some((v["sink"].as_str()?.to_string(), v["value"].as_str()?.to_string())))
+        .filter(|(_, v)| v.contains(marker))
+        .collect()
+}
+
+/// Whether a value reaching `sink` is exploitable: markup that survived
+/// into an HTML sink, any value in a code sink, or a `javascript:` URL.
+pub fn dom_dangerous(sink: &str, value: &str, marker: &str) -> bool {
+    let html = ["innerHTML", "outerHTML", "iframe.srcdoc", "insertAdjacentHTML", "createContextualFragment"]
+        .contains(&sink)
+        || sink.starts_with("document.write");
+    let code = ["eval", "setTimeout", "setInterval", "Function", "script.text"].contains(&sink);
+    let nav =
+        ["a.href", "form.action", "window.open", "location.assign", "location.replace", "script.src", "setAttribute"]
+            .contains(&sink);
+    if html {
+        return value.contains(&format!("{marker}<pmx"));
+    }
+    if code {
+        return true;
+    }
+    nav && (value.trim_start().to_ascii_lowercase().starts_with("javascript:") || sink == "script.src")
+}
+
+/// Same-origin `<script src>` URLs in a page (at most 8), absolute.
+pub fn script_srcs(html: &str, page_url: &str) -> Vec<String> {
+    let Ok(base) = url::Url::parse(page_url) else { return Vec::new() };
+    let lower = html.to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("<script") {
+        let start = from + at;
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        let tag = &html[start..end];
+        from = end;
+        let tl = tag.to_ascii_lowercase();
+        let Some(i) = tl.find("src=") else { continue };
+        let v = &tag[i + 4..];
+        let src = match v.chars().next() {
+            Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+            _ => v.split(|c: char| c.is_whitespace() || c == '>').next().unwrap_or(""),
+        };
+        let Ok(u) = base.join(src.trim()) else { continue };
+        if u.origin() == base.origin() && !out.contains(&u.to_string()) {
+            out.push(u.to_string());
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+/// A GET for `target` (origin-form) with the headers of `raw` (cookies,
+/// Host), minus the body and its headers: to fetch a page script or a page
+/// that may show stored input.
+pub fn get_request(raw: &str, target: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let rest: Vec<&str> = p
+        .rest_of_head
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| {
+            let k = l.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+            !["content-type", "content-length", "transfer-encoding"].contains(&k.as_str())
+        })
+        .collect();
+    let rest = rest.join("\r\n");
+    Some(rebuild(&Parsed { method: "GET", rest_of_head: &rest, ..p }, target, ""))
+}
+
+/// The value stored by the `i`-th stored XSS probe: a unique tag-like
+/// string plus quotes, to see how the page shows it later.
+pub fn stored_payload(marker: &str, i: usize) -> String {
+    format!("{marker}s{i}<pmx>\"'")
+}
+
+/// How a page shows the `i`-th stored value: `Some(true)` unencoded
+/// markup, `Some(false)` present but encoded, `None` absent.
+pub fn stored_seen(body: &str, marker: &str, i: usize) -> Option<bool> {
+    let id = format!("{marker}s{i}");
+    let hits: Vec<usize> = body
+        .match_indices(&id)
+        .map(|(at, _)| at)
+        .filter(|at| !body[at + id.len()..].starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    Some(hits.iter().any(|at| body[at + id.len()..].starts_with("<pmx>")))
+}
+
+fn csrf_token_like(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["csrf", "xsrf", "token", "nonce", "authenticity", "__requestverification"].iter().any(|t| n.contains(t))
+}
+
+/// Cross-site versions of a state-changing request that relies on cookies:
+/// the same request from a foreign Origin and Referer, and for JSON also as
+/// `text/plain` (which a plain HTML form can send). Empty when the request
+/// isn't a candidate (safe method, no cookie, bearer auth, or a token-like
+/// parameter or header present).
+pub fn csrf_variants(raw: &str, marker: &str) -> Vec<(String, Vec<u8>)> {
+    let Some(p) = parse(raw) else { return Vec::new() };
+    if !["POST", "PUT", "PATCH", "DELETE"].contains(&p.method.to_ascii_uppercase().as_str()) {
+        return Vec::new();
+    }
+    let header_names: Vec<String> =
+        p.rest_of_head.lines().filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_ascii_lowercase())).collect();
+    let has = |h: &str| header_names.iter().any(|n| n == h);
+    if !has("cookie") || has("authorization") || header_names.iter().any(|n| csrf_token_like(n)) {
+        return Vec::new();
+    }
+    if points(raw).iter().any(|pt| pt.kind != PointKind::Cookie && csrf_token_like(&pt.name)) {
+        return Vec::new();
+    }
+    let evil = format!("https://{marker}.example");
+    let mut out = Vec::new();
+    let cross = set_header(raw, "Origin", &evil)
+        .and_then(|r| set_header(&String::from_utf8_lossy(&r), "Referer", &format!("{evil}/")));
+    if let Some(r) = cross {
+        if p.json {
+            if let Some(t) = set_header(&String::from_utf8_lossy(&r), "Content-Type", "text/plain") {
+                out.push((format!("Origin: {evil}, Content-Type: text/plain"), t));
+            }
+        }
+        out.push((format!("Origin: {evil}"), r));
+    }
+    out
+}
+
+/// Whether the cross-site request was accepted like the original one.
+pub fn csrf_accepted(base: &Seen, got: &Seen) -> bool {
+    base.status.is_some_and(|s| (200..400).contains(&s))
+        && got.status == base.status
+        && similarity(&base.body, &got.body) >= 0.8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,5 +1749,68 @@ mod tests {
             &seen(200, "<ul><li>a</li><li>b</li></ul><pre>internal: db=prod</pre><p>more debug data here</p>")
         ));
         assert!(!differs(&base, &base, &base));
+    }
+
+    #[test]
+    fn dom_hooks_and_reports() {
+        let js = dom_hooks("pmZ", "pmProof");
+        assert!(js.contains("\"pmZ\"") && js.contains("innerHTML") && js.contains("\"pmProof\""));
+        let calls = vec![
+            r#"{"sink":"innerHTML","value":"Hi pmZ<pmx>"}"#.to_string(),
+            r#"{"sink":"innerHTML","value":"Hi pmZ&lt;pmx&gt;"}"#.to_string(),
+            r#"{"sink":"a.href","value":"/p?x=pmZ"}"#.to_string(),
+            "junk".to_string(),
+        ];
+        let r = dom_reports(&calls, "pmZ");
+        assert_eq!(r.len(), 3);
+        assert!(dom_dangerous(&r[0].0, &r[0].1, "pmZ"));
+        assert!(!dom_dangerous(&r[1].0, &r[1].1, "pmZ"));
+        assert!(!dom_dangerous(&r[2].0, &r[2].1, "pmZ"));
+        assert!(dom_dangerous("eval", "pmZ", "pmZ"));
+        assert!(dom_dangerous("a.href", "javascript:pmZ", "pmZ"));
+    }
+
+    #[test]
+    fn finds_same_origin_scripts() {
+        let html = r#"<script src="/static/a.js"></script><SCRIPT SRC='b.js'></SCRIPT>
+            <script src=https://cdn.example/c.js></script><script>inline()</script><script src="/static/a.js"></script>"#;
+        assert_eq!(
+            script_srcs(html, "http://shop.test:8080/app/page"),
+            vec!["http://shop.test:8080/static/a.js", "http://shop.test:8080/app/b.js"]
+        );
+    }
+
+    #[test]
+    fn get_requests_keep_cookies_and_drop_the_body() {
+        let form = "POST /api/x?a=1 HTTP/1.1\r\nHost: h\r\nCookie: s=1\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nabc";
+        let g = String::from_utf8(get_request(form, "/static/a.js").unwrap()).unwrap();
+        assert_eq!(g, "GET /static/a.js HTTP/1.1\r\nHost: h\r\nCookie: s=1\r\n\r\n");
+    }
+
+    #[test]
+    fn stored_values_are_told_apart() {
+        let p = stored_payload("pmQ", 1);
+        assert_eq!(stored_seen(&format!("<li>{p}</li>"), "pmQ", 1), Some(true));
+        assert_eq!(stored_seen("<li>pmQs1&lt;pmx&gt;</li>", "pmQ", 1), Some(false));
+        assert_eq!(stored_seen("<li>pmQs12<pmx></li>", "pmQ", 1), None);
+    }
+
+    #[test]
+    fn csrf_candidates_and_verdict() {
+        let form = "POST /api/profile HTTP/1.1\r\nHost: x\r\nCookie: sid=1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nemail=a%40b";
+        let v = csrf_variants(form, "pmC");
+        assert_eq!(v.len(), 1);
+        let r = String::from_utf8(v[0].1.clone()).unwrap();
+        assert!(r.contains("Origin: https://pmC.example") && r.contains("Referer: https://pmC.example/"));
+        let json =
+            "POST /a HTTP/1.1\r\nHost: x\r\nCookie: sid=1\r\nContent-Type: application/json\r\n\r\n{\"a\":\"b\"}";
+        assert_eq!(csrf_variants(json, "pmC").len(), 2);
+        assert!(csrf_variants(&form.replace("email=", "csrf_token=t&email="), "pmC").is_empty());
+        assert!(csrf_variants(&form.replace("POST", "GET"), "pmC").is_empty());
+        assert!(csrf_variants(&form.replace("Cookie: sid=1\r\n", ""), "pmC").is_empty());
+        let ok = Seen { status: Some(200), body: "saved".into(), ..Default::default() };
+        let denied = Seen { status: Some(403), body: "bad origin".into(), ..Default::default() };
+        assert!(csrf_accepted(&ok, &ok.clone()));
+        assert!(!csrf_accepted(&ok, &denied));
     }
 }

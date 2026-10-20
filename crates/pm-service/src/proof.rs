@@ -639,7 +639,7 @@ fn percent_decode(s: &str) -> String {
 
 /// The recorded response as a browser document: HTTP/2 text converted,
 /// body de-chunked and decompressed.
-fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
+pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
     let converted;
     let raw = if pm_http::h2text::is_http2_response(raw) {
         converted = pm_http::h2text::to_http1_response(raw)?;
@@ -656,7 +656,13 @@ fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
         // The body handed over is plain; the browser must not decode it again.
         headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-encoding"));
     }
-    Some(pm_browser::Document { url: url.to_string(), status: head.status, headers, body: decoded.bytes })
+    Some(pm_browser::Document {
+        url: url.to_string(),
+        status: head.status,
+        headers,
+        body: decoded.bytes,
+        resources: vec![],
+    })
 }
 
 pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<()> {

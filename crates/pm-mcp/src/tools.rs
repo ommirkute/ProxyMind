@@ -271,12 +271,14 @@ pub fn tool_definitions() -> Vec<Value> {
              token): ssrf_oob, xxe_oob, sql_oob, cmd_oob, ssti_oob, log4shell, code_oob. Also crlf, host_header, \
              cors, nosql_operator ($ne/$regex differential), auth_bypass (path and header tricks on 401/403, \
              checked against a missing path), hidden_params (param mining); sql_error also reports NoSQL, LDAP and \
-             XPath errors. Returns leads with \
+             XPath errors. Client side: stored_xss (on submissions; looks for the value on HTML pages from history), \
+             dom_xss (renders the page in headless Chromium with sink hooks), csrf (the request from a foreign \
+             Origin with the session cookie). Returns leads with \
              evidence and, where an oracle fits, how to prove them (prove_with). \
              Needs approval by default: ask the user, then call again with identical arguments plus approval_id.",
             json!({
                 "exchange_id": {"type":"integer"},
-                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time","ssrf_oob","xxe_oob","sql_oob","cmd_oob","ssti_oob","log4shell","code_oob","crlf","host_header","cors","nosql_operator","auth_bypass","hidden_params"]}},
+                "checks": {"type":"array","items":{"type":"string","enum":["sql_error","cmd_injection","reflected_input","open_redirect","path_traversal","ssti","sql_boolean","sql_time","cmd_time","ssrf_oob","xxe_oob","sql_oob","cmd_oob","ssti_oob","log4shell","code_oob","crlf","host_header","cors","nosql_operator","auth_bypass","hidden_params","stored_xss","dom_xss","csrf"]}},
                 "oob_wait_seconds": {"type":"integer","minimum":1,"maximum":60,"description":"Wait for callbacks, default 10"},
                 "max_requests": {"type":"integer","minimum":1,"maximum":2000},
                 "identity": {"type":"string"},

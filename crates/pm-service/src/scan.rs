@@ -204,6 +204,14 @@ enum Plan {
     AuthBypass(Vec<(String, Vec<u8>, Vec<u8>)>),
     /// The request with every guessed parameter added.
     Params(Vec<u8>),
+    /// (point, request storing the `i`-th value, i), then the pages that may
+    /// show it: (path, request).
+    StoredXss(Vec<(pm_scan::active::Point, Vec<u8>, usize)>, Vec<(String, Vec<u8>)>),
+    /// (point, request, URL fragment to add), and the page's same-origin
+    /// scripts to fetch and serve to the browser: (URL, request).
+    DomXss(Vec<(pm_scan::active::Point, Vec<u8>, String)>, Vec<(String, Vec<u8>)>),
+    /// (what changed, cross-site version of the request)
+    Csrf(Vec<(String, Vec<u8>)>),
 }
 
 impl Plan {
@@ -215,6 +223,9 @@ impl Plan {
             Plan::NoSql(..) => 5,
             Plan::AuthBypass(v) => v.len() * 2,
             Plan::Params(_) => 16,
+            Plan::StoredXss(stores, pages) => stores.len() + pages.len(),
+            Plan::DomXss(v, scripts) => v.len() + scripts.len(),
+            Plan::Csrf(v) => v.len(),
         }
     }
 
@@ -227,6 +238,9 @@ impl Plan {
             Plan::NoSql(_, n) => vec![n.ne.clone()],
             Plan::AuthBypass(v) => v.iter().map(|(_, t, _)| t.clone()).collect(),
             Plan::Params(r) => vec![r.clone()],
+            Plan::StoredXss(stores, _) => stores.iter().map(|(_, r, _)| r.clone()).collect(),
+            Plan::DomXss(v, _) => v.iter().map(|(_, r, _)| r.clone()).collect(),
+            Plan::Csrf(v) => v.iter().map(|(_, r)| r.clone()).collect(),
         }
     }
 }
@@ -327,6 +341,38 @@ impl Service {
         tpl.iter().enumerate().filter(|(_, t)| t.starts_with('{')).map(|(i, _)| i).collect()
     }
 
+    /// Pages that may show stored input: recent HTML GETs to the same
+    /// origin from history (not the scanner's own probes), one per path.
+    fn stored_xss_pages(&self, s: &pm_store::ExchangeSummary) -> Result<Vec<(String, Vec<u8>)>> {
+        let f = pm_store::HistoryFilter {
+            host: Some(s.host.clone()),
+            method: Some("GET".into()),
+            status_class: Some("2".into()),
+            limit: Some(200),
+            ..Default::default()
+        };
+        let rows = self.store.lock().search_exchanges(&f)?;
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut paths = std::collections::HashSet::new();
+        for r in rows {
+            if r.source == "scan" || r.host != s.host || r.port != s.port || r.scheme != s.scheme {
+                continue;
+            }
+            if !paths.insert(r.path.split('?').next().unwrap_or("").to_string()) {
+                continue;
+            }
+            let Some(e) = self.store.lock().get_exchange(r.id)? else { continue };
+            let html = seen_of(e.response.as_deref()).content_type.is_some_and(|c| c.contains("html"));
+            if html {
+                out.push((r.path.clone(), self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes()));
+            }
+            if out.len() >= 8 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn scan_active(&self, actor: &Actor, req: ActiveScanRequest) -> Result<ActiveScanResult> {
         use crate::Authorization;
         use pm_scan::active::{self as act, PointKind};
@@ -357,6 +403,7 @@ impl Service {
 
         // Multi-step plans: (check, point, payloads to try), most likely first.
         let mut plans: Vec<Plan> = Vec::new();
+        let mut notes = Vec::new();
         for pt in &points {
             let header = pt.kind == PointKind::Header;
             if want("sql_boolean") && !header {
@@ -385,6 +432,59 @@ impl Service {
         {
             plans.push(Plan::Params(r));
         }
+        let stores: Vec<(act::Point, Vec<u8>, usize)> = points
+            .iter()
+            .filter(|p| matches!(p.kind, PointKind::Query | PointKind::Form | PointKind::Json))
+            .take(10)
+            .enumerate()
+            .filter_map(|(i, pt)| Some((pt.clone(), act::inject(&raw, pt, &act::stored_payload(&marker, i))?, i)))
+            .collect();
+        if want("stored_xss") && !ex.summary.method.eq_ignore_ascii_case("GET") && !stores.is_empty() {
+            let pages = self.stored_xss_pages(&ex.summary)?;
+            if pages.is_empty() {
+                if !req.checks.is_empty() {
+                    notes.push(
+                        "stored XSS skipped: no HTML pages for this host in history (browse or crawl first)".into(),
+                    );
+                }
+            } else {
+                plans.push(Plan::StoredXss(stores, pages));
+            }
+        }
+        if want("dom_xss") && ex.summary.method.eq_ignore_ascii_case("GET") {
+            let recorded = seen_of(ex.response.as_deref());
+            if recorded.content_type.as_deref().is_some_and(|c| c.contains("html")) {
+                if pm_browser::find_chromium().is_none() {
+                    notes.push(format!("DOM XSS skipped: no Chromium found (set {})", pm_browser::ENV_CHROMIUM));
+                } else {
+                    let page_url = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?.url();
+                    let scripts: Vec<(String, Vec<u8>)> = act::script_srcs(&recorded.body, &page_url)
+                        .into_iter()
+                        .filter_map(|u| {
+                            let t = url::Url::parse(&u).ok()?;
+                            let target =
+                                format!("{}{}", t.path(), t.query().map(|q| format!("?{q}")).unwrap_or_default());
+                            Some((u, act::get_request(&raw, &target)?))
+                        })
+                        .collect();
+                    let value = format!("{marker}<pmx>'\"");
+                    let mut v: Vec<(act::Point, Vec<u8>, String)> = points
+                        .iter()
+                        .filter(|p| p.kind == PointKind::Query)
+                        .take(5)
+                        .filter_map(|pt| Some((pt.clone(), act::inject(&raw, pt, &value)?, String::new())))
+                        .collect();
+                    v.push((act::Point::request("URL fragment"), raw.clone().into_bytes(), format!("#{value}")));
+                    plans.push(Plan::DomXss(v, scripts));
+                }
+            }
+        }
+        if want("csrf") {
+            let v = act::csrf_variants(&raw, &marker);
+            if !v.is_empty() {
+                plans.push(Plan::Csrf(v));
+            }
+        }
         // Out-of-band probes, when an OAST listener is configured.
         // One lock at a time: in one struct literal both guards would live
         // to the end of the statement and deadlock.
@@ -392,7 +492,6 @@ impl Service {
         let domain = self.store.lock().get_setting(crate::proof::OAST_DNS_SETTING)?;
         let callback = pm_scan::oob::Callback { url, domain };
         let oob = pm_scan::oob::probes(&raw, &req.checks, &callback, &id_segments, limit, pm_oast::new_token);
-        let mut notes = Vec::new();
         if !callback.is_set() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
             notes.push(
                 "out-of-band checks skipped: no OAST listener (run `proxymind oast-server`, or mcp with --oast-listen)"
@@ -400,6 +499,17 @@ impl Service {
             );
         } else if callback.domain.is_none() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
             notes.push("DNS-only payloads (nslookup, UNC paths, JNDI) skipped: no OAST DNS zone".to_string());
+        }
+        if probes.is_empty() && plans.is_empty() && oob.is_empty() && !points.is_empty() {
+            // The requested checks don't apply here (see notes): nothing to send.
+            notes.push("none of the requested checks apply to this request".into());
+            return Ok(ActiveScanResult::Done {
+                baseline_exchange_id: req.exchange_id,
+                insertion_points: points,
+                requests: 0,
+                issues: Vec::new(),
+                notes,
+            });
         }
         if probes.is_empty() && plans.is_empty() && oob.is_empty() {
             return Err(crate::ServiceError::Invalid(
@@ -691,6 +801,137 @@ impl Service {
                                 );
                                 let issue = act::multi_step_issue("hidden_params", &pt, cands[0], evidence);
                                 issues.push(ActiveFinding { issue, exchange_id: one_sent.exchange_id });
+                            }
+                        }
+                    }
+                    Plan::StoredXss(stores, pages) => {
+                        let mut stored: Vec<&(act::Point, Vec<u8>, usize)> = Vec::new();
+                        for st in stores {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            send(st.1.clone()).await?;
+                            stored.push(st);
+                        }
+                        for (path, r) in pages {
+                            if stored.is_empty() {
+                                break;
+                            }
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let page_sent = send(r.clone()).await?;
+                            let page = seen_of(page_sent.response.as_deref());
+                            stored.retain(|(pt, _, i)| {
+                                if act::stored_seen(&page.body, &marker, *i) != Some(true) {
+                                    return true;
+                                }
+                                let payload = act::stored_payload(&marker, *i);
+                                let at = page.body.find(&payload).unwrap_or(0);
+                                let evidence = format!(
+                                    "a value sent in {} shows unencoded on GET {path}: {}",
+                                    pt.name,
+                                    act::snippet(&page.body, at, 120)
+                                );
+                                let issue = act::multi_step_issue("stored_xss", pt, &payload, evidence);
+                                issues.push(ActiveFinding { issue, exchange_id: page_sent.exchange_id });
+                                false
+                            });
+                        }
+                    }
+                    Plan::DomXss(variants, scripts) => {
+                        let Some(chromium) = pm_browser::find_chromium() else { continue };
+                        // The page's own scripts, fetched once like any probe.
+                        let mut resources = Vec::new();
+                        for (u, r) in scripts {
+                            if sent_count + 1 > limit {
+                                break;
+                            }
+                            sent_count += 1;
+                            let s = send(r.clone()).await?;
+                            if let Some(d) = s.response.as_deref().and_then(|x| crate::proof::recorded_document(u, x)) {
+                                resources.push(pm_browser::Resource {
+                                    url: u.clone(),
+                                    status: d.status,
+                                    headers: d.headers,
+                                    body: d.body,
+                                });
+                            }
+                        }
+                        for (pt, r, fragment) in variants {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let page_sent = send(r.clone()).await?;
+                            let url = format!("{}{fragment}", self.outgoing(endpoint.clone(), r, true)?.url());
+                            let Some(mut doc) =
+                                page_sent.response.as_deref().and_then(|x| crate::proof::recorded_document(&url, x))
+                            else {
+                                continue;
+                            };
+                            doc.resources = resources.clone();
+                            let opts = pm_browser::RenderOptions {
+                                init_script: Some(act::dom_hooks(&marker, "pmProof")),
+                                ..Default::default()
+                            };
+                            match pm_browser::render(&chromium, &doc, &opts).await {
+                                Ok(rep) => {
+                                    let hit = act::dom_reports(&rep.binding_calls, &marker)
+                                        .into_iter()
+                                        .find(|(sink, v)| act::dom_dangerous(sink, v, &marker));
+                                    if let Some((sink, value)) = hit {
+                                        let evidence = format!(
+                                            "a value in the {} reached {sink} in the page's scripts: {}",
+                                            if fragment.is_empty() {
+                                                format!("parameter {}", pt.name)
+                                            } else {
+                                                "URL fragment".into()
+                                            },
+                                            value.chars().take(200).collect::<String>()
+                                        );
+                                        let payload = if fragment.is_empty() {
+                                            format!("{marker}<pmx>'\"")
+                                        } else {
+                                            fragment.clone()
+                                        };
+                                        let issue = act::multi_step_issue("dom_xss", pt, &payload, evidence);
+                                        issues.push(ActiveFinding { issue, exchange_id: page_sent.exchange_id });
+                                    }
+                                }
+                                Err(e) => notes.push(format!("DOM XSS: browser error: {e}")),
+                            }
+                        }
+                    }
+                    Plan::Csrf(variants) => {
+                        if !base_seen.status.is_some_and(|s| (200..400).contains(&s)) {
+                            continue;
+                        }
+                        for (what, r) in variants {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let got_sent = send(r.clone()).await?;
+                            let got = seen_of(got_sent.response.as_deref());
+                            if act::csrf_accepted(&base_seen, &got) {
+                                let evidence = format!(
+                                    "sent with {what} and the session cookie: {} ({} bytes) like the original; \
+                                     no CSRF token in the request and the origin isn't checked. Browsers still \
+                                     block it if the session cookie is SameSite=Lax or Strict",
+                                    pm_proof::status_text(got.status),
+                                    got.body.len()
+                                );
+                                let pt = act::Point::request("Origin header");
+                                let issue = act::multi_step_issue("csrf", &pt, what, evidence);
+                                issues.push(ActiveFinding { issue, exchange_id: got_sent.exchange_id });
+                                break;
                             }
                         }
                     }

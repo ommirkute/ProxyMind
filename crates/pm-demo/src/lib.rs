@@ -190,11 +190,40 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/products",
         description: "A hidden debug parameter adds internal settings (with a database password) to the product list.",
     },
+    Vuln {
+        id: "VS-23",
+        class: "stored_xss",
+        method: "POST",
+        path: "/api/guestbook",
+        description: "Guestbook messages are stored and shown on /guestbook without encoding (the name is encoded).",
+    },
+    Vuln {
+        id: "VS-24",
+        class: "csrf",
+        method: "POST",
+        path: "/api/profile",
+        description: "Changing the profile email needs only the session cookie: no CSRF token, no Origin check.",
+    },
+    Vuln {
+        id: "VS-25",
+        class: "dom_xss",
+        method: "GET",
+        path: "/welcome",
+        description: "welcome.js writes the name URL parameter into the page with innerHTML.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
-pub const SECURE_ENDPOINTS: &[&str] =
-    &["GET /api/invoices/{id}", "GET /api/admin/stats", "GET /api/orders", "GET /help", "GET /out", "GET /docs"];
+pub const SECURE_ENDPOINTS: &[&str] = &[
+    "GET /api/invoices/{id}",
+    "GET /api/admin/stats",
+    "GET /api/orders",
+    "GET /help",
+    "GET /out",
+    "GET /docs",
+    "POST /api/settings",
+    "GET /hello",
+];
 
 struct User {
     id: u32,
@@ -225,6 +254,10 @@ struct State {
     /// Users who redeemed the WELCOME10 gift card, and their store credit.
     redeemed: std::collections::HashSet<u32>,
     credit: HashMap<u32, u32>,
+    /// VS-23: guestbook entries (name, message), newest last.
+    guestbook: Vec<(String, String)>,
+    /// VS-24: profile emails by user id.
+    emails: HashMap<u32, String>,
 }
 
 #[derive(Clone)]
@@ -415,7 +448,9 @@ const OPENAPI: &str = r##"{
     "/api/orders": {"get": {"summary": "Your orders"}, "post": {"summary": "Place an order"}},
     "/api/orders/{id}": {"get": {"summary": "One order", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "integer", "example": 1001}}]}},
     "/api/reviews": {"get": {"summary": "Product reviews", "security": [], "parameters": [{"name": "product", "in": "query", "required": true, "schema": {"type": "integer", "example": 1}}]}},
-    "/api/giftcard/redeem": {"post": {"summary": "Redeem the welcome gift card"}}
+    "/api/giftcard/redeem": {"post": {"summary": "Redeem the welcome gift card"}},
+    "/api/guestbook": {"post": {"summary": "Sign the guestbook", "security": [], "requestBody": {"content": {"application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"name": {"type": "string", "example": "carol"}, "message": {"type": "string", "example": "Nice shop"}}}}}}}},
+    "/api/profile": {"post": {"summary": "Change your email", "requestBody": {"content": {"application/x-www-form-urlencoded": {"schema": {"type": "object", "properties": {"email": {"type": "string", "example": "alice@example.org"}}}}}}}}
   }
 }"##;
 
@@ -424,7 +459,7 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
-<a href='/help?topic=orders'>Help</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<a href='/help?topic=orders'>Help</a> <a href=/guestbook>Guestbook</a> <a href='/welcome?name=guest'>Welcome</a> <a href='/hello?name=guest'>Hello</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
 
 /// An in-memory SQLite database for the SQL injection demos, with MySQL's
@@ -662,6 +697,8 @@ impl VulnShop {
                 next_order: 3000,
                 redeemed: Default::default(),
                 credit: HashMap::new(),
+                guestbook: vec![("alice".into(), "Lovely coffee!".into())],
+                emails: HashMap::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
             reset_codes: Arc::new(AtomicU64::new(400_000)),
@@ -960,6 +997,87 @@ impl VulnShop {
                 headers: vec![],
                 body: "User-agent: *\nDisallow: /api/admin/\nDisallow: /api/internal/\nDisallow: /*.bak$\n".into(),
                 content_type: "text/plain",
+            },
+            ("GET", ["guestbook"]) => {
+                // VS-23: messages are shown as stored (names are encoded).
+                let entries = self.state.lock().map(|st| st.guestbook.clone()).unwrap_or_default();
+                let items: String =
+                    entries.iter().map(|(n, m)| format!("<li><b>{}</b>: {m}</li>", html_escape(n))).collect();
+                let body = format!(
+                    "<!doctype html><html><head><title>Guestbook</title></head><body><h1>Guestbook</h1>\
+                     <ul>{items}</ul><form method=post action=/api/guestbook><input name=name>\
+                     <input name=message><button>Sign</button></form></body></html>"
+                );
+                Response { status: 200, headers: vec![], body, content_type: "text/html; charset=utf-8" }
+            }
+            ("POST", ["api", "guestbook"]) => {
+                let p = req.params();
+                let (n, m) =
+                    (p.get("name").cloned().unwrap_or_default(), p.get("message").cloned().unwrap_or_default());
+                if m.is_empty() {
+                    return json_resp(400, json!({"error": "message required"}));
+                }
+                if let Ok(mut st) = self.state.lock() {
+                    st.guestbook.push((n.chars().take(100).collect(), m.chars().take(500).collect()));
+                    let excess = st.guestbook.len().saturating_sub(50);
+                    st.guestbook.drain(..excess);
+                }
+                json_resp(201, json!({"ok": true}))
+            }
+            ("POST", ["api", "profile"]) => {
+                // VS-24: the session cookie is all it takes (CSRF).
+                let Some(u) = self.user(req) else { return unauthorized() };
+                let email = req.params().get("email").cloned().unwrap_or_default();
+                if let Ok(mut st) = self.state.lock() {
+                    st.emails.insert(u.id, email.chars().take(100).collect());
+                }
+                json_resp(200, json!({"ok": true, "user": u.name}))
+            }
+            ("POST", ["api", "settings"]) => {
+                // Secure look-alike: a cross-site Origin or Referer is refused.
+                let Some(u) = self.user(req) else { return unauthorized() };
+                let host = req.header("host").unwrap_or("");
+                let foreign = |v: Option<&str>| {
+                    v.is_some_and(|v| v.split("://").nth(1).and_then(|r| r.split('/').next()) != Some(host))
+                };
+                if foreign(req.header("origin")) || foreign(req.header("referer")) {
+                    return json_resp(403, json!({"error": "cross-site request refused"}));
+                }
+                json_resp(200, json!({"ok": true, "user": u.name}))
+            }
+            ("GET", ["welcome"]) => Response {
+                status: 200,
+                headers: vec![],
+                body: "<!doctype html><html><head><title>Welcome</title></head><body><h1>Welcome</h1>\
+                       <p id=msg></p><script src=/static/welcome.js></script></body></html>"
+                    .into(),
+                content_type: "text/html; charset=utf-8",
+            },
+            ("GET", ["hello"]) => Response {
+                status: 200,
+                headers: vec![],
+                body: "<!doctype html><html><head><title>Hello</title></head><body><h1>Hello</h1>\
+                       <p id=msg></p><script src=/static/hello.js></script></body></html>"
+                    .into(),
+                content_type: "text/html; charset=utf-8",
+            },
+            ("GET", ["static", "welcome.js"]) => Response {
+                // VS-25: DOM XSS, the name parameter goes to innerHTML.
+                status: 200,
+                headers: vec![],
+                body: "const n = new URLSearchParams(location.search).get('name') || 'guest';\n\
+                       document.getElementById('msg').innerHTML = 'Welcome back, ' + n + '!';\n"
+                    .into(),
+                content_type: "application/javascript",
+            },
+            ("GET", ["static", "hello.js"]) => Response {
+                // Secure look-alike: textContent.
+                status: 200,
+                headers: vec![],
+                body: "const n = new URLSearchParams(location.search).get('name') || 'guest';\n\
+                       document.getElementById('msg').textContent = 'Hello, ' + n + '!';\n"
+                    .into(),
+                content_type: "application/javascript",
             },
             ("GET", ["help"]) => {
                 // Secure look-alike: the topic is HTML-encoded.

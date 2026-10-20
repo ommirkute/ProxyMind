@@ -9,6 +9,10 @@
 //! resolver that resolves nothing, so anything the `Fetch` domain can't see
 //! (WebSockets, popups, service workers) fails too.
 //!
+//! Same-origin resources the caller already fetched (e.g. the page's own
+//! scripts, through the policy gate) can be handed over too; they are
+//! served the same way, still without the browser touching the network.
+//!
 //! What runs in the page is reported back: calls to a named JavaScript
 //! binding (`Runtime.addBinding`) and JavaScript dialogs (`alert`,
 //! `confirm`, `prompt`). The proof engine decides what that means.
@@ -62,6 +66,18 @@ pub struct Document {
     /// (the body here is already decoded).
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Other responses to serve when the page asks for exactly these URLs
+    /// (fragment ignored); everything else is still blocked.
+    pub resources: Vec<Resource>,
+}
+
+/// A response served for a subresource request.
+#[derive(Debug, Clone)]
+pub struct Resource {
+    pub url: String,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +91,9 @@ pub struct RenderOptions {
     /// Stop as soon as the binding is called with exactly this value, or a
     /// dialog's message contains it.
     pub stop_on: Option<String>,
+    /// JavaScript run in every document before the page's own scripts
+    /// (e.g. hooks that report what reaches dangerous sinks).
+    pub init_script: Option<String>,
 }
 
 impl Default for RenderOptions {
@@ -84,6 +103,7 @@ impl Default for RenderOptions {
             timeout: Duration::from_secs(10),
             settle: Duration::from_millis(1000),
             stop_on: None,
+            init_script: None,
         }
     }
 }
@@ -513,6 +533,9 @@ async fn drive(browser: &Browser, doc: &Document, opts: &RenderOptions) -> Resul
     cdp.call("Page.enable", json!({}), s).await?;
     cdp.call("Runtime.enable", json!({}), s).await?;
     cdp.call("Runtime.addBinding", json!({ "name": opts.binding }), s).await?;
+    if let Some(js) = &opts.init_script {
+        cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": js }), s).await?;
+    }
     let nav_id = cdp.send("Page.navigate", json!({ "url": doc.url }), s).await?;
 
     let headers: Vec<Value> =
@@ -543,6 +566,24 @@ async fn drive(browser: &Browser, doc: &Document, opts: &RenderOptions) -> Resul
                         "Fetch.fulfillRequest",
                         json!({ "requestId": request_id, "responseCode": doc.status,
                                 "responseHeaders": headers, "body": body }),
+                        s,
+                    )
+                    .await?;
+                } else if let Some(r) = {
+                    let url = p["request"]["url"].as_str().unwrap_or("");
+                    let url = url.split('#').next().unwrap_or(url);
+                    doc.resources.iter().find(|r| r.url.split('#').next() == Some(url))
+                } {
+                    let headers: Vec<Value> = r
+                        .headers
+                        .iter()
+                        .filter(|(n, _)| !skip_header(n))
+                        .map(|(n, v)| json!({ "name": n, "value": v }))
+                        .collect();
+                    cdp.send(
+                        "Fetch.fulfillRequest",
+                        json!({ "requestId": request_id, "responseCode": r.status,
+                                "responseHeaders": headers, "body": pm_core::base64(&r.body) }),
                         s,
                     )
                     .await?;

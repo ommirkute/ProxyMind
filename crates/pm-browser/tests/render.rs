@@ -16,6 +16,7 @@ fn html(url: &str, body: &str) -> Document {
         status: 200,
         headers: vec![("Content-Type".into(), "text/html; charset=utf-8".into())],
         body: body.as_bytes().to_vec(),
+        resources: vec![],
     }
 }
 
@@ -103,4 +104,32 @@ async fn content_security_policy_is_honoured() {
     page.headers.push(("Content-Security-Policy".into(), "script-src 'none'".into()));
     let r = render(&chrome, &page, &opts("tok789")).await.unwrap();
     assert!(r.served && r.binding_calls.is_empty(), "the recorded CSP blocks inline handlers: {r:?}");
+}
+
+#[tokio::test]
+async fn serves_given_resources_and_runs_the_init_script_first() {
+    let Some(chrome) = find_chromium() else {
+        eprintln!("no Chromium; skipping");
+        return;
+    };
+    let mut doc = html("http://shop.test/page", "<html><body><script src='/app.js'></script></body></html>");
+    doc.resources.push(pm_browser::Resource {
+        url: "http://shop.test/app.js".into(),
+        status: 200,
+        headers: vec![("Content-Type".into(), "text/javascript".into())],
+        body: b"document.body.innerHTML = decodeURIComponent(location.hash.slice(1));".to_vec(),
+    });
+    doc.url.push_str("#pmMARK");
+    let hook = "(() => { const d = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML'); \
+        Object.defineProperty(Element.prototype, 'innerHTML', { ...d, set(v) { \
+        if (String(v).includes('pmMARK')) window.pmProof('innerHTML:' + v); return d.set.call(this, v); } }); })();";
+    let opts = RenderOptions {
+        timeout: Duration::from_secs(20),
+        init_script: Some(hook.into()),
+        stop_on: Some("innerHTML:pmMARK".into()),
+        ..Default::default()
+    };
+    let r = render(&chrome, &doc, &opts).await.unwrap();
+    assert!(r.binding_calls.iter().any(|c| c == "innerHTML:pmMARK"), "{r:?}");
+    assert!(r.blocked.iter().all(|u| !u.ends_with("/app.js")), "the script was served, not blocked");
 }

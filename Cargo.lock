@@ -1559,6 +1559,7 @@ dependencies = [
  "pm-http",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]

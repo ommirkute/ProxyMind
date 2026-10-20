@@ -66,6 +66,8 @@ pub fn class_family(c: &str) -> &'static str {
         "idor"
     } else if c.contains("bfla") || c.contains("function") || c.contains("privilege") || c.contains("role") {
         "bfla"
+    } else if c.contains("csrf") || c.contains("xsrf") || c.contains("cross_site_request_forgery") {
+        "csrf"
     } else if c.contains("nosql") {
         "nosqli"
     } else if c.contains("sql") {
@@ -229,6 +231,9 @@ mod tests {
             ("command_injection", "command_injection"),
             ("xxe", "xxe"),
             ("resource", "resource"),
+            ("csrf", "csrf"),
+            ("stored_xss", "xss"),
+            ("dom_xss", "xss"),
         ] {
             assert_eq!(class_family(class), family, "{class}");
         }
