@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+futures-util = "0.3.34"
 anyhow = "1.0.104"
 tracing = "0.1.44"
 jiff = "0.2.38"
@@ -31,6 +32,7 @@ pm-policy = { version = "0.0.1", path = "../pm-policy" }
 pm-proof = { version = "0.0.1", path = "../pm-proof" }
 pm-proxy = { version = "0.0.1", path = "../pm-proxy" }
 pm-replay = { version = "0.0.1", path = "../pm-replay" }
+regex = "1.13.1"
 ring = "0.17.14"
 pm-plugin = { version = "0.0.1", path = "../pm-plugin" }
 pm-scan = { version = "0.0.1", path = "../pm-scan" }

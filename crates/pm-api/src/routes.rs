@@ -98,6 +98,9 @@ pub fn api() -> Router<AppState> {
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
         .route("/intruder", post(intruder))
+        .route("/intruder/attacks", get(attacks_list).post(attack_start))
+        .route("/intruder/attacks/{id}", get(attack_status))
+        .route("/intruder/attacks/{id}/{action}", post(attack_control))
         .route("/crawl", post(crawl))
         .route("/discover", post(discover))
         .route("/tools/decode", post(tools_decode))
@@ -581,6 +584,27 @@ async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlReques
 
 async fn intruder(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
     ok(st.service.intruder_run(&st.actor, r).await?)
+}
+
+async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
+    ok(st.service.intruder_start(&st.actor, r)?)
+}
+
+async fn attacks_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.intruder_list(&st.actor))
+}
+
+#[derive(serde::Deserialize)]
+struct FromQuery {
+    from: Option<usize>,
+}
+
+async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FromQuery>) -> ApiResult {
+    ok(st.service.intruder_status(&st.actor, &id, q.from.unwrap_or(0))?)
+}
+
+async fn attack_control(State(st): State<AppState>, Path((id, action)): Path<(String, String)>) -> ApiResult {
+    ok(json!({ "status": st.service.intruder_control(&st.actor, &id, &action)? }))
 }
 
 async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {

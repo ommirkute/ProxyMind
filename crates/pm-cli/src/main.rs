@@ -1767,9 +1767,14 @@ async fn run() -> Result<()> {
             let service = open_service(&cli.project, None)?;
             let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode))
                 .map_err(|_| anyhow::anyhow!("mode must be sniper, battering_ram, pitchfork or cluster_bomb"))?;
-            let set = |list: Vec<String>, numbers: Option<String>, builtin: Option<String>| {
-                pm_service::pm_fuzz::PayloadSet { list, numbers, builtin, url_encode: *url_encode }
-            };
+            let set =
+                |list: Vec<String>, numbers: Option<String>, builtin: Option<String>| pm_service::pm_fuzz::PayloadSet {
+                    list,
+                    numbers,
+                    builtin,
+                    url_encode: *url_encode,
+                    ..Default::default()
+                };
             let mut sets = Vec::new();
             for f in payload_files {
                 let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MARKER: char = '§';
 /// Most requests one attack may generate.
-pub const MAX_REQUESTS: usize = 1000;
+pub const MAX_REQUESTS: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuzzError {
@@ -27,6 +27,7 @@ pub enum FuzzError {
     EmptySet(usize),
     BadRange(String),
     UnknownBuiltin(String),
+    BadRule(String),
 }
 
 impl std::fmt::Display for FuzzError {
@@ -40,6 +41,7 @@ impl std::fmt::Display for FuzzError {
             FuzzError::TooMany(n) => write!(f, "the attack would send {n} requests; the limit is {MAX_REQUESTS}"),
             FuzzError::EmptySet(i) => write!(f, "payload set {} is empty", i + 1),
             FuzzError::BadRange(r) => write!(f, "bad number range: {r}"),
+            FuzzError::BadRule(r) => write!(f, "bad payload rule: {r}"),
             FuzzError::UnknownBuiltin(b) => {
                 write!(
                     f,
@@ -69,7 +71,7 @@ pub enum Mode {
 }
 
 /// One payload set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PayloadSet {
     /// Literal payloads.
@@ -81,9 +83,129 @@ pub struct PayloadSet {
     /// A built-in list: see [`BUILTINS`].
     #[serde(default)]
     pub builtin: Option<String>,
-    /// Percent-encode each payload (for query strings and form bodies).
+    /// Every string of `charset` from `min` to `max` characters long.
+    #[serde(default)]
+    pub brute: Option<BruteForce>,
+    /// This many empty payloads (to repeat the base request).
+    #[serde(default)]
+    pub null_payloads: Option<usize>,
+    /// Each word as written, lower case, UPPER case and Capitalised.
+    #[serde(default)]
+    pub case_variants: Vec<String>,
+    /// Applied to each payload in order (Burp's payload processing).
+    #[serde(default)]
+    pub processing: Vec<Rule>,
+    /// Percent-encode each payload (for query strings and form bodies),
+    /// after the processing rules.
     #[serde(default)]
     pub url_encode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BruteForce {
+    pub charset: String,
+    pub min: usize,
+    pub max: usize,
+}
+
+/// One payload processing step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Rule {
+    Prefix {
+        value: String,
+    },
+    Suffix {
+        value: String,
+    },
+    /// Replace every occurrence of `find` (literal text).
+    Replace {
+        find: String,
+        with: String,
+    },
+    /// Percent-encode reserved characters only.
+    UrlEncode,
+    /// Percent-encode every byte.
+    UrlEncodeAll,
+    Base64,
+    Hex,
+    Lower,
+    Upper,
+    Reverse,
+    Sha1,
+    Sha256,
+}
+
+impl Rule {
+    pub fn apply(&self, p: &str) -> String {
+        match self {
+            Rule::Prefix { value } => format!("{value}{p}"),
+            Rule::Suffix { value } => format!("{p}{value}"),
+            Rule::Replace { find, with } if !find.is_empty() => p.replace(find.as_str(), with),
+            Rule::Replace { .. } => p.to_string(),
+            Rule::UrlEncode => percent_encode(p),
+            Rule::UrlEncodeAll => p.bytes().map(|b| format!("%{b:02X}")).collect(),
+            Rule::Base64 => pm_core::base64(p.as_bytes()),
+            Rule::Hex => p.bytes().map(|b| format!("{b:02x}")).collect(),
+            Rule::Lower => p.to_lowercase(),
+            Rule::Upper => p.to_uppercase(),
+            Rule::Reverse => p.chars().rev().collect(),
+            Rule::Sha1 => hex_digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, p),
+            Rule::Sha256 => hex_digest(&ring::digest::SHA256, p),
+        }
+    }
+}
+
+fn hex_digest(alg: &'static ring::digest::Algorithm, p: &str) -> String {
+    ring::digest::digest(alg, p.as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Every string over `charset` of each length from `min` to `max`, shortest first.
+fn brute(b: &BruteForce) -> Result<Vec<String>, FuzzError> {
+    let chars: Vec<char> = {
+        let mut seen = std::collections::BTreeSet::new();
+        b.charset.chars().filter(|c| seen.insert(*c)).collect()
+    };
+    if chars.is_empty() || b.min > b.max || b.max > 32 {
+        return Err(FuzzError::BadRange(format!("brute force over {:?}, {}-{}", b.charset, b.min, b.max)));
+    }
+    let mut total: usize = 0;
+    for len in b.min..=b.max {
+        let n = chars.len().checked_pow(len as u32).unwrap_or(usize::MAX);
+        total = total.saturating_add(n);
+        if total > MAX_REQUESTS {
+            return Err(FuzzError::TooMany(total));
+        }
+    }
+    let mut out = Vec::with_capacity(total);
+    for len in b.min..=b.max {
+        let mut idx = vec![0usize; len];
+        loop {
+            out.push(idx.iter().map(|&i| chars[i]).collect());
+            // Odometer over the charset.
+            let mut p = len;
+            loop {
+                if p == 0 {
+                    break;
+                }
+                p -= 1;
+                idx[p] += 1;
+                if idx[p] < chars.len() {
+                    break;
+                }
+                idx[p] = 0;
+                if p == 0 {
+                    p = usize::MAX;
+                    break;
+                }
+            }
+            if p == usize::MAX || len == 0 {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Small built-in lists for common probes. They are starting points, not
@@ -121,6 +243,32 @@ impl PayloadSet {
         if let Some(b) = &self.builtin {
             let list = BUILTINS.iter().find(|x| x.0 == b).ok_or_else(|| FuzzError::UnknownBuiltin(b.clone()))?.1;
             out.extend(list.iter().map(|s| s.to_string()));
+        }
+        if let Some(b) = &self.brute {
+            out.extend(brute(b)?);
+        }
+        if let Some(n) = self.null_payloads {
+            if n > MAX_REQUESTS {
+                return Err(FuzzError::TooMany(n));
+            }
+            out.extend(std::iter::repeat_n(String::new(), n));
+        }
+        for w in &self.case_variants {
+            let mut cap = w.to_lowercase();
+            if let Some(f) = cap.get(..1).map(str::to_uppercase) {
+                cap.replace_range(..1, &f);
+            }
+            for v in [w.clone(), w.to_lowercase(), w.to_uppercase(), cap] {
+                if !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+        }
+        if out.len() > MAX_REQUESTS {
+            return Err(FuzzError::TooMany(out.len()));
+        }
+        for r in &self.processing {
+            out = out.iter().map(|p| r.apply(p)).collect();
         }
         if self.url_encode {
             out = out.iter().map(|p| percent_encode(p)).collect();
@@ -283,6 +431,92 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
     Ok(out)
 }
 
+/// Pulls a value out of each response for its own results column
+/// (Burp's grep - extract): text between two markers, or a regex's first
+/// group (or whole match).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Extract {
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub regex: Option<String>,
+}
+
+/// Longest extracted value kept.
+const EXTRACT_MAX: usize = 200;
+
+impl Extract {
+    pub fn compile(&self) -> Result<Option<regex::Regex>, FuzzError> {
+        self.regex
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                regex::RegexBuilder::new(r)
+                    .size_limit(1 << 20)
+                    .build()
+                    .map_err(|e| FuzzError::BadRule(format!("extract regex: {e}")))
+            })
+            .transpose()
+    }
+
+    /// The value in `text`, if found.
+    pub fn find(&self, re: Option<&regex::Regex>, text: &str) -> Option<String> {
+        let v = if let Some(re) = re {
+            let c = re.captures(text)?;
+            c.get(1).or_else(|| c.get(0))?.as_str().to_string()
+        } else {
+            let start = self.start.as_deref().filter(|s| !s.is_empty())?;
+            let from = text.find(start)? + start.len();
+            let rest = &text[from..];
+            let to = match self.end.as_deref().filter(|e| !e.is_empty()) {
+                Some(e) => rest.find(e)?,
+                None => rest.find(['\r', '\n']).unwrap_or(rest.len()),
+            };
+            rest[..to].to_string()
+        };
+        Some(v.chars().take(EXTRACT_MAX).collect())
+    }
+}
+
+/// Which grep terms match a response: case-insensitive text, or regexes.
+pub struct Grep {
+    terms: Vec<(String, Option<regex::Regex>)>,
+}
+
+impl Grep {
+    pub fn new(terms: &[String], as_regex: bool) -> Result<Self, FuzzError> {
+        let terms = terms
+            .iter()
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let re = as_regex
+                    .then(|| {
+                        regex::RegexBuilder::new(t)
+                            .case_insensitive(true)
+                            .size_limit(1 << 20)
+                            .build()
+                            .map_err(|e| FuzzError::BadRule(format!("grep regex {t:?}: {e}")))
+                    })
+                    .transpose()?;
+                Ok((t.clone(), re))
+            })
+            .collect::<Result<_, FuzzError>>()?;
+        Ok(Self { terms })
+    }
+
+    /// The terms found; `lower` is `text` lower-cased (done once by the caller).
+    pub fn matches(&self, text: &str, lower: &str) -> Vec<String> {
+        self.terms
+            .iter()
+            .filter(|(t, re)| match re {
+                Some(re) => re.is_match(text),
+                None => lower.contains(&t.to_lowercase()),
+            })
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+}
+
 /// What came back for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
@@ -396,35 +630,117 @@ mod tests {
         assert_eq!(p[1].payloads, vec![None, Some("1".to_string())]);
         assert!(matches!(plan(&t, Mode::Pitchfork, &[set(&["1"])]), Err(FuzzError::SetCount { .. })));
         assert_eq!(plan(&t, Mode::Sniper, &[vec![]]), Err(FuzzError::EmptySet(0)));
-        let big: Vec<String> = (0..40).map(|i| i.to_string()).collect();
-        assert_eq!(plan(&t, Mode::ClusterBomb, &[big.clone(), big]), Err(FuzzError::TooMany(1600)));
+        let big: Vec<String> = (0..120).map(|i| i.to_string()).collect();
+        assert_eq!(plan(&t, Mode::ClusterBomb, &[big.clone(), big]), Err(FuzzError::TooMany(14400)));
     }
 
     #[test]
     fn payload_sets_expand() {
-        let s = PayloadSet { list: set(&["a b"]), numbers: Some("3-1".into()), builtin: None, url_encode: true };
+        let s = PayloadSet {
+            list: set(&["a b"]),
+            numbers: Some("3-1".into()),
+            builtin: None,
+            url_encode: true,
+            ..Default::default()
+        };
         assert_eq!(s.expand().unwrap(), ["a%20b", "3", "2", "1"]);
-        let s =
-            PayloadSet { list: vec![], numbers: Some("-2-4:3".into()), builtin: Some("ids".into()), url_encode: false };
+        let s = PayloadSet {
+            list: vec![],
+            numbers: Some("-2-4:3".into()),
+            builtin: Some("ids".into()),
+            url_encode: false,
+            ..Default::default()
+        };
         let e = s.expand().unwrap();
         assert_eq!(&e[..3], ["-2", "1", "4"]);
         assert!(e.contains(&"999999".to_string()));
         assert!(matches!(
-            PayloadSet { list: vec![], numbers: Some("1-x".into()), builtin: None, url_encode: false }.expand(),
+            PayloadSet {
+                list: vec![],
+                numbers: Some("1-x".into()),
+                builtin: None,
+                url_encode: false,
+                ..Default::default()
+            }
+            .expand(),
             Err(FuzzError::BadRange(_))
         ));
         assert!(matches!(
-            PayloadSet { list: vec![], numbers: Some("0-5000".into()), builtin: None, url_encode: false }.expand(),
+            PayloadSet {
+                list: vec![],
+                numbers: Some("0-50000".into()),
+                builtin: None,
+                url_encode: false,
+                ..Default::default()
+            }
+            .expand(),
             Err(FuzzError::TooMany(_))
         ));
         assert!(matches!(
-            PayloadSet { list: vec![], numbers: None, builtin: Some("nope".into()), url_encode: false }.expand(),
+            PayloadSet {
+                list: vec![],
+                numbers: None,
+                builtin: Some("nope".into()),
+                url_encode: false,
+                ..Default::default()
+            }
+            .expand(),
             Err(FuzzError::UnknownBuiltin(_))
         ));
     }
 
     fn obs(status: u16, len: usize) -> Observed {
         Observed { status: Some(status), body_length: len, elapsed_ms: 20, matches: vec![], reflected: false }
+    }
+
+    #[test]
+    fn new_payload_types_and_processing() {
+        let b = PayloadSet { brute: Some(BruteForce { charset: "ab".into(), min: 1, max: 2 }), ..empty() };
+        assert_eq!(b.expand().unwrap(), ["a", "b", "aa", "ab", "ba", "bb"]);
+        let too = PayloadSet { brute: Some(BruteForce { charset: "0123456789".into(), min: 5, max: 5 }), ..empty() };
+        assert!(matches!(too.expand(), Err(FuzzError::TooMany(_))));
+        assert_eq!(PayloadSet { null_payloads: Some(3), ..empty() }.expand().unwrap(), ["", "", ""]);
+        assert_eq!(
+            PayloadSet { case_variants: vec!["admin".into()], ..empty() }.expand().unwrap(),
+            ["admin", "ADMIN", "Admin"]
+        );
+        let rules = PayloadSet {
+            list: vec!["a b".into()],
+            processing: vec![
+                Rule::Prefix { value: "x".into() },
+                Rule::Replace { find: " ".into(), with: "+".into() },
+                Rule::Upper,
+                Rule::Suffix { value: "!".into() },
+            ],
+            ..empty()
+        };
+        assert_eq!(rules.expand().unwrap(), ["XA+B!"]);
+        assert_eq!(Rule::Base64.apply("pm"), "cG0=");
+        assert_eq!(Rule::Hex.apply("A"), "41");
+        assert_eq!(Rule::UrlEncodeAll.apply("a/"), "%61%2F");
+        assert_eq!(Rule::Sha256.apply(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        let r: Rule = serde_json::from_str(r#"{"op":"prefix","value":"p"}"#).unwrap();
+        assert_eq!(r, Rule::Prefix { value: "p".into() });
+    }
+
+    #[test]
+    fn grep_and_extract() {
+        let g = Grep::new(&["Admin".into(), "".into()], false).unwrap();
+        let text = "Welcome ADMIN\r\nX-Csrf: tok123\r\n\r\n{\"id\":42}";
+        assert_eq!(g.matches(text, &text.to_lowercase()), ["Admin"]);
+        let r = Grep::new(&[r"id.:\d+".into()], true).unwrap();
+        assert_eq!(r.matches(text, &text.to_lowercase()).len(), 1);
+        assert!(Grep::new(&["(".into()], true).is_err());
+        let between = Extract { start: Some("X-Csrf: ".into()), ..Default::default() };
+        assert_eq!(between.find(None, text).as_deref(), Some("tok123"));
+        let re = Extract { regex: Some(r#""id":(\d+)"#.into()), ..Default::default() };
+        let c = re.compile().unwrap();
+        assert_eq!(re.find(c.as_ref(), text).as_deref(), Some("42"));
+        assert_eq!(Extract { start: Some("nope".into()), ..Default::default() }.find(None, text), None);
+    }
+
+    fn empty() -> PayloadSet {
+        PayloadSet::default()
     }
 
     #[test]

@@ -155,3 +155,47 @@ export function redirectOf(resp: string | null | undefined): string | null {
   const loc = resp.split(/\r?\n\r?\n/)[0].match(/^location:\s*(.+)$/im);
   return loc ? loc[1].trim() : null;
 }
+
+/**
+ * Marks the values of query and form parameters, top-level JSON strings
+ * and numbers, and cookies with § (Burp's "Auto §"). Existing markers are
+ * removed first.
+ */
+export function autoMark(raw: string): string {
+  const clean = raw.replace(/§/g, "");
+  const p = parseRequest(clean);
+  const markPairs = (s: string) =>
+    s
+      .split("&")
+      .map((kv) => {
+        const i = kv.indexOf("=");
+        return i < 0 ? kv : `${kv.slice(0, i + 1)}§${kv.slice(i + 1)}§`;
+      })
+      .join("&");
+  const qi = p.target.indexOf("?");
+  const target = qi < 0 ? p.target : `${p.target.slice(0, qi + 1)}${markPairs(p.target.slice(qi + 1))}`;
+  const headers = p.headers.map((h) =>
+    h.name.toLowerCase() === "cookie"
+      ? {
+          ...h,
+          value: h.value
+            .split(";")
+            .map((c) => {
+              const i = c.indexOf("=");
+              return i < 0 ? c : `${c.slice(0, i + 1)}§${c.slice(i + 1)}§`;
+            })
+            .join(";"),
+        }
+      : h,
+  );
+  let body = p.body;
+  if (isForm(p) && body.trim()) {
+    body = markPairs(body.trim());
+  } else if ((header(p, "content-type") ?? "").toLowerCase().includes("json")) {
+    // "key": "value" and "key": 123 at any depth, text only (keeps the JSON's own formatting).
+    body = body.replace(/("(?:[^"\\]|\\.)*"\s*:\s*)("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)/g, (_m, k: string, v: string) =>
+      v.startsWith('"') ? `${k}"§${v.slice(1, -1)}§"` : `${k}§${v}§`,
+    );
+  }
+  return buildRequest({ ...p, target, headers, body });
+}

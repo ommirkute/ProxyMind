@@ -44,7 +44,13 @@ async fn setup() -> (Arc<Service>, String) {
 }
 
 fn list(xs: &[&str]) -> PayloadSet {
-    PayloadSet { list: xs.iter().map(|s| s.to_string()).collect(), numbers: None, builtin: None, url_encode: false }
+    PayloadSet {
+        list: xs.iter().map(|s| s.to_string()).collect(),
+        numbers: None,
+        builtin: None,
+        url_encode: false,
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -118,4 +124,77 @@ async fn reflection_and_bad_attacks() {
     ] {
         assert!(s.intruder_run(&human(), r).await.is_err());
     }
+}
+
+async fn wait_done(s: &Service, id: &str) -> pm_service::AttackView {
+    for _ in 0..300 {
+        let v = s.intruder_status(&human(), id, 0).unwrap();
+        if !matches!(v.status, pm_service::AttackStatus::Running | pm_service::AttackStatus::Paused) {
+            return v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("attack {id} didn't finish");
+}
+
+#[tokio::test]
+async fn background_attacks_with_extract_and_concurrency() {
+    let (s, url) = setup().await;
+    let req = IntruderRequest {
+        url: Some(url.clone()),
+        raw: "GET /api/orders/§1001§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+        payload_sets: vec![PayloadSet { numbers: Some("1001-1004".into()), ..Default::default() }],
+        identity: Some("bob".into()),
+        grep: vec!["\"owner\":\"ali\\w+\"".into()],
+        grep_regex: true,
+        extract: vec![pm_service::pm_fuzz::Extract { regex: Some(r#""owner":"(\w+)""#.into()), ..Default::default() }],
+        concurrency: Some(3),
+        ..Default::default()
+    };
+    let pm_service::IntruderStart::Started { attack_id, total } = s.intruder_start(&human(), req).unwrap() else {
+        panic!("not started")
+    };
+    assert_eq!(total, 4);
+    let v = wait_done(&s, &attack_id).await;
+    assert_eq!((v.status, v.done, v.total), (pm_service::AttackStatus::Done, 4, 4));
+    let mut rows = v.rows.clone();
+    rows.sort_by_key(|r| r.index);
+    let owners: Vec<Option<String>> = rows.iter().map(|r| r.extracted[0].clone()).collect();
+    assert_eq!(owners[0].as_deref(), Some("alice"), "{owners:?}");
+    assert!(rows[0].matches.len() == 1 && rows[3].matches.is_empty());
+    assert_eq!(v.extract_columns.len(), 1);
+    // Polling from an offset returns only newer rows; the list shows the attack.
+    assert!(s.intruder_status(&human(), &attack_id, 4).unwrap().rows.is_empty());
+    assert_eq!(s.intruder_list(&human())[0].attack_id, attack_id);
+    // Agents can't see other actors' attacks.
+    assert!(s.intruder_status(&Actor::parse("agent:other").unwrap(), &attack_id, 0).is_err());
+}
+
+#[tokio::test]
+async fn attacks_pause_resume_and_cancel() {
+    let (s, url) = setup().await;
+    let req = IntruderRequest {
+        url: Some(url.clone()),
+        raw: "GET /api/products?x=§a§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+        payload_sets: vec![PayloadSet { null_payloads: Some(200), ..Default::default() }],
+        throttle_ms: Some(20),
+        ..Default::default()
+    };
+    let pm_service::IntruderStart::Started { attack_id, .. } = s.intruder_start(&human(), req).unwrap() else {
+        panic!("not started")
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(s.intruder_control(&human(), &attack_id, "pause").unwrap(), pm_service::AttackStatus::Paused);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let a = s.intruder_status(&human(), &attack_id, 0).unwrap().done;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let b = s.intruder_status(&human(), &attack_id, 0).unwrap().done;
+    assert!(b <= a + 1, "paused: {a} → {b}");
+    s.intruder_control(&human(), &attack_id, "resume").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(s.intruder_control(&human(), &attack_id, "cancel").unwrap(), pm_service::AttackStatus::Cancelled);
+    let v = wait_done(&s, &attack_id).await;
+    assert_eq!(v.status, pm_service::AttackStatus::Cancelled);
+    assert!(v.done > b && v.done < 200, "{} of 200", v.done);
+    assert!(s.intruder_control(&human(), &attack_id, "fly").is_ok(), "finished attacks ignore controls");
 }

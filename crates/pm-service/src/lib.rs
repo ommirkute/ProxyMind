@@ -42,7 +42,9 @@ pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
-pub use intruder::{IntruderRequest, IntruderResult, IntruderRow};
+pub use intruder::{
+    AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
+};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{NETWORK_SETTING, load_network, sync_network, watch_project};
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
@@ -116,6 +118,8 @@ pub struct Service {
     roe_text: parking_lot::Mutex<Option<String>>,
     /// Passive-check plugins the user installed (never from the project).
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
+    /// Recent Intruder attacks (running ones keep going in the background).
+    attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
 }
 
 impl Service {
@@ -140,6 +144,7 @@ impl Service {
             rewriter: std::sync::OnceLock::new(),
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
+            attacks: parking_lot::Mutex::new(Vec::new()),
         })
     }
 

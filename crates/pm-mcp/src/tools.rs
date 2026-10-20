@@ -123,11 +123,13 @@ pub fn tool_definitions() -> Vec<Value> {
             "Fuzz a request: mark positions in raw with §original§ (e.g. GET /api/orders/§1001§), give payload sets, \
              and ProxyMind sends the baseline plus one request per payload (sniper: one position at a time; \
              battering_ram: same payload everywhere; pitchfork: set i in position i together; cluster_bomb: every \
-             combination), max 1000. Returns status, body length, time, grep matches and reflection per request, and \
-             anomalies: results that differ from the baseline or the rest. Payload sets take list, numbers \
-             (\"1000-1050\" or \"0-100:10\"), builtin (ids, sqli, xss, traversal, ssti, methods_override) and \
-             url_encode. Needs approval by default for the whole attack: ask the user, then call again with identical \
-             arguments plus approval_id.",
+             combination), max 10000. Returns status, body length, time, grep matches, extracted values and reflection \
+             per request, and anomalies: results that differ from the baseline or the rest. Payload sets take list, \
+             numbers (\"1000-1050\" or \"0-100:10\"), builtin (ids, sqli, xss, traversal, ssti, methods_override), \
+             brute {charset,min,max}, null_payloads (n), case_variants, processing rules (prefix, suffix, replace, \
+             url_encode, url_encode_all, base64, hex, lower, upper, reverse, sha1, sha256) and url_encode. Needs \
+             approval by default for the whole attack: ask the user, then call again with identical arguments plus \
+             approval_id.",
             json!({
                 "exchange_id": {"type":"integer","description":"Recorded request whose target to use"},
                 "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
@@ -137,8 +139,18 @@ pub fn tool_definitions() -> Vec<Value> {
                     "list":{"type":"array","items":{"type":"string"}},
                     "numbers":{"type":"string"},
                     "builtin":{"type":"string","enum":["ids","sqli","xss","traversal","ssti","methods_override"]},
+                    "brute":{"type":"object","properties":{"charset":{"type":"string"},"min":{"type":"integer"},"max":{"type":"integer"}}},
+                    "null_payloads":{"type":"integer"},
+                    "case_variants":{"type":"array","items":{"type":"string"}},
+                    "processing":{"type":"array","items":{"type":"object","description":"{\"op\":\"prefix\",\"value\":\"x\"}, {\"op\":\"replace\",\"find\":\"a\",\"with\":\"b\"}, {\"op\":\"base64\"}…"}},
                     "url_encode":{"type":"boolean"}}}},
                 "grep": {"type":"array","items":{"type":"string"},"description":"Flag responses containing these"},
+                "grep_regex": {"type":"boolean","description":"grep terms are regular expressions"},
+                "extract": {"type":"array","items":{"type":"object","properties":{
+                    "start":{"type":"string"},"end":{"type":"string"},"regex":{"type":"string"}}},
+                    "description":"Pull a value out of each response: between start and end, or a regex's first group"},
+                "concurrency": {"type":"integer","minimum":1,"maximum":20},
+                "throttle_ms": {"type":"integer","minimum":0,"maximum":60000},
                 "identity": {"type":"string"},
                 "fix_content_length": {"type":"boolean"},
                 "hypothesis_id": {"type":"integer"},

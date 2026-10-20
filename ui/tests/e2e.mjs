@@ -275,13 +275,22 @@ try {
 
   console.log("Intruder");
   await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
+  await page.waitForFunction(() => document.querySelector('textarea[aria-label="Request"]')?.value.includes("/api/orders"));
+  await page.getByLabel("Request").fill("GET /api/orders?id=1&q=x HTTP/1.1\nHost: shop\nCookie: s=abc\n\n");
+  await page.getByTestId("auto-mark").click();
+  check((await page.getByLabel("Request").inputValue()).includes("?id=§1§&q=§x§") && (await page.getByLabel("Request").inputValue()).includes("s=§abc§"), "Auto § marks query values and cookies");
   await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");
+  await page.getByLabel("Mode").selectOption("sniper");
   await page.getByLabel("Send as").selectOption("bob");
-  await page.getByLabel("Payloads").fill("1001\n1002\n9999");
+  await page.getByLabel("Payload type").selectOption("list");
+  await page.getByLabel("Payloads", { exact: true }).fill("1001\n1002\n9999");
   await page.getByLabel("Grep").fill("alice@");
+  await page.getByRole("button", { name: "Add extract" }).click();
+  await page.getByLabel("Extract 1 regex").fill("([a-z]+@[a-z.]+)");
   await page.getByTestId("intruder-run").click();
-  await page.waitForSelector('[data-testid="intruder-summary"]');
-  check(await page.getByTestId("intruder-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests");
+  await page.waitForFunction(() => document.querySelector('[data-testid="intruder-summary"]')?.textContent?.includes("· done ·"));
+  check(await page.getByTestId("intruder-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
+  check((await page.getByTestId("extract-cell").allTextContents()).some((t) => t.startsWith("alice@")), "an extract column shows alice's email");
   check((await page.getByTestId("anomaly").count()) === 3, "alice's orders (grep) and the 404 stand out");
   await page.screenshot({ path: join(SHOTS, "5b-intruder.png") });
 
