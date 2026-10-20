@@ -13,4 +13,4 @@ ADR-0008 made the web UI the product and kept a Tauri shell for later. A desktop
 ## Consequences
 - No UI code is duplicated, and the desktop app can't do anything the API doesn't allow.
 - Native extras so far: a tray menu (open, quit) showing the CA certificate path. Project pickers, a CA install helper and installers (`tauri build`) are next.
-- macOS and Windows builds aren't in CI yet.
+- CI lints the app on Linux, macOS and Windows; tagged releases ship unsigned installers for all three (code signing is next).

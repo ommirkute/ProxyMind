@@ -64,11 +64,16 @@ jobs:
           path: ${{ runner.temp }}/ui-screenshots
 
   desktop:
-    name: desktop app (Tauri, Linux)
-    runs-on: ubuntu-latest
+    name: desktop app (Tauri, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      - if: runner.os == 'Linux'
+        run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
       - uses: actions/setup-node@v4
@@ -86,7 +91,8 @@ jobs:
           workspaces: desktop
       - run: cargo fmt --check
         working-directory: desktop
-      - run: cargo clippy --locked --all-targets -- -D warnings
+      # Not --locked: the app's path dependencies change with the workspace.
+      - run: cargo clippy --all-targets -- -D warnings
         working-directory: desktop
 
   deny:

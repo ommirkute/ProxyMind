@@ -124,7 +124,7 @@ Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (n
 - **CI:** a nightly GitHub Actions workflow (Ubuntu runners have Docker even though this sandbox can't pull images) that publishes scores as an artifact and in the README.
 
 ### C. Desktop shell (Tauri 2)
-✅ **Foundation done** (`desktop/`, ADR-0012; excluded from the workspace; CI job `desktop`). In the sandbox: `apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb`, build in `desktop/`, run under `Xvfb :77` and screenshot with ImageMagick `import`. Next: macOS/Windows CI, `tauri build` installers, project picker, CA helper. Original notes:
+✅ **Foundation done** (`desktop/`, ADR-0012; excluded from the workspace; CI job `desktop`). In the sandbox: `apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb`, build in `desktop/`, run under `Xvfb :77` and screenshot with ImageMagick `import`. CI lints it on all three OSes; releases bundle installers (`cargo tauri build`). Its `Cargo.lock` is separate: refresh it with `cargo metadata` in `desktop/` after adding workspace dependencies. Next: code signing, project picker, CA helper. Original notes:
 ADR-0006/0008: wrap the existing web UI, don't rewrite it.
 - **Layout:** a `desktop/` crate starts the `pm-api` router in-process on `127.0.0.1:0` and opens a webview at `/auth?token=…`.
 - **Native extras:** tray icon (proxy on/off), CA install helper, file pickers for projects.

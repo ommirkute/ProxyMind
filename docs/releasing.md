@@ -12,6 +12,7 @@
 - writes `SHA256SUMS` and an SPDX SBOM of the Rust and npm dependencies;
 - signs build provenance for every file and the SBOM with GitHub artifact attestations (Sigstore, keyless);
 - publishes a GitHub release (marked pre-release for `v0.x`);
+- builds desktop installers with `cargo tauri build` (Linux .deb/.rpm/.AppImage, macOS .dmg, Windows .msi and setup .exe; unsigned until code-signing certificates are set up, but covered by the provenance attestations);
 - builds and pushes `ghcr.io/<owner>/proxymind:<version>` with its own SBOM and provenance.
 
 ## Verifying a download

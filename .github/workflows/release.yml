@@ -54,8 +54,50 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist/*
 
+  desktop:
+    name: desktop installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: ui
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo install tauri-cli --version "^2" --locked
+      # Installers are unsigned for now (no code-signing certificates yet);
+      # their build provenance is still attested by the publish job.
+      - run: cargo tauri build
+        working-directory: desktop
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          find desktop/target/release/bundle -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-desktop-${{ runner.os }}
+          path: dist/*
+
   publish:
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write

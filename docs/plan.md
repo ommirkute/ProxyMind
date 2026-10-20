@@ -54,7 +54,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Next, in order:**
 
-1. **Desktop shell** (Tauri): done (Linux in CI); next: macOS/Windows builds, installers, project picker, CA install helper
+1. **Desktop shell** (Tauri): done, linted on all OSes, installers in releases; next: code signing, project picker, CA install helper
 2. **Benchmarks on real apps** (M6): done for VAmPI and Juice Shop (baseline); next: run crAPI, score agents, publish scores in the README
 3. **More oracles**: stored and DOM XSS proofs (reflection proofs, DNS OAST and payload-aware tiers are done)
 4. Transparent project encryption (sealing is done), installers (signed releases, SBOMs and the Docker image are done)
