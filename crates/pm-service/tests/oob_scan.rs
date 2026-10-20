@@ -92,7 +92,14 @@ async fn without_a_listener_the_checks_are_skipped_with_a_note() {
     let (s, url) = setup(false).await;
     let ex = record(&s, &url, "GET /api/fetch?url=http://example.org/ HTTP/1.1\r\nHost: x\r\n\r\n").await;
     let req = ActiveScanRequest { exchange_id: ex, checks: vec!["ssrf_oob".into()], ..Default::default() };
-    assert!(s.scan_active(&human(), req).await.is_err(), "nothing else to run: no insertion points for it");
+    // Nothing else to run: a note, and nothing sent.
+    match s.scan_active(&human(), req).await.unwrap() {
+        ActiveScanResult::Done { requests, notes, .. } => {
+            assert_eq!(requests, 0);
+            assert!(notes.iter().any(|n| n.contains("no OAST listener")), "{notes:?}");
+        }
+        other => panic!("{other:?}"),
+    }
     let (found, notes) = scan(&s, ex, &["ssrf_oob", "sql_error"]).await;
     assert!(found.is_empty());
     assert!(notes.iter().any(|n| n.contains("no OAST listener")), "{notes:?}");

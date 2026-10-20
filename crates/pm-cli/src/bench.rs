@@ -249,7 +249,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 22));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 26));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

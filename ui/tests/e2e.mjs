@@ -655,7 +655,7 @@ try {
   await page.getByLabel("Crawl start URL").fill(`http://127.0.0.1:${shop}/`);
   await page.getByTestId("crawl-run").click();
   await page.waitForSelector('[data-testid="crawl-summary"]', { timeout: 60000 });
-  check(await page.getByTestId("crawl-summary").textContent().then((t) => /^\d+ pages · 2 forms/.test(t)), "crawl finds pages and both forms");
+  check(await page.getByTestId("crawl-summary").textContent().then((t) => /^\d+ pages · 3 forms/.test(t)), "crawl finds pages and the three forms");
   await page.getByText("Skipped links").click();
   check((await page.getByText("the link probably logs out").count()) === 1, "the logout link is skipped");
   await page.screenshot({ path: join(SHOTS, "6b-crawl.png") });
@@ -667,7 +667,7 @@ try {
   await page.getByLabel("Spec exchange").fill(String(specId));
   await page.getByTestId("openapi-import").click();
   await page.waitForSelector('[data-testid="openapi-summary"]');
-  check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 10 operations")), "the spec's 10 operations are listed");
+  check(await page.getByTestId("openapi-summary").textContent().then((t) => t.startsWith("VulnShop API 1.0: 12 operations")), "the spec's 12 operations are listed");
 
   console.log("Content discovery");
   await page.getByRole("button", { name: "Find hidden paths…" }).click();
@@ -705,6 +705,15 @@ try {
   await page.waitForSelector('[data-testid="active-summary"]', { timeout: 60000 });
   check(await page.getByText("server-side template injection").count() > 0, "active scan finds the template injection");
   await page.screenshot({ path: join(SHOTS, "6d-active-scan.png") });
+
+  console.log("Crawl and audit");
+  await page.getByLabel("Start URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByLabel("Pages to crawl").fill("15");
+  await page.getByText("quick checks only").click();
+  await page.getByTestId("audit-start").click();
+  await page.waitForSelector('[data-testid="audit-progress"] b:text-is("done")', { timeout: 120000 });
+  check(await page.getByTestId("audit-issues").textContent().then((t) => t.includes("/search")), "crawl and audit finds the reflected XSS on /search");
+  await page.screenshot({ path: join(SHOTS, "6e-crawl-audit.png") });
 
   console.log("Tools");
   await open("tools");

@@ -226,6 +226,8 @@ async fn stored_xss_csrf_and_dom_xss() {
     assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["csrf"], "{found:?}");
     let st = record_raw(&s, &url, &form("/api/settings", "newsletter=1")).await;
     assert!(checks_with(&s, st, &["csrf"]).await.is_empty());
+    // The guestbook takes posts without a session: nothing to forge.
+    assert!(checks_with(&s, gb, &["csrf"]).await.is_empty());
 
     // DOM XSS (needs a browser).
     if pm_browser_available() {
@@ -242,4 +244,15 @@ async fn stored_xss_csrf_and_dom_xss() {
 
 fn pm_browser_available() -> bool {
     pm_service::pm_browser::find_chromium().is_some()
+}
+
+#[tokio::test]
+async fn nested_values_are_insertion_points() {
+    let (s, url) = setup().await;
+    let ex = record(&s, &url, "/api/recommend?ctx=eyJjYXRlZ29yeSI6ImNvZmZlZSJ9").await;
+    let found = checks_with(&s, ex, &["sql_error"]).await;
+    assert_eq!(
+        found.iter().map(|f| (f.0.as_str(), f.1.as_str())).collect::<Vec<_>>(),
+        [("sql_error", "nested ctx.category (base64)")]
+    );
 }

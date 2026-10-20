@@ -41,6 +41,16 @@ pub struct ScanLead {
     pub evidence: String,
 }
 
+/// One operation to scan, with the example request and its checks.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanTarget {
+    pub operation: String,
+    pub exchange_id: i64,
+    pub checks: Vec<String>,
+    /// A POST, PUT or PATCH (only re-sent by the submission checks).
+    pub submission: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ScanSweep {
     pub operations: usize,
@@ -220,61 +230,14 @@ impl Service {
     /// submissions get only the stored XSS and CSRF checks, which re-send
     /// them (as a browser would); everything goes through the gate.
     pub async fn auto_active_sweep(&self, actor: &Actor) -> Result<ScanSweep> {
-        let model = self.model()?;
         let mut sweep = ScanSweep::default();
-        // The checks to request (issue-only names like nosql_error come from sql_error).
-        let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
-        let checks: Vec<String> = SWEEP_CHECKS
-            .iter()
-            .filter(|(c, _)| runnable(c) && !SWEEP_SUBMIT_CHECKS.contains(c))
-            .map(|(c, _)| c.to_string())
-            .collect();
-        let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
-        // GETs that worked, minus ones whose name says they change state
-        // (`/createdb`, `/logout`…: a GET is not always harmless).
-        let candidates: Vec<_> = model
-            .operations
-            .iter()
-            .filter(|o| o.method == "GET" && !changes_state(&o.template))
-            // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass candidates).
-            .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
-            .collect();
-        // Operations with parameters first; then a few without, whose
-        // cookies and headers (User-Agent…) are the insertion points.
-        let has_params = |o: &&pm_model::Operation| !o.path_params.is_empty() || !o.query_params.is_empty();
-        let ops = candidates
-            .iter()
-            .filter(|o| has_params(o))
-            .take(SWEEP_MAX_OPERATIONS)
-            .chain(candidates.iter().filter(|o| !has_params(o)).take(SWEEP_MAX_PLAIN))
-            .map(|o| (*o, &checks));
-        // Submissions that worked, minus logins and ones whose name says they
-        // delete or reset something.
-        let submits = model
-            .operations
-            .iter()
-            .filter(|o| matches!(o.method.as_str(), "POST" | "PUT" | "PATCH"))
-            .filter(|o| !changes_state(&o.template) && !o.template.to_ascii_lowercase().contains("login"))
-            .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
-            .take(SWEEP_MAX_SUBMITS)
-            .map(|o| (o, &submit_checks));
-        for (op, checks) in ops.chain(submits) {
-            // The recent example with the most insertion points (an imported
-            // example may lack the browser's cookies and headers).
-            let points = |id: i64| {
-                self.exchange_raw(id)
-                    .map(|e| pm_scan::active::points(&String::from_utf8_lossy(&e.request)).len())
-                    .unwrap_or(0)
-            };
-            let Some(&example) = op.examples.iter().rev().take(5).max_by_key(|&&id| (points(id), id)) else {
-                continue;
-            };
+        for t in self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)? {
             let r = self
                 .scan_active(
                     actor,
                     ActiveScanRequest {
-                        exchange_id: example,
-                        checks: checks.clone(),
+                        exchange_id: t.exchange_id,
+                        checks: t.checks.clone(),
                         max_requests: Some(150),
                         oob_wait_seconds: Some(3),
                         ..Default::default()
@@ -284,11 +247,11 @@ impl Service {
             let (requests, issues) = match r {
                 Ok(ActiveScanResult::Done { requests, issues, .. }) => (requests, issues),
                 Ok(ActiveScanResult::PendingApproval { .. }) => {
-                    sweep.skipped.push(format!("{}: needs approval", op.key));
+                    sweep.skipped.push(format!("{}: needs approval", t.operation));
                     continue;
                 }
                 Ok(ActiveScanResult::Denied { reasons }) => {
-                    sweep.skipped.push(format!("{}: {}", op.key, reasons.join("; ")));
+                    sweep.skipped.push(format!("{}: {}", t.operation, reasons.join("; ")));
                     continue;
                 }
                 // No insertion points, or the example vanished: nothing to scan.
@@ -296,42 +259,125 @@ impl Service {
             };
             sweep.operations += 1;
             sweep.requests += requests;
-            let url = self.exchange_raw(example).ok().map(|e| {
-                let s = &e.summary;
-                pm_core::url(&s.scheme, &s.host, s.port, &s.path)
-            });
-            let mut seen = std::collections::BTreeSet::new();
-            for f in issues {
-                let Some((_, class)) = SWEEP_CHECKS.iter().find(|(c, _)| *c == f.issue.check) else { continue };
-                // One finding per class and operation (boolean and time SQLi are one bug).
-                if !seen.insert(*class) {
-                    continue;
-                }
-                let finding = self.finding_create(
-                    actor,
-                    NewFinding {
-                        title: format!("{} in {} ({})", f.issue.title, op.key, f.issue.point),
-                        vuln_class: (*class).into(),
-                        severity: f.issue.severity.into(),
-                        description: format!(
-                            "The active scanner sent {:?} in {} and saw: {}. Found by the automatic sweep; not \
-                             proven yet.",
-                            f.issue.payload, f.issue.point, f.issue.evidence
-                        ),
-                        url: url.clone(),
-                        evidence: vec![example, f.exchange_id],
-                        hypothesis_id: None,
-                    },
-                )?;
-                sweep.leads.push(ScanLead {
+            sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
+        }
+        Ok(sweep)
+    }
+
+    /// What to scan: recorded operations (optionally of one origin, e.g.
+    /// `http://shop:8080`), each with its best example and the checks that
+    /// suit it. GETs with parameters first, then a few without (cookies and
+    /// headers are their insertion points), then submissions (stored XSS
+    /// and CSRF only).
+    pub(crate) fn scan_targets(
+        &self,
+        origin: Option<&str>,
+        max_params: usize,
+        max_plain: usize,
+        max_submits: usize,
+    ) -> Result<Vec<ScanTarget>> {
+        let model = self.model()?;
+        // The checks to request (issue-only names like nosql_error come from sql_error).
+        let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
+        let checks: Vec<String> = SWEEP_CHECKS
+            .iter()
+            .filter(|(c, _)| runnable(c) && !SWEEP_SUBMIT_CHECKS.contains(c))
+            .map(|(c, _)| c.to_string())
+            .collect();
+        let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
+        let same_origin = |o: &&pm_model::Operation| origin.is_none_or(|x| o.origin.eq_ignore_ascii_case(x));
+        // GETs that worked, minus ones whose name says they change state
+        // (`/createdb`, `/logout`…: a GET is not always harmless).
+        let candidates: Vec<_> = model
+            .operations
+            .iter()
+            .filter(same_origin)
+            .filter(|o| o.method == "GET" && !changes_state(&o.template))
+            // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass candidates).
+            .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
+            .collect();
+        let has_params = |o: &&pm_model::Operation| !o.path_params.is_empty() || !o.query_params.is_empty();
+        let ops = candidates
+            .iter()
+            .filter(|o| has_params(o))
+            .take(max_params)
+            .chain(candidates.iter().filter(|o| !has_params(o)).take(max_plain))
+            .map(|o| (*o, &checks));
+        // Submissions that worked, minus logins and ones whose name says they
+        // delete or reset something.
+        let submits = model
+            .operations
+            .iter()
+            .filter(same_origin)
+            .filter(|o| matches!(o.method.as_str(), "POST" | "PUT" | "PATCH"))
+            .filter(|o| !changes_state(&o.template) && !o.template.to_ascii_lowercase().contains("login"))
+            .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
+            .take(max_submits)
+            .map(|o| (o, &submit_checks));
+        let mut out = Vec::new();
+        for (op, checks) in ops.chain(submits) {
+            // The recent example with the most insertion points (an imported
+            // example may lack the browser's cookies and headers).
+            let points = |id: i64| {
+                self.exchange_raw(id)
+                    .map(|e| pm_scan::active::points(&String::from_utf8_lossy(&e.request)).len())
+                    .unwrap_or(0)
+            };
+            if let Some(&example) = op.examples.iter().rev().take(5).max_by_key(|&&id| (points(id), id)) {
+                out.push(ScanTarget {
                     operation: op.key.clone(),
-                    check: f.issue.check.into(),
-                    finding_id: finding["id"].as_i64().unwrap_or_default(),
-                    evidence: f.issue.evidence.chars().take(200).collect(),
+                    exchange_id: example,
+                    checks: checks.clone(),
+                    submission: op.method != "GET",
                 });
             }
         }
-        Ok(sweep)
+        Ok(out)
+    }
+
+    /// Records the strong issues of one scan as suspected findings, one per
+    /// class and operation (boolean and time SQLi are one bug).
+    pub(crate) fn record_scan_leads(
+        &self,
+        actor: &Actor,
+        t: &ScanTarget,
+        issues: &[crate::ActiveFinding],
+    ) -> Result<Vec<ScanLead>> {
+        let url = self.exchange_raw(t.exchange_id).ok().map(|e| {
+            let s = &e.summary;
+            pm_core::url(&s.scheme, &s.host, s.port, &s.path)
+        });
+        let mut seen = std::collections::BTreeSet::new();
+        let mut leads = Vec::new();
+        for f in issues {
+            let Some((_, class)) = SWEEP_CHECKS.iter().find(|(c, _)| *c == f.issue.check) else { continue };
+            if !seen.insert(*class) {
+                continue;
+            }
+            let finding = self.finding_create(
+                actor,
+                NewFinding {
+                    title: format!("{} in {} ({})", f.issue.title, t.operation, f.issue.point),
+                    vuln_class: (*class).into(),
+                    severity: f.issue.severity.into(),
+                    description: format!(
+                        "The active scanner sent {:?} in {} and saw: {}. Found by an automatic scan; not proven \
+                         yet.",
+                        f.issue.payload, f.issue.point, f.issue.evidence
+                    ),
+                    url: url.clone(),
+                    evidence: vec![t.exchange_id, f.exchange_id],
+                    hypothesis_id: None,
+                },
+            )?;
+            leads.push(ScanLead {
+                operation: t.operation.clone(),
+                check: f.issue.check.into(),
+                finding_id: finding["id"].as_i64().unwrap_or_default(),
+                evidence: f.issue.evidence.chars().take(200).collect(),
+            });
+        }
+        Ok(leads)
     }
 
     /// Checks every authorization candidate and proves the leaks it finds.

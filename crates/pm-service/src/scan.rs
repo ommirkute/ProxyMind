@@ -210,8 +210,9 @@ enum Plan {
     /// (point, request, URL fragment to add), and the page's same-origin
     /// scripts to fetch and serve to the browser: (URL, request).
     DomXss(Vec<(pm_scan::active::Point, Vec<u8>, String)>, Vec<(String, Vec<u8>)>),
-    /// (what changed, cross-site version of the request)
-    Csrf(Vec<(String, Vec<u8>)>),
+    /// (what changed, cross-site version of the request), and the request
+    /// without cookies (a control: an action that needs no session can't be forged).
+    Csrf(Vec<(String, Vec<u8>)>, Vec<u8>),
 }
 
 impl Plan {
@@ -225,7 +226,7 @@ impl Plan {
             Plan::Params(_) => 16,
             Plan::StoredXss(stores, pages) => stores.len() + pages.len(),
             Plan::DomXss(v, scripts) => v.len() + scripts.len(),
-            Plan::Csrf(v) => v.len(),
+            Plan::Csrf(v, _) => v.len() + 1,
         }
     }
 
@@ -240,7 +241,7 @@ impl Plan {
             Plan::Params(r) => vec![r.clone()],
             Plan::StoredXss(stores, _) => stores.iter().map(|(_, r, _)| r.clone()).collect(),
             Plan::DomXss(v, _) => v.iter().map(|(_, r, _)| r.clone()).collect(),
-            Plan::Csrf(v) => v.iter().map(|(_, r)| r.clone()).collect(),
+            Plan::Csrf(v, _) => v.iter().map(|(_, r)| r.clone()).collect(),
         }
     }
 }
@@ -344,14 +345,20 @@ impl Service {
     /// Pages that may show stored input: recent HTML GETs to the same
     /// origin from history (not the scanner's own probes), one per path.
     fn stored_xss_pages(&self, s: &pm_store::ExchangeSummary) -> Result<Vec<(String, Vec<u8>)>> {
-        let f = pm_store::HistoryFilter {
-            host: Some(s.host.clone()),
-            method: Some("GET".into()),
-            status_class: Some("2".into()),
-            limit: Some(200),
-            ..Default::default()
-        };
-        let rows = self.store.lock().search_exchanges(&f)?;
+        // By source: the scanner's own probes would crowd out the pages.
+        let mut rows = Vec::new();
+        for source in ["proxy", "crawl", "replay"] {
+            let f = pm_store::HistoryFilter {
+                host: Some(s.host.clone()),
+                method: Some("GET".into()),
+                status_class: Some("2".into()),
+                source: Some(source.into()),
+                limit: Some(200),
+                ..Default::default()
+            };
+            rows.extend(self.store.lock().search_exchanges(&f)?);
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.id));
         let mut out: Vec<(String, Vec<u8>)> = Vec::new();
         let mut paths = std::collections::HashSet::new();
         for r in rows {
@@ -481,8 +488,10 @@ impl Service {
         }
         if want("csrf") {
             let v = act::csrf_variants(&raw, &marker);
-            if !v.is_empty() {
-                plans.push(Plan::Csrf(v));
+            if !v.is_empty()
+                && let Some(anon) = act::without_header(&raw, "cookie")
+            {
+                plans.push(Plan::Csrf(v, anon));
             }
         }
         // Out-of-band probes, when an OAST listener is configured.
@@ -908,8 +917,14 @@ impl Service {
                             }
                         }
                     }
-                    Plan::Csrf(variants) => {
-                        if !base_seen.status.is_some_and(|s| (200..400).contains(&s)) {
+                    Plan::Csrf(variants, anonymous) => {
+                        if !base_seen.status.is_some_and(|s| (200..400).contains(&s)) || sent_count + 1 > limit {
+                            continue;
+                        }
+                        // Only a request that needs the session can be forged with it.
+                        sent_count += 1;
+                        let anon = seen_of(send(anonymous.clone()).await?.response.as_deref());
+                        if act::csrf_accepted(&base_seen, &anon) {
                             continue;
                         }
                         for (what, r) in variants {

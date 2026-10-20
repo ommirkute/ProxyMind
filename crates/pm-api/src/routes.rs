@@ -124,6 +124,9 @@ pub fn api() -> Router<AppState> {
         .route("/coverage", get(coverage))
         .route("/scan/issues", get(scan_issues))
         .route("/scan/active", post(scan_active))
+        .route("/scan/tasks", get(scan_tasks_list).post(scan_task_start))
+        .route("/scan/tasks/{id}", get(scan_task_status))
+        .route("/scan/tasks/{id}/cancel", post(scan_task_cancel))
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
@@ -315,6 +318,22 @@ async fn model(State(st): State<AppState>, Query(f): Query<ModelFilter>) -> ApiR
 #[derive(Deserialize)]
 struct CoverageQuery {
     all: Option<bool>,
+}
+
+async fn scan_task_start(State(st): State<AppState>, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
+    ok(st.service.scan_task_start(&st.actor, r)?)
+}
+
+async fn scan_tasks_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.scan_task_list(&st.actor))
+}
+
+async fn scan_task_status(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_status(&st.actor, &id)?)
+}
+
+async fn scan_task_cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_cancel(&st.actor, &id)?)
 }
 
 async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {

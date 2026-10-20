@@ -43,6 +43,12 @@ pub enum PointKind {
     Body,
     /// The request as a whole (Host, Origin, path tricks).
     Request,
+    /// A query or form parameter's name.
+    Name,
+    /// A value inside another one: JSON in a parameter or cookie, or base64.
+    Nested,
+    /// Text of an element in an XML body.
+    Xml,
 }
 
 /// Where a payload can go.
@@ -66,6 +72,84 @@ enum Locator {
     Cookie(usize),
     /// Lower-case header name.
     Header(String),
+    /// Name of the query (`Query`) or form (`Form`) pair at this index.
+    Name(PointKind, usize),
+    Nested(Box<Nest>),
+    /// Byte range of the text in the body.
+    Xml(usize, usize),
+}
+
+/// Where a nested value sits: the outer point, how it is encoded, and the
+/// JSON pointer inside it (none: the whole decoded value).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Nest {
+    outer_kind: PointKind,
+    outer: Locator,
+    b64: Option<B64>,
+    ptr: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct B64 {
+    url_safe: bool,
+    padded: bool,
+}
+
+const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(data: &[u8], k: B64) -> String {
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            let c = B64_STD[((n >> (18 - 6 * i)) & 63) as usize];
+            out.push(match (k.url_safe, c) {
+                (true, b'+') => '-',
+                (true, b'/') => '_',
+                (_, c) => c as char,
+            });
+        }
+        if k.padded {
+            out.push_str(&"=".repeat(3 - chunk.len()));
+        }
+    }
+    out
+}
+
+/// A value that looks like base64 of readable text: the text and the flavour.
+fn b64_text(v: &str) -> Option<(String, B64)> {
+    if v.len() < 8 || v.len() > 4096 {
+        return None;
+    }
+    let url_safe = v.contains(['-', '_']);
+    let body = v.trim_end_matches('=');
+    let mut bits = 0u32;
+    let mut nbits = 0;
+    let mut out = Vec::new();
+    for c in body.bytes() {
+        let x = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' if !url_safe => 62,
+            b'/' if !url_safe => 63,
+            b'-' if url_safe => 62,
+            b'_' if url_safe => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(x);
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((bits >> nbits) as u8);
+            bits &= (1 << nbits) - 1;
+        }
+    }
+    let text = String::from_utf8(out).ok()?;
+    let readable = !text.is_empty() && text.chars().all(|c| !c.is_control() || c.is_whitespace());
+    // A plain word made of base64 letters decodes to junk; real data round-trips.
+    let k = B64 { url_safe, padded: v.ends_with('=') };
+    (readable && b64_encode(text.as_bytes(), k).trim_end_matches('=') == body).then_some((text, k))
 }
 
 pub const CHECKS: &[&str] = &[
@@ -160,6 +244,21 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// Percent-encodes only what a cookie value can't hold (separators,
+/// quotes, spaces, controls, non-ASCII): servers rarely decode cookies, so
+/// `'`, `=` and base64 go as they are.
+fn cookie_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_graphic() && !matches!(b, b';' | b',' | b'"' | b'\\' | b'%') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -193,6 +292,7 @@ struct Parsed<'a> {
     body: &'a str,
     form: bool,
     json: bool,
+    xml: bool,
 }
 
 fn parse(raw: &str) -> Option<Parsed<'_>> {
@@ -214,6 +314,7 @@ fn parse(raw: &str) -> Option<Parsed<'_>> {
         body,
         form: ct.contains("application/x-www-form-urlencoded"),
         json: ct.contains("json"),
+        xml: ct.contains("xml"),
     })
 }
 
@@ -344,7 +445,104 @@ pub fn points_with(raw: &str, id_segments: &[usize]) -> Vec<Point> {
             });
         }
     }
+    if p.xml {
+        out.extend(xml_points(p.body));
+    }
+    let nested: Vec<Point> = out
+        .iter()
+        .filter(|pt| matches!(pt.kind, PointKind::Query | PointKind::Form | PointKind::Cookie))
+        .flat_map(nested_points)
+        .take(20)
+        .collect();
+    out.extend(nested);
     out
+}
+
+/// JSON (objects and arrays) or base64 text inside a parameter or cookie value.
+fn nested_points(pt: &Point) -> Vec<Point> {
+    let (text, b64) = match b64_text(&pt.original) {
+        Some((t, k)) => (t, Some(k)),
+        None => (pt.original.clone(), None),
+    };
+    let suffix = if b64.is_some() { " (base64)" } else { "" };
+    let nest = |ptr: Option<String>| {
+        Locator::Nested(Box::new(Nest { outer_kind: pt.kind, outer: pt.locator.clone(), b64, ptr }))
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(v) if v.is_object() || v.is_array() => {
+            let mut leaves = Vec::new();
+            json_leaves(&v, String::new(), &mut leaves);
+            leaves
+                .into_iter()
+                .take(10)
+                .map(|(ptr, val)| Point {
+                    kind: PointKind::Nested,
+                    name: format!("{}{}{suffix}", pt.name, ptr.replace('/', ".")),
+                    original: val,
+                    locator: nest(Some(ptr)),
+                })
+                .collect()
+        }
+        _ if b64.is_some() => {
+            vec![Point {
+                kind: PointKind::Nested,
+                name: format!("{}{suffix}", pt.name),
+                original: text,
+                locator: nest(None),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Text between an element's tags in an XML body (not comments, CDATA or
+/// declarations), at most 20.
+fn xml_points(body: &str) -> Vec<Point> {
+    let mut out = Vec::new();
+    let mut tag = String::new();
+    let mut i = 0;
+    while let Some(lt) = body[i..].find('<').map(|x| x + i) {
+        let Some(gt) = body[lt..].find('>').map(|x| x + lt) else { break };
+        let inside = &body[lt + 1..gt];
+        let closing = inside.starts_with('/');
+        if !inside.starts_with(['!', '?']) && !closing {
+            tag = inside.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("").to_string();
+        }
+        let start = gt + 1;
+        let end = body[start..].find('<').map_or(body.len(), |x| x + start);
+        let text = &body[start..end];
+        let self_closing = inside.ends_with('/');
+        if !closing && !self_closing && !inside.starts_with(['!', '?']) && !text.trim().is_empty() && end < body.len() {
+            out.push(Point {
+                kind: PointKind::Xml,
+                name: tag.clone(),
+                original: text.to_string(),
+                locator: Locator::Xml(start, end),
+            });
+            if out.len() >= 20 {
+                break;
+            }
+        }
+        i = end.max(gt + 1);
+    }
+    out
+}
+
+/// Query and form parameter names as insertion points (some apps put
+/// names in SQL or echo them back).
+pub fn name_points(raw: &str) -> Vec<Point> {
+    let Some(p) = parse(raw) else { return Vec::new() };
+    let query = p.target.split_once('?').map_or("", |(_, q)| q);
+    let form = if p.form { pairs(p.body.trim()) } else { Vec::new() };
+    let named = |kind: PointKind, ps: Vec<(String, String)>| {
+        ps.into_iter().enumerate().map(move |(i, (k, _))| Point {
+            kind: PointKind::Name,
+            name: percent_decode(&k),
+            original: percent_decode(&k),
+            locator: Locator::Name(kind, i),
+        })
+    };
+    named(PointKind::Query, pairs(query)).chain(named(PointKind::Form, form)).take(10).collect()
 }
 
 /// The head lines after the request line, with one header replaced.
@@ -396,8 +594,8 @@ pub fn inject(raw: &str, point: &Point, value: &str) -> Option<Vec<u8>> {
                         .filter(|c| !c.is_empty())
                         .enumerate()
                         .map(|(j, c)| match (j == *i, c.split_once('=')) {
-                            (true, Some((n, _))) => format!("{n}={}", percent_encode(value)),
-                            (true, None) => format!("{c}={}", percent_encode(value)),
+                            (true, Some((n, _))) => format!("{n}={}", cookie_encode(value)),
+                            (true, None) => format!("{c}={}", cookie_encode(value)),
                             _ => c.to_string(),
                         })
                         .collect::<Vec<_>>()
@@ -405,6 +603,42 @@ pub fn inject(raw: &str, point: &Point, value: &str) -> Option<Vec<u8>> {
                 })
             });
             Some(rebuild(&Parsed { rest_of_head: &rest, ..p }, p.target, p.body))
+        }
+        (PointKind::Name, Locator::Name(kind, i)) => {
+            let rename = |s: &str| {
+                let mut ps = pairs(s);
+                ps.get_mut(*i)?.0 = percent_encode(value);
+                Some(join(&ps))
+            };
+            if *kind == PointKind::Query {
+                Some(rebuild(&p, &format!("{path}?{}", rename(query)?), p.body))
+            } else {
+                Some(rebuild(&p, p.target, &rename(p.body.trim())?))
+            }
+        }
+        (PointKind::Nested, Locator::Nested(n)) => {
+            let outer = points(raw).into_iter().find(|o| o.kind == n.outer_kind && o.locator == n.outer)?;
+            let inner = match n.b64 {
+                Some(_) => b64_text(&outer.original)?.0,
+                None => outer.original.clone(),
+            };
+            let new_inner = match &n.ptr {
+                Some(ptr) => {
+                    let mut v: serde_json::Value = serde_json::from_str(&inner).ok()?;
+                    *v.pointer_mut(ptr)? = serde_json::Value::String(value.to_string());
+                    v.to_string()
+                }
+                None => value.to_string(),
+            };
+            let new = match n.b64 {
+                Some(k) => b64_encode(new_inner.as_bytes(), k),
+                None => new_inner,
+            };
+            inject(raw, &outer, &new)
+        }
+        (PointKind::Xml, Locator::Xml(start, end)) => {
+            let body = format!("{}{value}{}", p.body.get(..*start)?, p.body.get(*end..)?);
+            Some(rebuild(&p, p.target, &body))
         }
         (PointKind::Header, Locator::Header(name)) => {
             // Header values can't hold line breaks; everything else goes as is.
@@ -701,7 +935,7 @@ pub fn probes(raw: &str, checks: &[String], marker: &str, limit: usize) -> Vec<P
 pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_segments: &[usize]) -> Vec<Probe> {
     let want = |c: &str| checks.is_empty() || checks.iter().any(|x| x == c);
     let mut out = Vec::new();
-    for pt in points_with(raw, id_segments) {
+    for pt in points_with(raw, id_segments).into_iter().chain(name_points(raw)) {
         let mut add = |check: &'static str, payload: String| {
             if out.len() < limit
                 && let Some(r) = inject(raw, &pt, &payload)
@@ -709,6 +943,16 @@ pub fn probes_with(raw: &str, checks: &[String], marker: &str, limit: usize, id_
                 out.push(Probe { check, point: pt.clone(), payload, raw: r });
             }
         };
+        // Names get a quote and a reflection probe only.
+        if pt.kind == PointKind::Name {
+            if want("sql_error") {
+                add("sql_error", format!("{}'", pt.original));
+            }
+            if want("reflected_input") {
+                add("reflected_input", format!("{marker}\"'<>"));
+            }
+            continue;
+        }
         if want("sql_error") {
             // Quotes break SQL and XPath; `*)(` breaks LDAP filters. The
             // error tells which (SQL, NoSQL, LDAP, XPath): see [`injection_error`].
@@ -1446,14 +1690,27 @@ pub fn csrf_variants(raw: &str, marker: &str) -> Vec<(String, Vec<u8>)> {
     let cross = set_header(raw, "Origin", &evil)
         .and_then(|r| set_header(&String::from_utf8_lossy(&r), "Referer", &format!("{evil}/")));
     if let Some(r) = cross {
-        if p.json {
-            if let Some(t) = set_header(&String::from_utf8_lossy(&r), "Content-Type", "text/plain") {
-                out.push((format!("Origin: {evil}, Content-Type: text/plain"), t));
-            }
+        if p.json
+            && let Some(t) = set_header(&String::from_utf8_lossy(&r), "Content-Type", "text/plain")
+        {
+            out.push((format!("Origin: {evil}, Content-Type: text/plain"), t));
         }
         out.push((format!("Origin: {evil}"), r));
     }
     out
+}
+
+/// `raw` without the header `name` (any case).
+pub fn without_header(raw: &str, name: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let rest: Vec<&str> = p
+        .rest_of_head
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.split(':').next().unwrap_or("").trim().eq_ignore_ascii_case(name))
+        .collect();
+    let rest = rest.join("\r\n");
+    Some(rebuild(&Parsed { rest_of_head: &rest, ..p }, p.target, p.body))
 }
 
 /// Whether the cross-site request was accepted like the original one.
@@ -1585,7 +1842,7 @@ mod tests {
         let ua = String::from_utf8(inject(raw, &pts[1], "x' AND SLEEP(3)-- -\r\nEvil: 1").unwrap()).unwrap();
         assert!(ua.contains("\r\nUser-Agent: x' AND SLEEP(3)-- -Evil: 1\r\nCookie: sid=abc; theme=dark\r\n"), "{ua}");
         let ck = String::from_utf8(inject(raw, &pts[3], "dark'").unwrap()).unwrap();
-        assert!(ck.contains("\r\nCookie: sid=abc; theme=dark%27\r\nAccept: */*\r\n\r\n"), "{ck}");
+        assert!(ck.contains("\r\nCookie: sid=abc; theme=dark'\r\nAccept: */*\r\n\r\n"), "{ck}");
         // Headers and cookies get injection checks, not reflection or redirects.
         let ps = probes(raw, &[], "m", 1000);
         assert!(ps.iter().any(|p| p.point.kind == PointKind::Cookie && p.check == "sql_error"));
@@ -1812,5 +2069,53 @@ mod tests {
         let denied = Seen { status: Some(403), body: "bad origin".into(), ..Default::default() };
         assert!(csrf_accepted(&ok, &ok.clone()));
         assert!(!csrf_accepted(&ok, &denied));
+        let anon = String::from_utf8(without_header(form, "COOKIE").unwrap()).unwrap();
+        assert!(!anon.contains("sid=1") && anon.contains("Host: x\r\nContent-Type:") && anon.ends_with("email=a%40b"));
+    }
+
+    #[test]
+    fn base64_is_recognised_only_when_it_round_trips() {
+        let (t, k) = b64_text("eyJ1c2VyIjoiYWxpY2UifQ==").unwrap();
+        assert_eq!(t, "{\"user\":\"alice\"}");
+        assert_eq!(b64_encode(t.as_bytes(), k), "eyJ1c2VyIjoiYWxpY2UifQ==");
+        assert_eq!(b64_text("aGVsbG8gd29ybGQ").unwrap().0, "hello world");
+        for plain in ["password", "abcdefgh", "12345678", "shoe", "report.pdf"] {
+            assert!(b64_text(plain).is_none(), "{plain}");
+        }
+    }
+
+    #[test]
+    fn nested_xml_and_name_points() {
+        let raw = "GET /a?data=%7B%22user%22%3A%22alice%22%7D&q=1 HTTP/1.1\r\nHost: x\r\n\
+                   Cookie: prefs=eyJ1c2VyIjoiYWxpY2UifQ==\r\n\r\n";
+        let pts = points(raw);
+        let data = pts.iter().find(|p| p.name == "data.user").unwrap();
+        assert_eq!((data.kind, data.original.as_str()), (PointKind::Nested, "alice"));
+        let r = String::from_utf8(inject(raw, data, "x'").unwrap()).unwrap();
+        assert!(r.starts_with("GET /a?data=%7B%22user%22%3A%22x%27%22%7D&q=1 "), "{r}");
+        let prefs = pts.iter().find(|p| p.name == "prefs.user (base64)").unwrap();
+        let r = String::from_utf8(inject(raw, prefs, "bob").unwrap()).unwrap();
+        assert!(
+            r.contains(&format!("prefs={}", b64_encode(b"{\"user\":\"bob\"}", B64 { url_safe: false, padded: true })))
+        );
+
+        let xml = "POST /import HTTP/1.1\r\nHost: x\r\nContent-Type: application/xml\r\n\r\n\
+                   <?xml version=\"1.0\"?><items><item id=\"1\">Coffee</item><!-- c --><note/></items>";
+        let pts = points(xml);
+        assert_eq!(
+            pts.iter().map(|p| (p.kind, p.name.as_str(), p.original.as_str())).collect::<Vec<_>>(),
+            [(PointKind::Xml, "item", "Coffee")]
+        );
+        let r = String::from_utf8(inject(xml, &pts[0], "Tea'").unwrap()).unwrap();
+        assert!(r.ends_with("<item id=\"1\">Tea'</item><!-- c --><note/></items>"), "{r}");
+
+        let names = name_points(raw);
+        assert_eq!(names.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["data", "q"]);
+        let r = String::from_utf8(inject(raw, &names[1], "q'").unwrap()).unwrap();
+        assert!(r.contains("&q%27=1 "), "{r}");
+        // Names only get the quote and reflection probes.
+        let checks: Vec<&str> =
+            probes(raw, &[], "pmN", 1000).iter().filter(|p| p.point.kind == PointKind::Name).map(|p| p.check).collect();
+        assert_eq!(checks, ["sql_error", "reflected_input", "sql_error", "reflected_input"]);
     }
 }

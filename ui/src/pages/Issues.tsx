@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
@@ -37,6 +37,7 @@ export default function Issues() {
 
   return (
     <div className="content">
+      <CrawlAudit />
       <ActiveScan key={String(arg ?? "")} initial={arg === undefined ? undefined : String(arg)} />
       <Panel
         title="Issues (passive)"
@@ -128,6 +129,131 @@ function ActiveScan({ initial }: { initial?: string }) {
                     <td className="mono">{i.point} = {i.payload}</td>
                     <td style={{ maxWidth: 320, wordBreak: "break-word" }}>{i.evidence} <ExchangeLink id={i.exchange_id} /></td>
                     <td className="muted">{i.prove_with ?? "–"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+interface ScanTask {
+  task_id: string;
+  url: string;
+  created_ms: number;
+  status: "crawling" | "auditing" | "done" | "cancelled" | "failed";
+  pages_crawled: number;
+  targets_total: number;
+  targets_done: number;
+  requests: number;
+  current?: string;
+  issues: (ActiveFinding & { operation: string; finding_id?: number })[];
+  notes: string[];
+  error?: string;
+}
+
+const QUICK = ["reflected_input", "sql_error", "open_redirect", "path_traversal", "ssti"];
+const running = (t?: ScanTask | null) => t?.status === "crawling" || t?.status === "auditing";
+
+/** Crawl a site, then run the active scanner over what was found, in the background. */
+function CrawlAudit() {
+  const { go } = useNav();
+  const [url, setUrl] = useState("");
+  const [pages, setPages] = useState("30");
+  const [quick, setQuick] = useState(false);
+  const [id, setId] = useState<string | null>(null);
+  const [task, setTask] = useState<ScanTask | null>(null);
+  const tasks = useLoad(() => api.get<ScanTask[]>("/scan/tasks"), [id, task?.status]);
+  const action = useAction();
+
+  useEffect(() => {
+    if (!id) return;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const t = await api.get<ScanTask>(`/scan/tasks/${id}`);
+        if (stop) return;
+        setTask(t);
+        if (running(t)) setTimeout(poll, 1000);
+      } catch (e) {
+        if (!stop) action.setError((e as Error).message);
+      }
+    };
+    poll();
+    return () => {
+      stop = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  const start = () =>
+    action.run(async () => {
+      const t = await api.post<ScanTask>("/scan/tasks", {
+        url,
+        max_pages: Number(pages) || 30,
+        checks: quick ? QUICK : [],
+      });
+      setTask(t);
+      setId(t.task_id);
+    });
+  const cancel = () => action.run(async () => setTask(await api.post<ScanTask>(`/scan/tasks/${id}/cancel`, {})));
+  const pct = task && task.targets_total > 0 ? Math.round((100 * task.targets_done) / task.targets_total) : 0;
+
+  return (
+    <Panel
+      title="Crawl and audit"
+      actions={
+        tasks.data && tasks.data.length > 0 ? (
+          <select aria-label="Scan task" value={id ?? ""} onChange={(e) => setId(e.target.value || null)}>
+            <option value="">Recent tasks…</option>
+            {tasks.data.map((t) => (
+              <option key={t.task_id} value={t.task_id}>{t.url} · {t.status}</option>
+            ))}
+          </select>
+        ) : undefined
+      }
+    >
+      <div className="row">
+        <input aria-label="Start URL" placeholder="https://app.example/" value={url} onChange={(e) => setUrl(e.target.value)} style={{ minWidth: 260 }} />
+        <label className="small">pages <input aria-label="Pages to crawl" value={pages} onChange={(e) => setPages(e.target.value)} style={{ width: 50 }} /></label>
+        <label className="small"><input type="checkbox" checked={quick} onChange={(e) => setQuick(e.target.checked)} /> quick checks only</label>
+        <button className="btn primary" disabled={!url || action.busy || running(task)} onClick={start} data-testid="audit-start">Crawl and audit</button>
+        {running(task) && <button className="btn" onClick={cancel}>Cancel</button>}
+      </div>
+      <p className="small muted">Crawls the start URL, then scans each recorded operation of that origin (submissions only get the stored XSS and CSRF checks). Runs in the background; every request goes through the policy gate, and strong issues become suspected findings.</p>
+      <ErrorBox error={action.error} />
+      {task && (
+        <>
+          <div className="small" data-testid="audit-progress">
+            <b>{task.status}</b> · {task.pages_crawled} pages crawled · {task.targets_done}/{task.targets_total} operations · {task.requests} requests · {task.issues.length} issues
+            {task.current && <span className="muted mono"> · {task.current}</span>}
+          </div>
+          {task.targets_total > 0 && (
+            <div style={{ background: "var(--border, #ddd)", height: 6, borderRadius: 3, margin: "6px 0" }}>
+              <div style={{ width: `${pct}%`, background: "var(--accent, #36c)", height: 6, borderRadius: 3 }} />
+            </div>
+          )}
+          {task.error && <div className="error">{task.error}</div>}
+          {task.notes.length > 0 && <ul className="small muted">{task.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
+          {task.issues.length > 0 && (
+            <table className="grid small" data-testid="audit-issues">
+              <thead><tr><th>Severity</th><th>Issue</th><th>Operation</th><th>Where</th><th>Evidence</th><th></th></tr></thead>
+              <tbody>
+                {task.issues.map((i) => (
+                  <tr key={`${i.operation}${i.check}${i.point}`}>
+                    <td><Chip value={i.severity} /></td>
+                    <td>{i.title}</td>
+                    <td className="mono">{i.operation}</td>
+                    <td className="mono">{i.point} = {i.payload}</td>
+                    <td style={{ maxWidth: 320, wordBreak: "break-word" }}>{i.evidence} <ExchangeLink id={i.exchange_id} /></td>
+                    <td>
+                      {i.finding_id !== undefined && (
+                        <a href="#" onClick={(e) => { e.preventDefault(); go("findings", i.finding_id); }}>finding #{i.finding_id}</a>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

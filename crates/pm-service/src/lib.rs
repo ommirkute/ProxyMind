@@ -26,6 +26,7 @@ mod report;
 mod roe;
 mod rules;
 mod scan;
+mod scan_task;
 mod search;
 mod session;
 mod tools;
@@ -60,6 +61,7 @@ pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
 pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
+pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
 pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
@@ -128,6 +130,8 @@ pub struct Service {
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
     /// Recent Intruder attacks (running ones keep going in the background).
     attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// Recent crawl-and-audit tasks.
+    scan_tasks: parking_lot::Mutex<Vec<std::sync::Arc<scan_task::ScanTask>>>,
     /// Extra proxy listeners, when this process runs the proxy.
     listeners: std::sync::OnceLock<std::sync::Arc<pm_proxy::Listeners>>,
     /// Session handling: cookie jar, macro variables.
@@ -161,6 +165,7 @@ impl Service {
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             attacks: parking_lot::Mutex::new(Vec::new()),
+            scan_tasks: parking_lot::Mutex::new(Vec::new()),
             listeners: std::sync::OnceLock::new(),
             session: parking_lot::Mutex::default(),
             session_lock: tokio::sync::Mutex::new(()),

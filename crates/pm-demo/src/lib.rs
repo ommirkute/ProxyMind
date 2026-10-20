@@ -211,6 +211,13 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/welcome",
         description: "welcome.js writes the name URL parameter into the page with innerHTML.",
     },
+    Vuln {
+        id: "VS-26",
+        class: "sqli",
+        method: "GET",
+        path: "/api/recommend",
+        description: "ctx is base64 of a JSON object; its category goes into SQL unescaped (error-based).",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -429,6 +436,30 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
+/// Standard base64 (padding optional).
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut bits, mut n) = (0u32, 0);
+    for c in s.trim_end_matches('=').bytes() {
+        let x = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(x);
+        n += 6;
+        if n >= 8 {
+            n -= 8;
+            out.push((bits >> n) as u8);
+            bits &= (1 << n) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// VulnShop's API description (served at /openapi.json).
 const OPENAPI: &str = r##"{
   "openapi": "3.0.3",
@@ -459,7 +490,7 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
-<a href='/help?topic=orders'>Help</a> <a href=/guestbook>Guestbook</a> <a href='/welcome?name=guest'>Welcome</a> <a href='/hello?name=guest'>Hello</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<a href='/help?topic=orders'>Help</a> <a href=/guestbook>Guestbook</a> <a href='/welcome?name=guest'>Welcome</a> <a href='/hello?name=guest'>Hello</a> <a href='/api/recommend?ctx=eyJjYXRlZ29yeSI6ImNvZmZlZSJ9'>For you</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
 
 /// An in-memory SQLite database for the SQL injection demos, with MySQL's
@@ -998,6 +1029,26 @@ impl VulnShop {
                 body: "User-agent: *\nDisallow: /api/admin/\nDisallow: /api/internal/\nDisallow: /*.bak$\n".into(),
                 content_type: "text/plain",
             },
+            ("GET", ["api", "recommend"]) => {
+                // VS-26: SQL injection inside base64-encoded JSON.
+                let ctx = req.query.get("ctx").cloned().unwrap_or_default();
+                let Some(v) = b64_decode(&ctx).and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else {
+                    return json_resp(400, json!({"error": "bad ctx"}));
+                };
+                let category = v["category"].as_str().unwrap_or("");
+                if category.contains('\'') {
+                    return Response {
+                        status: 500,
+                        headers: vec![],
+                        body: format!(
+                            "You have an error in your SQL syntax; check the manual that corresponds to your MySQL \
+                             server version for the right syntax to use near '{category}' at line 1"
+                        ),
+                        content_type: "text/plain",
+                    };
+                }
+                json_resp(200, json!({"category": category, "products": ["Coffee"]}))
+            }
             ("GET", ["guestbook"]) => {
                 // VS-23: messages are shown as stored (names are encoded).
                 let entries = self.state.lock().map(|st| st.guestbook.clone()).unwrap_or_default();

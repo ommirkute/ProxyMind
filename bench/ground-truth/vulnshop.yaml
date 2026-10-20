@@ -128,6 +128,11 @@ vulns:
     method: GET
     path: /welcome
     description: welcome.js writes the name parameter into the page with innerHTML.
+  - id: VS-26
+    class: sqli
+    method: GET
+    path: /api/recommend
+    description: ctx is base64 JSON; its category goes into SQL unescaped.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats

@@ -41,12 +41,12 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Issue | ProxyMind | BurpMax | Step |
 |---|---|---|---|
 | Reflected XSS | ✅ (+ browser `reflection` proof) | ✅ | 3 (context-aware payloads) |
-| Stored XSS | ❌ | ✅ | 3 |
-| DOM XSS (sources → sinks) | ❌ | ✅ (static) | 3 (headless browser taint) |
+| Stored XSS | ✅ step 3 (revisits HTML pages from history) | ✅ | 3 |
+| DOM XSS (sources → sinks) | ✅ step 3 (headless Chromium, sink hooks; query and fragment sources) | ✅ (static) | 3 |
 | Client-side template injection (Angular) | ❌ | ❌ | 3 |
 | Open redirection (reflected, DOM) | ✅ (reflected) | ✅ | 3 (DOM) |
 | Link manipulation / input returned in response | 🟡 | ❌ | 3 |
-| Cross-site request forgery | ❌ | ✅ | 3 |
+| Cross-site request forgery | ✅ step 3 (foreign Origin/Referer, text/plain JSON) | ✅ | 3 |
 | Clickjacking (frameable response) | ✅ passive | ✅ | – |
 
 ## Server-side request and routing
@@ -97,7 +97,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 |---|---|---|---|
 | Insertion points: query, form, JSON, numeric/ID path segments | ✅ | ✅ | – |
 | Insertion points: headers (User-Agent, Referer, X-Forwarded-For) and cookies | ✅ step 1 | ✅ (headers) | 1 |
-| Insertion points: parameter names, XML, nested/encoded values (base64, JSON in a param) | ❌ | 🟡 (XML, JSON walk) | 3 |
+| Insertion points: parameter names, XML, nested/encoded values (base64, JSON in a param) | ✅ step 3 | 🟡 (XML, JSON walk) | 3 |
 | Confirmation: re-send, baseline-absent, delay follows payload | ✅ step 1 | ✅ | 1 |
 | Proof oracles (differential authz, timing, OAST, browser reflection) | ✅ | ❌ | – |
 | Ordering fast → slow, request budget | ✅ step 1 | ✅ | 1 |
@@ -106,7 +106,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Scan checkpoint / resume | ❌ | ✅ | 4 |
 | WAF evasion encodings | ❌ | ✅ | 4 |
 | Backslash-powered (payload-free) anomaly detection | ❌ | ❌ | 4 |
-| Crawl + audit as one scan task with live progress | 🟡 (crawl and scan separate) | ✅ | 3 |
+| Crawl + audit as one scan task with live progress | ✅ step 3 (background task, API and UI) | ✅ | 3 |
 
 ## Steps
 
@@ -119,9 +119,10 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
    collected while the slower checks run)*
 3. Stored and DOM XSS, CSRF, Host header, active CORS, NoSQL/LDAP/XPath,
    CRLF, auth bypass, hidden parameters, richer insertion points, one
-   crawl-and-audit task. *(3a done: NoSQL/LDAP/XPath, CRLF, Host header,
-   CORS, auth bypass, hidden parameters; 3b next: stored and DOM XSS, CSRF,
-   insertion points, crawl-and-audit)*
+   crawl-and-audit task. *(done: 3a NoSQL/LDAP/XPath, CRLF, Host header,
+   CORS, auth bypass, hidden parameters; 3b stored and DOM XSS, CSRF,
+   insertion points, crawl-and-audit. Left for later: client-side template
+   injection, DOM open redirect, XML injection, method override)*
 4. JWT, OAuth, GraphQL depth, request smuggling, cache poisoning and
    deception, prototype pollution, deserialization, file upload, mass
    assignment, race checks: the risky ones behind approval.
