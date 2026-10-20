@@ -17,7 +17,8 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
-- Engagement page (`/api/v1/roe`, `proxymind roe use`): view the rules in force with a who-may-do-what table, edit and validate the YAML, save (humans only, audited with before/after hashes); changes apply at once to the gate, rate limits and the proxy's scope checks, and other processes on the project (MCP servers, the desktop app) pick them up within two seconds
+- Proxy setup page (`/api/v1/setup`, `/api/v1/ca.pem`): proxy address, CA download with its SHA-256 fingerprint, per-OS and per-tool steps. Desktop app: project picker (recent projects, create a project from target URLs), Switch project and Trust the CA (per-user store) in the tray (ADR-0012)
+- Engagement page (`/api/v1/roe`, `proxymind roe use`): view the rules in force with a who-may-do-what table, edit and validate the YAML, save (humans only, audited with before/after BLAKE3 hashes); changes apply at once to the gate, rate limits and the proxy's scope checks, and other processes on the project (MCP servers, the desktop app) pick them up within two seconds
 - Content discovery (`pm_crawl::discover`, Model page, `proxymind discover`, `/api/v1/discover`, MCP `discover_content`): a built-in list of common hidden paths or your own words with extensions, GET only, in scope, risky paths skipped, the server's not-found page fingerprinted per path shape so soft 404s aren't reported; VulnShop gained VS-13 (an exposed `.git/config` with a deploy token) and a single-page-app soft-404 trap under `/app/`
 - GraphQL (`pm-graphql`, Model page, `proxymind graphql`, `/api/v1/graphql/import`, MCP `graphql_import`): introspection results (pasted, recorded or fetched through the gate) become operations with example documents, variables and requests; a passive check flags introspection; VulnShop serves `/graphql` with VS-12 (the invoice resolver skips the ownership check the REST endpoint has)
 - Site map and content search (`pm_tools::{search,sitemap}`, Site map & Search page, `proxymind search/sitemap`, `/api/v1/search`, `/sitemap`, MCP `history_grep`, `site_map`): literal or regex, case options, request/response/both, decoded bodies, paging; agents match against redacted text so search can't confirm secrets
@@ -59,7 +60,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Next, in order:**
 
-1. **Desktop shell** (Tauri): done, linted on all OSes, installers in releases; next: code signing, project picker, CA install helper
+1. **Desktop shell** (Tauri): done, linted on all OSes, installers in releases, project picker, CA trust helper; next: code signing
 2. **Benchmarks on real apps** (M6): done for VAmPI and Juice Shop (baseline); next: run crAPI, score agents, publish scores in the README
 3. **More oracles**: stored and DOM XSS proofs (reflection proofs, DNS OAST and payload-aware tiers are done)
 4. Transparent project encryption (sealing is done), installers (signed releases, SBOMs and the Docker image are done)

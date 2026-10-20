@@ -73,6 +73,8 @@ pub fn api() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
         .route("/roe", get(roe_get).put(roe_put))
+        .route("/setup", get(setup))
+        .route("/ca.pem", get(ca_pem))
         .route("/roe/check", post(roe_check))
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
@@ -403,6 +405,30 @@ async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiR
 
 async fn discover(State(st): State<AppState>, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
     ok(st.service.discover(&st.actor, r).await?)
+}
+
+async fn setup(State(st): State<AppState>) -> ApiResult {
+    ok(json!({
+        "proxy": st.setup.proxy,
+        "ca_available": st.setup.ca_pem.is_some(),
+        "ca_sha256": st.setup.ca_fingerprint(),
+    }))
+}
+
+/// The CA certificate, as a download (it is public, but stays behind the API token like everything here).
+async fn ca_pem(State(st): State<AppState>) -> Result<Response, ApiError> {
+    let pem =
+        st.setup.ca_pem.clone().ok_or_else(|| {
+            pm_service::ServiceError::NotFound("no CA here: this process doesn't run the proxy".into())
+        })?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind-ca.pem\""),
+        ],
+        pem,
+    )
+        .into_response())
 }
 
 async fn roe_get(State(st): State<AppState>) -> ApiResult {

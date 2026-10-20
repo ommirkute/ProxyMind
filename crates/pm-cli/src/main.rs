@@ -1191,8 +1191,10 @@ async fn run() -> Result<()> {
             let service = Arc::new(open_service(&cli.project, None)?);
             service.set_plugins(user_plugins(&cli));
             let me = human_actor(actor.as_deref())?;
+            let mut setup = pm_api::ProxySetup::default();
             if !*no_proxy {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
+                setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
                 let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
                 let queue = Arc::new(pm_proxy::InterceptQueue::new());
                 service.attach_intercept(queue.clone());
@@ -1214,7 +1216,8 @@ async fn run() -> Result<()> {
                 pm_service::watch_project(&cli.project, None, service.network().clone())?;
             }
             pm_service::watch_roe(service.clone());
-            let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
+            let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
+                .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
             eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
             let shown =

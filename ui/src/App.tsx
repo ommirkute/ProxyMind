@@ -17,6 +17,7 @@ import Tools from "./pages/Tools";
 import Audit from "./pages/Audit";
 import SiteMap from "./pages/SiteMap";
 import Engagement from "./pages/Engagement";
+import Setup from "./pages/Setup";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "history", label: "History" },
@@ -35,6 +36,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "audit", label: "Audit log" },
   { id: "engagement", label: "Engagement" },
   { id: "network", label: "Network" },
+  { id: "setup", label: "Proxy setup" },
 ];
 
 function parseHash(): { page: Page; arg?: string } {
@@ -121,6 +123,7 @@ export default function App() {
     tools: Tools,
     sitemap: SiteMap,
     engagement: Engagement,
+    setup: Setup,
     findings: Findings,
     audit: Audit,
     network: Network,

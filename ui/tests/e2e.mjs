@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
+import { X509Certificate } from "node:crypto";
 import { chromium } from "playwright-core";
 
 const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
@@ -607,6 +608,14 @@ try {
   }, shop);
   check(excluded === "denied", `the new exclusion applies at once (${excluded})`);
   await page.screenshot({ path: join(SHOTS, "7c-engagement.png"), fullPage: true });
+
+  console.log("Proxy setup");
+  await page.getByRole("button", { name: "Proxy setup" }).click();
+  await page.waitForSelector('[data-testid="ca-fingerprint"]');
+  const caShown = await page.getByTestId("ca-fingerprint").textContent();
+  const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
+  check(caShown === new X509Certificate(pem).fingerprint256, "the CA fingerprint matches the downloaded certificate");
+  check(await page.getByTestId("setup-proxy").textContent() === `127.0.0.1:${proxy}`, "the proxy address is shown");
 
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();

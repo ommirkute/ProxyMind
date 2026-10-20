@@ -12,5 +12,7 @@ ADR-0008 made the web UI the product and kept a Tauri shell for later. A desktop
 
 ## Consequences
 - No UI code is duplicated, and the desktop app can't do anything the API doesn't allow.
-- Native extras so far: a tray menu (open, quit) showing the CA certificate path. Project pickers, a CA install helper and installers (`tauri build`) are next.
+- Native extras: a tray menu (open, switch project, trust the CA for this user, quit); installers are built by `cargo tauri build` in releases.
+- The project picker is a *local* app page (`static/setup.html`) and the only page that may call the app's commands (`list_projects`, `open_project`, `create_project`). The ProxyMind UI stays a remote page with no IPC, so target content shown there can never reach native code. Switching projects saves the choice to `~/.proxymind/desktop.json` and restarts the app, rather than running two stacks (the proxy port can't be shared).
+- Trusting the CA uses the operating system's own per-user store and prompt (`security add-trusted-cert` on macOS, `certutil -user -addstore Root` on Windows, the NSS database on Linux); it never asks for administrator rights. The Proxy setup page in the web UI covers the same steps by hand, with the certificate's SHA-256 fingerprint to compare.
 - CI lints the app on Linux, macOS and Windows; tagged releases ship unsigned installers for all three (code signing is next).

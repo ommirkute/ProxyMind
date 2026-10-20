@@ -94,7 +94,7 @@ impl Service {
         self.audit(
             &actor.id(),
             "roe_change",
-            json!({ "old_sha256": pm_policy::audit::content_hash(old.as_bytes()), "new_sha256": pm_policy::audit::content_hash(text.as_bytes()), "summary": self.roe_get()?.summary }),
+            json!({ "old_blake3": pm_policy::audit::content_hash(old.as_bytes()), "new_blake3": pm_policy::audit::content_hash(text.as_bytes()), "summary": self.roe_get()?.summary }),
             "ok",
         )?;
         self.roe_get()

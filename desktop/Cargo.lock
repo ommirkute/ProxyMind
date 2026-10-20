@@ -2687,6 +2687,7 @@ dependencies = [
  "pm-assistant",
  "pm-core",
  "pm-service",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
@@ -2749,6 +2750,14 @@ name = "pm-fuzz"
 version = "0.0.1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "pm-graphql"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2916,6 +2925,7 @@ dependencies = [
  "pm-crawl",
  "pm-diff",
  "pm-fuzz",
+ "pm-graphql",
  "pm-http",
  "pm-identity",
  "pm-ledger",
@@ -2971,7 +2981,10 @@ name = "pm-tools"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "memchr",
  "pm-core",
+ "pm-http",
+ "regex",
  "ring",
  "serde",
  "serde_json",
@@ -3113,6 +3126,8 @@ dependencies = [
  "pm-service",
  "pm-store",
  "pm-tls",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",

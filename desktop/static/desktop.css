@@ -1,0 +1,14 @@
+body { font: 15px/1.5 system-ui, sans-serif; max-width: 680px; margin: 32px auto; padding: 0 16px; color: #1f2330; background: #fff; }
+h1 { font-size: 22px; } h2 { font-size: 17px; margin-top: 28px; }
+input, textarea { font: inherit; width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c9ccd6; border-radius: 6px; }
+label { display: block; margin: 10px 0; }
+button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #5b4bdb; background: #5b4bdb; color: #fff; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; } .row input { flex: 1; }
+.list { list-style: none; padding: 0; } .list li { display: flex; gap: 10px; align-items: center; margin: 6px 0; word-break: break-all; }
+.muted { color: #697086; } .why, .error { color: #b42318; }
+pre { white-space: pre-wrap; background: #f2f3f7; border-radius: 6px; padding: 12px; }
+@media (prefers-color-scheme: dark) {
+  body { background: #16181f; color: #e6e8ef; } pre { background: #23262f; }
+  input, textarea { background: #1e2129; color: inherit; border-color: #3a3f4d; } .muted { color: #9aa1b5; }
+}
