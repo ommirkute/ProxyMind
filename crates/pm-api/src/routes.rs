@@ -72,6 +72,8 @@ fn ok<T: serde::Serialize>(v: T) -> ApiResult {
 pub fn api() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
+        .route("/roe", get(roe_get).put(roe_put))
+        .route("/roe/check", post(roe_check))
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
         .route("/exchanges/{id}", get(exchange))
@@ -401,6 +403,23 @@ async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiR
 
 async fn discover(State(st): State<AppState>, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
     ok(st.service.discover(&st.actor, r).await?)
+}
+
+async fn roe_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.roe_get()?)
+}
+
+#[derive(serde::Deserialize)]
+struct RoeBody {
+    text: String,
+}
+
+async fn roe_put(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
+    ok(st.service.roe_set(&st.actor, &b.text)?)
+}
+
+async fn roe_check(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
+    ok(st.service.roe_check(&b.text)?)
 }
 
 async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

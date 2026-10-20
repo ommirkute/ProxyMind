@@ -16,6 +16,7 @@ import Issues from "./pages/Issues";
 import Tools from "./pages/Tools";
 import Audit from "./pages/Audit";
 import SiteMap from "./pages/SiteMap";
+import Engagement from "./pages/Engagement";
 
 const PAGES: { id: Page; label: string }[] = [
   { id: "history", label: "History" },
@@ -32,6 +33,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: "issues", label: "Issues" },
   { id: "findings", label: "Findings" },
   { id: "audit", label: "Audit log" },
+  { id: "engagement", label: "Engagement" },
   { id: "network", label: "Network" },
 ];
 
@@ -55,24 +57,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    api
-      .get<Status>("/status")
-      .then((s) => {
-        setStatus(s);
-        setCounters(s.counters);
-      })
-      .catch((e) => setAuthError(e.message));
+    const load = () =>
+      api
+        .get<Status>("/status")
+        .then((s) => {
+          setStatus(s);
+          setCounters(s.counters);
+        })
+        .catch((e) => setAuthError(e.message));
+    load();
+    // Pages that change what the header shows (e.g. the engagement) ask for a refresh.
+    window.addEventListener("pm-status-changed", load);
+    return () => window.removeEventListener("pm-status-changed", load);
   }, []);
 
   // Live updates: the server pushes counters when anything changes.
+  const signedIn = status != null;
   useEffect(() => {
-    if (!status) return;
+    if (!signedIn) return;
     const es = new EventSource("/api/v1/events");
     es.addEventListener("counters", (e) => setCounters(JSON.parse((e as MessageEvent).data)));
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [status]);
+  }, [signedIn]);
 
   const nav = useMemo(
     () => ({
@@ -112,6 +120,7 @@ export default function App() {
     issues: Issues,
     tools: Tools,
     sitemap: SiteMap,
+    engagement: Engagement,
     findings: Findings,
     audit: Audit,
     network: Network,

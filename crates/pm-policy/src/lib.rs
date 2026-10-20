@@ -172,16 +172,23 @@ impl Verdict {
 
 /// Evaluates actions against a rules-of-engagement file.
 pub struct Policy {
-    roe: Roe,
+    /// Swapped as a whole when the rules change, so a decision always sees one version.
+    roe: parking_lot::RwLock<std::sync::Arc<Roe>>,
 }
 
 impl Policy {
     pub fn new(roe: Roe) -> Self {
-        Self { roe }
+        Self { roe: parking_lot::RwLock::new(std::sync::Arc::new(roe)) }
     }
 
-    pub fn roe(&self) -> &Roe {
-        &self.roe
+    /// The rules in force now.
+    pub fn roe(&self) -> std::sync::Arc<Roe> {
+        self.roe.read().clone()
+    }
+
+    /// Replaces the rules; later decisions use the new ones.
+    pub fn set_roe(&self, roe: Roe) {
+        *self.roe.write() = std::sync::Arc::new(roe);
     }
 
     /// Whether a target is in scope, with the reason.
@@ -191,10 +198,11 @@ impl Policy {
         {
             return Err(format!("{ip} is in a denied network ({net})"));
         }
-        if let Some(p) = self.roe.exclude.iter().find(|p| p.matches_lenient(t)) {
+        let roe = self.roe();
+        if let Some(p) = roe.exclude.iter().find(|p| p.matches_lenient(t)) {
             return Err(format!("excluded by scope rule {}", p.text));
         }
-        if !self.roe.include.iter().any(|p| p.matches(t)) {
+        if !roe.include.iter().any(|p| p.matches(t)) {
             return Err(format!("{}://{}:{}{} is not in scope", t.scheme, t.host, t.port, t.path));
         }
         Ok(())
@@ -213,25 +221,26 @@ impl Policy {
 
     /// IPv4-mapped IPv6 addresses (`::ffff:127.0.0.1`) are checked as IPv4,
     /// so they can't slip past an IPv4 rule.
-    fn denied_network(&self, ip: IpAddr) -> Option<&ipnet::IpNet> {
+    fn denied_network(&self, ip: IpAddr) -> Option<ipnet::IpNet> {
         let canonical = ip.to_canonical();
-        self.roe.deny_networks.iter().find(|n| n.contains(&ip) || n.contains(&canonical))
+        self.roe().deny_networks.iter().find(|n| n.contains(&ip) || n.contains(&canonical)).copied()
     }
 
     fn time_check(&self, now: jiff::Timestamp) -> Result<(), String> {
-        let local = now.to_zoned(self.roe.timezone.clone());
+        let roe = self.roe();
+        let local = now.to_zoned(roe.timezone.clone());
         let date = local.date();
-        if let Some(s) = self.roe.engagement.starts
+        if let Some(s) = roe.engagement.starts
             && date < s
         {
             return Err(format!("the engagement starts on {s}"));
         }
-        if let Some(e) = self.roe.engagement.ends
+        if let Some(e) = roe.engagement.ends
             && date > e
         {
             return Err(format!("the engagement ended on {e}"));
         }
-        if !self.roe.windows.is_empty() && !self.roe.windows.iter().any(|w| w.contains(local.datetime())) {
+        if !roe.windows.is_empty() && !roe.windows.iter().any(|w| w.contains(local.datetime())) {
             return Err(format!("outside the allowed testing windows ({})", local.strftime("%a %H:%M %Z")));
         }
         Ok(())
@@ -250,7 +259,7 @@ impl Policy {
                 return Verdict::deny(why);
             }
         }
-        let decision = self.roe.tier_decision(req.actor.kind, req.tier);
+        let decision = self.roe().tier_decision(req.actor.kind, req.tier);
         let tier = serde_json::to_value(req.tier).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
         let reason = match decision {
             Decision::Allow => format!("{} actions are allowed for this actor", tier),

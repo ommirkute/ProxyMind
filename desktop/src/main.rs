@@ -61,6 +61,8 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
         Ok(r) => service.set_plugins(r.enabled()),
         Err(e) => eprintln!("plugins not loaded: {e}"),
     }
+    // ROE edits (Engagement page, `proxymind roe use`) apply while the app runs.
+    pm_service::watch_roe(service.clone());
     let token = pm_api::load_or_create_token(&home.join("api-token"))?;
 
     // The proxy, as in `proxymind ui`; the UI still works if 8080 is taken.

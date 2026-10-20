@@ -588,6 +588,26 @@ try {
   check(await page.getByTestId("sequencer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "sequencer spots the counter");
   await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
 
+  console.log("Engagement (rules of engagement)");
+  await page.getByRole("button", { name: "Engagement" }).click();
+  await page.waitForSelector('[data-testid="roe-summary"]');
+  check(await page.getByTestId("roe-summary").textContent().then((t) => t.includes(`http://127.0.0.1:${shop}/`)), "the scope in force is shown");
+  await page.getByLabel("ROE YAML").fill(`version: 1\nengagement:\n  name: e2e engagement\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n  exclude: ["http://127.0.0.1:${shop}/api/admin/"]\n`);
+  await page.getByTestId("roe-check").click();
+  await page.getByText("Preview (not saved)").waitFor();
+  check(await page.getByTestId("roe-summary").textContent().then((t) => t.includes("e2e engagement") && t.includes("Excluded")), "validate previews the new rules");
+  await page.getByTestId("roe-save").click();
+  await page.waitForSelector('[data-testid="roe-note"]');
+  await page.locator(".meta", { hasText: "e2e engagement" }).waitFor();
+  check(true, "the header shows the new engagement name");
+  const excluded = await page.evaluate(async (shop) => {
+    const r = await fetch("/api/v1/replay", { method: "POST", headers: { "Content-Type": "application/json", "X-ProxyMind": "1" },
+      body: JSON.stringify({ url: `http://127.0.0.1:${shop}`, raw: "GET /api/admin/stats HTTP/1.1\r\nHost: shop\r\n\r\n" }) });
+    return (await r.json()).status;
+  }, shop);
+  check(excluded === "denied", `the new exclusion applies at once (${excluded})`);
+  await page.screenshot({ path: join(SHOTS, "7c-engagement.png"), fullPage: true });
+
   console.log("Model, coverage and audit");
   await page.getByRole("button", { name: "Model & Coverage" }).click();
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

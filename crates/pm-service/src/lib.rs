@@ -23,6 +23,7 @@ mod proof;
 mod race;
 mod replay;
 mod report;
+mod roe;
 mod rules;
 mod scan;
 mod search;
@@ -50,6 +51,7 @@ pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
+pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
@@ -102,13 +104,16 @@ pub enum Authorization {
 }
 
 pub struct Service {
-    policy: Policy,
+    /// Shared with the proxy's scope checks, so ROE changes reach them too.
+    policy: std::sync::Arc<Policy>,
     store: Mutex<Store>,
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
     rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
+    /// The ROE text in force (to notice changes saved by other processes).
+    roe_text: parking_lot::Mutex<Option<String>>,
     /// Passive-check plugins the user installed (never from the project).
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
 }
@@ -127,12 +132,13 @@ impl Service {
         }
         Ok(Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
-            policy,
+            policy: std::sync::Arc::new(policy),
             store: Mutex::new(store),
             sender,
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
             rewriter: std::sync::OnceLock::new(),
+            roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
         })
     }

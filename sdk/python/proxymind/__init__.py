@@ -128,6 +128,18 @@ class Client:
     def status(self) -> dict:
         return self._get("/status")
 
+    def roe(self) -> dict:
+        """The rules of engagement in force: {text, summary}."""
+        return self._get("/roe")
+
+    def check_roe(self, text: str) -> dict:
+        """Validates ROE YAML without saving; returns its summary."""
+        return self._post("/roe/check", {"text": text})
+
+    def set_roe(self, text: str) -> dict:
+        """Replaces the rules of engagement (you act as the human who started the UI); audited."""
+        return self.request("PUT", "/roe", body={"text": text})
+
     def history(self, **filters: Any) -> list:
         """Recorded exchanges, newest first. Filters: host, path, method, status, source, limit, before_id…"""
         return self._get("/exchanges", **filters)["exchanges"]

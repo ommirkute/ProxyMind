@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap";
+export type Page = "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement";
 
 export interface Nav {
   page: Page;

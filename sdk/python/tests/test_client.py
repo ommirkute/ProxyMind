@@ -98,6 +98,15 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(r["imported"], 1)
         self.assertTrue(self.pm.history(source="import", path="/copied"))
 
+    def test_roe(self):
+        current = self.pm.roe()
+        self.assertIn(self.url + "/", current["summary"]["in_scope"])
+        with self.assertRaises(ApiError):
+            self.pm.check_roe("version: 1\nscope:\n  include: []\n")
+        renamed = current["text"] + "engagement:\n  name: sdk\n"
+        self.assertEqual(self.pm.set_roe(renamed)["summary"]["engagement"]["name"], "sdk")
+        self.pm.set_roe(current["text"])
+
     def test_discover(self):
         r = self.pm.discover(f"{self.url}/", words=[".git/config", "nothing-here"])
         self.assertEqual([f["url"] for f in r["found"]], [f"{self.url}/.git/config"])

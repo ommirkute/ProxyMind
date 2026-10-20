@@ -792,7 +792,7 @@ fn home_dir(cli: &Cli) -> Result<PathBuf> {
     Ok(PathBuf::from(base).join(".proxymind"))
 }
 
-const ROE_SETTING: &str = "roe";
+use pm_service::ROE_SETTING;
 
 /// Opens the project's service with its saved ROE, or saves `roe_file` first.
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
@@ -1176,6 +1176,7 @@ async fn run() -> Result<()> {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
             pm_service::watch_project(&cli.project, None, service.network().clone())?;
+            pm_service::watch_roe(service.clone());
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
@@ -1212,6 +1213,7 @@ async fn run() -> Result<()> {
             } else {
                 pm_service::watch_project(&cli.project, None, service.network().clone())?;
             }
+            pm_service::watch_roe(service.clone());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?;
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
             eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
