@@ -462,7 +462,9 @@ pub fn polluted(got: &Seen, marker: &str) -> bool {
 /// that disagree on framing make the back end wait for bytes that never
 /// come. Built from the request's head as a POST.
 pub struct SmugglingProbes {
-    /// Content-Length says 4, the chunked body is longer: a TE back end waits.
+    /// A complete chunked body, but Content-Length says 4: a CL front end
+    /// forwards `1\r\nA` and a TE back end waits for the next chunk. (A lone
+    /// server reads either framing to the end and answers at once.)
     pub cl_te: Vec<u8>,
     /// Chunked ends after 5 bytes, Content-Length says 6: a CL back end waits.
     pub te_cl: Vec<u8>,
@@ -495,7 +497,7 @@ pub fn smuggling_probes(raw: &str) -> Option<SmugglingProbes> {
         .into_bytes()
     };
     Some(SmugglingProbes {
-        cl_te: build(4, "1\r\nA\r\nX"),
+        cl_te: build(4, "1\r\nA\r\n0\r\n\r\n"),
         te_cl: build(6, "0\r\n\r\nX"),
         control: build(5, "0\r\n\r\n"),
     })
@@ -883,7 +885,7 @@ mod tests {
         assert!(
             String::from_utf8(p.cl_te)
                 .unwrap()
-                .ends_with("Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\nX")
+                .ends_with("Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\n0\r\n\r\n")
         );
         assert!(
             String::from_utf8(p.control)
