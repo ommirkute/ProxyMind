@@ -164,6 +164,7 @@ function CrawlAudit() {
   const [url, setUrl] = useState("");
   const [pages, setPages] = useState("30");
   const [quick, setQuick] = useState(false);
+  const [js, setJs] = useState(true);
   const [id, setId] = useState<string | null>(null);
   const [task, setTask] = useState<ScanTask | null>(null);
   const tasks = useLoad(() => api.get<ScanTask[]>("/scan/tasks"), [id, task?.status]);
@@ -195,6 +196,7 @@ function CrawlAudit() {
         url,
         max_pages: Number(pages) || 30,
         checks: quick ? QUICK : [],
+        browser: js,
       });
       setTask(t);
       setId(t.task_id);
@@ -220,6 +222,7 @@ function CrawlAudit() {
         <input aria-label="Start URL" placeholder="https://app.example/" value={url} onChange={(e) => setUrl(e.target.value)} style={{ minWidth: 260 }} />
         <label className="small">pages <input aria-label="Pages to crawl" value={pages} onChange={(e) => setPages(e.target.value)} style={{ width: 50 }} /></label>
         <label className="small"><input type="checkbox" checked={quick} onChange={(e) => setQuick(e.target.checked)} /> quick checks only</label>
+        <label className="small" title="Crawl in a headless browser that runs the app's JavaScript (needs Chromium)"><input type="checkbox" checked={js} onChange={(e) => setJs(e.target.checked)} /> run JavaScript</label>
         <button className="btn primary" disabled={!url || action.busy || running(task)} onClick={start} data-testid="audit-start">Crawl and audit</button>
         {running(task) && <button className="btn" onClick={cancel}>Cancel</button>}
       </div>

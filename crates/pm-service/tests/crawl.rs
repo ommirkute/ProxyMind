@@ -47,3 +47,39 @@ async fn crawls_in_scope_and_skips_risky_links() {
     let r = s.crawl(&agent, CrawlRequest { url: "http://example.org/".into(), ..Default::default() }).await.unwrap();
     assert!(matches!(r, CrawlResult::Denied { .. }), "{r:?}");
 }
+
+#[tokio::test]
+async fn a_browser_crawl_runs_the_app_and_finds_what_its_scripts_call() {
+    if pm_service::pm_browser::find_chromium().is_none() {
+        eprintln!("skipping: no Chromium");
+        return;
+    }
+    let addr = VulnShop::start_local().await.unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+    let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");
+    let s = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
+    let human = Actor::parse("human:tester").unwrap();
+    let crawled_api = |s: &Service| {
+        let f = pm_service::pm_store::HistoryFilter { limit: Some(500), ..Default::default() };
+        s.history_search(&human, &f)
+            .unwrap()
+            .exchanges
+            .iter()
+            .any(|e| e.path.starts_with("/api/spa/catalog?category=tea") && e.source == "crawl")
+    };
+
+    // Links only: the app's API stays hidden.
+    let plain = CrawlRequest { url: format!("{url}/spa"), max_pages: Some(10), ..Default::default() };
+    s.crawl(&human, plain).await.unwrap();
+    assert!(!crawled_api(&s));
+
+    let req =
+        CrawlRequest { url: format!("{url}/spa"), max_pages: Some(10), browser: Some(true), ..Default::default() };
+    let r = s.crawl(&human, req).await.unwrap();
+    let CrawlResult::Done { pages, browser, .. } = r else { panic!("{r:?}") };
+    assert!(browser);
+    let urls: Vec<&str> = pages.iter().map(|p| p.url.as_str()).collect();
+    assert!(urls.iter().any(|u| u.ends_with("/spa/catalog")), "routes pushed by the app are visited: {urls:?}");
+    assert!(pages.iter().all(|p| p.exchange_id > 0 || p.status.is_none()), "{pages:?}");
+    assert!(crawled_api(&s), "the API the app's script calls is recorded");
+}

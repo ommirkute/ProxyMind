@@ -388,12 +388,16 @@ pub fn tool_definitions() -> Vec<Value> {
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
-             with status, forms found (not submitted) and links skipped with why. Usually allowed directly.",
+             with status, forms found (not submitted) and links skipped with why. Usually allowed directly. \
+             With browser: true, pages load in headless Chromium and run their JavaScript (single-page apps, routes \
+             pushed by scripts, API calls); every request still goes through the policy gate, and calls that would \
+             change state are listed as not_sent.",
             json!({
                 "url": {"type":"string","description":"Start URL, e.g. https://app.example.com/"},
                 "max_pages": {"type":"integer","minimum":1,"maximum":500,"description":"Default 50"},
                 "max_depth": {"type":"integer","minimum":0,"maximum":10,"description":"Default 3"},
                 "robots": {"type":"boolean","description":"Read robots.txt and sitemaps (default true)"},
+                "browser": {"type":"boolean","description":"Run the pages' JavaScript in a headless browser (default false)"},
                 "identity": {"type":"string"},
                 "approval_id": {"type":"string"},
             }),

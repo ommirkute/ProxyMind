@@ -65,7 +65,9 @@ done
 "${P[@]}" identity list >&2
 
 step "crawl"
-"${P[@]}" crawl "$APP_URL/" --max-pages "${BENCH_CRAWL_PAGES:-60}" | tail -1 >&2
+# In a browser when there is one (single-page apps), else links only.
+"${P[@]}" crawl "$APP_URL/" --max-pages "${BENCH_CRAWL_PAGES:-60}" --browser 2>/dev/null | tail -1 >&2 ||
+  "${P[@]}" crawl "$APP_URL/" --max-pages "${BENCH_CRAWL_PAGES:-60}" | tail -1 >&2
 
 step "OAST listener (for out-of-band checks)"
 # Reachable from Docker containers (docker0) and the host alike.

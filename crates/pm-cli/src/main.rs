@@ -358,6 +358,10 @@ enum Command {
         no_robots: bool,
         #[arg(long)]
         identity: Option<String>,
+        /// Load pages in a headless browser that runs their JavaScript
+        /// (single-page apps); every request still goes through the policy gate
+        #[arg(long)]
+        browser: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1736,7 +1740,7 @@ async fn run() -> Result<()> {
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
-        Command::Crawl { url, max_pages, max_depth, no_robots, identity, json } => {
+        Command::Crawl { url, max_pages, max_depth, no_robots, identity, browser, json } => {
             let service = open_service(&cli.project, None)?;
             let r = service
                 .crawl(
@@ -1748,11 +1752,17 @@ async fn run() -> Result<()> {
                         robots: Some(!*no_robots),
                         identity: identity.clone(),
                         approval_id: None,
+                        browser: Some(*browser),
                     },
                 )
                 .await?;
             match (&r, *json) {
-                (pm_service::CrawlResult::Done { pages, forms, skipped, skipped_total, not_visited }, false) => {
+                (
+                    pm_service::CrawlResult::Done {
+                        pages, forms, skipped, skipped_total, not_visited, not_sent, ..
+                    },
+                    false,
+                ) => {
                     for p in pages {
                         out!(
                             "{:>5}  #{:<6} {}",
@@ -1771,6 +1781,9 @@ async fn run() -> Result<()> {
                     }
                     for s in skipped.iter().take(20) {
                         out!("  skipped {}: {}", s.url, s.reason);
+                    }
+                    for n in not_sent.iter().take(20) {
+                        out!("  not sent (would change state): {n}");
                     }
                 }
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),

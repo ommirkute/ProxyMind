@@ -680,6 +680,14 @@ try {
   await page.getByText("Skipped links").click();
   check((await page.getByText("the link probably logs out").count()) === 1, "the logout link is skipped");
   await page.screenshot({ path: join(SHOTS, "6b-crawl.png") });
+  await page.getByLabel("Crawl start URL").fill(`http://127.0.0.1:${shop}/spa`);
+  await page.getByLabel("Max pages").fill("6");
+  await page.getByTestId("crawl-browser").check();
+  await page.getByTestId("crawl-run").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="crawl-summary"]')?.closest(".panel")?.textContent.includes("/spa/catalog"), null, { timeout: 90000 });
+  const jsApi = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=/api/spa/catalog&limit=5")).json()).exchanges.length);
+  check(jsApi > 0, "a browser crawl runs the single-page app and records the API its script calls");
+  await page.screenshot({ path: join(SHOTS, "6b-crawl-browser.png") });
 
   console.log("OpenAPI import");
   await viaProxy(proxy, shop, "GET /openapi.json HTTP/1.1\r\nHost: shop\r\n\r\n");

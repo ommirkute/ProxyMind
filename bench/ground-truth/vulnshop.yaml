@@ -188,6 +188,11 @@ vulns:
     method: POST
     path: /api/avatar
     description: HTML and SVG avatars are stored and served as pages.
+  - id: VS-38
+    class: sqli
+    method: GET
+    path: /api/spa/catalog
+    description: an API only the single-page app's script calls; category goes into SQL.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats

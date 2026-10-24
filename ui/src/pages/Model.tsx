@@ -127,6 +127,8 @@ type CrawlResult =
       skipped: { url: string; reason: string }[];
       skipped_total: number;
       not_visited: number;
+      not_sent?: string[];
+      browser?: boolean;
     }
   | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
   | { status: "denied"; reasons: string[] };
@@ -135,12 +137,13 @@ type CrawlResult =
 function CrawlPanel() {
   const [url, setUrl] = useState("");
   const [maxPages, setMaxPages] = useState(50);
+  const [js, setJs] = useState(false);
   const [result, setResult] = useState<CrawlResult | null>(null);
   const [open, setOpen] = useState(false);
   const action = useAction();
   const run = () =>
     action.run(async () => {
-      setResult(await api.post<CrawlResult>("/crawl", { url, max_pages: maxPages }));
+      setResult(await api.post<CrawlResult>("/crawl", { url, max_pages: maxPages, browser: js }));
     });
   return (
     <Panel
@@ -152,6 +155,9 @@ function CrawlPanel() {
           <div className="row">
             <input aria-label="Crawl start URL" className="grow mono" placeholder="https://app.example.com/" value={url} onChange={(e) => setUrl(e.target.value)} />
             <input aria-label="Max pages" type="number" min={1} max={500} value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))} style={{ width: 80 }} />
+            <label className="small" title="Load pages in a headless browser that runs their JavaScript: single-page apps, routes and API calls made by scripts">
+              <input type="checkbox" checked={js} onChange={(e) => setJs(e.target.checked)} data-testid="crawl-browser" /> run JavaScript (browser)
+            </label>
             <button className="btn primary" disabled={!url || action.busy} onClick={run} data-testid="crawl-run">{action.busy ? "Crawling…" : "Crawl"}</button>
           </div>
           <p className="small muted">GET requests only, in scope only; links that look like log out or delete are skipped, forms are listed but never submitted.</p>
@@ -179,6 +185,11 @@ function CrawlPanel() {
               </table>
               {result.forms.length > 0 && (
                 <ul className="small">{result.forms.map((f) => <li key={f.method + f.action}><Chip value={f.method} /> <span className="mono">{f.action}</span> ({f.inputs.join(", ") || "no fields"})</li>)}</ul>
+              )}
+              {(result.not_sent?.length ?? 0) > 0 && (
+                <details className="small"><summary>Calls the app made that weren't sent ({result.not_sent?.length}): they would change state</summary>
+                  <ul>{result.not_sent?.map((n) => <li key={n} className="mono">{n}</li>)}</ul>
+                </details>
               )}
               {result.skipped.length > 0 && (
                 <details className="small"><summary>Skipped links</summary>

@@ -8,7 +8,7 @@ ProxyMind's claims about agents and proofs have to be measurable. This directory
 
 | App | Ground truth | Checked against | How to run |
 |---|---|---|---|
-| VulnShop (built in) | [`vulnshop.yaml`](ground-truth/vulnshop.yaml): 37 bugs + traps | `proxymind demo-target` | nothing to start |
+| VulnShop (built in) | [`vulnshop.yaml`](ground-truth/vulnshop.yaml): 38 bugs + traps | `proxymind demo-target` | nothing to start |
 | [VAmPI](https://github.com/erev0s/VAmPI) | [`vampi.yaml`](ground-truth/vampi.yaml): 7 bugs + 1 trap | image digest in the file | `docker compose -f bench/docker-compose.yml up -d vampi` |
 | [OWASP Juice Shop](https://github.com/juice-shop/juice-shop) | [`juice-shop.yaml`](ground-truth/juice-shop.yaml): 8 API-level bugs | v20.3.0 | `docker compose -f bench/docker-compose.yml up -d juice-shop` |
 | [OWASP crAPI](https://github.com/OWASP/crAPI) | [`crapi.yaml`](ground-truth/crapi.yaml): 10 bugs from crAPI's challenge list | not yet run | crAPI's own compose file (about 4 GB of images) |
@@ -42,7 +42,7 @@ The model-free baseline (`proxymind bench auto`) has three steps, all through th
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 23/37 | 2/37 | 0 |
+| VulnShop | 24/38 | 2/38 | 0 |
 | Juice Shop | 4/9 | 1/9 | 0 |
 | VAmPI | 3/8 | 1/8 | 0 |
 

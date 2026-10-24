@@ -23,6 +23,9 @@ pub struct ScanTaskRequest {
     pub crawl: Option<bool>,
     /// Most pages to crawl (default 30, max 500).
     pub max_pages: Option<usize>,
+    /// Crawl in a headless browser that runs the app's JavaScript (default:
+    /// yes when a Chromium is installed).
+    pub browser: Option<bool>,
     /// Most operations to scan (default 30, max 200).
     pub max_targets: Option<usize>,
     /// Most requests per operation (default 150, max 2000).
@@ -169,11 +172,17 @@ impl Service {
 
     async fn scan_task_run(&self, actor: &Actor, req: &ScanTaskRequest, origin: &str, task: &ScanTask) -> Result<()> {
         if req.crawl.unwrap_or(true) {
+            let have_browser = pm_browser::find_chromium().is_some();
+            if req.browser == Some(true) && !have_browser {
+                task.note("no Chromium found: crawled links only, without running the app's JavaScript".into());
+            }
             let crawl = CrawlRequest {
                 url: req.url.clone(),
                 max_pages: Some(req.max_pages.unwrap_or(30).clamp(1, 500)),
                 identity: req.identity.clone(),
                 approval_id: req.approval_id.clone(),
+                // Run the app's JavaScript when a browser is there, unless asked not to.
+                browser: Some(req.browser.unwrap_or(true) && have_browser),
                 ..Default::default()
             };
             match self.crawl(actor, crawl).await? {

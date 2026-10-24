@@ -20,6 +20,8 @@
 //! The DevTools protocol is spoken over a plain WebSocket using the frame
 //! codec in [`pm_http::ws`]; no extra dependencies.
 
+pub mod crawl;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

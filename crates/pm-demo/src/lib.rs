@@ -296,6 +296,14 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/api/avatar",
         description: "Avatars of any type are stored and served from /uploads with a type from the extension (HTML runs).",
     },
+    Vuln {
+        id: "VS-38",
+        class: "sqli",
+        method: "GET",
+        path: "/api/spa/catalog",
+        description: "The single-page app at /spa calls this API from JavaScript only; category goes into SQL \
+                      (error-based). Only a crawler that runs the app finds it.",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -529,6 +537,31 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
+/// VS-38: the single-page app's script. Navigation is buttons and
+/// `history.pushState`; the catalog API's path is assembled at run time.
+const SPA_JS: &str = r#"const pages = [['/spa', 'Home'], ['/spa/catalog', 'Catalog'], ['/spa/account', 'Account']];
+const nav = document.getElementById('nav');
+for (const [path, label] of pages) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = () => { history.pushState({}, '', path); render(); };
+  nav.appendChild(b);
+}
+async function render() {
+  const view = document.getElementById('view');
+  if (location.pathname === '/spa/catalog') {
+    const r = await fetch(['/api', 'spa', 'catalog'].join('/') + '?category=' + 'tea');
+    view.textContent = (await r.json()).items.join(', ');
+  } else if (location.pathname === '/spa/account') {
+    const r = await fetch('/api/me');
+    view.textContent = r.status === 200 ? 'Signed in' : 'Please sign in';
+  } else {
+    view.textContent = 'Welcome to the VulnShop app';
+  }
+}
+render();
+"#;
+
 /// VS-36: checks a PHP-serialized value the way unserialize() would fail:
 /// declared string lengths must match. Returns the strings, or the offset
 /// of the first error.
@@ -657,7 +690,7 @@ const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><bo
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \
-<a href='/help?topic=orders'>Help</a> <a href=/guestbook>Guestbook</a> <a href='/welcome?name=guest'>Welcome</a> <a href='/hello?name=guest'>Hello</a> <a href='/api/recommend?ctx=eyJjYXRlZ29yeSI6ImNvZmZlZSJ9'>For you</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
+<a href='/help?topic=orders'>Help</a> <a href=/guestbook>Guestbook</a> <a href='/welcome?name=guest'>Welcome</a> <a href='/hello?name=guest'>Hello</a> <a href=/spa>App</a> <a href='/api/recommend?ctx=eyJjYXRlZ29yeSI6ImNvZmZlZSJ9'>For you</a> <a href='/api/tools/ping?host=127.0.0.1'>Network check</a> <a href='/api/lang?set=en'>English</a> <a href='/api/share?product=1'>Share</a> <a href=/api/logout>Log out</a> <a href=https://example.org/>Elsewhere</a> \
 <script src=/static/app.js></script></body></html>";
 
 /// An in-memory SQLite database for the SQL injection demos, with MySQL's
@@ -1566,6 +1599,35 @@ impl VulnShop {
                     body: String::from_utf8_lossy(&data).into_owned(),
                     content_type,
                 }
+            }
+            ("GET", ["spa", ..]) => Response {
+                // A single-page app: buttons, History API routes, and an API only its script knows.
+                status: 200,
+                headers: vec![],
+                body: "<!doctype html><html><head><title>VulnShop app</title></head><body><nav id=nav></nav>\
+                       <main id=view>Loading…</main><script src=/static/spa.js></script></body></html>"
+                    .into(),
+                content_type: "text/html; charset=utf-8",
+            },
+            ("GET", ["static", "spa.js"]) => {
+                Response { status: 200, headers: vec![], body: SPA_JS.into(), content_type: "application/javascript" }
+            }
+            ("GET", ["api", "spa", "catalog"]) => {
+                // VS-38: SQL injection in an API only the app's script calls.
+                let category = req.query.get("category").cloned().unwrap_or_default();
+                if category.contains('\'') {
+                    return Response {
+                        status: 500,
+                        headers: vec![],
+                        body: format!(
+                            "You have an error in your SQL syntax; check the manual that corresponds to your MySQL \
+                             server version for the right syntax to use near '{category}' at line 1"
+                        ),
+                        content_type: "text/plain",
+                    };
+                }
+                let items = if category == "tea" { vec!["Green tea", "Black tea"] } else { vec!["Coffee"] };
+                json_resp(200, json!({"category": category, "items": items}))
             }
             ("GET", ["help"]) => {
                 // Secure look-alike: the topic is HTML-encoded.
