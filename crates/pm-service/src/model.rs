@@ -84,7 +84,12 @@ impl Service {
         let obs: Vec<Observation> = exchanges
             .iter()
             .zip(&resolved)
-            .filter(|(e, _)| e.summary.source != "authz" && e.summary.source != "proof")
+            // What ProxyMind sent to test things (probes, payloads, re-sends)
+            // isn't how the app is used; discovery counts only for what it found.
+            .filter(|(e, _)| {
+                !matches!(e.summary.source.as_str(), "authz" | "proof" | "scan" | "intruder" | "sequencer" | "race")
+            })
+            .filter(|(e, _)| e.summary.source != "discover" || e.summary.status.is_some_and(|s| s < 400))
             .map(|(e, who)| Observation {
                 exchange_id: e.summary.id,
                 method: &e.summary.method,

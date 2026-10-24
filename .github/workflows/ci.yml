@@ -1,9 +1,19 @@
 name: CI
 
+# Pushes run on Linux only to save Actions minutes (macOS bills 10x and
+# Windows 2x on private repositories). Pull requests and manual runs
+# (Actions → CI → Run workflow) cover all three OSes.
 on:
   push:
     branches: ["**"]
+    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,6 +57,15 @@ jobs:
       - run: npm run build
         working-directory: ui
       - run: cargo build -p pm-cli
+      - name: Python SDK tests (against the real binary)
+        run: python3 -m unittest discover -s sdk/python/tests -v
+        env:
+          PROXYMIND: ${{ github.workspace }}/target/debug/proxymind
+      - name: TypeScript SDK (typecheck, build, tests against the real binary)
+        run: npm ci && npm run build && npm test
+        working-directory: sdk/typescript
+        env:
+          PROXYMIND: ${{ github.workspace }}/target/debug/proxymind
       - run: npx playwright-core install --with-deps chromium
         working-directory: ui
       - run: npm run test:e2e
@@ -58,6 +77,38 @@ jobs:
         with:
           name: ui-screenshots
           path: ${{ runner.temp }}/ui-screenshots
+
+  desktop:
+    name: desktop app (Tauri, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: ui
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo fmt --check
+        working-directory: desktop
+      # Not --locked: the app's path dependencies change with the workspace.
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: desktop
 
   deny:
     name: licenses and advisories

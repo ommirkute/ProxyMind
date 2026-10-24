@@ -1,0 +1,16 @@
+[package]
+name = "pm-crawl"
+description = "Crawler logic: link and form extraction, robots.txt and sitemaps, the frontier. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+url = "2.5.8"
+
+[lints]
+workspace = true

@@ -191,7 +191,10 @@ impl Service {
         }
 
         let wait = Duration::from_millis(req.wait_ms.unwrap_or(1000)).min(MAX_WAIT);
-        let tier = if payloads.is_empty() { Tier::ActiveSafe } else { Tier::ActiveIntrusive };
+        let mut tier = if payloads.is_empty() { Tier::ActiveSafe } else { Tier::ActiveIntrusive };
+        for (_, p) in &payloads {
+            tier = tier.max(pm_policy::payload::classify_text(&String::from_utf8_lossy(p)).tier);
+        }
         let extra = json!({ "websocket_messages": req.messages, "wait_ms": wait.as_millis() as u64 });
         let identity = req.identity.as_deref();
         match self.gate_send_with(

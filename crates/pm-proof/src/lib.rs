@@ -241,6 +241,114 @@ pub fn oast(token: &str, interactions: usize, first: Option<&str>) -> Verdict {
     }
 }
 
+// ----------------------------------------------------------- reflection --
+
+/// Name of the JavaScript function a reflection payload calls.
+pub const XSS_BINDING: &str = "pmProof";
+
+/// Placeholders a reflection request may contain.
+pub const XSS_PLACEHOLDERS: [&str; 3] = ["{{xss}}", "{{xss_url}}", "{{token}}"];
+
+/// The default payload: calls the binding with the token when it runs.
+pub fn xss_payload(token: &str) -> String {
+    format!("<img src=x onerror={XSS_BINDING}('{token}')>")
+}
+
+/// Percent-encodes everything but unreserved characters (RFC 3986).
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Fills a request template: `{{xss}}` → the default payload as is,
+/// `{{xss_url}}` → the payload percent-encoded (for query strings and form
+/// bodies), `{{token}}` → just the token, for a custom payload that calls
+/// `pmProof('{{token}}')` or `alert('{{token}}')` itself.
+pub fn fill_xss_template(raw: &str, token: &str) -> String {
+    let payload = xss_payload(token);
+    raw.replace("{{xss_url}}", &percent_encode(&payload)).replace("{{xss}}", &payload).replace("{{token}}", token)
+}
+
+/// What the reflection oracle saw.
+#[derive(Debug, Clone, Default)]
+pub struct ReflectionInputs {
+    pub token: String,
+    pub status: Option<u16>,
+    pub content_type: Option<String>,
+    /// The token appears in the (decoded) response body.
+    pub token_in_body: bool,
+    /// The response body contains the payload exactly as sent (unencoded).
+    pub payload_in_body: bool,
+    /// Arguments the page passed to the binding.
+    pub binding_calls: Vec<String>,
+    /// Messages of JavaScript dialogs the page opened.
+    pub dialogs: Vec<String>,
+    pub blocked_requests: usize,
+    pub rendered: bool,
+}
+
+/// Cross-site scripting is proven only when script *ran* in a browser and
+/// handed back the unique token: through the binding, or in a dialog.
+/// Reflection alone (even unencoded) is never enough: CSP, the content type
+/// or the HTML context may stop it from running.
+pub fn reflection(i: &ReflectionInputs) -> Verdict {
+    let by_binding = i.binding_calls.iter().any(|c| c == &i.token);
+    let by_dialog = i.dialogs.iter().any(|d| d.contains(&i.token));
+    // The content type comes from the target: keep it short and printable.
+    let ct: String = match &i.content_type {
+        Some(c) => c.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(80).collect(),
+        None => "no content type".into(),
+    };
+    let mut reasons = Vec::new();
+    if by_binding || by_dialog {
+        reasons.push(format!(
+            "a headless browser rendering the recorded response ({}, {ct}) ran the injected script: it {} with the \
+             unique token {}",
+            status_text(i.status),
+            if by_binding { format!("called {XSS_BINDING}()") } else { "opened a dialog".into() },
+            i.token
+        ));
+        reasons.push(format!(
+            "rendered offline from the recorded response; {} other request(s) from the page were blocked",
+            i.blocked_requests
+        ));
+        return Verdict { proven: true, confidence: "high", reasons };
+    }
+    if !i.rendered {
+        reasons.push("the response could not be rendered".into());
+    } else if !i.token_in_body {
+        reasons.push(format!(
+            "the token {} is not in the response ({}, {ct}); nothing reflected",
+            i.token,
+            status_text(i.status)
+        ));
+    } else if !i.payload_in_body {
+        reasons.push(format!(
+            "the token is reflected but the payload is not intact (encoded or filtered); no script ran ({ct})"
+        ));
+    } else {
+        reasons.push(format!(
+            "the payload is reflected unencoded but did not run in the browser ({ct}); check the content type, \
+             Content-Security-Policy and the HTML context, or try a payload for that context with {{{{token}}}}"
+        ));
+    }
+    if !i.binding_calls.is_empty() || !i.dialogs.is_empty() {
+        reasons.push(format!(
+            "the page ran script without the token ({} binding call(s), {} dialog(s)); ignored",
+            i.binding_calls.len(),
+            i.dialogs.len()
+        ));
+    }
+    Verdict { proven: false, confidence: "low", reasons }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +400,51 @@ mod tests {
         let jitter = [130.0, 140.0, 125.0, 135.0, 132.0, 128.0];
         assert!(!timing(&base, &jitter, 500.0).0.proven, "significant but tiny");
         assert!(!timing(&base[..3], &slow[..3], 500.0).0.proven, "too few samples");
+    }
+
+    #[test]
+    fn xss_templates_fill_and_encode() {
+        let t = "abc123";
+        assert_eq!(xss_payload(t), "<img src=x onerror=pmProof('abc123')>");
+        assert_eq!(
+            fill_xss_template("GET /s?q={{xss_url}} HTTP/1.1", t),
+            "GET /s?q=%3Cimg%20src%3Dx%20onerror%3DpmProof%28%27abc123%27%29%3E HTTP/1.1"
+        );
+        assert_eq!(fill_xss_template("q={{xss}}", t), "q=<img src=x onerror=pmProof('abc123')>");
+        assert_eq!(fill_xss_template("\"><svg onload=alert('{{token}}')>", t), "\"><svg onload=alert('abc123')>");
+        assert_eq!(percent_encode("a-b_c.d~e f/é"), "a-b_c.d~e%20f%2F%C3%A9");
+    }
+
+    #[test]
+    fn reflection_needs_the_token_from_running_script() {
+        let base = ReflectionInputs {
+            token: "tok".into(),
+            status: Some(200),
+            content_type: Some("text/html".into()),
+            token_in_body: true,
+            payload_in_body: true,
+            rendered: true,
+            ..Default::default()
+        };
+        let ran = ReflectionInputs { binding_calls: vec!["tok".into()], ..base.clone() };
+        assert!(reflection(&ran).proven);
+        assert_eq!(reflection(&ran).confidence, "high");
+        let dialog = ReflectionInputs { dialogs: vec!["tok".into()], ..base.clone() };
+        assert!(reflection(&dialog).proven);
+
+        // Reflected but not run (CSP, text/plain, wrong context): not proven.
+        let v = reflection(&base);
+        assert!(!v.proven && v.reasons[0].contains("did not run"), "{v:?}");
+        // Encoded reflection.
+        let enc = ReflectionInputs { payload_in_body: false, ..base.clone() };
+        assert!(reflection(&enc).reasons[0].contains("encoded"));
+        // The page's own script calling the binding or alert() with other values.
+        let noise =
+            ReflectionInputs { binding_calls: vec!["other".into()], dialogs: vec!["hi".into()], ..base.clone() };
+        let v = reflection(&noise);
+        assert!(!v.proven && v.reasons.iter().any(|r| r.contains("without the token")), "{v:?}");
+        // A token prefix is not the token.
+        let prefix = ReflectionInputs { binding_calls: vec!["to".into()], ..base };
+        assert!(!reflection(&prefix).proven);
     }
 }

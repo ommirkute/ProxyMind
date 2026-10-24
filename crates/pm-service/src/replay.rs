@@ -210,17 +210,17 @@ impl Service {
         if !extra.is_null() {
             params["extra"] = extra;
         }
-        let summary = match identity {
+        let mut summary = match identity {
             Some(i) => format!("{} {} as {i}", out.method, out.url()),
             None => format!("{} {}", out.method, out.url()),
         };
-        let action = ActionRequest {
-            actor: actor.clone(),
-            action: action.into(),
-            tier: tier.unwrap_or_else(|| Tier::for_http_method(&out.method)),
-            target: Some(target),
-            summary,
-        };
+        // What the payload does can raise the tier, never lower it.
+        let (by_request, payload_reasons) = Tier::for_http_request(&out.raw);
+        let tier = tier.map_or(by_request, |t| t.max(by_request));
+        if !payload_reasons.is_empty() {
+            summary.push_str(&format!(" [payload: {}]", payload_reasons.join("; ")));
+        }
+        let action = ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
         match approval_id {
             Some(id) => self.run_approved(id, &params),
             None => self.authorize(action, &params),
@@ -228,8 +228,8 @@ impl Service {
     }
 
     /// Sends now (the caller has already passed the gate) and records the
-    /// exchange. Applies rate limits, secrets, identity credentials and the
-    /// DNS check.
+    /// exchange. Applies session rules (without an identity), rate limits,
+    /// secrets, identity credentials and the DNS check.
     pub(crate) async fn send_now(
         &self,
         actor: &Actor,
@@ -238,11 +238,30 @@ impl Service {
         fix_cl: bool,
         source: &str,
     ) -> Result<Sent> {
-        let _permit = self.acquire_slot(&out.endpoint.host).await?;
+        if identity.is_none()
+            && let Some(sent) = self.send_with_session(actor, out, fix_cl, source).await?
+        {
+            return Ok(sent);
+        }
         let mut wire = self.redactor.unredact(&out.raw);
         if let Some(id) = identity {
             wire = pm_identity::apply(&wire, &id.auth);
         }
+        self.transmit(actor, out, wire, identity, fix_cl, source).await
+    }
+
+    /// Sends `wire` (the bytes for `out`, secrets already filled in) and
+    /// records the exchange. Applies rate limits and the DNS check.
+    pub(crate) async fn transmit(
+        &self,
+        actor: &Actor,
+        out: &Outgoing,
+        mut wire: Vec<u8>,
+        identity: Option<&pm_identity::Identity>,
+        fix_cl: bool,
+        source: &str,
+    ) -> Result<Sent> {
+        let _permit = self.acquire_slot(&out.endpoint.host).await?;
         if fix_cl {
             wire = pm_http::fix_content_length(&wire);
         }
@@ -300,7 +319,7 @@ impl Service {
         let sent = self.send_now(actor, out, ident.as_ref(), fix_cl, source).await?;
         if let (Some(id), Some(resp)) = (&ident, &sent.response)
             && id.login.is_some()
-            && pm_identity::looks_logged_out(resp)
+            && id.looks_logged_out(resp)
         {
             notes.push(format!("{} looked logged out; logging in again", id.name));
             match self.identity_login(&id.name).await {

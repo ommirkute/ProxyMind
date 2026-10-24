@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ProxyMind: projects</title>
+<link rel="stylesheet" href="desktop.css">
+</head>
+<body>
+<h1>ProxyMind projects</h1>
+<p class="why" id="why" hidden></p>
+<section>
+  <h2>Recent</h2>
+  <ul id="recent" class="list"></ul>
+  <form id="open" class="row">
+    <input id="open-path" placeholder="/path/to/project.pmproj" aria-label="Project file" required>
+    <button>Open</button>
+  </form>
+</section>
+<section>
+  <h2>New project</h2>
+  <p class="muted">A project is one file holding the traffic, findings and audit log of one engagement. Its rules of engagement decide what ProxyMind may send; you can refine them later on the Engagement page.</p>
+  <form id="create">
+    <label>Engagement name <input id="name" placeholder="Acme web app, Q4" required></label>
+    <label>In scope (one URL per line) <textarea id="scope" rows="3" placeholder="https://app.example.com/" required></textarea></label>
+    <label>Project file <input id="path" required></label>
+    <button>Create and open</button>
+  </form>
+</section>
+<p class="error" id="error" role="alert" hidden></p>
+<script src="setup.js"></script>
+</body>
+</html>

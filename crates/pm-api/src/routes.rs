@@ -72,12 +72,46 @@ fn ok<T: serde::Serialize>(v: T) -> ApiResult {
 pub fn api() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
+        .route("/roe", get(roe_get).put(roe_put))
+        .route("/setup", get(setup))
+        .route("/ca.pem", get(ca_pem))
+        .route("/browser/open", post(browser_open))
+        .route("/roe/check", post(roe_check))
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
         .route("/exchanges/{id}", get(exchange))
+        .route("/search", post(search))
+        .route("/sitemap", get(sitemap))
         .route("/exchanges/{id}/ws", get(ws_messages))
+        .route("/exchanges/{id}/annotation", axum::routing::put(annotate))
+        .route("/ws/history", get(ws_history))
+        .route(
+            "/ui/{key}",
+            get(ui_get).put(ui_put).layer(axum::extract::DefaultBodyLimit::max(pm_service::UI_STATE_MAX + 1024)),
+        )
+        .route("/exchanges/{id}/curl", get(exchange_curl))
+        .route(
+            "/import/har",
+            post(import_har).layer(axum::extract::DefaultBodyLimit::max(pm_service::MAX_IMPORT_BYTES + 1024)),
+        )
+        .route("/export/har", post(export_har))
+        .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
+        .route("/intruder", post(intruder))
+        .route("/intruder/attacks", get(attacks_list).post(attack_start))
+        .route("/intruder/attacks/{id}", get(attack_status))
+        .route("/intruder/attacks/{id}/{action}", post(attack_control))
+        .route("/crawl", post(crawl))
+        .route("/discover", post(discover))
+        .route("/tools/decode", post(tools_decode))
+        .route("/tools/compare", post(tools_compare))
+        .route("/tools/sequencer", post(tools_sequencer))
+        .route("/tools/sequencer/analyze", post(tools_sequencer_analyze))
+        .route("/openapi", get(openapi_get))
+        .route("/openapi/import", post(openapi_import))
+        .route("/graphql", get(graphql_get))
+        .route("/graphql/import", post(graphql_import))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
@@ -89,6 +123,11 @@ pub fn api() -> Router<AppState> {
         .route("/authz/candidates", get(authz_candidates))
         .route("/model", get(model))
         .route("/coverage", get(coverage))
+        .route("/scan/issues", get(scan_issues))
+        .route("/scan/active", post(scan_active))
+        .route("/scan/tasks", get(scan_tasks_list).post(scan_task_start))
+        .route("/scan/tasks/{id}", get(scan_task_status))
+        .route("/scan/tasks/{id}/cancel", post(scan_task_cancel))
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
@@ -105,6 +144,11 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
+        .route("/proxy/listeners", get(listeners_get).put(listeners_put))
+        .route("/history/recording", get(recording_get).put(recording_put))
+        .route("/session", get(session_get).put(session_put))
+        .route("/session/jar", get(session_jar).delete(session_jar_clear))
+        .route("/session/macros/{name}/run", post(session_macro_run))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/chats/{id}", get(assistant_chat))
@@ -157,15 +201,55 @@ async fn exchanges(State(st): State<AppState>, Query(f): Query<HistoryFilter>) -
     ok(st.service.history_search(&st.actor, &f)?)
 }
 
-async fn exchange(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+#[derive(serde::Deserialize)]
+struct BytesQuery {
+    /// Also return the exact bytes, base64-encoded (for hex views).
+    #[serde(default)]
+    bytes: Option<u8>,
+    /// Cut request and response text to this many bytes (`*_truncated`
+    /// then gives the full length). Large bodies stay fast in a browser.
+    #[serde(default)]
+    max: Option<usize>,
+}
+
+/// Text of at most `max` bytes (on a character boundary) and, if cut, the full length.
+fn capped(raw: &[u8], max: Option<usize>) -> (String, Option<usize>) {
+    match max {
+        Some(m) if raw.len() > m => {
+            let mut s = String::from_utf8_lossy(&raw[..m]).into_owned();
+            if s.ends_with('\u{fffd}') {
+                s.pop(); // a character cut in half
+            }
+            (s, Some(raw.len()))
+        }
+        _ => (String::from_utf8_lossy(raw).into_owned(), None),
+    }
+}
+
+async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
     let ex = st.service.exchange_raw(id)?;
     let view = st.service.exchange_get(&st.actor, id, View::Full, 6000)?;
-    ok(json!({
+    let max = q.max.map(|m| m.max(1024));
+    let (request, request_truncated) = capped(&ex.request, max);
+    let response = ex.response.as_deref().map(|r| capped(r, max));
+    let mut v = json!({
         "summary": ex.summary,
-        "request": String::from_utf8_lossy(&ex.request),
-        "response": ex.response.as_deref().map(String::from_utf8_lossy),
+        "request": request,
+        "response": response.as_ref().map(|r| &r.0),
         "view": view,
-    }))
+    });
+    if let Some(n) = request_truncated {
+        v["request_truncated"] = json!(n);
+    }
+    if let Some(n) = response.and_then(|r| r.1) {
+        v["response_truncated"] = json!(n);
+    }
+    if q.bytes == Some(1) {
+        let cut = |b: &[u8]| pm_core::base64(&b[..max.map_or(b.len(), |m| m.min(b.len()))]);
+        v["request_b64"] = json!(cut(&ex.request));
+        v["response_b64"] = json!(ex.response.as_deref().map(cut));
+    }
+    Ok(Json(v))
 }
 
 async fn replay(State(st): State<AppState>, Json(r): Json<ReplayRequest>) -> ApiResult {
@@ -237,6 +321,35 @@ struct CoverageQuery {
     all: Option<bool>,
 }
 
+async fn scan_task_start(State(st): State<AppState>, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
+    ok(st.service.scan_task_start(&st.actor, r)?)
+}
+
+async fn scan_tasks_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.scan_task_list(&st.actor))
+}
+
+async fn scan_task_status(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_status(&st.actor, &id)?)
+}
+
+async fn scan_task_cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_cancel(&st.actor, &id)?)
+}
+
+async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {
+    ok(st.service.scan_active(&st.actor, r).await?)
+}
+
+async fn scan_issues(State(st): State<AppState>, Query(f): Query<pm_service::ScanFilter>) -> ApiResult {
+    // Plugins run as processes; keep them off the async workers.
+    let (service, actor) = (st.service.clone(), st.actor.clone());
+    let issues = tokio::task::spawn_blocking(move || service.scan_passive(&actor, &f))
+        .await
+        .map_err(|e| pm_service::ServiceError::Invalid(format!("scan failed: {e}")))??;
+    ok(issues)
+}
+
 async fn coverage(State(st): State<AppState>, Query(q): Query<CoverageQuery>) -> ApiResult {
     ok(st.service.coverage(!q.all.unwrap_or(false))?)
 }
@@ -294,9 +407,26 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
     }
 }
 
-async fn report(State(st): State<AppState>) -> Result<Response, ApiError> {
-    let md = st.service.report_markdown()?;
-    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+#[derive(serde::Deserialize)]
+struct ReportQuery {
+    format: Option<String>,
+}
+
+async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
+    let (ct, body) = match q.format.as_deref().unwrap_or("md") {
+        "md" | "markdown" => ("text/markdown; charset=utf-8", st.service.report_markdown()?),
+        "json" => ("application/json", st.service.report_json()?),
+        "sarif" => ("application/sarif+json", st.service.report_sarif()?),
+        // Served as a download only, and with its own CSP: it contains target content.
+        "html" => ("text/html; charset=utf-8", st.service.report_html()?),
+        other => {
+            return Err(pm_service::ServiceError::Invalid(format!(
+                "unknown format {other}; use md, json, sarif or html"
+            ))
+            .into());
+        }
+    };
+    Ok(([(header::CONTENT_TYPE, ct), (header::CONTENT_DISPOSITION, "attachment")], body).into_response())
 }
 
 async fn intercept_state(State(st): State<AppState>) -> ApiResult {
@@ -332,6 +462,207 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
 struct WsQuery {
     after_id: Option<i64>,
     limit: Option<usize>,
+}
+
+async fn search(State(st): State<AppState>, Json(r): Json<pm_service::SearchRequest>) -> ApiResult {
+    ok(st.service.history_search_text(&st.actor, &r)?)
+}
+
+#[derive(serde::Deserialize)]
+struct SiteQuery {
+    host: Option<String>,
+}
+
+async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiResult {
+    ok(st.service.site_map(&st.actor, q.host.as_deref().filter(|h| !h.is_empty()))?)
+}
+
+async fn discover(State(st): State<AppState>, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
+    ok(st.service.discover(&st.actor, r).await?)
+}
+
+async fn setup(State(st): State<AppState>) -> ApiResult {
+    ok(json!({
+        "proxy": st.setup.proxy,
+        "ca_available": st.setup.ca_pem.is_some(),
+        "ca_sha256": st.setup.ca_fingerprint(),
+        "browser_available": st.service.browser_available(),
+    }))
+}
+
+async fn browser_open(State(st): State<AppState>, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
+    ok(st.service.browser_open(&st.actor, r).await?)
+}
+
+/// The CA certificate, as a download (it is public, but stays behind the API token like everything here).
+async fn ca_pem(State(st): State<AppState>) -> Result<Response, ApiError> {
+    let pem =
+        st.setup.ca_pem.clone().ok_or_else(|| {
+            pm_service::ServiceError::NotFound("no CA here: this process doesn't run the proxy".into())
+        })?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind-ca.pem\""),
+        ],
+        pem,
+    )
+        .into_response())
+}
+
+async fn roe_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.roe_get()?)
+}
+
+#[derive(serde::Deserialize)]
+struct RoeBody {
+    text: String,
+}
+
+async fn roe_put(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
+    ok(st.service.roe_set(&st.actor, &b.text)?)
+}
+
+async fn roe_check(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
+    ok(st.service.roe_check(&b.text)?)
+}
+
+#[derive(serde::Deserialize)]
+struct AnnotationBody {
+    #[serde(default)]
+    highlight: Option<String>,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+async fn annotate(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AnnotationBody>) -> ApiResult {
+    ok(st.service.exchange_annotate(&st.actor, id, b.highlight.as_deref(), b.comment.as_deref())?)
+}
+
+#[derive(serde::Deserialize)]
+struct WsHistoryQuery {
+    host: Option<String>,
+    before_id: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn ws_history(State(st): State<AppState>, Query(q): Query<WsHistoryQuery>) -> ApiResult {
+    let host = q.host.as_deref().filter(|h| !h.is_empty());
+    ok(st.service.ws_history(&st.actor, host, q.before_id, q.limit.unwrap_or(500), 2000)?)
+}
+
+async fn ui_get(State(st): State<AppState>, Path(key): Path<String>) -> ApiResult {
+    ok(st.service.ui_state_get(&key)?)
+}
+
+async fn ui_put(State(st): State<AppState>, Path(key): Path<String>, Json(v): Json<Value>) -> ApiResult {
+    st.service.ui_state_put(&st.actor, &key, &v)?;
+    ok(json!({ "saved": key }))
+}
+
+async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(json!({ "command": st.service.exchange_curl(&st.actor, id)? }))
+}
+
+async fn import_har(State(st): State<AppState>, Json(r): Json<pm_service::ImportRequest>) -> ApiResult {
+    ok(st.service.traffic_import_har(&st.actor, &r)?)
+}
+
+/// A HAR download: it holds target content, so it is never rendered here.
+async fn export_har(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::ExportRequest>,
+) -> Result<Response, ApiError> {
+    let har = st.service.traffic_export_har(&st.actor, &r)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind.har\""),
+        ],
+        har.to_string(),
+    )
+        .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct CurlBody {
+    command: String,
+}
+
+async fn tools_curl(State(st): State<AppState>, Json(r): Json<CurlBody>) -> ApiResult {
+    ok(st.service.curl_parse(&r.command)?)
+}
+
+async fn graphql_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.graphql_get()?)
+}
+
+async fn graphql_import(State(st): State<AppState>, Json(r): Json<pm_service::GraphQlImportRequest>) -> ApiResult {
+    ok(st.service.graphql_import(&st.actor, r).await?)
+}
+
+async fn openapi_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.openapi_get()?)
+}
+
+async fn openapi_import(State(st): State<AppState>, Json(r): Json<pm_service::OpenApiImportRequest>) -> ApiResult {
+    ok(st.service.openapi_import(&st.actor, r).await?)
+}
+
+async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::DecodeRequest>) -> ApiResult {
+    ok(st.service.decode(&r)?)
+}
+
+#[derive(serde::Deserialize)]
+struct CompareBody {
+    a: i64,
+    b: i64,
+}
+
+async fn tools_compare(State(st): State<AppState>, Json(r): Json<CompareBody>) -> ApiResult {
+    ok(st.service.compare_exchanges(&st.actor, r.a, r.b)?)
+}
+
+async fn tools_sequencer(State(st): State<AppState>, Json(r): Json<pm_service::SequencerRequest>) -> ApiResult {
+    ok(st.service.sequencer_run(&st.actor, r).await?)
+}
+
+#[derive(serde::Deserialize)]
+struct TokensBody {
+    tokens: Vec<String>,
+}
+
+async fn tools_sequencer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
+    ok(st.service.sequencer_analyze(&r.tokens)?)
+}
+
+async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {
+    ok(st.service.crawl(&st.actor, r).await?)
+}
+
+async fn intruder(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
+    ok(st.service.intruder_run(&st.actor, r).await?)
+}
+
+async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
+    ok(st.service.intruder_start(&st.actor, r)?)
+}
+
+async fn attacks_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.intruder_list(&st.actor))
+}
+
+#[derive(serde::Deserialize)]
+struct FromQuery {
+    from: Option<usize>,
+}
+
+async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FromQuery>) -> ApiResult {
+    ok(st.service.intruder_status(&st.actor, &id, q.from.unwrap_or(0))?)
+}
+
+async fn attack_control(State(st): State<AppState>, Path((id, action)): Path<(String, String)>) -> ApiResult {
+    ok(json!({ "status": st.service.intruder_control(&st.actor, &id, &action)? }))
 }
 
 async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {
@@ -386,6 +717,48 @@ async fn network_get(State(st): State<AppState>) -> ApiResult {
 
 async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
     ok(st.service.network_set(&st.actor, cfg)?)
+}
+
+async fn recording_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.recording_get()?)
+}
+
+async fn recording_put(State(st): State<AppState>, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
+    ok(st.service.recording_set(&st.actor, r)?)
+}
+
+async fn session_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.session_get(&st.actor)?)
+}
+
+async fn session_put(State(st): State<AppState>, Json(cfg): Json<pm_service::SessionConfig>) -> ApiResult {
+    ok(st.service.session_set(&st.actor, cfg)?)
+}
+
+async fn session_jar(State(st): State<AppState>) -> ApiResult {
+    ok(json!({ "cookies": st.service.session_jar(&st.actor)? }))
+}
+
+async fn session_jar_clear(State(st): State<AppState>) -> ApiResult {
+    st.service.session_jar_clear(&st.actor)?;
+    ok(json!({ "cleared": true }))
+}
+
+async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.session_macro_run(&st.actor, &name).await?)
+}
+
+#[derive(Deserialize)]
+struct ListenersBody {
+    listeners: Vec<pm_service::pm_proxy::ListenerConfig>,
+}
+
+async fn listeners_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.listeners_get()?)
+}
+
+async fn listeners_put(State(st): State<AppState>, Json(b): Json<ListenersBody>) -> ApiResult {
+    ok(st.service.listeners_set(&st.actor, b.listeners)?)
 }
 
 #[derive(Deserialize)]

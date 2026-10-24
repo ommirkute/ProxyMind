@@ -92,6 +92,64 @@ impl Service {
     }
 }
 
+/// A message in the history across connections.
+#[derive(Debug, Clone, Serialize)]
+pub struct WsHistoryItem {
+    pub exchange_id: i64,
+    pub host: String,
+    pub path: String,
+    #[serde(flatten)]
+    pub message: WsMessageView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WsHistoryPage {
+    pub messages: Vec<WsHistoryItem>,
+    /// Pass as `before_id` for older messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before_id: Option<i64>,
+}
+
+impl Service {
+    /// WebSocket messages across every connection, newest first, with a
+    /// preview of `max_chars` (redacted and marked untrusted for agents).
+    pub fn ws_history(
+        &self,
+        actor: &Actor,
+        host: Option<&str>,
+        before_id: Option<i64>,
+        limit: usize,
+        max_chars: usize,
+    ) -> Result<WsHistoryPage> {
+        let limit = limit.clamp(1, 1000);
+        let rows = self.store.lock().ws_history(host, before_id, limit)?;
+        let agent = actor.kind != pm_policy::ActorKind::Human;
+        let redactor = self.redactor_for(actor);
+        let next_before_id = (rows.len() == limit).then(|| rows.last().map(|r| r.message.id)).flatten();
+        let messages = rows
+            .into_iter()
+            .map(|r| {
+                let mut v = view(&r.message);
+                if let Some(t) = v.text.as_mut() {
+                    if let Some(red) = redactor {
+                        *t = red.redact(t);
+                    }
+                    if t.chars().count() > max_chars {
+                        *t = t.chars().take(max_chars).collect();
+                        v.truncated = true;
+                    }
+                    if agent {
+                        *t = wrap_untrusted(t);
+                    }
+                }
+                let path = redactor.map_or(r.path.clone(), |red| red.redact(&r.path));
+                WsHistoryItem { exchange_id: r.message.exchange_id, host: r.host, path, message: v }
+            })
+            .collect();
+        Ok(WsHistoryPage { messages, next_before_id })
+    }
+}
+
 fn view(r: &WsMessageRow) -> WsMessageView {
     let kind = ws::opcode_name(r.opcode);
     let (text, hex) = match r.opcode {

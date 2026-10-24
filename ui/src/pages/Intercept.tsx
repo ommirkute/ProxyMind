@@ -59,6 +59,16 @@ export default function Intercept() {
   const held = state.data?.held ?? [];
   const current = held.find((h) => h.id === selected) ?? held[0];
 
+  // The live counter only says how many are held: a message forwarded and a
+  // new one arriving between two updates leave it unchanged, so poll while on.
+  const enabled = state.data?.settings.enabled ?? false;
+  useEffect(() => {
+    if (!enabled) return;
+    const t = setInterval(() => state.reload(), 1500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled]);
+
   // Load the selected message into the editor when it changes.
   useEffect(() => {
     if (current) {

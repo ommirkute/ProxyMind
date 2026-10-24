@@ -88,6 +88,20 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
+| `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
+| `scan_issues` | Passive scan of recorded traffic (sends nothing): security headers, cookies, CORS, version disclosure, database errors, secrets, directory listings, plus installed passive-check plugins (`<plugin>/<check>`); grouped, most severe first. Leads to test, not findings |
+| `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
+| `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies; secrets are replaced before matching, snippets are untrusted |
+| `site_map` | Recorded traffic as a tree per origin with counts, methods, statuses and in-scope flags |
+| `graphql_import` | Read a GraphQL schema (introspection JSON, a recorded introspection response, or `fetch: true` through the gate) into queries, mutations and subscriptions with example documents, variables and requests for `replay_send` |
+| `discover_content` | Forced browsing: GET common hidden paths (or your words, with extensions) under a folder, in scope only, skipping log-out/delete-looking paths; soft 404s are learned and filtered; one approval per run |
+| `import_har` | Add the exchanges of a HAR file (text) to history as `source: import`; nothing is sent, bodies are rebuilt decoded |
+| `curl_parse` | Read a curl command into a raw request and url for `replay_send`; nothing is sent, unsupported options come back as warnings |
+| `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |
+| `compare_exchanges` | Semantic response similarity and line diffs of two recorded exchanges |
+| `sequencer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
+| `crawl` | Discover pages from a URL: GET only, in scope only, skips links that log out or delete, reads robots.txt and sitemaps; pages feed history and the app model; forms are listed, never submitted |
+| `intruder_run` | Fuzz a request: positions marked `§like this§`, payload sets (lists, number ranges, built-in lists), four attack modes; returns per-request status/length/time/grep/reflection and the anomalies. One approval covers the whole attack |
 | `race_send` | Race-condition test: send copies of a request so they arrive together (HTTP/2 single-packet or last-byte sync); responses grouped |
 | `ws_send` | Open a new WebSocket like a recorded one, send messages and get every message both ways (sending needs approval by default) |
 | `replay_send` | Send a request (new, resent or edited) through the policy gate. Write `HTTP/2` in the request line to send it over HTTP/2 |
@@ -101,7 +115,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `hypothesis_create` / `hypothesis_update` / `hypothesis_list` | The shared ledger of what is being tested and what was ruled out |
 | `coverage` | Each operation × relevant vulnerability class, untested and high-priority first |
 | `finding_create` / `finding_update` / `finding_list` | Record findings with evidence; agents can't mark them proven or confirmed |
-| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing` or `oast` |
+| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast` or `reflection` |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
@@ -114,9 +128,12 @@ A finding only becomes **proven** when ProxyMind checks it itself:
 |---|---|---|
 | `differential_authz` | IDOR/BOLA, missing role checks | the owner's request works twice, an anonymous request is refused, and a different, not more privileged identity gets the same data (noise ignored; owner details such as emails raise confidence) |
 | `timing` | time-based injection | payload responses are slower than interleaved baseline responses with p < 0.01 (Mann-Whitney U) *and* by at least `min_effect_ms` |
-| `oast` | SSRF, blind injection | the target calls back with a unique token. Run `proxymind oast-server`, or start the MCP server with `--oast-listen 127.0.0.1:8085` (use a public URL the target can reach) |
+| `oast` | SSRF, blind injection | the target calls back with a unique token: an HTTP request to `{{oast}}`, or a DNS lookup of `{{oast_dns}}` (`<token>.<your domain>`). Run `proxymind oast-server` (add `--dns 0.0.0.0:53 --domain oast.example.com` and an NS record delegating that domain to it for DNS), or start the MCP server with `--oast-listen 127.0.0.1:8085` (use a public URL the target can reach) |
+| `reflection` | reflected XSS | a headless browser rendering the **recorded** response runs the payload and hands back a fresh token (through `pmProof()` or a dialog). Put `{{xss_url}}` (percent-encoded default payload), `{{xss}}` (unencoded) or `{{token}}` (inside your own payload, e.g. `<svg onload=alert('{{token}}')>`) in `raw`. Rendering is offline: the page's other requests are all blocked, and the response's own CSP applies. Needs Chromium or Chrome (found automatically, or set `PROXYMIND_CHROMIUM`; `proxymind proof browser` shows which one is used) |
 
-Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`) count as intrusive, so agents need approval by default.
+Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a retest. Payload oracles (`timing`, `oast`, `reflection`) count as intrusive, so agents need approval by default.
+
+**Tiers follow the payload, not just the method.** A GET whose query or body carries destructive SQL (`DROP TABLE`, `DELETE FROM`, `INTO OUTFILE`), destructive OS commands (`rm -rf`, `shutdown`) or a delete mutation is *destructive* (refused for agents by default); command-injection probes, SQL writes and bulk actions are *intrusive*. Encoding tricks (double percent-encoding, comments, JSON escapes) are undone first. The approval request says what was found.
 
 ## What the agent sees
 

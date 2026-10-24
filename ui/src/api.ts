@@ -36,7 +36,18 @@ export const api = {
   post: <T>(path: string, body?: unknown) => call<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body: unknown) => call<T>("PATCH", path, body),
   put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
+  del: <T>(path: string) => call<T>("DELETE", path),
 };
+
+/** Saves text as a file in the browser (for downloads that need a POST). */
+export function saveText(name: string, text: string, type = "application/json") {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export function qs(params: Record<string, string | number | boolean | undefined | null>): string {
   const p = new URLSearchParams();
@@ -84,9 +95,13 @@ export interface ExchangeSummary {
   error: string | null;
   identity?: string;
   hypothesis_id?: number;
+  highlight?: string;
+  comment?: string;
 }
 
 export interface ExchangePage {
+  /** With a query: how many exchanges were looked at. */
+  scanned?: number;
   exchanges: ExchangeSummary[];
   next_before_id?: number;
 }
@@ -105,6 +120,11 @@ export interface ExchangeDetail {
   summary: ExchangeSummary;
   request: string;
   response: string | null;
+  request_b64?: string;
+  response_b64?: string | null;
+  /** Full length when the text was cut (`?max=`). */
+  request_truncated?: number;
+  response_truncated?: number;
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };
@@ -273,3 +293,18 @@ export const originOf = (e: ExchangeSummary) => {
   const host = e.host.includes(":") ? `[${e.host}]` : e.host;
   return `${e.scheme}://${host}${e.port === def ? "" : `:${e.port}`}`;
 };
+
+export interface BrowserOpened {
+  url: string;
+  proxy: string;
+  pid: number | null;
+  profile: string;
+}
+
+/** Opens ProxyMind's browser window (through the proxy, trusting its CA). */
+export const openBrowser = (url?: string) => api.post<BrowserOpened>("/browser/open", url ? { url } : {});
+
+/** Shows a short message in the corner (the app shell listens). */
+export function toast(message: string, kind: "ok" | "bad" = "ok") {
+  window.dispatchEvent(new CustomEvent("pm-toast", { detail: { message, kind } }));
+}

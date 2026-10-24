@@ -1,0 +1,17 @@
+[package]
+name = "pm-vault"
+description = "Passphrase encryption for project files (sealed .pmlock archives)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+ring = "0.17.14"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

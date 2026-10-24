@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Built on their own: the desktop app needs WebKitGTK, fuzzing needs nightly.
+exclude = ["desktop", "fuzz"]
 
 [workspace.package]
 version = "0.0.1"

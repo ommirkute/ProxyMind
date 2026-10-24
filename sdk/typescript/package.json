@@ -1,0 +1,20 @@
+{
+  "name": "@proxymind/client",
+  "version": "0.1.0",
+  "description": "TypeScript client for the ProxyMind REST API (no dependencies)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test tests/client.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "typescript": "5.6.3"
+  }
+}

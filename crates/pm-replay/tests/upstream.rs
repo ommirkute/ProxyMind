@@ -172,7 +172,7 @@ async fn http_proxy_plain_and_tls() {
         password: "pass".into(),
         ..Default::default()
     };
-    let s = sender(NetConfig { upstream: Some(up.clone()), client_certs: vec![] });
+    let s = sender(NetConfig { upstream: Some(up.clone()), client_certs: vec![], ..Default::default() });
     let r = s.send(&Endpoint::new("http", "127.0.0.1", echo), GET, "GET", None).await.unwrap();
     assert_eq!(body(&r), format!("GET http://127.0.0.1:{echo}/path?x=1 HTTP/1.1"), "absolute form via the proxy");
 
@@ -194,8 +194,11 @@ async fn http_proxy_plain_and_tls() {
     assert!(seen.lock().unwrap().iter().any(|h| h.starts_with(&format!("CONNECT localhost:{tls_port} HTTP/1.1"))));
 
     // Wrong password: the proxy's refusal is reported.
-    let bad =
-        sender(NetConfig { upstream: Some(UpstreamProxy { password: "nope".into(), ..up }), client_certs: vec![] });
+    let bad = sender(NetConfig {
+        upstream: Some(UpstreamProxy { password: "nope".into(), ..up }),
+        client_certs: vec![],
+        ..Default::default()
+    });
     let e = bad.send(&Endpoint::new("https", "localhost", tls_port), GET, "GET", None).await.err().unwrap();
     assert!(format!("{e:#}").contains("407"), "{e:#}");
 }
@@ -212,7 +215,7 @@ async fn socks5_with_login_local_or_remote_dns_and_bypass() {
         password: "s3cret".into(),
         ..Default::default()
     };
-    let s = sender(NetConfig { upstream: Some(up.clone()), client_certs: vec![] });
+    let s = sender(NetConfig { upstream: Some(up.clone()), client_certs: vec![], ..Default::default() });
     let r = s.send(&Endpoint::new("http", "localhost", echo), GET, "GET", None).await.unwrap();
     assert_eq!(body(&r), "GET /path?x=1 HTTP/1.1", "request bytes unchanged through SOCKS");
     let tried = seen.lock().unwrap().clone();
@@ -222,15 +225,18 @@ async fn socks5_with_login_local_or_remote_dns_and_bypass() {
     );
     let before = tried.len();
 
-    let remote =
-        sender(NetConfig { upstream: Some(UpstreamProxy { remote_dns: true, ..up.clone() }), client_certs: vec![] });
+    let remote = sender(NetConfig {
+        upstream: Some(UpstreamProxy { remote_dns: true, ..up.clone() }),
+        client_certs: vec![],
+        ..Default::default()
+    });
     remote.send(&Endpoint::new("http", "localhost", echo), GET, "GET", None).await.unwrap();
     assert_eq!(seen.lock().unwrap()[before], format!("localhost:{echo}"), "the proxy resolves the name");
 
     // Bypassed hosts connect directly (the proxy port is wrong on purpose).
     let direct = sender(NetConfig {
         upstream: Some(UpstreamProxy { port: 1, bypass: vec!["127.0.0.1".into()], ..up }),
-        client_certs: vec![],
+        ..Default::default()
     });
     direct.send(&Endpoint::new("http", "127.0.0.1", echo), GET, "GET", None).await.unwrap();
     assert_eq!(seen.lock().unwrap().len(), before + 1);
@@ -242,7 +248,7 @@ async fn address_checks_still_apply_through_a_proxy() {
     let (proxy, seen) = http_proxy("Basic dXNlcjpwYXNz").await;
     let s = sender(NetConfig {
         upstream: Some(UpstreamProxy { host: "127.0.0.1".into(), port: proxy, ..Default::default() }),
-        client_certs: vec![],
+        ..Default::default()
     });
     let deny = |_: &[IpAddr]| -> Result<(), String> { Err("loopback is denied".into()) };
     let e = s.send(&Endpoint::new("http", "127.0.0.1", echo), GET, "GET", Some(&deny)).await.err().unwrap();
@@ -306,8 +312,8 @@ async fn client_certificates_for_mutual_tls() {
         cert_file: dir.join("client.pem"),
         key_file: dir.join("client.key"),
     };
-    let other = sender(NetConfig { upstream: None, client_certs: vec![cert("*.example.com")] });
+    let other = sender(NetConfig { upstream: None, client_certs: vec![cert("*.example.com")], ..Default::default() });
     assert!(other.send(&ep, GET, "GET", None).await.is_err(), "certificate for another host isn't sent");
-    let s = sender(NetConfig { upstream: None, client_certs: vec![cert("localhost")] });
+    let s = sender(NetConfig { upstream: None, client_certs: vec![cert("localhost")], ..Default::default() });
     assert_eq!(body(&s.send(&ep, GET, "GET", None).await.unwrap()), "mTLS");
 }

@@ -346,6 +346,35 @@ pub struct ExchangeSummary {
     pub identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hypothesis_id: Option<i64>,
+    /// Row colour set by a person: red, orange, yellow, green, blue, purple, gray.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// The columns the site map needs.
+#[derive(Debug, Clone)]
+pub struct SiteRow {
+    pub id: i64,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub method: String,
+    pub path: String,
+    pub status: Option<u16>,
+}
+
+/// Row colours for [`Store::annotate`].
+pub const HIGHLIGHTS: &[&str] = &["red", "orange", "yellow", "green", "blue", "purple", "gray"];
+
+/// A WebSocket message with its connection's target, for the history across connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WsHistoryRow {
+    #[serde(flatten)]
+    pub message: WsMessageRow,
+    pub host: String,
+    pub path: String,
 }
 
 /// A full exchange including the raw bytes.
@@ -380,14 +409,43 @@ pub struct HistoryFilter {
     pub before_id: Option<i64>,
     /// Maximum rows (default 50, max 500).
     pub limit: Option<usize>,
+    /// Status classes to show, e.g. "2,3" for 2xx and 3xx ("0" means no response).
+    pub status_class: Option<String>,
+    /// File extensions to hide, comma-separated, e.g. "png,jpg,css,js".
+    pub hide_ext: Option<String>,
+    /// Only rows with a highlight or a comment.
+    pub annotated: Option<bool>,
+    /// Only targets in the rules of engagement (applied by the service).
+    pub in_scope: Option<bool>,
+    /// Host, path or comment contains this text (case-insensitive).
+    pub text: Option<String>,
+    /// A history query (`pm_tools::hql`), applied by the service.
+    pub q: Option<String>,
 }
 
 pub struct Store {
     conn: Connection,
 }
 
+/// The highlight stored in an exchange's tags (`["highlight:red"]`).
+fn highlight_of(tags: &str) -> Option<String> {
+    let v: Vec<String> = serde_json::from_str(tags).ok()?;
+    v.iter().find_map(|t| t.strip_prefix("highlight:").map(str::to_string))
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        // A sealed project (pm-vault) must be unlocked first.
+        let mut head = [0u8; 8];
+        if std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok()
+            && &head == b"PMLOCK1\0"
+        {
+            anyhow::bail!(
+                "{} is a locked project; run `proxymind project unlock {}` first",
+                path.display(),
+                path.display()
+            );
+        }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
     }
@@ -414,7 +472,7 @@ impl Store {
             anyhow::bail!("project was created by a newer ProxyMind (schema {version})");
         }
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
-            let tx = self.conn.transaction()?;
+            let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", (i + 1) as i64)?;
             tx.commit()?;
@@ -442,7 +500,10 @@ impl Store {
     }
 
     pub fn insert_exchange(&mut self, ex: &NewExchange) -> Result<i64> {
-        let tx = self.conn.transaction()?;
+        // IMMEDIATE takes the write lock up front (waiting on busy_timeout). A
+        // deferred one reads first and fails at once (SQLITE_BUSY_SNAPSHOT)
+        // if another connection commits in between, losing the exchange.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let req_hash = Self::put_blob(&tx, &ex.request)?;
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
         tx.execute(
@@ -475,7 +536,7 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error, identity, hypothesis_id";
+                                        status, req_len, resp_len, error, identity, hypothesis_id, tags, notes";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -495,6 +556,8 @@ impl Store {
             error: r.get(13)?,
             identity: r.get(14)?,
             hypothesis_id: r.get(15)?,
+            highlight: highlight_of(&r.get::<_, String>(16)?),
+            comment: r.get::<_, Option<String>>(17)?.filter(|c| !c.is_empty()),
         })
     }
 
@@ -511,39 +574,144 @@ impl Store {
 
     /// Searches history, newest first.
     pub fn search_exchanges(&self, f: &HistoryFilter) -> Result<Vec<ExchangeSummary>> {
-        let sql = format!(
-            "SELECT {} FROM exchanges WHERE
-                (?1 IS NULL OR instr(lower(host), lower(?1)) > 0) AND
-                (?2 IS NULL OR instr(lower(path), lower(?2)) > 0) AND
-                (?3 IS NULL OR upper(method) = upper(?3)) AND
-                (?4 IS NULL OR status = ?4) AND
-                (?5 IS NULL OR source = ?5) AND
-                (?6 IS NULL OR actor_id = ?6) AND
-                (?7 IS NULL OR id > ?7) AND
-                (?8 IS NULL OR id < ?8) AND
-                (?10 IS NULL OR hypothesis_id = ?10) AND
-                (?11 IS NULL OR identity = ?11)
-             ORDER BY id DESC LIMIT ?9",
-            Self::SUMMARY_COLS
-        );
+        use rusqlite::types::Value as V;
+        let mut conds: Vec<String> = Vec::new();
+        let mut args: Vec<V> = Vec::new();
+        // `@` marks where the value goes (SQL text may contain `?` itself).
+        let mut add = |cond: &str, v: V| {
+            args.push(v);
+            conds.push(cond.replace('@', &format!("?{}", args.len())));
+        };
+        let text = |s: &Option<String>| s.as_ref().filter(|x| !x.is_empty()).map(|x| V::Text(x.clone()));
+        if let Some(v) = text(&f.host) {
+            add("instr(lower(host), lower(@)) > 0", v);
+        }
+        if let Some(v) = text(&f.path) {
+            add("instr(lower(path), lower(@)) > 0", v);
+        }
+        if let Some(v) = text(&f.method) {
+            add("upper(method) = upper(@)", v);
+        }
+        if let Some(v) = f.status {
+            add("status = @", V::Integer(i64::from(v)));
+        }
+        if let Some(v) = text(&f.source) {
+            add("source = @", v);
+        }
+        if let Some(v) = text(&f.actor) {
+            add("actor_id = @", v);
+        }
+        if let Some(v) = f.after_id {
+            add("id > @", V::Integer(v));
+        }
+        if let Some(v) = f.before_id {
+            add("id < @", V::Integer(v));
+        }
+        if let Some(v) = f.hypothesis_id {
+            add("hypothesis_id = @", V::Integer(v));
+        }
+        if let Some(v) = text(&f.identity) {
+            add("identity = @", v);
+        }
+        if let Some(v) = text(&f.text) {
+            add("(instr(lower(host || ' ' || path || ' ' || coalesce(notes, '')), lower(@)) > 0)", v);
+        }
+        if let Some(classes) = text(&f.status_class) {
+            add("instr(@, CAST(coalesce(status / 100, 0) AS TEXT)) > 0", classes);
+        }
+        if let Some(exts) = f.hide_ext.as_deref() {
+            // The path before any query, lower-cased, must not end in .ext.
+            for ext in exts.split(',').map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase()) {
+                if !ext.is_empty() && ext.len() <= 10 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    add(
+                        "lower(substr(path, 1, instr(path || '?', '?') - 1)) NOT LIKE @ ESCAPE '\\'",
+                        V::Text(format!("%.{ext}")),
+                    );
+                }
+            }
+        }
+        if f.annotated == Some(true) {
+            conds.push("(tags != '[]' OR coalesce(notes, '') != '')".into());
+        }
         let limit = f.limit.unwrap_or(50).clamp(1, 500) as i64;
+        args.push(V::Integer(limit));
+        let where_ = if conds.is_empty() { "1".to_string() } else { conds.join(" AND ") };
+        let sql = format!(
+            "SELECT {} FROM exchanges WHERE {where_} ORDER BY id DESC LIMIT ?{}",
+            Self::SUMMARY_COLS,
+            args.len()
+        );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params![
-                f.host,
-                f.path,
-                f.method,
-                f.status,
-                f.source,
-                f.actor,
-                f.after_id,
-                f.before_id,
-                limit,
-                f.hypothesis_id,
-                f.identity
-            ],
-            Self::summary_from_row,
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), Self::summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sets (or clears, with None) an exchange's highlight and comment.
+    pub fn annotate(&mut self, id: i64, highlight: Option<&str>, comment: Option<&str>) -> Result<bool> {
+        if let Some(h) = highlight {
+            anyhow::ensure!(HIGHLIGHTS.contains(&h), "unknown highlight {h:?}; use {}", HIGHLIGHTS.join(", "));
+        }
+        let tags = match highlight {
+            Some(h) => serde_json::json!([format!("highlight:{h}")]).to_string(),
+            None => "[]".to_string(),
+        };
+        let comment = comment.map(str::trim).filter(|c| !c.is_empty());
+        if let Some(c) = comment {
+            anyhow::ensure!(c.len() <= 2000, "comment longer than 2000 characters");
+        }
+        let n = self
+            .conn
+            .execute("UPDATE exchanges SET tags = ?1, notes = ?2 WHERE id = ?3", params![tags, comment, id])?;
+        Ok(n == 1)
+    }
+
+    /// WebSocket messages across all connections, newest first.
+    pub fn ws_history(&self, host: Option<&str>, before_id: Option<i64>, limit: usize) -> Result<Vec<WsHistoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.exchange_id, m.ts_ms, m.from_client, m.opcode, m.len, m.payload, m.truncated, m.compressed,
+                    e.host, e.path
+             FROM ws_messages m JOIN exchanges e ON e.id = m.exchange_id
+             WHERE (?1 IS NULL OR instr(lower(e.host), lower(?1)) > 0) AND (?2 IS NULL OR m.id < ?2)
+             ORDER BY m.id DESC LIMIT ?3",
         )?;
+        let rows = stmt.query_map(params![host, before_id, limit.clamp(1, 1000) as i64], |r| {
+            Ok(WsHistoryRow {
+                message: WsMessageRow {
+                    id: r.get(0)?,
+                    exchange_id: r.get(1)?,
+                    ts_ms: r.get(2)?,
+                    from_client: r.get(3)?,
+                    opcode: r.get(4)?,
+                    len: u64::try_from(r.get::<_, i64>(5)?).unwrap_or(0),
+                    payload: r.get(6)?,
+                    truncated: r.get(7)?,
+                    compressed: r.get(8)?,
+                },
+                host: r.get(9)?,
+                path: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// (id, scheme, host, port, method, path, status) of up to `limit` exchanges,
+    /// newest first, optionally only hosts containing `host` (for the site map).
+    pub fn site_rows(&self, host: Option<&str>, limit: usize) -> Result<Vec<SiteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scheme, host, port, method, path, status FROM exchanges
+             WHERE (?1 IS NULL OR instr(lower(host), lower(?1)) > 0) ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![host, limit as i64], |r| {
+            Ok(SiteRow {
+                id: r.get(0)?,
+                scheme: r.get(1)?,
+                host: r.get(2)?,
+                port: r.get(3)?,
+                method: r.get(4)?,
+                path: r.get(5)?,
+                status: r.get(6)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -552,7 +720,7 @@ impl Store {
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(16)?, r.get::<_, Option<Vec<u8>>>(17)?))
+                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(18)?, r.get::<_, Option<Vec<u8>>>(19)?))
             })
             .optional()?;
         let Some((summary, req_hash, resp_hash)) = row else {
@@ -773,6 +941,14 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Writes a consistent single-file copy of the project (WAL included)
+    /// to `path`, which must not exist yet.
+    pub fn snapshot_to(&self, path: &Path) -> Result<()> {
+        let p = path.to_str().context("snapshot path is not valid UTF-8")?;
+        self.conn.execute("VACUUM INTO ?1", [p])?;
+        Ok(())
+    }
+
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
@@ -879,6 +1055,20 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Ids of exchanges with a response recorded after `after`, oldest first.
+    pub fn exchange_ids_after(&self, after: i64, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM exchanges WHERE id > ?1 AND resp_hash IS NOT NULL ORDER BY id LIMIT ?2")?;
+        let rows = stmt.query_map([after, limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The highest exchange id (0 when there are none).
+    pub fn max_exchange_id(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM exchanges", [], |r| r.get(0))?)
     }
 
     /// The most recent `limit` exchanges with their bytes, oldest first.
@@ -1060,6 +1250,70 @@ mod tests {
             identity: None,
             hypothesis_id: None,
         }
+    }
+
+    #[test]
+    fn concurrent_writers_never_lose_exchanges() {
+        // Two connections to one project, like the proxy's recorder and the
+        // UI's service: every insert must land while the other one writes.
+        let dir = std::env::temp_dir().join(format!("pm-store-conc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.pmproj");
+        let mut a = Store::open(&path).unwrap();
+        let mut b = Store::open(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            for i in 0..300 {
+                b.set_setting("busy", &i.to_string()).unwrap();
+                b.insert_exchange(&sample(&format!("/b/{i}"), b"HTTP/1.1 200 OK\r\n\r\nb")).unwrap();
+            }
+        });
+        for i in 0..300 {
+            a.insert_exchange(&sample(&format!("/a/{i}"), format!("HTTP/1.1 200 OK\r\n\r\n{i}").as_bytes())).unwrap();
+        }
+        writer.join().unwrap();
+        assert_eq!(a.count_exchanges().unwrap(), 600);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn annotations_and_history_filters() {
+        let mut s = Store::open_in_memory().unwrap();
+        let ok = b"HTTP/1.1 200 OK\r\n\r\n";
+        let a = s.insert_exchange(&sample("/app.js?v=1", ok)).unwrap();
+        let b = s.insert_exchange(&sample("/api/users", ok)).unwrap();
+        let mut c = sample("/logo.PNG", ok);
+        c.status = Some(404);
+        let c = s.insert_exchange(&c).unwrap();
+        let mut d = sample("/down", ok);
+        d.status = None;
+        s.insert_exchange(&d).unwrap();
+
+        assert!(s.annotate(b, Some("red"), Some("  look here  ")).unwrap());
+        assert!(s.annotate(b, Some("pink"), None).is_err());
+        assert!(!s.annotate(9999, None, None).unwrap());
+        let got = s.get_exchange(b).unwrap().unwrap();
+        assert_eq!(
+            (got.summary.highlight.as_deref(), got.summary.comment.as_deref()),
+            (Some("red"), Some("look here"))
+        );
+        assert_eq!(got.request, sample("/api/users", ok).request, "raw bytes still load after the new columns");
+
+        fn ids(s: &Store, f: HistoryFilter) -> Vec<i64> {
+            s.search_exchanges(&f).unwrap().iter().map(|r| r.id).collect()
+        }
+        assert_eq!(ids(&s, HistoryFilter { annotated: Some(true), ..Default::default() }), [b]);
+        assert_eq!(ids(&s, HistoryFilter { text: Some("LOOK".into()), ..Default::default() }), [b]);
+        let hidden = ids(&s, HistoryFilter { hide_ext: Some("png, js,bad ext".into()), ..Default::default() });
+        assert!(!hidden.contains(&a) && !hidden.contains(&c) && hidden.contains(&b), "{hidden:?}");
+        assert_eq!(ids(&s, HistoryFilter { status_class: Some("4".into()), ..Default::default() }), [c]);
+        assert_eq!(
+            ids(&s, HistoryFilter { status_class: Some("0".into()), ..Default::default() }).len(),
+            1,
+            "no response"
+        );
+        assert!(s.annotate(b, None, None).unwrap());
+        assert!(ids(&s, HistoryFilter { annotated: Some(true), ..Default::default() }).is_empty());
     }
 
     #[test]

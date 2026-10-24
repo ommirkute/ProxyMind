@@ -1,0 +1,21 @@
+[package]
+name = "pm-fuzz"
+description = "Intruder logic: payload positions, attack modes, payload sets and anomaly detection. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+pm-core = { version = "0.0.1", path = "../pm-core" }
+regex = "1.13.1"
+ring = "0.17.14"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

@@ -188,6 +188,29 @@ async fn network_settings_hide_the_password() {
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad)).await.0, 400);
     let unknown = json!({"upstream": {"host": "x", "port": 1, "typo": true}});
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(unknown)).await.0, 422);
+    let hosts =
+        json!({"hosts": [{"host": "*.staging.test", "address": "10.1.2.3"}], "tls_passthrough": ["pinned.test"]});
+    let (st, _, body) = http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(hosts)).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("10.1.2.3") && body.contains("pinned.test"));
+    let bad_ip = json!({"hosts": [{"host": "a.test", "address": "not-an-ip"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad_ip)).await.0, 422);
+}
+
+#[tokio::test]
+async fn proxy_listeners_are_saved_and_validated() {
+    let (port, _) = start().await;
+    let l = json!({"listeners": [{"bind": "127.0.0.1:18089", "redirect_host": "api.test", "redirect_port": 443, "force_tls": true}]});
+    let (st, _, body) = http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(l)).await;
+    assert_eq!(st, 200, "{body}");
+    let (_, _, body) = http(port, "GET", "/api/v1/proxy/listeners", &[AUTH], None).await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["listeners"][0]["redirect_host"], "api.test");
+    assert_eq!(v["listeners"][0]["enabled"], true);
+    let bad = json!({"listeners": [{"bind": "nowhere"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(bad)).await.0, 400);
+    let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
+    assert!(audit.contains("proxy_listeners"));
 }
 
 #[tokio::test]

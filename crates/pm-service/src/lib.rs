@@ -7,33 +7,73 @@
 mod approvals;
 mod assistant;
 mod authz;
+mod auto;
+mod browser;
+mod crawl;
+mod discover;
 mod findings;
+mod graphql;
 mod history;
 mod identity;
 mod intercept;
+mod intruder;
+mod login_record;
 mod model;
 mod network;
+mod openapi;
 mod proof;
 mod race;
 mod replay;
+mod report;
+mod roe;
 mod rules;
+mod scan;
+mod scan_task;
+mod search;
+mod session;
+mod tools;
+mod traffic;
 mod ws;
 mod ws_replay;
 
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
+pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
+pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
+pub use crawl::{CrawlRequest, CrawlResult};
+pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use findings::{FindingUpdate, NewFinding};
-pub use history::ExchangePage;
+pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
+pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
+pub use intruder::{
+    AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
+};
+pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
-pub use network::{NETWORK_SETTING, load_network, sync_network};
+pub use network::{
+    LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,
+    load_network, sync_listeners, sync_network, watch_project,
+};
+pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
+pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
+pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
-pub use ws::{WsMessageView, WsPage};
+pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
+pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
+pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
+pub use session::{
+    ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
+    SessionRule, SessionView, SetValue, SetWhere, Validity,
+};
+pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
+pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
+pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
 use parking_lot::Mutex;
@@ -47,7 +87,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_diff, pm_identity, pm_ledger, pm_model, pm_oast, pm_policy, pm_proof, pm_proxy, pm_replay, pm_store,
+    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi, pm_plugin,
+    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
 };
 
 #[derive(Debug, Error)]
@@ -79,13 +120,32 @@ pub enum Authorization {
 }
 
 pub struct Service {
-    policy: Policy,
+    /// Shared with the proxy's scope checks, so ROE changes reach them too.
+    policy: std::sync::Arc<Policy>,
     store: Mutex<Store>,
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
     rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
+    /// The ROE text in force (to notice changes saved by other processes).
+    roe_text: parking_lot::Mutex<Option<String>>,
+    /// Passive-check plugins the user installed (never from the project).
+    plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
+    /// Recent Intruder attacks (running ones keep going in the background).
+    attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// This process's proxy, for the built-in browser.
+    proxy_info: std::sync::OnceLock<browser::ProxyInfo>,
+    /// Recent crawl-and-audit tasks.
+    scan_tasks: parking_lot::Mutex<Vec<std::sync::Arc<scan_task::ScanTask>>>,
+    /// Extra proxy listeners, when this process runs the proxy.
+    listeners: std::sync::OnceLock<std::sync::Arc<pm_proxy::Listeners>>,
+    /// Session handling: cookie jar, macro variables.
+    session: parking_lot::Mutex<session::SessionState>,
+    /// One macro run at a time.
+    session_lock: tokio::sync::Mutex<()>,
+    /// The proxy records only in-scope exchanges.
+    record_in_scope_only: std::sync::atomic::AtomicBool,
 }
 
 impl Service {
@@ -102,13 +162,28 @@ impl Service {
         }
         Ok(Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
-            policy,
+            policy: std::sync::Arc::new(policy),
             store: Mutex::new(store),
             sender,
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
             rewriter: std::sync::OnceLock::new(),
+            roe_text: parking_lot::Mutex::new(None),
+            plugins: parking_lot::RwLock::new(Vec::new()),
+            attacks: parking_lot::Mutex::new(Vec::new()),
+            scan_tasks: parking_lot::Mutex::new(Vec::new()),
+            proxy_info: std::sync::OnceLock::new(),
+            listeners: std::sync::OnceLock::new(),
+            session: parking_lot::Mutex::default(),
+            session_lock: tokio::sync::Mutex::new(()),
+            record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Sets the passive-check plugins to run with the passive scan. Callers
+    /// pass the user's registry (`pm_plugin::Registry`), never the project's.
+    pub fn set_plugins(&self, plugins: Vec<pm_plugin::Installed>) {
+        *self.plugins.write() = plugins;
     }
 
     /// Whether content shown to this actor should have secrets replaced.

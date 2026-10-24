@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind, Policy, Target};
+use pm_policy::{Actor, ActorKind, Target};
 use pm_proxy::Rewriter;
 use pm_proxy::rewrite::{self, Rule};
 use pm_store::Store;
@@ -37,7 +37,7 @@ impl Service {
     /// Connects the proxy's rewriter: in-scope-only rules use this
     /// project's rules of engagement, and saved rules are loaded now.
     pub fn attach_rewriter(&self, r: Arc<Rewriter>) -> Result<()> {
-        let policy = Arc::new(Policy::new(self.policy.roe().clone()));
+        let policy = self.policy.clone();
         r.set_scope(Arc::new(move |scheme, host, port, path| {
             Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
         }));

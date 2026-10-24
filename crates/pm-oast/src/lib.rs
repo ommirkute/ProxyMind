@@ -6,8 +6,10 @@
 //! records the interaction. Seeing the token proves the target made the
 //! request: nothing else could know it.
 //!
-//! This first version listens for HTTP. DNS interactions (which need a
-//! domain you control) come later.
+//! [`serve`] listens for HTTP; [`dns::serve`] answers DNS for a domain
+//! delegated to it (`<token>.oast.example.com`).
+
+pub mod dns;
 
 use std::net::SocketAddr;
 
@@ -44,9 +46,13 @@ pub fn new_token() -> String {
     format!("{:016x}{:04x}", mix(), mix() & 0xffff)
 }
 
+/// Whether `s` looks like a token from [`new_token`].
+pub fn is_token(s: &str) -> bool {
+    s.len() == 20 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
 /// Finds a token in a path (`/<token>/...`) or a Host header (`<token>.oast.example.com`).
 pub fn extract_token(path: &str, host: Option<&str>) -> Option<String> {
-    let is_token = |s: &str| s.len() == 20 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
     path.trim_start_matches('/')
         .split(['/', '?'])
         .next()

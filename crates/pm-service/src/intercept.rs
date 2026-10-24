@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind, Policy, Target};
+use pm_policy::{Actor, ActorKind, Target};
 use pm_proxy::intercept::{Decision, Held, Kind};
 use pm_proxy::{InterceptQueue, InterceptSettings};
 use serde::Serialize;
@@ -21,7 +21,7 @@ impl Service {
     /// Connects the proxy's intercept queue. The queue's "in scope only"
     /// option uses this project's rules of engagement.
     pub fn attach_intercept(&self, q: Arc<InterceptQueue>) {
-        let policy = Arc::new(Policy::new(self.policy.roe().clone()));
+        let policy = self.policy.clone();
         q.set_scope(Arc::new(move |scheme, host, port, path| {
             Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
         }));

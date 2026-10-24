@@ -37,12 +37,47 @@ pub struct AppState {
     pub project: Arc<String>,
     /// The built-in assistant (acts as agent:assistant, not as `actor`).
     pub assistant: Arc<pm_assistant::Assistant>,
+    /// How browsers connect: the proxy address and the CA to trust.
+    pub setup: Arc<ProxySetup>,
+}
+
+/// What the Proxy setup page shows.
+#[derive(Debug, Clone, Default)]
+pub struct ProxySetup {
+    /// e.g. 127.0.0.1:8080, when this process runs the proxy.
+    pub proxy: Option<String>,
+    /// The CA certificate (PEM) browsers must trust for HTTPS.
+    pub ca_pem: Option<String>,
+}
+
+impl ProxySetup {
+    /// SHA-256 of the CA certificate (DER), as browsers show it (`AB:CD:…`).
+    pub fn ca_fingerprint(&self) -> Option<String> {
+        let pem = self.ca_pem.as_deref()?;
+        let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect::<Vec<_>>().join("");
+        let der = pm_service::pm_tools::codec::base64_decode(b64.trim(), false).ok()?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, &der);
+        Some(digest.as_ref().iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":"))
+    }
 }
 
 impl AppState {
     pub fn new(service: Arc<Service>, actor: Actor, token: String, project: String) -> anyhow::Result<Self> {
         let assistant = Arc::new(pm_assistant::Assistant::new(service.clone()).map_err(|e| anyhow::anyhow!("{e}"))?);
-        Ok(Self { service, actor, token: Arc::new(token), project: Arc::new(project), assistant })
+        Ok(Self {
+            service,
+            actor,
+            token: Arc::new(token),
+            project: Arc::new(project),
+            assistant,
+            setup: Arc::new(ProxySetup::default()),
+        })
+    }
+
+    /// Adds the proxy address and CA for the Proxy setup page.
+    pub fn with_setup(mut self, setup: ProxySetup) -> Self {
+        self.setup = Arc::new(setup);
+        self
     }
 }
 

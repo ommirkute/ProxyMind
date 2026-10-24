@@ -30,6 +30,7 @@ async fn setup() -> (Arc<Service>, String) {
                 role: role.into(),
                 auth: AuthMaterial::default(),
                 health: None,
+                logged_out: None,
                 login: Some(LoginRecipe {
                     steps: vec![LoginStep {
                         url: url.clone(),
@@ -39,6 +40,7 @@ async fn setup() -> (Arc<Service>, String) {
                         token_json_pointer: None,
                         token_header: None,
                         token_prefix: None,
+                        ..Default::default()
                     }],
                 }),
             },
@@ -194,13 +196,13 @@ async fn timing_proof_needs_approval_for_agents_and_separates_signal_from_noise(
     };
     // Agents need approval for payload sends.
     assert!(matches!(
-        s.proof_run(&agent(), req("x%27%20AND%20SLEEP(1)--")).await.unwrap(),
+        s.proof_run(&agent(), req("Coffee%27%20AND%20SLEEP(1)--")).await.unwrap(),
         ProofResult::PendingApproval { .. }
     ));
     // A human runs it directly.
-    let (proven, _, reasons) = completed(s.proof_run(&human(), req("x%27%20AND%20SLEEP(1)--")).await.unwrap());
+    let (proven, _, reasons) = completed(s.proof_run(&human(), req("Coffee%27%20AND%20SLEEP(1)--")).await.unwrap());
     assert!(proven, "{reasons:?}");
-    let (proven, _, reasons) = completed(s.proof_run(&human(), req("x%27%20AND%201=1--")).await.unwrap());
+    let (proven, _, reasons) = completed(s.proof_run(&human(), req("Coffee%27%20AND%201=1--")).await.unwrap());
     assert!(!proven, "no delay, no proof: {reasons:?}");
 }
 
@@ -231,4 +233,142 @@ async fn oast_proof_catches_ssrf() {
     assert!(!proven, "no fetch, no callback");
     let proof: Value = s.proof_get(1).unwrap();
     assert_eq!(proof["oracle"], "oast");
+}
+
+#[tokio::test]
+async fn reflection_proof_runs_the_payload_in_a_browser_and_rejects_encoded_reflection() {
+    let (s, url) = setup().await;
+    if s.chromium_path().unwrap().is_none() {
+        eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
+        return;
+    }
+    let run = |raw: &str| ProofRequest {
+        oracle: "reflection".into(),
+        url: Some(url.clone()),
+        raw: Some(raw.into()),
+        ..Default::default()
+    };
+    // Agents need approval: payload sends are intrusive.
+    assert!(matches!(
+        s.proof_run(&agent(), run("GET /search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap(),
+        ProofResult::PendingApproval { .. }
+    ));
+
+    // VS-6: the payload runs.
+    let r = s.proof_run(&human(), run("GET /search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap();
+    let ProofResult::Completed { proven, confidence, reasons, details, exchange_ids, .. } = r else { panic!("{r:?}") };
+    assert!(proven, "{reasons:?} {details}");
+    assert_eq!(confidence, "high");
+    assert!(reasons[0].contains("ran the injected script"), "{reasons:?}");
+    assert_eq!(details["payload_in_body"], true);
+    assert!(details["page_activity"].as_str().unwrap().starts_with("<untrusted_target_content>"));
+    assert_eq!(exchange_ids.len(), 1);
+
+    // A payload of the tester's own, using alert() with the token.
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /search?q=%3Csvg%20onload%3Dalert('{{token}}')%3E HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap(),
+    );
+    assert!(proven, "{reasons:?}");
+    assert!(reasons[0].contains("opened a dialog"), "{reasons:?}");
+
+    // Trap: /help reflects the payload HTML-encoded.
+    let (proven, _, reasons) =
+        completed(s.proof_run(&human(), run("GET /help?topic={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap());
+    assert!(!proven, "encoded reflection is not XSS");
+    assert!(reasons[0].contains("encoded"), "{reasons:?}");
+
+    // Trap: JSON endpoints that don't reflect.
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /api/products/search?q={{xss_url}} HTTP/1.1\r\nHost: x\r\n\r\n")).await.unwrap(),
+    );
+    assert!(!proven && reasons[0].contains("nothing reflected"), "{reasons:?}");
+
+    // Re-running uses a fresh token and proves it again.
+    let r = s.proof_rerun(&human(), 1).await.unwrap();
+    let ProofResult::Completed { proven, details: again, .. } = r else { panic!("{r:?}") };
+    assert!(proven);
+    assert_ne!(again["token"], details["token"]);
+
+    // Placeholders are required.
+    assert!(s.proof_run(&human(), run("GET /search?q=x HTTP/1.1\r\nHost: x\r\n\r\n")).await.is_err());
+}
+
+#[tokio::test]
+async fn oast_proof_catches_dns_lookups() {
+    let (s, url) = setup().await;
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dns_addr = sock.local_addr().unwrap();
+    let s2 = s.clone();
+    tokio::spawn(pm_service::pm_oast::dns::serve(sock, "oast.test".into(), std::net::Ipv4Addr::LOCALHOST, move |i| {
+        let _ = s2.record_oast(&i);
+    }));
+    s.set_oast_dns_domain("OAST.test.").unwrap();
+    assert!(s.set_oast_dns_domain("bad domain").is_err());
+    let run = |raw: &str| ProofRequest {
+        oracle: "oast".into(),
+        url: Some(url.clone()),
+        raw: Some(raw.into()),
+        wait_seconds: Some(3),
+        ..Default::default()
+    };
+    // The target resolves the name it's given: simulate the lookup once the
+    // request is sent, the way a vulnerable server would.
+    let s3 = s.clone();
+    let lookup = tokio::spawn(async move {
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let page = s3.history_search(&human(), &Default::default()).unwrap();
+            if let Some(name) = page
+                .exchanges
+                .iter()
+                .find_map(|e| e.path.split(['=', '&']).find(|w| w.ends_with(".oast.test")).map(str::to_string))
+            {
+                let c = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                c.send_to(&dns_query(&name), dns_addr).await.unwrap();
+                return;
+            }
+        }
+    });
+    let (proven, _, reasons) = completed(
+        s.proof_run(&human(), run("GET /api/products/search?q={{oast_dns}} HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap(),
+    );
+    lookup.await.unwrap();
+    assert!(proven, "{reasons:?}");
+    assert!(reasons[0].contains("DNS A"), "{reasons:?}");
+}
+
+fn dns_query(name: &str) -> Vec<u8> {
+    let mut p = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for l in name.split('.') {
+        p.push(l.len() as u8);
+        p.extend_from_slice(l.as_bytes());
+    }
+    p.extend_from_slice(&[0, 0, 1, 0, 1]);
+    p
+}
+
+#[tokio::test]
+async fn automatic_access_control_pass_proves_leaks_and_drops_the_rest() {
+    let (s, url) = setup().await;
+    for who in ["alice", "bob", "admin"] {
+        get_as(&s, &url, "/api/me", who).await;
+        get_as(&s, &url, "/api/orders", who).await;
+    }
+    get_as(&s, &url, "/api/orders/1001", "alice").await;
+    get_as(&s, &url, "/api/invoices/5001", "alice").await;
+    get_as(&s, &url, "/api/admin/users", "admin").await;
+    let r = s.auto_access_control(&human()).await.unwrap();
+    let proven: Vec<(String, bool)> = r.results.iter().map(|p| (p.operation.clone(), p.proven)).collect();
+    assert!(proven.iter().any(|(op, ok)| op.ends_with("/api/orders/{id}") && *ok), "{proven:?}");
+    assert!(proven.iter().any(|(op, ok)| op.ends_with("/api/admin/users") && *ok), "{proven:?}");
+    // Admins reading users' invoices is expected, so it's not reported at all.
+    assert!(!proven.iter().any(|(op, _)| op.contains("invoices")), "{proven:?}");
+    let findings = s.finding_list(None).unwrap();
+    let classes: Vec<&str> = findings.iter().filter_map(|f| f["vuln_class"].as_str()).collect();
+    assert!(classes.contains(&"idor") && classes.contains(&"bfla"), "{classes:?}");
+    assert!(findings.iter().all(|f| f["status"] == "proven"), "only proven findings stay live");
 }

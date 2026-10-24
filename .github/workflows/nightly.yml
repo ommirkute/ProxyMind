@@ -1,0 +1,87 @@
+name: Nightly
+
+# Slow checks that don't need to run on every push: fuzzing the parsers
+# that read hostile input, and building the container image.
+# Manual only for now, to stay within the plan's Actions minutes (a full
+# run is about 90 minutes). To run it on a schedule again, add:
+#   schedule:
+#     - cron: "17 3 * * 0"   # weekly, Sunday 03:17 UTC
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - http_messages
+          - websocket_frames
+          - dns_query
+          - payload_classifier
+          - crawl_extract
+          - intruder_template
+          - passive_checks
+          - openapi_spec
+          - har_curl
+          - graphql_schema
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=2048
+        working-directory: fuzz
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: proxymind:nightly
+      - name: Smoke test
+        run: |
+          docker run --rm proxymind:nightly --version
+          docker run --rm proxymind:nightly proof browser | grep -q /usr/bin/chromium
+
+  bench:
+    name: benchmarks (model-free baseline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p pm-cli
+      - name: Start Juice Shop and VAmPI
+        run: docker compose -f bench/docker-compose.yml up -d juice-shop vampi
+      - name: Run benchmarks
+        env:
+          PROXYMIND: ${{ github.workspace }}/target/release/proxymind
+          OUT: ${{ runner.temp }}/bench
+        run: |
+          for app in vulnshop vampi juice-shop; do
+            WORK=$(mktemp -d) bench/run.sh "$app"
+          done
+          cat "$OUT"/*.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: ${{ runner.temp }}/bench

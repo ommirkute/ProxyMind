@@ -217,3 +217,29 @@ async fn resending_a_recorded_exchange_uses_its_target() {
     assert!(matches!(r, ReplayResult::Sent { .. }), "{r:?}");
     assert!(seen.lock().unwrap()[0].starts_with("GET /orig HTTP/1.1"));
 }
+
+#[tokio::test]
+async fn destructive_payloads_raise_the_tier_even_on_get() {
+    let roe = "version: 1\nscope:\n  include: [\"http://127.0.0.1:9/\"]\n";
+    let s = pm_service::Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(roe).unwrap())).unwrap();
+    let send = |path: &str| pm_service::ReplayRequest {
+        url: Some("http://127.0.0.1:9".into()),
+        raw: Some(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n")),
+        ..Default::default()
+    };
+    let agent = Actor::parse("agent:test").unwrap();
+    // DROP TABLE hidden in a GET is destructive: agents are refused by
+    // default; a human is asked, and told why.
+    let r = s.replay_send(&agent, send("/s?q=1;DrOp%2520TaBlE%2520users")).await.unwrap();
+    assert!(matches!(r, pm_service::ReplayResult::Denied { .. }), "{r:?}");
+    let human = Actor::parse("human:tester").unwrap();
+    match s.replay_send(&human, send("/s?q=1;DrOp%2520TaBlE%2520users")).await.unwrap() {
+        pm_service::ReplayResult::PendingApproval { summary, .. } => {
+            assert!(summary.contains("destructive SQL: DROP TABLE"), "{summary}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // Command injection probes in a GET need an agent's approval.
+    let r = s.replay_send(&agent, send("/ping?host=x%7Cwhoami")).await.unwrap();
+    assert!(matches!(r, pm_service::ReplayResult::PendingApproval { .. }), "{r:?}");
+}
