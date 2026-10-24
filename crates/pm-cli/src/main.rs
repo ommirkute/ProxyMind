@@ -423,12 +423,26 @@ enum Command {
     },
     /// Write a Markdown report of the findings.
     Report {
-        /// Output file (default: print)
+        /// Output file (default: print; a PDF needs one)
         #[arg(long, short)]
         out: Option<PathBuf>,
-        /// md, json, sarif or html (default: from --out's extension, else md)
+        /// md, html, pdf, json or sarif (default: from --out's extension, else md)
         #[arg(long)]
         format: Option<String>,
+        /// technical (default), executive, compliance or a saved template
+        #[arg(long)]
+        template: Option<String>,
+        /// Leave out findings below this severity
+        #[arg(long)]
+        min_severity: Option<String>,
+        /// Leave out request/response evidence
+        #[arg(long)]
+        no_evidence: bool,
+    },
+    /// The issue library: what each kind of issue is, how to fix it, CWE and OWASP.
+    Library {
+        /// Show one entry (an id, check or class name)
+        id: Option<String>,
     },
     /// Review actions waiting for human approval.
     Approvals {
@@ -2221,25 +2235,48 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Report { out: file, format } => {
+        Command::Report { out: file, format, template, min_severity, no_evidence } => {
             let service = open_service(&cli.project, None)?;
             let from_ext =
                 file.as_ref().and_then(|f| f.extension()).and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-            let md = match format.as_deref().or(from_ext.as_deref()).unwrap_or("md") {
-                "md" | "markdown" => service.report_markdown()?,
-                "json" => service.report_json()?,
-                "sarif" => service.report_sarif()?,
-                "html" | "htm" => service.report_html()?,
-                other => anyhow::bail!("unknown report format {other}; use md, json, sarif or html"),
+            let fmt = match format.as_deref().or(from_ext.as_deref()).unwrap_or("md") {
+                "htm" => "html",
+                "markdown" => "md",
+                f => f,
             };
+            let opts = pm_service::ReportOptions {
+                min_severity: min_severity.clone(),
+                evidence: no_evidence.then_some(false),
+                ..Default::default()
+            };
+            let r = service.report_render(template.as_deref(), fmt, &opts).await?;
             match file {
                 Some(f) => {
-                    std::fs::write(f, md)?;
+                    std::fs::write(f, &r.body)?;
                     out!("✓ report written to {}", f.display());
                 }
-                None => out!("{md}"),
+                None if fmt == "pdf" => anyhow::bail!("a PDF report needs --out <file.pdf>"),
+                None => out!("{}", String::from_utf8_lossy(&r.body)),
             }
         }
+        Command::Library { id } => match id {
+            Some(id) => {
+                let i =
+                    pm_service::pm_scan::library::lookup(id).with_context(|| format!("no library entry for {id}"))?;
+                out!("{} ({}) · typical severity {}", i.name, i.id, i.severity);
+                let cwe: Vec<String> = i.cwe.iter().map(|n| format!("CWE-{n}")).collect();
+                out!("{} · {}{}", cwe.join(", "), i.owasp, i.owasp_api.map(|a| format!(" · {a}")).unwrap_or_default());
+                out!("\nWhat it is: {}\n\nImpact: {}\n\nFix: {}", i.background, i.impact, i.remediation);
+                for r in i.references {
+                    out!("  {r}");
+                }
+            }
+            None => {
+                for i in pm_service::pm_scan::library::LIBRARY {
+                    out!("{:<22} {:<8} {}", i.id, i.severity, i.name);
+                }
+            }
+        },
         Command::Approvals { action } => {
             let service = open_service(&cli.project, None)?;
             match action {

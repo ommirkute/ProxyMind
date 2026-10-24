@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, fmtDateTime, type Finding, type IdentityInfo, type ProofResult } from "../api";
+import { api, cweUrl, fmtDateTime, toast, type Finding, type IdentityInfo, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
@@ -34,6 +34,7 @@ export default function Findings() {
           <ErrorBox error={list.error} />
           {creating && <NewFinding onDone={(id) => { setCreating(false); list.reload(); go("findings", id); }} />}
           {sorted.length === 0 && !creating && <Empty>No findings yet.</Empty>}
+          <ReportBuilder />
           {sorted.length > 0 && (
             <table className="grid" data-testid="findings">
               <thead><tr><th>#</th><th>Severity</th><th>Title</th><th>Status</th></tr></thead>
@@ -42,7 +43,11 @@ export default function Findings() {
                   <tr key={f.id} className="clickable" onClick={() => go("findings", f.id)} style={selected === f.id ? { background: "var(--accent-soft)" } : undefined}>
                     <td className="muted">{f.id}</td>
                     <td><Chip value={f.severity} /></td>
-                    <td>{f.title}<div className="small muted mono">{f.url}</div></td>
+                    <td>
+                      {f.title}
+                      <div className="small muted mono">{f.url}</div>
+                      {f.issue && <div className="small muted">{f.issue.name} · {f.issue.cwe.map((n) => `CWE-${n}`).join(", ")}</div>}
+                    </td>
                     <td><Chip value={f.status} /></td>
                   </tr>
                 ))}
@@ -123,6 +128,13 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
       f.reload();
       onChange();
     });
+  const retest = () =>
+    action.run(async () => {
+      const r = await api.post<Retest>(`/findings/${id}/retest`);
+      toast(r.reproduced === false ? "Not reproduced" : r.reproduced ? "Still reproduces" : "Retest couldn't run", r.reproduced ? "bad" : "ok");
+      f.reload();
+      onChange();
+    });
   const rerun = (proofId: number) =>
     action.run(async () => {
       setResult(await api.post<ProofResult>(`/proofs/${proofId}/rerun`));
@@ -139,7 +151,24 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
       </div>
       <div className="mono small" style={{ wordBreak: "break-all" }}>{d.url}</div>
       <p style={{ whiteSpace: "pre-wrap" }}>{d.description || <span className="muted">No description.</span>}</p>
-      <div className="small">Evidence: {d.evidence.length ? d.evidence.map((e) => <span key={e}><ExchangeLink id={e} /> </span>) : "–"}</div>
+      <div className="small">
+        Evidence: {d.evidence.length ? d.evidence.map((e) => <span key={e}><ExchangeLink id={e} /> </span>) : "–"}
+        {!!d.duplicates && <span className="muted"> · {d.duplicates} duplicate report(s) merged in</span>}
+      </div>
+      {d.issue && <IssueCard issue={d.issue} />}
+      <div className="row" style={{ marginTop: 8 }}>
+        <button className="btn" disabled={action.busy} onClick={retest} data-testid="retest">
+          {action.busy ? "Retesting…" : "Retest"}
+        </button>
+        {d.retest ? (
+          <span className="small" data-testid="retest-result">
+            <Chip value={d.retest.reproduced === null ? "not checked" : d.retest.reproduced ? "reproduced" : "not reproduced"} />{" "}
+            {d.retest.summary} <span className="muted">({fmtDateTime(d.retest.ts_ms)})</span>
+          </span>
+        ) : (
+          <span className="small muted">Re-runs the proof, or the scanner check for this issue type, to see if it's fixed.</span>
+        )}
+      </div>
 
       <h3>Proofs</h3>
       {d.proofs?.length ? (
@@ -201,6 +230,8 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         <button className="btn" onClick={() => setStatus("confirmed")} disabled={action.busy}>Confirm</button>
         <button className="btn" onClick={() => setStatus("false_positive")} disabled={action.busy}>False positive</button>
         <button className="btn" onClick={() => setStatus("reported")} disabled={action.busy}>Reported</button>
+        <button className="btn" onClick={() => setStatus("fixed")} disabled={action.busy}>Fixed</button>
+        <button className="btn" onClick={() => setStatus("accepted_risk")} disabled={action.busy}>Accept risk</button>
         <button className="btn" onClick={() => setStatus("suspected")} disabled={action.busy}>Back to suspected</button>
       </div>
     </Panel>
@@ -219,4 +250,137 @@ function xssTemplate(findingUrl: string): { url: string; raw: string } {
   } catch {
     return { url: "", raw: "GET /?q={{xss_url}} HTTP/1.1\nHost: x\n\n" };
   }
+}
+
+/** What the issue library says about a finding's kind of issue. */
+export function IssueCard({ issue }: { issue: IssueType }) {
+  return (
+    <div className="panel" style={{ background: "var(--panel-2)", marginTop: 8 }} data-testid="issue-card">
+      <div className="row small">
+        <strong>{issue.name}</strong>
+        {issue.cwe.map((n) => <a key={n} href={cweUrl(n)} target="_blank" rel="noreferrer noopener">CWE-{n}</a>)}
+        <span className="muted">{issue.owasp}</span>
+        {issue.owasp_api && <span className="muted">{issue.owasp_api}</span>}
+      </div>
+      <p className="small" style={{ margin: "6px 0" }}><b>What it is.</b> {issue.background}</p>
+      <p className="small" style={{ margin: "6px 0" }}><b>Impact.</b> {issue.impact}</p>
+      <p className="small" style={{ margin: "6px 0" }}><b>How to fix.</b> {issue.remediation}</p>
+      {issue.references.length > 0 && (
+        <div className="small muted">
+          {issue.references.map((r) => <div key={r}><a href={r} target="_blank" rel="noreferrer noopener">{r}</a></div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const FORMATS = [["html", "HTML"], ["pdf", "PDF"], ["md", "Markdown"], ["json", "JSON"], ["sarif", "SARIF"]];
+
+/** Choose a template, format and filters; preview or download the report. */
+function ReportBuilder() {
+  const templates = useLoad(() => api.get<ReportTemplate[]>("/report/templates"), []);
+  const [open, setOpen] = useState(false);
+  const [opts, setOpts] = useState({ template: "technical", format: "html", min: "", evidence: true });
+  const [preview, setPreview] = useState<string | null>(null);
+  const names = [...new Set((templates.data ?? []).map((t) => t.name))];
+  const formatsFor = (name: string) => (templates.data ?? []).filter((t) => t.name === name).map((t) => t.format as string);
+  const templated = opts.format === "html" || opts.format === "md" || opts.format === "pdf";
+  const params = new URLSearchParams({ format: opts.format });
+  if (templated) params.set("template", opts.template);
+  if (opts.min) params.set("min_severity", opts.min);
+  if (!opts.evidence) params.set("evidence", "false");
+  const href = `/api/v1/report?${params}`;
+  const canRender = !templated || formatsFor(opts.template).includes(opts.format === "pdf" ? "html" : opts.format);
+
+  return (
+    <details open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }} data-testid="report-builder">
+      <summary className="small"><b>Report builder</b> <span className="muted">· executive, technical, compliance or your own template</span></summary>
+      <ErrorBox error={templates.error} />
+      <div className="row" style={{ marginTop: 8 }}>
+        <select aria-label="Report template" value={opts.template} onChange={(e) => setOpts({ ...opts, template: e.target.value })} disabled={!templated}>
+          {names.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <select aria-label="Report format" value={opts.format} onChange={(e) => setOpts({ ...opts, format: e.target.value })}>
+          {FORMATS.map(([f, l]) => <option key={f} value={f}>{l}</option>)}
+        </select>
+        <select aria-label="Report floor" value={opts.min} onChange={(e) => setOpts({ ...opts, min: e.target.value })}>
+          <option value="">all severities</option>
+          {SEVERITY_ORDER.map((s) => <option key={s} value={s}>{s} and above</option>)}
+        </select>
+        <label className="small"><input type="checkbox" aria-label="Show HTTP traffic" checked={opts.evidence} onChange={(e) => setOpts({ ...opts, evidence: e.target.checked })} /> requests &amp; responses</label>
+        {opts.format === "html" && canRender && (
+          <button
+            className="btn"
+            onClick={() => api.text(href.replace("/api/v1", "")).then(setPreview).catch((e) => toast(String(e), "bad"))}
+            data-testid="report-preview"
+          >
+            Preview
+          </button>
+        )}
+        {canRender ? (
+          <a className="btn primary" href={href} download={`proxymind-report.${opts.format}`} data-testid="report-download" style={{ textDecoration: "none" }}>
+            Download
+          </a>
+        ) : (
+          <span className="small muted">{opts.template} has no {opts.format} version</span>
+        )}
+      </div>
+      {preview && (
+        <iframe title="Report preview" sandbox="" srcDoc={preview} style={{ width: "100%", height: 480, border: "1px solid var(--border)", borderRadius: 8, marginTop: 8, background: "#fff" }} />
+      )}
+      <TemplateEditor templates={templates.data ?? []} reload={templates.reload} />
+    </details>
+  );
+}
+
+function TemplateEditor({ templates, reload }: { templates: ReportTemplate[]; reload: () => void }) {
+  const [form, setForm] = useState<{ name: string; format: "html" | "md"; description: string; body: string }>({ name: "", format: "md", description: "", body: "" });
+  const action = useAction();
+  const saved = templates.filter((t) => !t.builtin);
+  const copy = (t: ReportTemplate) =>
+    setForm({ name: t.builtin ? `my-${t.name}` : t.name, format: t.format, description: t.description, body: t.body });
+  const save = () =>
+    action.run(async () => {
+      await api.post("/report/templates", form);
+      toast("Template saved");
+      reload();
+    });
+  const remove = (name: string) =>
+    action.run(async () => {
+      await api.del(`/report/templates/${encodeURIComponent(name)}`);
+      reload();
+    });
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary className="small">Your templates ({saved.length})</summary>
+      <p className="small muted">
+        MiniJinja templates. They get <code>r</code> (title, client, scope, risk, severity_counts, findings with issue,
+        proof and evidence, issue_types, owasp), <code>css</code> and <code>cwe_url(n)</code>. HTML templates escape every
+        value automatically. Start from a copy of a built-in one:
+      </p>
+      <div className="row small">
+        {templates.filter((t) => t.body).map((t) => (
+          <button key={`${t.name}.${t.format}`} className="btn" onClick={() => copy(t)}>Copy {t.name}.{t.format}</button>
+        ))}
+      </div>
+      {saved.map((t) => (
+        <div key={`${t.name}.${t.format}`} className="row small" style={{ marginTop: 4 }}>
+          <strong>{t.name}</strong><span className="muted">{t.format}</span>
+          <button className="btn" onClick={() => copy(t)}>Edit</button>
+          <button className="btn" onClick={() => remove(t.name)}>Delete</button>
+        </div>
+      ))}
+      <ErrorBox error={action.error} />
+      <div className="row" style={{ marginTop: 8 }}>
+        <input aria-label="Template name" placeholder="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ width: 140 }} />
+        <select aria-label="Template format" value={form.format} onChange={(e) => setForm({ ...form, format: e.target.value as "html" | "md" })}>
+          <option value="md">Markdown</option>
+          <option value="html">HTML</option>
+        </select>
+        <input aria-label="Template description" placeholder="description" className="grow" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        <button className="btn primary" disabled={!form.name || !form.body || action.busy} onClick={save}>Save template</button>
+      </div>
+      <textarea aria-label="Template body" className="mono" rows={8} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} style={{ width: "100%", marginTop: 6 }} />
+    </details>
+  );
 }

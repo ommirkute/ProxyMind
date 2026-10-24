@@ -554,6 +554,20 @@ pub fn tool_definitions() -> Vec<Value> {
             &["title", "vuln_class", "severity", "description"],
         ),
         tool(
+            "finding_retest",
+            "Check whether a finding still reproduces: re-runs its proof, or the scanner checks for its issue type on \
+             the request that was scanned. The result is kept on the finding (a proof that holds marks it proven).",
+            json!({ "id": {"type":"integer"} }),
+            &["id"],
+        ),
+        tool(
+            "issue_library",
+            "What a kind of issue is, its impact, how to fix it, and its CWE and OWASP categories. Give a finding \
+             class or scanner check (e.g. sqli, reflected_input, idor); without one, lists every entry's id and name.",
+            json!({ "class": {"type":"string"} }),
+            &[],
+        ),
+        tool(
             "finding_update",
             "Update a finding's description, severity or evidence. Agents may only set status to suspected.",
             json!({
@@ -870,6 +884,34 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
         "finding_create" => {
             let f: pm_service::NewFinding = args(a)?;
             service.finding_create(actor, f).map_err(|e| e.to_string())
+        }
+        "finding_retest" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                id: i64,
+            }
+            let g: A = args(a)?;
+            service.finding_retest(actor, g.id).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "issue_library" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                class: Option<String>,
+            }
+            let g: A = args(a)?;
+            match g.class {
+                Some(c) => pm_service::pm_scan::library::lookup(&c)
+                    .map(|i| json!(i))
+                    .ok_or_else(|| format!("no library entry for {c}")),
+                None => Ok(json!(
+                    pm_service::pm_scan::library::LIBRARY
+                        .iter()
+                        .map(|i| json!({ "id": i.id, "name": i.name, "severity": i.severity }))
+                        .collect::<Vec<_>>()
+                )),
+            }
         }
         "finding_update" => {
             let u: pm_service::FindingUpdate = args(a)?;

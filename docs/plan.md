@@ -63,6 +63,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Active scanner step 4a: JWT (weak secret, unverified signature, alg none), GraphQL (introspection, batching, suggestions, GET), web cache poisoning and deception, mass assignment, server-side prototype pollution
 - Active scanner step 4b: OAuth redirect_uri and state, deserialization (error-based, five formats), and behind approval: request smuggling (timing), file upload, race conditions as a scan check
 - Built-in browser (proxied, CA pinned by public key, own profile) and browser-driven crawling of JavaScript apps (every request through the gate; routes, clicks, script API calls, `#/` routes)
+- Issue library (CWE, OWASP Top 10 / API Top 10, remediation), finding workflow (fixed / accepted risk, retest, duplicate merging) and report templates (executive, technical, compliance, custom; HTML, Markdown, PDF)
 - Scan profiles (built-in and saved), crawl-and-audit tasks saved in the project with pause/resume (also after a restart), and scheduled scans (hourly/daily/weekly)
 - Recorded logins (multi-step, CSRF and tokens read fresh each run) and session-expiry detection (learned logged-out look; scans re-login and stop when the session is lost)
 - Active scanner step 2: out-of-band checks through ProxyMind's own OAST listener (SSRF, XXE, SQL and command injection, blind template injection, Log4Shell, code injection), one token per probe

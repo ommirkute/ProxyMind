@@ -4,6 +4,7 @@ import { NavContext, usePref, type Page } from "./components";
 import { Icon } from "./icons";
 import Overview from "./pages/Overview";
 import Scans from "./pages/Scans";
+import Library from "./pages/Library";
 import { CommandPalette } from "./palette";
 import History from "./pages/History";
 import Intercept from "./pages/Intercept";
@@ -59,7 +60,7 @@ const GROUPS: Group[] = [
   { id: "repeater", label: "Repeater", icon: "repeater", section: "Testing", pages: [{ id: "repeater", label: "Repeater" }] },
   { id: "intruder", label: "Intruder", icon: "intruder", section: "Testing", pages: [{ id: "intruder", label: "Intruder" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
-  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }] },
+  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
   { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
@@ -178,6 +179,7 @@ export default function App() {
   const PageView = {
     overview: Overview,
     scans: Scans,
+    library: Library,
     history: History,
     assistant: Assistant,
     intercept: Intercept,

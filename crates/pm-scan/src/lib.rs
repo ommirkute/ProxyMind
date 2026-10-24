@@ -9,6 +9,7 @@
 
 pub mod active;
 pub mod advanced;
+pub mod library;
 pub mod oob;
 
 use pm_http::Header;

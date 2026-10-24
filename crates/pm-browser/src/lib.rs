@@ -218,6 +218,77 @@ pub async fn render(chromium: &Path, doc: &Document, opts: &RenderOptions) -> Re
     result
 }
 
+/// Prints an HTML page to PDF in a fresh headless browser, with scripts off
+/// and every request other than the page itself blocked. Returns the PDF as
+/// base64 (as the DevTools protocol gives it).
+pub async fn print_pdf(chromium: &Path, html: &[u8]) -> Result<String> {
+    let browser = Browser::launch(chromium).await?;
+    let result = tokio::time::timeout(Duration::from_secs(90), print_in(&browser, html))
+        .await
+        .unwrap_or(Err(Error::Timeout("printing the page")));
+    browser.shutdown().await;
+    result
+}
+
+async fn print_in(browser: &Browser, html: &[u8]) -> Result<String> {
+    let mut cdp = Cdp::connect(browser.port, &browser.ws_path).await?;
+    let target = cdp.call("Target.createTarget", json!({ "url": "about:blank" }), None).await?;
+    let target_id = target["targetId"].as_str().ok_or_else(|| Error::Protocol("no targetId".into()))?.to_string();
+    let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None).await?;
+    let session = attached["sessionId"].as_str().ok_or_else(|| Error::Protocol("no sessionId".into()))?.to_string();
+    let s = Some(session.as_str());
+    cdp.call("Emulation.setScriptExecutionDisabled", json!({ "value": true }), s).await?;
+    cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*" }] }), s).await?;
+    cdp.call("Page.enable", json!({}), s).await?;
+    cdp.send("Page.navigate", json!({ "url": "https://report.proxymind.invalid/" }), s).await?;
+    let body = pm_core::base64(html);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut served = false;
+    while let Some(msg) = cdp.next(deadline).await? {
+        if msg.get("sessionId").and_then(Value::as_str) != Some(session.as_str()) {
+            continue;
+        }
+        let p = &msg["params"];
+        match msg["method"].as_str().unwrap_or("") {
+            "Fetch.requestPaused" => {
+                let request_id = p["requestId"].as_str().unwrap_or_default().to_string();
+                if !served && p["resourceType"] == "Document" {
+                    served = true;
+                    let headers = json!([{ "name": "Content-Type", "value": "text/html; charset=utf-8" }]);
+                    cdp.send(
+                        "Fetch.fulfillRequest",
+                        json!({ "requestId": request_id, "responseCode": 200, "responseHeaders": headers,
+                                "body": body }),
+                        s,
+                    )
+                    .await?;
+                } else {
+                    cdp.send(
+                        "Fetch.failRequest",
+                        json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                        s,
+                    )
+                    .await?;
+                }
+            }
+            "Page.loadEventFired" if served => break,
+            _ => {}
+        }
+    }
+    if !served {
+        return Err(Error::Timeout("loading the page to print"));
+    }
+    let pdf = cdp
+        .call(
+            "Page.printToPDF",
+            json!({ "printBackground": true, "preferCSSPageSize": true, "marginTop": 0.5, "marginBottom": 0.5,
+                    "marginLeft": 0.5, "marginRight": 0.5 }),
+            s,
+        )
+        .await?;
+    pdf["data"].as_str().map(str::to_string).ok_or_else(|| Error::Protocol("no PDF data".into()))
+}
+
 // ---------------------------------------------------- browser window --
 
 /// Set to `1` to open the browser window headless (tests, CI, servers).

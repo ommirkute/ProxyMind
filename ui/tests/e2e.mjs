@@ -259,6 +259,37 @@ try {
     check(f === "html" ? text.includes("Any user can read any order") && text.includes("default-src 'none'") : JSON.parse(text).version === "2.1.0", `${f} report downloads`);
   }
 
+  console.log("Issue library, retest and report builder");
+  await page.getByTestId("issue-card").waitFor();
+  check(await page.getByTestId("issue-card").textContent().then((t) => t.includes("Broken object level authorization") && t.includes("CWE-639")),
+    "the finding shows its issue library entry");
+  await page.getByTestId("retest").click();
+  await page.waitForSelector('[data-testid="retest-result"]', { timeout: 30000 });
+  check(await page.getByTestId("retest-result").textContent().then((t) => t.includes("reproduced") && t.includes("proof still holds")),
+    "retest re-runs the proof");
+  await page.locator('[data-testid="report-builder"] summary').first().click();
+  await page.getByLabel("Report template").selectOption("executive");
+  await page.getByLabel("Report format").selectOption("md");
+  {
+    const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("report-download").click()]);
+    const text = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c).toString());
+    check(text.includes("executive summary") && text.includes("Overall risk:** high"), "executive Markdown report downloads");
+  }
+  await page.getByLabel("Report template").selectOption("compliance");
+  await page.getByLabel("Report format").selectOption("html");
+  await page.getByTestId("report-preview").click();
+  const frame = page.frameLocator('iframe[title="Report preview"]');
+  await frame.locator("text=A01:2021 Broken Access Control").first().waitFor({ timeout: 10000 });
+  check(true, "compliance report preview groups findings by OWASP category");
+  await page.screenshot({ path: join(SHOTS, "4c-report-builder.png"), fullPage: true });
+  await open("library");
+  await page.getByLabel("Search the library").fill("CWE-89");
+  await page.locator('[data-testid="library"] strong', { hasText: "SQL injection" }).first().click();
+  await page.getByTestId("issue-card").getByText("parameterised queries").first().waitFor();
+  check(true, "the issue library is searchable by CWE");
+  await page.screenshot({ path: join(SHOTS, "4d-library.png") });
+  await open("findings");
+
   console.log("XSS proof");
   await page.getByRole("button", { name: "New finding" }).click();
   await page.getByLabel("Title").fill("Reflected XSS in search");

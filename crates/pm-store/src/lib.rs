@@ -218,6 +218,11 @@ CREATE TABLE scan_schedules (
     next_run_ms INTEGER NOT NULL
 );
 "#,
+    r#"
+-- Finding workflow: the last retest (JSON) and how many duplicates were merged in.
+ALTER TABLE findings ADD COLUMN retest TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN duplicates INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1233,6 +1238,8 @@ impl Store {
                 "proof_id",
                 "evidence",
                 "actor",
+                "retest",
+                "duplicates",
                 "created_ms",
                 "updated_ms",
             ],

@@ -40,19 +40,9 @@ Finished on 2026-10-24: integration test (`crates/pm-service/tests/login_record.
 
 Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC; a lock so two processes on one project can't both fire a schedule.
 
-## 3. Task 45: issue library and report templates (about half a session)
+## 3. Task 45: issue library and report templates — done
 
-- **Issue library** (`crates/pm-scan/src/library.rs`): one entry per issue type, with:
-  - title, severity, confidence defaults, CWE, CAPEC, OWASP Top 10 2021 / API Top 10 2023 mapping;
-  - background, impact, remediation, references.
-
-  Write the text ourselves; do not copy Burp's issue text. `ScanIssue` and findings carry `issue_type`, and the report fills in from the library.
-- **Report templates**:
-  - Built-in: executive summary, technical detail, compliance mapping (OWASP).
-  - Custom templates: a project setting holding a small template language. Prefer a vetted crate such as `minijinja` (check its license) to rolling our own.
-  - Output HTML, Markdown and PDF (print HTML through the headless Chromium we already ship with pm-browser).
-- **Finding workflow**: states (new, confirmed, false positive, fixed, accepted risk), a retest button that replays the proof, and dedupe across scans.
-- **UI**: a library browser and a report builder (choose template, filters, preview).
+Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, findings filled in from it, duplicate merging, fixed / accepted-risk statuses, retest, executive / technical / compliance templates plus saved MiniJinja templates, HTML / Markdown / PDF output, API/CLI/MCP, and the UI report builder and Issue library page. See the handoff section "Issue library, finding workflow and report templates". Left for later: a Word (.docx) export; per-finding comments and assignment (belongs with team use).
 
 ## 4. Task 46: plugin platform (about one to two sessions)
 

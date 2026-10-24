@@ -2,11 +2,90 @@
 //! scanning dashboards) and a self-contained HTML page for clients. All
 //! three come from one structured report so they always agree.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::findings::{SEVERITIES, excerpt};
-use crate::{Result, Service};
+use crate::{Result, Service, ServiceError};
+
+/// What the issue library says about a finding's kind of issue.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportIssue {
+    pub id: String,
+    pub name: String,
+    pub cwe: Vec<u32>,
+    pub owasp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owasp_api: Option<String>,
+    pub background: String,
+    pub impact: String,
+    pub remediation: String,
+    pub references: Vec<String>,
+}
+
+impl ReportIssue {
+    pub(crate) fn from_library(i: &pm_scan::library::IssueType) -> Self {
+        Self {
+            id: i.id.into(),
+            name: i.name.into(),
+            cwe: i.cwe.to_vec(),
+            owasp: i.owasp.into(),
+            owasp_api: i.owasp_api.map(str::to_string),
+            background: i.background.into(),
+            impact: i.impact.into(),
+            remediation: i.remediation.into(),
+            references: i.references.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeverityCount {
+    pub severity: String,
+    pub count: usize,
+}
+
+/// Findings of one issue type, with what to do about them.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportIssueGroup {
+    pub id: String,
+    pub name: String,
+    /// The most severe of its findings.
+    pub severity: String,
+    pub count: usize,
+    pub findings: Vec<i64>,
+    pub cwe: Vec<u32>,
+    pub owasp: String,
+    pub remediation: String,
+}
+
+/// Findings under one OWASP Top 10 category.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportOwaspGroup {
+    pub category: String,
+    pub findings: Vec<ReportOwaspItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportOwaspItem {
+    pub id: i64,
+    pub title: String,
+    pub severity: String,
+    pub status: String,
+    pub cwe: Vec<u32>,
+}
+
+/// Which findings go into a report.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReportOptions {
+    /// Leave out findings below this severity.
+    pub min_severity: Option<String>,
+    /// Only these statuses (default: all but false_positive).
+    pub statuses: Vec<String>,
+    /// Include request/response evidence (default true).
+    pub evidence: Option<bool>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportEvidence {
@@ -39,6 +118,12 @@ pub struct ReportFinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof: Option<ReportProof>,
     pub evidence: Vec<ReportEvidence>,
+    /// From the issue library, when the class is a known issue type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<ReportIssue>,
+    /// The last retest's summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,16 +140,97 @@ pub struct Report {
     /// "N records, hash chain verified" or what failed.
     pub audit: String,
     pub audit_ok: bool,
+    /// The most severe finding's severity, or "none".
+    pub risk: String,
+    /// Findings per severity, most severe first (every severity listed).
+    pub severity_counts: Vec<SeverityCount>,
+    /// Findings grouped by issue type, most severe first.
+    pub issue_types: Vec<ReportIssueGroup>,
+    /// Findings grouped by OWASP Top 10 2021 category.
+    pub owasp: Vec<ReportOwaspGroup>,
+}
+
+impl Report {
+    /// Fills in the summary fields from `findings`.
+    pub fn summarise(&mut self) {
+        let rank = |s: &str| SEVERITIES.iter().position(|x| *x == s).unwrap_or(9);
+        self.risk = self.findings.iter().map(|f| f.severity.clone()).min_by_key(|s| rank(s)).unwrap_or("none".into());
+        self.severity_counts = SEVERITIES
+            .iter()
+            .map(|s| SeverityCount {
+                severity: s.to_string(),
+                count: self.findings.iter().filter(|f| f.severity == *s).count(),
+            })
+            .collect();
+        let mut groups: Vec<ReportIssueGroup> = Vec::new();
+        let mut owasp: Vec<ReportOwaspGroup> = Vec::new();
+        for f in &self.findings {
+            let (id, name, cwe, cat, fix) = match &f.issue {
+                Some(i) => (i.id.clone(), i.name.clone(), i.cwe.clone(), i.owasp.clone(), i.remediation.clone()),
+                None => (f.vuln_class.clone(), f.vuln_class.clone(), vec![], "Not mapped".into(), String::new()),
+            };
+            match groups.iter_mut().find(|g| g.id == id) {
+                Some(g) => {
+                    g.count += 1;
+                    g.findings.push(f.id);
+                    if rank(&f.severity) < rank(&g.severity) {
+                        g.severity = f.severity.clone();
+                    }
+                }
+                None => groups.push(ReportIssueGroup {
+                    id,
+                    name,
+                    severity: f.severity.clone(),
+                    count: 1,
+                    findings: vec![f.id],
+                    cwe: cwe.clone(),
+                    owasp: cat.clone(),
+                    remediation: fix,
+                }),
+            }
+            let item = ReportOwaspItem {
+                id: f.id,
+                title: f.title.clone(),
+                severity: f.severity.clone(),
+                status: f.status.clone(),
+                cwe,
+            };
+            match owasp.iter_mut().find(|g| g.category == cat) {
+                Some(g) => g.findings.push(item),
+                None => owasp.push(ReportOwaspGroup { category: cat, findings: vec![item] }),
+            }
+        }
+        groups.sort_by_key(|g| (rank(&g.severity), std::cmp::Reverse(g.count)));
+        owasp.sort_by(|a, b| a.category.cmp(&b.category));
+        self.issue_types = groups;
+        self.owasp = owasp;
+    }
 }
 
 impl Service {
     /// The findings (false positives left out), most severe first, with
     /// their proving proof and up to four evidence exchanges.
     pub fn report(&self) -> Result<Report> {
+        self.report_with(&ReportOptions::default())
+    }
+
+    pub fn report_with(&self, opts: &ReportOptions) -> Result<Report> {
         let roe = self.policy.roe();
-        let mut findings: Vec<Value> =
-            self.finding_list(None)?.into_iter().filter(|f| f["status"] != "false_positive").collect();
         let rank = |s: &str| SEVERITIES.iter().position(|x| *x == s).unwrap_or(9);
+        let floor = match opts.min_severity.as_deref().filter(|s| !s.is_empty()) {
+            Some(m) if SEVERITIES.contains(&m) => rank(m),
+            Some(m) => return Err(ServiceError::Invalid(format!("unknown severity {m}"))),
+            None => 9,
+        };
+        let mut findings: Vec<Value> = self
+            .finding_list(None)?
+            .into_iter()
+            .filter(|f| {
+                let st = f["status"].as_str().unwrap_or("");
+                if opts.statuses.is_empty() { st != "false_positive" } else { opts.statuses.iter().any(|s| s == st) }
+            })
+            .filter(|f| rank(f["severity"].as_str().unwrap_or("")) <= floor)
+            .collect();
         findings.sort_by_key(|f| rank(f["severity"].as_str().unwrap_or("")));
         let s = |v: &Value| v.as_str().unwrap_or("").to_string();
         let mut out = Vec::new();
@@ -83,7 +249,7 @@ impl Service {
                 .take(4)
                 .collect();
             let mut evidence = Vec::new();
-            for ex_id in evidence_ids {
+            for ex_id in evidence_ids.into_iter().filter(|_| opts.evidence.unwrap_or(true)) {
                 let Some(ex) = self.store.lock().get_exchange(ex_id)? else { continue };
                 evidence.push(ReportEvidence {
                     exchange_id: ex_id,
@@ -107,13 +273,20 @@ impl Service {
                     reasons: p["reasons"].as_array().into_iter().flatten().map(s).collect(),
                 }),
                 evidence,
+                issue: pm_scan::library::lookup(&s(&f["vuln_class"])).map(ReportIssue::from_library),
+                retest: f["retest"]["summary"].as_str().map(|r| {
+                    let when = jiff::Timestamp::from_millisecond(f["retest"]["ts_ms"].as_i64().unwrap_or(0))
+                        .map(|t| t.to_string())
+                        .unwrap_or_default();
+                    format!("{r} ({when})")
+                }),
             });
         }
         let (audit, audit_ok) = match crate::verify_audit(&self.store.lock()) {
             Ok(n) => (format!("{n} records, hash chain verified"), true),
             Err(e) => (format!("verification failed: {e}"), false),
         };
-        Ok(Report {
+        let mut report = Report {
             title: roe.engagement.name.clone().unwrap_or_else(|| "Security assessment".into()),
             client: roe.engagement.client.clone(),
             window: match (roe.engagement.starts, roe.engagement.ends) {
@@ -126,7 +299,13 @@ impl Service {
             findings: out,
             audit,
             audit_ok,
-        })
+            risk: String::new(),
+            severity_counts: vec![],
+            issue_types: vec![],
+            owasp: vec![],
+        };
+        report.summarise();
+        Ok(report)
     }
 
     pub fn report_json(&self) -> Result<String> {
@@ -147,8 +326,24 @@ pub fn sarif(r: &Report) -> Value {
     let mut classes: Vec<&str> = r.findings.iter().map(|f| f.vuln_class.as_str()).collect();
     classes.sort_unstable();
     classes.dedup();
-    let rules: Vec<Value> =
-        classes.iter().map(|c| json!({ "id": c, "name": c, "shortDescription": { "text": c } })).collect();
+    let rules: Vec<Value> = classes
+        .iter()
+        .map(|c| match pm_scan::library::lookup(c) {
+            Some(i) => {
+                let mut tags = vec!["security".to_string(), i.owasp.to_string()];
+                tags.extend(i.cwe.iter().map(|n| format!("CWE-{n}")));
+                json!({
+                    "id": c, "name": i.name,
+                    "shortDescription": { "text": i.name },
+                    "fullDescription": { "text": i.background },
+                    "help": { "text": i.remediation },
+                    "helpUri": i.cwe.first().map(|n| pm_scan::library::cwe_url(*n)),
+                    "properties": { "tags": tags },
+                })
+            }
+            None => json!({ "id": c, "name": c, "shortDescription": { "text": c } }),
+        })
+        .collect();
     let results: Vec<Value> = r
         .findings
         .iter()
@@ -224,9 +419,18 @@ pub fn html(r: &Report) -> String {
         esc(&r.generated_at),
         esc(&r.generator)
     ));
-    h.push_str(
-        "<h2>Summary</h2><table><tr><th>#</th><th>Severity</th><th>Title</th><th>Status</th><th>Proof</th></tr>",
-    );
+    h.push_str(&format!(
+        "<h2>Summary</h2><p>Overall risk: <span class=\"sev {}\">{}</span> · {}</p>",
+        esc(&r.risk),
+        esc(&r.risk),
+        r.severity_counts
+            .iter()
+            .filter(|c| c.count > 0)
+            .map(|c| format!("{} {}", c.count, esc(&c.severity)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    h.push_str("<table><tr><th>#</th><th>Severity</th><th>Title</th><th>Status</th><th>Proof</th></tr>");
     if r.findings.is_empty() {
         h.push_str("<tr><td colspan=5>No findings recorded.</td></tr>");
     }
@@ -256,6 +460,23 @@ pub fn html(r: &Report) -> String {
             esc(&f.url),
             esc(&f.description)
         ));
+        if let Some(i) = &f.issue {
+            let cwe: Vec<String> =
+                i.cwe.iter().map(|n| format!("<a href=\"{}\">CWE-{n}</a>", pm_scan::library::cwe_url(*n))).collect();
+            h.push_str(&format!(
+                "<p class=\"meta\">{} · {}{}</p><h3>Background</h3><p>{}</p><h3>Impact</h3><p>{}</p>\
+                 <h3>Remediation</h3><p>{}</p>",
+                cwe.join(", "),
+                esc(&i.owasp),
+                i.owasp_api.as_deref().map(|a| format!(" · {}", esc(a))).unwrap_or_default(),
+                esc(&i.background),
+                esc(&i.impact),
+                esc(&i.remediation)
+            ));
+        }
+        if let Some(t) = &f.retest {
+            h.push_str(&format!("<p class=\"muted\">Last retest: {}</p>", esc(t)));
+        }
         if let Some(p) = &f.proof {
             h.push_str(&format!(
                 "<h3>Proof</h3><p>Verified automatically by the <code>{}</code> check ({} confidence):</p><ul>",
@@ -293,7 +514,7 @@ pub fn html(r: &Report) -> String {
     h
 }
 
-const CSS: &str = "body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 16px;color:#1f2330}\
+pub(crate) const CSS: &str = "body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 16px;color:#1f2330}\
 h1{font-size:26px}h2{font-size:20px;margin-top:32px;border-bottom:1px solid #e3e5ec;padding-bottom:4px}h3{font-size:16px}\
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #e3e5ec;padding:6px 8px;text-align:left}\
 dt{font-weight:600;float:left;clear:left;width:140px}dd{margin-left:150px}\
@@ -307,7 +528,7 @@ mod tests {
     use super::*;
 
     fn report() -> Report {
-        Report {
+        let mut r = Report {
             title: "Test <engagement>".into(),
             client: Some("ACME".into()),
             window: None,
@@ -334,10 +555,18 @@ mod tests {
                     request: "GET / HTTP/1.1".into(),
                     response: Some("<img src=x onerror=alert(1)>".into()),
                 }],
+                issue: pm_scan::library::lookup("idor").map(ReportIssue::from_library),
+                retest: None,
             }],
             audit: "3 records, hash chain verified".into(),
             audit_ok: true,
-        }
+            risk: String::new(),
+            severity_counts: vec![],
+            issue_types: vec![],
+            owasp: vec![],
+        };
+        r.summarise();
+        r
     }
 
     #[test]
@@ -354,6 +583,7 @@ mod tests {
         assert_eq!(s["version"], "2.1.0");
         let run = &s["runs"][0];
         assert_eq!(run["tool"]["driver"]["rules"][0]["id"], "idor");
+        assert!(run["tool"]["driver"]["rules"][0]["properties"]["tags"].to_string().contains("CWE-639"));
         assert_eq!(run["results"][0]["level"], "error");
         assert_eq!(run["results"][0]["properties"]["proven"], true);
         assert_eq!(

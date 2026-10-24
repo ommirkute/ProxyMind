@@ -25,6 +25,7 @@ mod proof;
 mod race;
 mod replay;
 mod report;
+mod report_template;
 mod roe;
 mod rules;
 mod scan;
@@ -44,7 +45,7 @@ pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
-pub use findings::{FindingUpdate, NewFinding};
+pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
@@ -63,7 +64,11 @@ pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
-pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
+pub use report::{
+    Report, ReportEvidence, ReportFinding, ReportIssue, ReportIssueGroup, ReportOptions, ReportOwaspGroup, ReportProof,
+    SeverityCount,
+};
+pub use report_template::{Rendered, ReportTemplate, TEMPLATES_SETTING, builtin_templates};
 pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};

@@ -141,6 +141,10 @@ pub fn api() -> Router<AppState> {
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
+        .route("/findings/{id}/retest", post(finding_retest))
+        .route("/library", get(library))
+        .route("/report/templates", get(report_templates).post(report_template_save))
+        .route("/report/templates/{name}", axum::routing::delete(report_template_delete))
         .route("/proofs", post(proof_run))
         .route("/proofs/{id}", get(proof))
         .route("/proofs/{id}/rerun", post(proof_rerun))
@@ -478,23 +482,63 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
 #[derive(serde::Deserialize)]
 struct ReportQuery {
     format: Option<String>,
+    template: Option<String>,
+    min_severity: Option<String>,
+    /// Comma-separated statuses to include.
+    statuses: Option<String>,
+    evidence: Option<bool>,
+    /// Show inline (for the preview) instead of as a download.
+    inline: Option<bool>,
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
-    let (ct, body) = match q.format.as_deref().unwrap_or("md") {
-        "md" | "markdown" => ("text/markdown; charset=utf-8", st.service.report_markdown()?),
-        "json" => ("application/json", st.service.report_json()?),
-        "sarif" => ("application/sarif+json", st.service.report_sarif()?),
-        // Served as a download only, and with its own CSP: it contains target content.
-        "html" => ("text/html; charset=utf-8", st.service.report_html()?),
-        other => {
-            return Err(pm_service::ServiceError::Invalid(format!(
-                "unknown format {other}; use md, json, sarif or html"
-            ))
-            .into());
-        }
+    let opts = pm_service::ReportOptions {
+        min_severity: q.min_severity.clone(),
+        statuses: q
+            .statuses
+            .as_deref()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default(),
+        evidence: q.evidence,
     };
-    Ok(([(header::CONTENT_TYPE, ct), (header::CONTENT_DISPOSITION, "attachment")], body).into_response())
+    let format = q.format.as_deref().unwrap_or("md");
+    let r = st.service.report_render(q.template.as_deref(), format, &opts).await?;
+    // A download by default. Inline previews get a sandbox: the report holds
+    // target content (it is escaped, and carries its own CSP as well).
+    let disposition = if q.inline == Some(true) {
+        "inline".to_string()
+    } else {
+        format!("attachment; filename=\"proxymind-report.{}\"", r.extension)
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, r.content_type.to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'; style-src 'unsafe-inline'".to_string()),
+        ],
+        r.body,
+    )
+        .into_response())
+}
+
+async fn finding_retest(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.finding_retest(&st.actor, id).await?)
+}
+
+async fn library() -> ApiResult {
+    ok(pm_service::pm_scan::library::LIBRARY)
+}
+
+async fn report_templates(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.report_templates()?)
+}
+
+async fn report_template_save(State(st): State<AppState>, Json(t): Json<pm_service::ReportTemplate>) -> ApiResult {
+    ok(st.service.report_template_save(&st.actor, t)?)
+}
+
+async fn report_template_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.report_template_delete(&st.actor, &name)? }))
 }
 
 async fn intercept_state(State(st): State<AppState>) -> ApiResult {
