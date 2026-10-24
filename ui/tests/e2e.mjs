@@ -127,6 +127,25 @@ try {
   }
   check(true, "captured alice and bob from history");
 
+  console.log("Overview");
+  await open("overview");
+  await page.getByRole("heading", { name: "Overview" }).waitFor();
+  check(await page.locator(".stat").count() === 4, "the overview shows the workspace at a glance");
+  await page.screenshot({ path: join(SHOTS, "0-overview.png") });
+  await page.getByRole("button", { name: /^Theme:/ }).click();
+  await page.getByRole("button", { name: /^Theme:/ }).click();
+  check(await page.evaluate(() => document.documentElement.dataset.theme) === "dark", "the theme can be switched to dark");
+  await sleep(400);
+  await page.screenshot({ path: join(SHOTS, "0-overview-dark.png") });
+  await open("history");
+  await page.screenshot({ path: join(SHOTS, "0-history-dark.png") });
+  await page.getByRole("button", { name: /^Theme:/ }).click();
+  await page.keyboard.press("Control+k");
+  await page.getByLabel("Go to", { exact: true }).fill("repeat");
+  await page.screenshot({ path: join(SHOTS, "0-palette.png") });
+  await page.keyboard.press("Enter");
+  check(await page.evaluate(() => location.hash) === "#/repeater", "the command palette jumps to a page");
+
   console.log("Proxy: top tabs, HTTP history tools");
   await page.getByTestId("tab-dashboard").click();
   await page.getByRole("button", { name: "Findings" }).waitFor();

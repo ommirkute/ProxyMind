@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions";
+export type Page = "overview" | "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions";
 
 export interface Nav {
   page: Page;
@@ -88,8 +88,17 @@ const CHIP: Record<string, string> = {
   allow: "ok",
   deny: "",
   response: "accent",
+  // scan tasks and tiers
+  done: "ok",
+  crawling: "info",
+  auditing: "info",
+  cancelled: "",
+  failed: "bad",
+  destructive: "bad",
+  active_intrusive: "warn",
+  active_safe: "info",
   // severities
-  critical: "bad",
+  critical: "crit",
   high: "bad",
   medium: "warn",
   low: "info",
@@ -119,9 +128,9 @@ export function Panel({ title, actions, children }: { title?: ReactNode; actions
   return (
     <section className="panel">
       {(title || actions) && (
-        <div className="row" style={{ marginBottom: 10 }}>
-          {title && <h2 style={{ margin: 0 }} className="grow">{title}</h2>}
-          {actions}
+        <div className="panel-head">
+          {title && <h2>{title}</h2>}
+          {actions && <div className="actions">{actions}</div>}
         </div>
       )}
       {children}
@@ -362,7 +371,11 @@ export function usePref<T>(key: string, initial: T): [T, (v: T) => void] {
   const [v, setV] = useState<T>(() => {
     try {
       const s = localStorage.getItem(key);
-      return s ? { ...initial, ...JSON.parse(s) } : initial;
+      if (!s) return initial;
+      const parsed = JSON.parse(s);
+      // Objects gain fields added since they were saved; plain values are used as they are.
+      const isObj = (x: unknown) => typeof x === "object" && x !== null && !Array.isArray(x);
+      return isObj(initial) && isObj(parsed) ? { ...initial, ...parsed } : (parsed as T);
     } catch {
       return initial;
     }

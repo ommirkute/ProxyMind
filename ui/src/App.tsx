@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, type Counters, type Status } from "./api";
-import { NavContext, type Page } from "./components";
+import { NavContext, usePref, type Page } from "./components";
+import { Icon } from "./icons";
+import Overview from "./pages/Overview";
+import { CommandPalette } from "./palette";
 import History from "./pages/History";
 import Intercept from "./pages/Intercept";
 import Repeater from "./pages/Repeater";
@@ -24,35 +27,39 @@ import Sessions from "./pages/Sessions";
 interface Group {
   id: string;
   label: string;
+  icon: string;
+  /** Sidebar section the group sits in. */
+  section: string;
   pages: { id: Page; label: string }[];
 }
 
-/** Top tabs and their sub-tabs, laid out like Burp. */
+/** Sidebar entries and their sub-pages (shown as tabs in the header). */
 const GROUPS: Group[] = [
-  { id: "dashboard", label: "Dashboard", pages: [
+  { id: "dashboard", label: "Dashboard", icon: "dashboard", section: "Workspace", pages: [
+    { id: "overview", label: "Overview" },
     { id: "findings", label: "Findings" },
     { id: "issues", label: "Scanner issues" },
     { id: "approvals", label: "Approvals" },
     { id: "audit", label: "Audit log" },
   ] },
-  { id: "target", label: "Target", pages: [
+  { id: "target", label: "Target", icon: "target", section: "Workspace", pages: [
     { id: "sitemap", label: "Site map & Search" },
     { id: "model", label: "Model & Coverage" },
     { id: "engagement", label: "Scope & rules" },
   ] },
-  { id: "proxy", label: "Proxy", pages: [
+  { id: "proxy", label: "Proxy", icon: "proxy", section: "Testing", pages: [
     { id: "intercept", label: "Intercept" },
     { id: "history", label: "HTTP history" },
     { id: "wshistory", label: "WebSockets history" },
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
-  { id: "intruder", label: "Intruder", pages: [{ id: "intruder", label: "Intruder" }] },
-  { id: "repeater", label: "Repeater", pages: [{ id: "repeater", label: "Repeater" }] },
-  { id: "authz", label: "Authz", pages: [{ id: "authz", label: "Identities & Authz" }] },
-  { id: "tools", label: "Tools", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }] },
-  { id: "assistant", label: "Assistant", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
+  { id: "repeater", label: "Repeater", icon: "repeater", section: "Testing", pages: [{ id: "repeater", label: "Repeater" }] },
+  { id: "intruder", label: "Intruder", icon: "intruder", section: "Testing", pages: [{ id: "intruder", label: "Intruder" }] },
+  { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
+  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }] },
+  { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
+  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
 
 const PAGES = GROUPS.flatMap((g) => g.pages);
@@ -72,6 +79,23 @@ export default function App() {
   const [counters, setCounters] = useState<Counters | null>(null);
   const [live, setLive] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [theme, setTheme] = usePref<"system" | "light" | "dark">("pm-theme", "system");
+  const [collapsed, setCollapsed] = usePref<boolean>("pm-sidebar-collapsed", false);
+  const [palette, setPalette] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette((p) => !p);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash());
@@ -119,18 +143,25 @@ export default function App() {
 
   if (authError) {
     return (
-      <div className="panel" style={{ maxWidth: 560, margin: "80px auto" }}>
-        <h2>Not signed in</h2>
-        <p>{authError}</p>
-        <p className="muted">
-          Open the link printed by <code>proxymind ui</code> (it looks like
-          <code> http://127.0.0.1:7777/auth?token=…</code>).
-        </p>
+      <div className="signin">
+        <div className="signin-card">
+          <div className="brand">
+            <span className="brand-mark"><Icon name="logo" size={17} stroke={2} /></span>
+            <span className="brand-name">Proxy<span>Mind</span></span>
+          </div>
+          <h2>Not signed in</h2>
+          <p>{authError}</p>
+          <p className="small">
+            Open the link printed by <code style={{ display: "inline" }}>proxymind ui</code>. It looks like
+            <code>http://127.0.0.1:7777/auth?token=…</code>
+          </p>
+        </div>
       </div>
     );
   }
 
   const PageView = {
+    overview: Overview,
     history: History,
     assistant: Assistant,
     intercept: Intercept,
@@ -158,47 +189,95 @@ export default function App() {
     id === "intercept" ? counters?.intercepted ?? 0 : id === "approvals" ? counters?.pending_approvals ?? 0 : 0;
   const groupBadge = (g: Group) => g.pages.reduce((n, p) => n + badge(p.id), 0);
 
+  const sections = [...new Set(GROUPS.map((g) => g.section))];
+  const nextTheme = { system: "light", light: "dark", dark: "system" } as const;
+  const scope = status?.in_scope.join(", ") ?? "";
+
   return (
     <NavContext.Provider value={nav}>
-      <div className="app">
-        <header className="topnav">
-          <div className="topnav-row">
-            <div className="brand">
-              Proxy<span>Mind</span>
+      <div className={`app ${collapsed ? "collapsed" : ""}`}>
+        <aside className="sidebar">
+          <div className="brand">
+            <span className="brand-mark"><Icon name="logo" size={17} stroke={2} /></span>
+            <span className="brand-name">Proxy<span>Mind</span></span>
+          </div>
+          <nav className="maintabs" aria-label="Main">
+            {sections.map((sec) => (
+              <div key={sec} style={{ display: "contents" }}>
+                <div className="nav-section">{sec}</div>
+                {GROUPS.filter((g) => g.section === sec).map((g) => (
+                  <button
+                    key={g.id}
+                    className={`maintab ${group.id === g.id ? "active" : ""}`}
+                    aria-current={group.id === g.id ? "page" : undefined}
+                    onClick={() => nav.go(lastIn[g.id] ?? g.pages[0].id)}
+                    data-testid={`tab-${g.id}`}
+                    title={g.label}
+                  >
+                    <Icon name={g.icon} size={17} />
+                    <span className="label">{g.label}</span>
+                    {groupBadge(g) > 0 && (
+                      <span
+                        className="badge"
+                        data-testid={g.id === "proxy" ? "intercept-badge" : g.id === "dashboard" ? "approvals-badge" : undefined}
+                      >
+                        {groupBadge(g)}
+                      </span>
+                    )}
+                    {g.id === "dashboard" && groupBadge(g) === 0 && (counters?.findings ?? 0) > 0 && (
+                      <span className="chip plain">{counters?.findings}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+          <div className="sidebar-foot">
+            <div className="project-card" title={status?.project}>
+              <span className="avatar">{(status?.you_are ?? "?").replace(/^\w+:/, "").slice(0, 2)}</span>
+              <div className="who">
+                <b>{status?.you_are ?? "…"}</b>
+                <span>{(status?.project ?? "").split(/[\\/]/).pop()}</span>
+              </div>
             </div>
-            <nav className="maintabs" aria-label="Main">
-              {GROUPS.map((g) => (
-                <button
-                  key={g.id}
-                  className={`maintab ${group.id === g.id ? "active" : ""}`}
-                  aria-current={group.id === g.id ? "page" : undefined}
-                  onClick={() => nav.go(lastIn[g.id] ?? g.pages[0].id)}
-                  data-testid={`tab-${g.id}`}
-                >
-                  {g.label}
-                  {groupBadge(g) > 0 && (
-                    <span
-                      className="badge"
-                      data-testid={g.id === "proxy" ? "intercept-badge" : g.id === "dashboard" ? "approvals-badge" : undefined}
-                    >
-                      {groupBadge(g)}
-                    </span>
-                  )}
-                  {g.id === "dashboard" && (counters?.findings ?? 0) > 0 && <span className="chip">{counters?.findings}</span>}
-                </button>
-              ))}
-            </nav>
-            <div className="topnav-status">
-              <span title={live ? "Live" : "Reconnecting…"}>
-                <span className={`live ${live ? "" : "off"}`} />
-                {counters?.exchanges ?? 0} exchanges
-              </span>
-              <span title={status?.project}>{status?.you_are}</span>
-              <span className="muted">v{status?.version}</span>
+            <div className="foot-actions">
+              <button
+                className="icon-btn"
+                onClick={() => setTheme(nextTheme[theme])}
+                aria-label={`Theme: ${theme}`}
+                title={`Theme: ${theme} (click to change)`}
+              >
+                <Icon name={theme === "dark" ? "moon" : theme === "light" ? "sun" : "monitor"} size={15} />
+                <span className="label">{theme === "system" ? "Auto" : theme === "dark" ? "Dark" : "Light"}</span>
+              </button>
+              <button
+                className="icon-btn"
+                onClick={() => setCollapsed(!collapsed)}
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              >
+                <Icon name="panel" size={15} />
+                <span className="label">v{status?.version}</span>
+              </button>
             </div>
           </div>
-          <div className="topnav-row sub">
-            {group.pages.length > 1 ? (
+        </aside>
+        <div className="main-col">
+          <header className="topnav">
+            <div className="crumbs">
+              {group.pages.length === 1 && group.pages[0].label !== group.label ? (
+                <>
+                  <span>{group.label}</span>
+                  <Icon name="chevron" size={14} />
+                  <b>{group.pages[0].label}</b>
+                </>
+              ) : group.pages.length === 1 ? (
+                <b>{group.label}</b>
+              ) : (
+                <span>{group.label}</span>
+              )}
+            </div>
+            {group.pages.length > 1 && (
               <nav className="subtabs" aria-label={group.label}>
                 {group.pages.map((p) => (
                   <button
@@ -212,17 +291,42 @@ export default function App() {
                   </button>
                 ))}
               </nav>
-            ) : (
-              <span className="subtitle">{group.pages[0].label}</span>
             )}
-            <span className="meta grow" title={status?.in_scope.join(", ")}>
-              {status?.engagement ?? "No engagement name"} · Scope: {status?.in_scope.join(", ")}
-            </span>
-          </div>
-        </header>
-        <main className="main">
-          <PageView />
-        </main>
+            <div className="topnav-status">
+              <button className="pill search-pill" onClick={() => setPalette(true)} aria-label="Open command palette">
+                <Icon name="search" size={13} />
+                <span className="hide-narrow">Jump to…</span>
+                <kbd>{/Mac/.test(navigator.platform) ? "⌘K" : "Ctrl K"}</kbd>
+              </button>
+              <span className="pill hide-narrow" title={`Scope: ${scope}`}>
+                <Icon name="globe" size={13} />
+                <span className="ellipsis-text meta">
+                  {status?.engagement ? <b>{status.engagement}</b> : "No engagement"} · {scope || "no scope"}
+                </span>
+              </span>
+              <span className="pill" title={live ? "Live: updates stream in" : "Reconnecting…"}>
+                <span className={`live ${live ? "" : "off"}`} />
+                {(counters?.exchanges ?? 0).toLocaleString()} exchanges
+              </span>
+            </div>
+          </header>
+          <main className="main">
+            <PageView />
+          </main>
+          <CommandPalette
+            open={palette}
+            onClose={() => setPalette(false)}
+            items={GROUPS.flatMap((g) =>
+              g.pages.map((p) => ({
+                id: p.id,
+                label: p.label,
+                group: g.label,
+                icon: g.icon,
+                run: () => nav.go(p.id),
+              })),
+            )}
+          />
+        </div>
       </div>
     </NavContext.Provider>
   );
