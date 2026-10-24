@@ -129,6 +129,10 @@ fn random<const N: usize>(rng: &SystemRandom) -> Result<[u8; N]> {
 
 fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let digits: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    // Checked first: slicing below assumes one byte per character.
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ServiceError::Invalid("hex payload has a non-hex character".into()));
+    }
     if !digits.len().is_multiple_of(2) {
         return Err(ServiceError::Invalid("hex payload has an odd number of digits".into()));
     }
@@ -369,6 +373,14 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_payloads_with_other_characters_are_refused_not_panicking() {
+        assert_eq!(parse_hex("de ad be ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert!(parse_hex("aéb").is_err(), "a two-byte character between digits");
+        assert!(parse_hex("zz").is_err());
+        assert!(parse_hex("abc").is_err());
+    }
 
     #[test]
     fn upgrade_gets_a_fresh_key_and_no_extensions() {

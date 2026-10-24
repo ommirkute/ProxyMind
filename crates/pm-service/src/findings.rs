@@ -129,6 +129,10 @@ impl Service {
             let mut changes = serde_json::Map::new();
             changes.insert("evidence".into(), json!(serde_json::to_string(&ev).unwrap_or_default()));
             changes.insert("duplicates".into(), json!(o["duplicates"].as_i64().unwrap_or(0) + 1));
+            let rank = |s: &str| SEVERITIES.iter().position(|x| *x == s).unwrap_or(9);
+            if rank(&severity) < rank(o["severity"].as_str().unwrap_or("")) {
+                changes.insert("severity".into(), json!(severity));
+            }
             changes.insert("updated_ms".into(), json!(now_ms()));
             self.store.lock().update_row("findings", id, &changes)?;
             self.audit(

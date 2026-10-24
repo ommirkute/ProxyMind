@@ -50,13 +50,32 @@ async fn an_interrupted_task_resumes_without_rescanning() {
     let mid = wait(&a, &id, |v| v.status == ScanTaskStatus::Auditing && v.targets_done >= 2).await;
     assert!(mid.targets_total > mid.targets_done + 1, "enough left to resume: {mid:?}");
 
-    // ProxyMind "restarts" while the task runs: the project opens again.
+    // Another process opening the project meanwhile leaves the running task alone.
+    let other = service(&path, &roe);
+    let seen = other.scan_task_status(&human(), &id).unwrap();
+    assert!(seen.status.running(), "{seen:?}");
+    assert!(seen.notes.iter().any(|n| n == "running in another ProxyMind process"), "{seen:?}");
+    assert!(other.scan_task_resume(&human(), &id).is_err(), "no second copy of a running scan");
+    drop(other);
+
+    // ProxyMind stops mid-scan (simulated: the task is stopped, then its saved
+    // row is put back to "auditing" with an old heartbeat), and opens again.
+    a.scan_task_cancel(&human(), &id).unwrap();
+    wait(&a, &id, |v| !v.status.running()).await;
+    {
+        let mut store = Store::open(&path).unwrap();
+        let mut row = store.list_scan_tasks(20).unwrap().into_iter().find(|r| r.id == id).unwrap();
+        let mut data: serde_json::Value = serde_json::from_str(&row.data).unwrap();
+        data["view"]["status"] = "auditing".into();
+        row.status = "auditing".into();
+        row.data = data.to_string();
+        row.updated_ms -= 10 * 60 * 1000;
+        store.upsert_scan_task(&row).unwrap();
+    }
     let b = service(&path, &roe);
     let restored = b.scan_task_status(&human(), &id).unwrap();
     assert_eq!(restored.status, ScanTaskStatus::Paused, "{restored:?}");
     assert!(restored.notes.iter().any(|n| n.starts_with("interrupted")));
-    a.scan_task_cancel(&human(), &id).unwrap();
-    wait(&a, &id, |v| !v.status.running()).await;
 
     let resumed = b.scan_task_resume(&human(), &id).unwrap();
     assert_eq!(resumed.status, ScanTaskStatus::Auditing, "the crawl isn't repeated");

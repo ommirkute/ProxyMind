@@ -487,8 +487,6 @@ struct ReportQuery {
     /// Comma-separated statuses to include.
     statuses: Option<String>,
     evidence: Option<bool>,
-    /// Show inline (for the preview) instead of as a download.
-    inline: Option<bool>,
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
@@ -503,21 +501,10 @@ async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Res
     };
     let format = q.format.as_deref().unwrap_or("md");
     let r = st.service.report_render(q.template.as_deref(), format, &opts).await?;
-    // A download by default. Inline previews get a sandbox: the report holds
-    // target content (it is escaped, and carries its own CSP as well).
-    let disposition = if q.inline == Some(true) {
-        "inline".to_string()
-    } else {
-        format!("attachment; filename=\"proxymind-report.{}\"", r.extension)
-    };
-    Ok((
-        [
-            (header::CONTENT_TYPE, r.content_type.to_string()),
-            (header::CONTENT_DISPOSITION, disposition),
-            (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'; style-src 'unsafe-inline'".to_string()),
-        ],
-        r.body,
-    )
+    // Always a download: reports hold target content (escaped, with their own
+    // CSP). The UI previews HTML in a sandboxed srcdoc frame instead.
+    let disposition = format!("attachment; filename=\"proxymind-report.{}\"", r.extension);
+    Ok(([(header::CONTENT_TYPE, r.content_type.to_string()), (header::CONTENT_DISPOSITION, disposition)], r.body)
         .into_response())
 }
 

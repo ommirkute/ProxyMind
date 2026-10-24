@@ -168,6 +168,10 @@ pub(crate) struct ScanTask {
 /// Tasks kept in memory and loaded when a project opens.
 const KEEP_TASKS: usize = 20;
 
+/// A running task is saved at least this often, so other processes that
+/// open the project can tell it is still running.
+const HEARTBEAT_MS: i64 = 20_000;
+
 impl ScanTask {
     fn update(&self, f: impl FnOnce(&mut ScanTaskView)) {
         f(&mut self.view.lock());
@@ -291,7 +295,12 @@ impl Service {
                 view: parking_lot::Mutex::new(saved.view),
                 progress: parking_lot::Mutex::new(saved.progress),
             });
-            if task.view.lock().status.running() {
+            let running = task.view.lock().status.running();
+            if running && pm_core::now_ms() - row.updated_ms < 3 * HEARTBEAT_MS {
+                // Another ProxyMind process (the UI server, the desktop app)
+                // is running it right now: leave it alone.
+                task.note("running in another ProxyMind process".into());
+            } else if running {
                 task.update(|v| {
                     v.status = ScanTaskStatus::Paused;
                     v.current = None;
@@ -306,8 +315,21 @@ impl Service {
 
     fn spawn_task(self: &Arc<Self>, task: Arc<ScanTask>, actor: Actor) {
         let svc = self.clone();
+        let heartbeat = {
+            let (svc, task) = (self.clone(), task.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(HEARTBEAT_MS as u64)).await;
+                    if !task.view.lock().status.running() {
+                        break;
+                    }
+                    svc.save_task(&task);
+                }
+            })
+        };
         tokio::spawn(async move {
             let r = svc.scan_task_run(&actor, &task).await;
+            heartbeat.abort();
             task.update(|v| {
                 v.current = None;
                 match r {

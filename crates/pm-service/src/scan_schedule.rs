@@ -82,7 +82,7 @@ pub fn next_run_after(every: &Every, now_ms: i64) -> i64 {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScanSchedule {
     /// 0 for a new schedule.
@@ -98,12 +98,6 @@ pub struct ScanSchedule {
     pub last_run_ms: Option<i64>,
     pub last_task: Option<String>,
     pub last_error: Option<String>,
-}
-
-impl PartialEq for ScanTaskRequest {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
 }
 
 fn humans_only(actor: &Actor) -> Result<()> {
