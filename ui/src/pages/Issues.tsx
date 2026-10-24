@@ -149,6 +149,7 @@ interface ScanTask {
   targets_total: number;
   targets_done: number;
   requests: number;
+  relogins?: number;
   current?: string;
   issues: (ActiveFinding & { operation: string; finding_id?: number })[];
   notes: string[];
@@ -231,7 +232,7 @@ function CrawlAudit() {
       {task && (
         <>
           <div className="small" data-testid="audit-progress">
-            <b>{task.status}</b> · {task.pages_crawled} pages crawled · {task.targets_done}/{task.targets_total} operations · {task.requests} requests · {task.issues.length} issues
+            <b>{task.status}</b> · {task.pages_crawled} pages crawled · {task.targets_done}/{task.targets_total} operations · {task.requests} requests · {task.issues.length} issues{task.relogins ? ` · ${task.relogins} re-login(s)` : ""}
             {task.current && <span className="muted mono"> · {task.current}</span>}
           </div>
           {task.targets_total > 0 && (

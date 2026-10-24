@@ -19,6 +19,10 @@ pub struct IdentityInfo {
     pub headers: Vec<String>,
     pub has_health_check: bool,
     pub has_login: bool,
+    /// Whether a learned logged-out signature is set.
+    pub logged_out: bool,
+    /// Steps in the login recipe.
+    pub login_steps: usize,
     pub created_by: String,
 }
 
@@ -42,6 +46,8 @@ fn info(row: &IdentityRow) -> IdentityInfo {
         headers: ident.auth.headers.iter().map(|(k, _)| k.clone()).collect(),
         has_health_check: ident.health.is_some(),
         has_login: ident.login.is_some(),
+        logged_out: ident.logged_out.is_some(),
+        login_steps: ident.login.as_ref().map_or(0, |l| l.steps.len()),
         created_by: row.created_by.clone(),
     }
 }

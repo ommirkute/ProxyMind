@@ -625,6 +625,25 @@ enum IdentityAction {
         #[arg(long)]
         token_pointer: Option<String>,
     },
+    /// Print the newest exchange id: note it before logging in through the proxy.
+    Mark,
+    /// Build a login recipe from what the browser sent after `--from` (a mark):
+    /// the steps the logged-in session needs, with CSRF tokens and the like
+    /// read fresh on each run.
+    RecordLogin {
+        name: String,
+        #[arg(long)]
+        from: i64,
+        /// Last exchange of the recording (default: the newest)
+        #[arg(long)]
+        to: Option<i64>,
+        #[arg(long, default_value = "user")]
+        role: String,
+    },
+    /// Learn how the app answers when the session is gone (needs a health check).
+    LearnLoggedOut {
+        name: String,
+    },
     /// Define an identity from a JSON file (name, role, auth, health, login).
     Set {
         file: PathBuf,
@@ -2146,6 +2165,44 @@ async fn run() -> Result<()> {
                 )?,
                 IdentityAction::Login { name, from, token_pointer } => {
                     show(&service.identity_set_login_from(&me, name, *from, token_pointer.clone())?)?
+                }
+                IdentityAction::Mark => out!("{}", service.history_mark()?),
+                IdentityAction::RecordLogin { name, from, to, role } => {
+                    let r = service.identity_record_login(&me, name, role, *from, *to)?;
+                    out!("recorded a {}-step login for {}:", r.steps.len(), r.name);
+                    for st in &r.steps {
+                        let mut extra = String::new();
+                        if !st.uses.is_empty() {
+                            extra.push_str(&format!(" uses {}", st.uses.join(",")));
+                        }
+                        if !st.extracts.is_empty() {
+                            extra.push_str(&format!(" reads {}", st.extracts.join(",")));
+                        }
+                        out!("  #{} {} {}{extra}", st.exchange_id, st.method, st.url);
+                    }
+                    out!("  session: cookies=[{}] headers=[{}]", r.cookies.join(","), r.headers.join(","));
+                    for n in &r.notes {
+                        out!("  - {n}");
+                    }
+                }
+                IdentityAction::LearnLoggedOut { name } => {
+                    let l = service.identity_learn_logged_out(&me, name).await?;
+                    let lo = &l.logged_out;
+                    if !lo.statuses.is_empty() {
+                        out!("{name}: logged out when the status is {:?}", lo.statuses);
+                    }
+                    if !lo.location_contains.is_empty() {
+                        out!("{name}: logged out when redirected to {}", lo.location_contains);
+                    }
+                    if !lo.body_contains.is_empty() {
+                        out!("{name}: logged out when the page says {:?}", lo.body_contains);
+                    }
+                    if lo == &Default::default() {
+                        out!("{name}: the usual signs (401, redirect to a login page) are enough");
+                    }
+                    if let Some(c) = &l.health_contains {
+                        out!("{name}: health check now also needs {c:?}");
+                    }
                 }
                 IdentityAction::Set { file } => {
                     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;

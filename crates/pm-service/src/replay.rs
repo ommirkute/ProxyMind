@@ -126,6 +126,14 @@ pub(crate) fn parse_url_endpoint(url: &str) -> Result<Endpoint> {
     Ok(Endpoint::new(u.scheme(), host.trim_matches(['[', ']']), port))
 }
 
+/// Counts of automatic logins for one identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Relogins {
+    pub ok: usize,
+    pub failed: usize,
+    pub failed_in_row: usize,
+}
+
 impl Service {
     pub(crate) fn outgoing(&self, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
         let raw = if normalize { crlf_head(raw) } else { raw.to_vec() };
@@ -304,6 +312,11 @@ impl Service {
         Ok(Sent { exchange_id, response, status, error, elapsed_ms })
     }
 
+    /// How automatic logins for one identity have gone.
+    pub(crate) fn relogins(&self, identity: &str) -> Relogins {
+        self.relogins.lock().get(identity).copied().unwrap_or_default()
+    }
+
     /// Sends as an identity, logging it in again once if the response says
     /// the session expired and the identity has a login recipe.
     pub(crate) async fn send_as(
@@ -324,12 +337,24 @@ impl Service {
             notes.push(format!("{} looked logged out; logging in again", id.name));
             match self.identity_login(&id.name).await {
                 Ok(learned) => {
+                    {
+                        let mut r = self.relogins.lock();
+                        let e = r.entry(id.name.clone()).or_default();
+                        e.ok += 1;
+                        e.failed_in_row = 0;
+                    }
                     notes.push(format!("login ok ({})", learned.join(", ")));
                     let fresh = self.load_identity(&id.name)?;
                     let retry = self.send_now(actor, out, Some(&fresh), fix_cl, source).await?;
                     return Ok((retry, notes));
                 }
-                Err(e) => notes.push(format!("login failed: {e}")),
+                Err(e) => {
+                    let mut r = self.relogins.lock();
+                    let s = r.entry(id.name.clone()).or_default();
+                    s.failed += 1;
+                    s.failed_in_row += 1;
+                    notes.push(format!("login failed: {e}"));
+                }
             }
         }
         Ok((sent, notes))

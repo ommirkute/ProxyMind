@@ -886,6 +886,22 @@ try {
   await page.getByTestId("session-save").click();
   await page.waitForSelector("text=Saved. Rules apply");
 
+  console.log("Recorded login");
+  await open("authz");
+  await page.getByLabel("Login identity name").fill("carol");
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await page.waitForSelector("text=recording after #");
+  await browseAs(proxy, shop, "alice", ["/api/me"]);
+  await page.getByRole("button", { name: "Stop & save" }).click();
+  await page.waitForSelector('[data-testid="record-login-result"] >> text=1-step login');
+  check(true, "a login done through the proxy becomes a login recipe");
+  await page.waitForSelector('[data-testid="logged-out-learned"]', { timeout: 15000 });
+  const learnedText = await page.getByTestId("logged-out-learned").textContent();
+  check(learnedText.includes("logged out when") || learnedText.includes("usual signs"), `logged-out look learned (${learnedText})`);
+  await page.locator("td", { hasText: "knows its logged-out look" }).first().waitFor({ timeout: 5000 });
+  check(true, "the identity list shows the learned logged-out look");
+  await page.screenshot({ path: join(SHOTS, "3b-record-login.png"), fullPage: true });
+
   console.log("Model, coverage and audit");
   await open("model");
   await page.locator('[data-testid="operations"] strong', { hasText: "/api/orders/{id}" }).waitFor();

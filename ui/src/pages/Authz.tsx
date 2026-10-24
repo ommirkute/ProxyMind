@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
-import { api, type AuthzCandidate, type AuthzRow, type IdentityInfo } from "../api";
-import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
+import {
+  api,
+  openBrowser,
+  toast,
+  type AuthzCandidate,
+  type AuthzRow,
+  type IdentityInfo,
+  type LoggedOutLearned,
+  type LoginRecording,
+} from "../api";
+import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav, usePref } from "../components";
 
 interface Report {
   method: string;
@@ -44,6 +53,103 @@ export function AuthzTable({ rows }: { rows: AuthzRow[] }) {
   );
 }
 
+function describeLoggedOut(l: LoggedOutLearned): string {
+  const lo = l.logged_out;
+  const parts = [
+    lo.statuses.length ? `status ${lo.statuses.join("/")}` : "",
+    lo.location_contains ? `redirect to ${lo.location_contains}` : "",
+    lo.body_contains ? `page says "${lo.body_contains}"` : "",
+  ].filter(Boolean);
+  return parts.length ? `logged out when: ${parts.join(", ")}` : "the usual signs (401, login redirect) are enough";
+}
+
+/** Log in once in the browser; the steps become the identity's login recipe. */
+function RecordLogin({ onSaved }: { onSaved: () => void }) {
+  const [rec, setRec] = usePref<{ name: string; role: string; mark: number | null }>("pm-record-login", {
+    name: "",
+    role: "user",
+    mark: null,
+  });
+  const [result, setResult] = useState<LoginRecording | null>(null);
+  const [learned, setLearned] = useState<string | null>(null);
+  const action = useAction();
+
+  const start = () =>
+    action.run(async () => {
+      const m = await api.get<{ id: number }>("/history/mark");
+      setRec({ ...rec, mark: m.id });
+      setResult(null);
+      setLearned(null);
+    });
+  const stop = () =>
+    action.run(async () => {
+      if (rec.mark == null) return;
+      const r = await api.post<LoginRecording>("/identities/record-login", {
+        name: rec.name.trim(),
+        role: rec.role.trim() || "user",
+        from: rec.mark,
+      });
+      setResult(r);
+      setRec({ ...rec, mark: null });
+      onSaved();
+      toast(`Login recorded for ${r.name}`);
+      if (r.health_check != null) {
+        try {
+          const l = await api.post<LoggedOutLearned>(`/identities/${encodeURIComponent(r.name)}/learn-logged-out`);
+          setLearned(describeLoggedOut(l));
+          onSaved();
+        } catch (e) {
+          setLearned(`couldn't learn the logged-out look: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    });
+
+  return (
+    <div data-testid="record-login" style={{ marginTop: 16 }}>
+      <h3 style={{ margin: "0 0 6px" }}>Record a login</h3>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Press Start, log in through the proxy (e.g. in ProxyMind's browser), open a page that needs the login, then
+        press Stop &amp; save. CSRF tokens and session tokens are read fresh each time it logs in again.
+      </p>
+      <ErrorBox error={action.error} />
+      <div className="row">
+        <input aria-label="Login identity name" placeholder="name, e.g. alice" value={rec.name} onChange={(e) => setRec({ ...rec, name: e.target.value })} style={{ width: 140 }} disabled={rec.mark != null} />
+        <input aria-label="Login identity role" placeholder="role" value={rec.role} onChange={(e) => setRec({ ...rec, role: e.target.value })} style={{ width: 90 }} disabled={rec.mark != null} />
+        {rec.mark == null ? (
+          <button className="btn primary" disabled={action.busy || !rec.name.trim()} onClick={start}>
+            Start recording
+          </button>
+        ) : (
+          <>
+            <button className="btn" onClick={() => openBrowser().catch((e) => toast(String(e), "bad"))}>Open browser</button>
+            <button className="btn primary" disabled={action.busy} onClick={stop}>Stop &amp; save</button>
+            <button className="btn" disabled={action.busy} onClick={() => setRec({ ...rec, mark: null })}>Cancel</button>
+            <span className="small muted">recording after #{rec.mark}…</span>
+          </>
+        )}
+      </div>
+      {result && (
+        <div className="small" style={{ marginTop: 8 }} data-testid="record-login-result">
+          <div>
+            <b>{result.steps.length}-step login</b> for {result.name} · session: {[...result.cookies.map((c) => `cookie ${c}`), ...result.headers].join(", ")}
+          </div>
+          <ol style={{ margin: "4px 0", paddingLeft: 20 }}>
+            {result.steps.map((s) => (
+              <li key={s.exchange_id} className="mono">
+                <ExchangeLink id={s.exchange_id} /> {s.method} {new URL(s.url).pathname}
+                {s.uses.length > 0 && <span className="muted"> · sends {s.uses.join(", ")}</span>}
+                {s.extracts.length > 0 && <span className="muted"> · reads {s.extracts.join(", ")}</span>}
+              </li>
+            ))}
+          </ol>
+          {result.notes.map((n) => <div key={n} className="muted">{n}</div>)}
+          {learned && <div className="muted" data-testid="logged-out-learned">{learned}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Authz() {
   const { arg } = useNav();
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
@@ -66,6 +172,13 @@ export default function Authz() {
       const r = await api.post<Report>("/authz/check", { exchange_id, identities, include_anonymous: anon });
       setReport(r);
       results.reload();
+    });
+
+  const learn = (name: string) =>
+    checkAction.run(async () => {
+      const l = await api.post<LoggedOutLearned>(`/identities/${encodeURIComponent(name)}/learn-logged-out`);
+      setChecks((m) => ({ ...m, [name]: describeLoggedOut(l) }));
+      ids.reload();
     });
 
   const checkIdentity = (name: string) =>
@@ -99,11 +212,15 @@ export default function Authz() {
                     </td>
                     <td className="small muted">
                       {[...i.cookies.map((c) => `cookie ${c}`), ...i.headers].join(", ")}
-                      {i.has_login && " · auto re-login"}
+                      {i.has_login && ` · auto re-login${i.login_steps > 1 ? ` (${i.login_steps} steps)` : ""}`}
+                      {i.logged_out && " · knows its logged-out look"}
                     </td>
-                    <td>
+                    <td style={{ whiteSpace: "nowrap" }}>
                       <button className="btn" disabled={checkAction.busy || !i.has_health_check} title={i.has_health_check ? "" : "No health check set (proxymind identity health)"} onClick={() => checkIdentity(i.name)}>
                         Check
+                      </button>{" "}
+                      <button className="btn" disabled={checkAction.busy || !i.has_health_check} title="Learn how the app answers once this session is gone" onClick={() => learn(i.name)}>
+                        Learn logged-out
                       </button>
                     </td>
                   </tr>
@@ -111,6 +228,7 @@ export default function Authz() {
               </tbody>
             </table>
           )}
+          <RecordLogin onSaved={ids.reload} />
         </Panel>
 
         <Panel title="Run an authorization check">

@@ -174,7 +174,25 @@ export interface IdentityInfo {
   headers: string[];
   has_health_check: boolean;
   has_login: boolean;
+  logged_out: boolean;
+  login_steps: number;
   created_by: string;
+}
+
+export interface LoginRecording {
+  name: string;
+  steps: { exchange_id: number; method: string; url: string; extracts: string[]; uses: string[] }[];
+  cookies: string[];
+  headers: string[];
+  health_check: number | null;
+  notes: string[];
+}
+
+export interface LoggedOutLearned {
+  name: string;
+  logged_out: { statuses: number[]; location_contains: string; body_contains: string };
+  health_contains: string | null;
+  exchange_ids: number[];
 }
 
 export interface AuthzRow {

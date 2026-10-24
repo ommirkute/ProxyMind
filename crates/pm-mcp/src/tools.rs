@@ -231,6 +231,13 @@ pub fn tool_definitions() -> Vec<Value> {
             &["name"],
         ),
         tool(
+            "identity_learn_logged_out",
+            "Learn how the app answers when an identity's session is gone (logs in, sends its health check with and \
+             without credentials). Afterwards, expired sessions that still answer 200 are noticed and logged in again.",
+            json!({ "name": {"type":"string"} }),
+            &["name"],
+        ),
+        tool(
             "authz_check",
             "Authorization test: re-send a recorded GET (made by the data's owner) as other identities and as an \
              anonymous user, and compare each response with the owner's while ignoring noise such as timestamps. \
@@ -735,6 +742,15 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             }
             let g: A = args(a)?;
             service.identity_check(actor, &g.name).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "identity_learn_logged_out" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                name: String,
+            }
+            let g: A = args(a)?;
+            service.identity_learn_logged_out(actor, &g.name).await.map(to_json).map_err(|e| e.to_string())
         }
         "authz_check" => {
             let r: pm_service::AuthzCheckRequest = args(a)?;

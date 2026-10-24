@@ -144,6 +144,8 @@ pub struct Service {
     session: parking_lot::Mutex<session::SessionState>,
     /// One macro run at a time.
     session_lock: tokio::sync::Mutex<()>,
+    /// Automatic logins after an identity looked logged out, per identity.
+    relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
 }
@@ -176,6 +178,7 @@ impl Service {
             listeners: std::sync::OnceLock::new(),
             session: parking_lot::Mutex::default(),
             session_lock: tokio::sync::Mutex::new(()),
+            relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
         })
     }

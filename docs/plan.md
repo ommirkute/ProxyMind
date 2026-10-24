@@ -62,7 +62,8 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Active scanner step 3b: stored XSS (revisit pages from history), DOM XSS (headless Chromium with sink hooks), CSRF (foreign Origin), parameter-name / nested JSON and base64 / XML insertion points, crawl-and-audit background task with progress (API and UI)
 - Active scanner step 4a: JWT (weak secret, unverified signature, alg none), GraphQL (introspection, batching, suggestions, GET), web cache poisoning and deception, mass assignment, server-side prototype pollution
 - Active scanner step 4b: OAuth redirect_uri and state, deserialization (error-based, five formats), and behind approval: request smuggling (timing), file upload, race conditions as a scan check
-- Built-in browser (proxied, CA pinned by public key, own profile) and browser-driven crawling of JavaScript apps (every request through the gate; routes, clicks, script API calls)
+- Built-in browser (proxied, CA pinned by public key, own profile) and browser-driven crawling of JavaScript apps (every request through the gate; routes, clicks, script API calls, `#/` routes)
+- Recorded logins (multi-step, CSRF and tokens read fresh each run) and session-expiry detection (learned logged-out look; scans re-login and stop when the session is lost)
 - Active scanner step 2: out-of-band checks through ProxyMind's own OAST listener (SSRF, XXE, SQL and command injection, blind template injection, Log4Shell, code injection), one token per probe
 - History query language (fields, regex, OR/NOT, numeric ranges; content terms loaded lazily) with saved filters; big-message caps, in-scope-only recording, tested at 100k exchanges
 - Session handling: cookie jar, macros with variable extraction, rules per tool and host (jar cookies, set header/cookie/parameter, run a macro before each request or when logged out, then resend)

@@ -70,6 +70,8 @@ pub struct ScanTaskView {
     pub targets_total: usize,
     pub targets_done: usize,
     pub requests: usize,
+    /// Times the identity looked logged out and was logged in again.
+    pub relogins: usize,
     /// The operation being scanned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
@@ -126,6 +128,7 @@ impl Service {
                 targets_total: 0,
                 targets_done: 0,
                 requests: 0,
+                relogins: 0,
                 current: None,
                 issues: Vec::new(),
                 notes: Vec::new(),
@@ -255,9 +258,21 @@ impl Service {
         if targets.is_empty() {
             task.note(format!("nothing recorded for {origin} to scan: browse or crawl it first"));
         }
+        let start_relogins = req.identity.as_deref().map(|i| self.relogins(i)).unwrap_or_default();
         for t in &targets {
             if task.cancelled.load(Ordering::Relaxed) {
                 break;
+            }
+            if let Some(name) = req.identity.as_deref() {
+                let now = self.relogins(name);
+                task.update(|v| v.relogins = now.ok - start_relogins.ok);
+                // Scanning logged out finds nothing and looks clean: stop instead.
+                if now.failed - start_relogins.failed >= 2 && now.failed_in_row >= 2 {
+                    return Err(ServiceError::Invalid(format!(
+                        "session lost: {name} looked logged out and logging in again failed twice; fix its login \
+                         (proxymind identity check {name}) and start the scan again"
+                    )));
+                }
             }
             task.update(|v| v.current = Some(t.operation.clone()));
             let r = self
@@ -301,6 +316,13 @@ impl Service {
                 Err(_) => {}
             }
             task.update(|v| v.targets_done += 1);
+        }
+        if let Some(name) = req.identity.as_deref() {
+            let n = self.relogins(name).ok - start_relogins.ok;
+            task.update(|v| v.relogins = n);
+            if n > 0 {
+                task.note(format!("{name} looked logged out {n} time(s) and was logged in again"));
+            }
         }
         Ok(())
     }

@@ -118,6 +118,9 @@ pub fn api() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/identities/capture", post(identity_capture))
         .route("/identities/{name}/check", post(identity_check))
+        .route("/identities/record-login", post(identity_record_login))
+        .route("/identities/{name}/learn-logged-out", post(identity_learn_logged_out))
+        .route("/history/mark", get(history_mark))
         .route("/authz/check", post(authz_check))
         .route("/authz/results", get(authz_results))
         .route("/authz/candidates", get(authz_candidates))
@@ -293,6 +296,28 @@ async fn identity_capture(State(st): State<AppState>, Json(b): Json<CaptureBody>
 
 async fn identity_check(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
     ok(st.service.identity_check(&st.actor, &name).await?)
+}
+
+#[derive(Deserialize)]
+struct RecordLoginBody {
+    name: String,
+    #[serde(default)]
+    role: Option<String>,
+    from: i64,
+    #[serde(default)]
+    to: Option<i64>,
+}
+
+async fn identity_record_login(State(st): State<AppState>, Json(b): Json<RecordLoginBody>) -> ApiResult {
+    ok(st.service.identity_record_login(&st.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.from, b.to)?)
+}
+
+async fn identity_learn_logged_out(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.identity_learn_logged_out(&st.actor, &name).await?)
+}
+
+async fn history_mark(State(st): State<AppState>) -> ApiResult {
+    ok(serde_json::json!({ "id": st.service.history_mark()? }))
 }
 
 async fn authz_check(State(st): State<AppState>, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
