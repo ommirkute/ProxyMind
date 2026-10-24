@@ -56,7 +56,7 @@ impl Service {
         serde_json::from_str(&row.data).map_err(|e| ServiceError::Invalid(format!("identity {name} is corrupt: {e}")))
     }
 
-    fn save_identity(&self, ident: &Identity, created_by: &str, status: &str) -> Result<()> {
+    pub(crate) fn save_identity(&self, ident: &Identity, created_by: &str, status: &str) -> Result<()> {
         let row = IdentityRow {
             name: ident.name.clone(),
             role: ident.role.clone(),
@@ -109,7 +109,7 @@ impl Service {
             Ok(old) => (old.health, old.login, self.store.lock().get_identity(name)?.map(|r| r.created_by)),
             Err(_) => (None, None, None),
         };
-        let ident = Identity { name: name.into(), role: role.into(), auth, health, login };
+        let ident = Identity { name: name.into(), role: role.into(), auth, health, login, logged_out: None };
         let created_by = created_by.unwrap_or_else(|| actor.id());
         self.save_identity(&ident, &created_by, "unknown")?;
         self.audit(
@@ -174,6 +174,7 @@ impl Service {
                 token_json_pointer,
                 token_header: None,
                 token_prefix: None,
+                ..Default::default()
             }],
         });
         self.save_identity(&ident, &actor.id(), "unknown")?;
@@ -200,17 +201,50 @@ impl Service {
         let created_by = self.store.lock().get_identity(name)?.map(|r| r.created_by).unwrap_or_default();
         let owner = Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         let mut learned = Vec::new();
+        // What this run has learned: cookies set by its steps (sent on to
+        // later steps) and values read from responses.
+        let mut run = pm_identity::AuthMaterial::default();
+        let mut vars = std::collections::HashMap::new();
         for (i, step) in recipe.steps.iter().enumerate() {
-            let out = self.outgoing(parse_url_endpoint(&step.url)?, step.request.as_bytes(), true)?;
+            let raw = crate::session::substitute(&step.request, &vars);
+            let out = self.outgoing(parse_url_endpoint(&step.url)?, raw.as_bytes(), true)?;
             match self.gate_send(&owner, "identity_login", &out, None, true, None)? {
                 Authorization::Allowed { .. } => {}
                 other => return Err(ServiceError::Invalid(format!("login step {} not allowed: {other:?}", i + 1))),
             }
-            let sent = self.send_now(&owner, &out, None, true, "login").await?;
+            let wire = crate::session::set_cookies(&self.redactor.unredact(&out.raw), &run.cookies);
+            let sent = self.transmit(&owner, &out, wire, None, true, "login").await?;
             let resp = sent.response.ok_or_else(|| {
                 ServiceError::Invalid(format!("login step {} failed: {}", i + 1, sent.error.unwrap_or_default()))
             })?;
-            learned.extend(step.absorb(&mut ident.auth, &resp));
+            learned.extend(step.absorb(&mut run, &resp));
+            for x in &step.extract {
+                match x.find(&resp) {
+                    Some(v) => {
+                        vars.insert(x.name.clone(), v);
+                    }
+                    None => learned.push(format!("step {}: {} not found", i + 1, x.name)),
+                }
+            }
+        }
+        for step in &recipe.steps {
+            for (h, template) in &step.set_headers {
+                let value = crate::session::substitute(template, &vars);
+                if value.contains("{{") {
+                    continue; // a value the run didn't find: keep the old one
+                }
+                run.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(h));
+                run.headers.push((h.clone(), value));
+                learned.push(format!("{h} header"));
+            }
+        }
+        for (k, v) in run.cookies {
+            ident.auth.cookies.retain(|(n, _)| n != &k);
+            ident.auth.cookies.push((k, v));
+        }
+        for (h, v) in run.headers {
+            ident.auth.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&h));
+            ident.auth.headers.push((h, v));
         }
         self.save_identity(&ident, &created_by, "unknown")?;
         Ok(learned)

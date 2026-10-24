@@ -287,7 +287,7 @@ impl Service {
             let (log, identity) = (&log, identity.clone());
             Box::pin(async move { self.crawl_fetch(actor, identity.as_deref(), ireq, log).await })
         };
-        let mut frontier = pm_crawl::Frontier::new(start.clone(), max_depth);
+        let mut frontier = pm_crawl::Frontier::keeping_routes(start.clone(), max_depth);
         let (mut pages, mut forms) = (Vec::new(), Vec::new());
         let opts = pm_browser::crawl::VisitOptions::default();
         let mut result = Ok(());

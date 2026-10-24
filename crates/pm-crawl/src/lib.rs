@@ -271,18 +271,36 @@ pub struct Frontier {
     queue: VecDeque<(Url, usize)>,
     seen: HashSet<String>,
     pub max_depth: usize,
+    /// Keep `#/…` and `#!/…` fragments: single-page apps route with them.
+    keep_routes: bool,
 }
 
 impl Frontier {
     pub fn new(start: Url, max_depth: usize) -> Self {
-        let mut f = Frontier { queue: VecDeque::new(), seen: HashSet::new(), max_depth };
+        let mut f = Frontier { queue: VecDeque::new(), seen: HashSet::new(), max_depth, keep_routes: false };
+        f.push(start, 0);
+        f
+    }
+
+    /// Like [`Frontier::new`], but `#/route` fragments make different pages
+    /// (for crawling in a browser, where the app's router reads them).
+    pub fn keeping_routes(start: Url, max_depth: usize) -> Self {
+        let mut f = Frontier { queue: VecDeque::new(), seen: HashSet::new(), max_depth, keep_routes: true };
         f.push(start, 0);
         f
     }
 
     /// Adds a URL if it is new and not too deep. Returns whether it was added.
     pub fn push(&mut self, u: Url, depth: usize) -> bool {
-        let u = strip(&u);
+        let route = u.fragment().filter(|f| self.keep_routes && (f.starts_with('/') || f.starts_with("!/")));
+        let u = match route {
+            Some(f) => {
+                let mut x = strip(&u);
+                x.set_fragment(Some(f));
+                x
+            }
+            None => strip(&u),
+        };
         if depth > self.max_depth || !self.seen.insert(u.to_string()) {
             return false;
         }
@@ -385,5 +403,16 @@ mod tests {
         assert!(!f.push(u("http://a.test/c"), 2), "too deep");
         assert_eq!(f.pop().unwrap().0.as_str(), "http://a.test/");
         assert_eq!(f.pending(), 1);
+    }
+
+    #[test]
+    fn route_fragments_are_pages_when_asked() {
+        let mut plain = Frontier::new(u("http://x/"), 3);
+        assert!(!plain.push(u("http://x/#/contact"), 1));
+        let mut spa = Frontier::keeping_routes(u("http://x/"), 3);
+        assert!(spa.push(u("http://x/#/contact"), 1));
+        assert!(spa.push(u("http://x/#!/about"), 1));
+        assert!(!spa.push(u("http://x/#top"), 1), "plain anchors are still the same page");
+        assert!(!spa.push(u("http://x/#/contact"), 1));
     }
 }

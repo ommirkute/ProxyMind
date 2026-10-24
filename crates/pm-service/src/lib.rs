@@ -17,6 +17,7 @@ mod history;
 mod identity;
 mod intercept;
 mod intruder;
+mod login_record;
 mod model;
 mod network;
 mod openapi;
@@ -49,6 +50,7 @@ pub use intercept::InterceptState;
 pub use intruder::{
     AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
 };
+pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
     LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,

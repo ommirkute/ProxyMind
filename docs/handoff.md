@@ -114,6 +114,8 @@ All of this has automated tests and passes CI on Linux, macOS and Windows plus a
 
 ## 4. What's next, and how to do each
 
+**Latest plan: see `docs/next-session.md`** (finish recorded logins, then scan profiles/scheduling/resume, issue library and report templates, plugin platform, then the second tier).
+
 Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (noted below); the rest of A is fully doable in the sandbox and is the recommended next phase.
 
 ### A. More oracles and payload awareness (recommended next)

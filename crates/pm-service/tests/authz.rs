@@ -28,6 +28,7 @@ fn login_step(url: &str, user: &str) -> LoginStep {
         token_json_pointer: None,
         token_header: None,
         token_prefix: None,
+        ..Default::default()
     }
 }
 
@@ -42,6 +43,7 @@ fn identity(url: &str, user: &str) -> Identity {
             expect_status: Some(200),
             expect_contains: Some(format!("{user}@vulnshop.test")),
         }),
+        logged_out: None,
         login: Some(LoginRecipe { steps: vec![login_step(url, user)] }),
     }
 }

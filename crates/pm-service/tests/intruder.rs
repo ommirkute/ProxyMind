@@ -25,6 +25,7 @@ async fn setup() -> (Arc<Service>, String) {
             role: "user".into(),
             auth: AuthMaterial::default(),
             health: None,
+            logged_out: None,
             login: Some(LoginRecipe {
                 steps: vec![LoginStep {
                     url: url.clone(),
@@ -34,6 +35,7 @@ async fn setup() -> (Arc<Service>, String) {
                     token_json_pointer: None,
                     token_header: None,
                     token_prefix: None,
+                    ..Default::default()
                 }],
             }),
         },

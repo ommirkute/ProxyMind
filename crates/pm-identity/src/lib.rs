@@ -109,7 +109,7 @@ pub struct LoginRecipe {
     pub steps: Vec<LoginStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginStep {
     /// Where to send it: scheme://host[:port]
     pub url: String,
@@ -125,6 +125,74 @@ pub struct LoginStep {
     pub token_header: Option<String>,
     #[serde(default)]
     pub token_prefix: Option<String>,
+    /// Values to read from this step's response (e.g. a CSRF token), used
+    /// as `{{name}}` in later steps and in `set_headers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extract: Vec<LoginExtract>,
+    /// Headers the identity carries after logging in, e.g.
+    /// ("Authorization", "Bearer {{v1}}").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set_headers: Vec<(String, String)>,
+}
+
+/// A value read from a login response with a regex (its first group).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginExtract {
+    pub name: String,
+    pub regex: String,
+}
+
+impl LoginExtract {
+    /// The value in `response` (head and decoded body), if the regex matches.
+    pub fn find(&self, response: &[u8]) -> Option<String> {
+        let re = regex::Regex::new(&self.regex).ok()?;
+        let text = response_text(response);
+        let c = re.captures(&text)?;
+        Some(c.get(1).or_else(|| c.get(0))?.as_str().to_string())
+    }
+}
+
+/// A response's head and (de-chunked) body as text.
+pub fn response_text(response: &[u8]) -> String {
+    let (head, body) = pm_http::split_message(response);
+    let body = pm_http::decode_chunked(body).unwrap_or_else(|| body.to_vec());
+    let mut t = String::from_utf8_lossy(head).into_owned();
+    t.push_str(&String::from_utf8_lossy(&body));
+    t
+}
+
+/// What a logged-out response looks like for one app, learned by sending a
+/// request with and without credentials. Any one part matching is enough.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggedOut {
+    pub statuses: Vec<u16>,
+    /// Text in a redirect's Location.
+    pub location_contains: String,
+    /// Text in the body.
+    pub body_contains: String,
+}
+
+impl LoggedOut {
+    pub fn matches(&self, response: &[u8]) -> bool {
+        let (head, body) = pm_http::split_message(response);
+        let Ok(h) = pm_http::parse_response_head(head) else { return false };
+        if self.statuses.contains(&h.status) {
+            return true;
+        }
+        if !self.location_contains.is_empty()
+            && (300..400).contains(&h.status)
+            && pm_http::header(&h.headers, "location")
+                .is_some_and(|l| String::from_utf8_lossy(l).contains(&self.location_contains))
+        {
+            return true;
+        }
+        if !self.body_contains.is_empty() {
+            let decoded = pm_http::decode_chunked(body).unwrap_or_else(|| body.to_vec());
+            return String::from_utf8_lossy(&decoded).contains(&self.body_contains);
+        }
+        false
+    }
 }
 
 impl LoginStep {
@@ -153,7 +221,7 @@ impl LoginStep {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     /// Short name such as `alice` or `admin`.
     pub name: String,
@@ -166,6 +234,10 @@ pub struct Identity {
     pub health: Option<HealthCheck>,
     #[serde(default)]
     pub login: Option<LoginRecipe>,
+    /// How this app answers when the session is gone (beyond the usual 401
+    /// or redirect to a login page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_out: Option<LoggedOut>,
 }
 
 impl Identity {
@@ -176,7 +248,13 @@ impl Identity {
             auth: AuthMaterial::default(),
             health: None,
             login: None,
+            logged_out: None,
         }
+    }
+
+    /// Whether `response` means this identity's session has expired.
+    pub fn looks_logged_out(&self, response: &[u8]) -> bool {
+        looks_logged_out(response) || self.logged_out.as_ref().is_some_and(|l| l.matches(response))
     }
 }
 
@@ -281,7 +359,7 @@ pub fn apply(raw: &[u8], auth: &AuthMaterial) -> Vec<u8> {
     out
 }
 
-fn looks_like_session_cookie(name: &str) -> bool {
+pub fn looks_like_session_cookie(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     ["sess", "sid", "auth", "token", "jwt", "login", "user", "remember", "csrf", "xsrf", "id"]
         .iter()
@@ -335,6 +413,7 @@ Authorization: Bearer bob-token\r\n\r\n"
             token_json_pointer: Some("/data/token".into()),
             token_header: None,
             token_prefix: None,
+            ..Default::default()
         };
         let resp = b"HTTP/1.1 200 OK\r\nSet-Cookie: session=new; Path=/\r\nSet-Cookie: gone=; Max-Age=0\r\n\r\n{\"data\":{\"token\":\"T1\"}}";
         let learned = step.absorb(&mut a, resp);

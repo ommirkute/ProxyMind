@@ -319,7 +319,7 @@ impl Service {
         let sent = self.send_now(actor, out, ident.as_ref(), fix_cl, source).await?;
         if let (Some(id), Some(resp)) = (&ident, &sent.response)
             && id.login.is_some()
-            && pm_identity::looks_logged_out(resp)
+            && id.looks_logged_out(resp)
         {
             notes.push(format!("{} looked logged out; logging in again", id.name));
             match self.identity_login(&id.name).await {

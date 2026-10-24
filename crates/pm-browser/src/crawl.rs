@@ -129,6 +129,15 @@ fn mark_clickables(n: usize) -> String {
     )
 }
 
+/// A page's address without plain anchors; `#/route` fragments are kept,
+/// since single-page apps route with them.
+fn page_key(href: &str) -> &str {
+    match href.split_once('#') {
+        Some((base, f)) if !(f.starts_with('/') || f.starts_with("!/")) => base,
+        _ => href,
+    }
+}
+
 /// A headless browser kept open across page visits (cookies and storage persist).
 pub struct CrawlSession {
     browser: Option<Browser>,
@@ -210,7 +219,7 @@ impl CrawlSession {
                     }
                 }
                 // A click that left the page: go back for the next one.
-                if href.split('#').next() != visit.final_url.split('#').next() {
+                if page_key(&href) != page_key(&visit.final_url) {
                     let nav =
                         self.cdp.send("Page.navigate", json!({ "url": visit.final_url }), Some(&self.session)).await?;
                     self.pump(handler, deadline, opts.idle, Some(nav), &mut visit).await?;
@@ -347,5 +356,18 @@ impl Drop for CrawlSession {
     fn drop(&mut self) {
         // Close was not awaited (an error on the way): kill_on_drop ends the process.
         let _ = self.browser.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_key;
+
+    #[test]
+    fn route_fragments_are_part_of_the_page() {
+        assert_eq!(page_key("http://x/a#top"), "http://x/a");
+        assert_eq!(page_key("http://x/#/contact"), "http://x/#/contact");
+        assert_eq!(page_key("http://x/#!/about"), "http://x/#!/about");
+        assert_eq!(page_key("http://x/a"), "http://x/a");
     }
 }
