@@ -131,6 +131,13 @@ pub fn api() -> Router<AppState> {
         .route("/scan/tasks", get(scan_tasks_list).post(scan_task_start))
         .route("/scan/tasks/{id}", get(scan_task_status))
         .route("/scan/tasks/{id}/cancel", post(scan_task_cancel))
+        .route("/scan/tasks/{id}/pause", post(scan_task_pause))
+        .route("/scan/tasks/{id}/resume", post(scan_task_resume))
+        .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
+        .route("/scan/profiles/{name}", axum::routing::delete(scan_profile_delete))
+        .route("/scan/schedules", get(scan_schedules).post(scan_schedule_save))
+        .route("/scan/schedules/{id}", axum::routing::delete(scan_schedule_delete))
+        .route("/scan/schedules/{id}/run", post(scan_schedule_run))
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
@@ -360,6 +367,42 @@ async fn scan_task_status(State(st): State<AppState>, Path(id): Path<String>) ->
 
 async fn scan_task_cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
     ok(st.service.scan_task_cancel(&st.actor, &id)?)
+}
+
+async fn scan_task_pause(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_pause(&st.actor, &id)?)
+}
+
+async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_resume(&st.actor, &id)?)
+}
+
+async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.scan_profiles()?)
+}
+
+async fn scan_profile_save(State(st): State<AppState>, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
+    ok(st.service.scan_profile_save(&st.actor, p)?)
+}
+
+async fn scan_profile_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.scan_profile_delete(&st.actor, &name)? }))
+}
+
+async fn scan_schedules(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.schedule_list()?)
+}
+
+async fn scan_schedule_save(State(st): State<AppState>, Json(s): Json<pm_service::ScanSchedule>) -> ApiResult {
+    ok(st.service.schedule_save(&st.actor, s)?)
+}
+
+async fn scan_schedule_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.schedule_delete(&st.actor, id)? }))
+}
+
+async fn scan_schedule_run(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.schedule_run_now(&st.actor, id)?)
 }
 
 async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {

@@ -886,6 +886,35 @@ try {
   await page.getByTestId("session-save").click();
   await page.waitForSelector("text=Saved. Rules apply");
 
+  console.log("Scans: profiles, schedules, tasks");
+  await open("scans");
+  await page.locator('[data-testid="scan-profiles"] strong', { hasText: "api-only" }).waitFor();
+  check(true, "built-in scan profiles are listed");
+  await page.getByLabel("Profile name").fill("e2e-quick");
+  await page.getByLabel("Profile checks").fill("reflected_input");
+  await page.getByText("crawl first").click();
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.locator('[data-testid="scan-profiles"] strong', { hasText: "e2e-quick" }).waitFor();
+  check(true, "a saved profile joins the list");
+  await page.getByLabel("Scan URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByLabel("Scan profile").selectOption("e2e-quick");
+  await page.getByTestId("scan-start").click();
+  await page.locator('[data-testid="scan-tasks"] td', { hasText: "e2e-quick" }).first().waitFor();
+  await page.locator('[data-testid="scan-tasks"] tr', { hasText: "e2e-quick" }).filter({ hasText: "done" }).first().waitFor({ timeout: 60000 });
+  check(true, "a scan with a saved profile runs to the end");
+  await page.getByLabel("Schedule name").fill("e2e nightly");
+  await page.getByLabel("Schedule URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByLabel("Schedule profile").selectOption("e2e-quick");
+  await page.getByLabel("Schedule frequency").selectOption("weekly");
+  await page.getByLabel("Schedule day").selectOption("sun");
+  await page.getByTestId("schedule-add").click();
+  await page.locator('[data-testid="scan-schedules"] td', { hasText: "every sun at 02:00 UTC" }).waitFor();
+  check(true, "a weekly schedule is saved");
+  await page.locator('[data-testid="scan-schedules"]').getByRole("button", { name: "Run now" }).click();
+  await page.locator('[data-testid="scan-tasks"] td', { hasText: "schedule #" }).first().waitFor({ timeout: 10000 });
+  check(true, "Run now starts the schedule's scan");
+  await page.screenshot({ path: join(SHOTS, "2c-scans.png"), fullPage: true });
+
   console.log("Recorded login");
   await open("authz");
   await page.getByLabel("Login identity name").fill("carol");

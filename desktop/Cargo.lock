@@ -2717,6 +2717,7 @@ version = "0.0.1"
 dependencies = [
  "pm-core",
  "pm-http",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

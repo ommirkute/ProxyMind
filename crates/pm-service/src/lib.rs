@@ -28,6 +28,8 @@ mod report;
 mod roe;
 mod rules;
 mod scan;
+mod scan_profile;
+mod scan_schedule;
 mod scan_task;
 mod search;
 mod session;
@@ -65,6 +67,8 @@ pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
 pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
+pub use scan_profile::{PROFILES_SETTING, ScanProfile, builtin_profiles};
+pub use scan_schedule::{Every, ScanSchedule, next_run_after};
 pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
 pub use session::{
@@ -162,7 +166,7 @@ impl Service {
         if let Err(e) = network::sync_network(&store, sender.network()) {
             tracing::warn!("network settings not applied: {e}");
         }
-        Ok(Self {
+        let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
             store: Mutex::new(store),
@@ -180,7 +184,9 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
-        })
+        };
+        svc.load_scan_tasks();
+        Ok(svc)
     }
 
     /// Sets the passive-check plugins to run with the passive scan. Callers

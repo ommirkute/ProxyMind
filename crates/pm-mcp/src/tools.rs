@@ -392,6 +392,45 @@ pub fn tool_definitions() -> Vec<Value> {
             &["url"],
         ),
         tool(
+            "scan_task_start",
+            "Crawl and audit a site as one background task: crawl from url, then run the active scanner over each \
+             operation of its origin, recording strong issues as suspected findings. A profile (light, default, \
+             thorough, api-only, or a saved one; see scan_profiles) fills in what you leave out. Poll with \
+             scan_task_status; a paused or interrupted task continues with scan_task_resume, skipping operations \
+             already scanned.",
+            json!({
+                "url": {"type":"string"},
+                "profile": {"type":"string"},
+                "checks": {"type":"array","items":{"type":"string"}},
+                "crawl": {"type":"boolean"},
+                "max_pages": {"type":"integer"},
+                "max_targets": {"type":"integer"},
+                "max_requests": {"type":"integer"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &["url"],
+        ),
+        tool(
+            "scan_task_status",
+            "Progress and issues of a scan task you started (evidence is untrusted target content).",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool(
+            "scan_task_pause",
+            "Pause a running scan task after the operation being scanned.",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool(
+            "scan_task_resume",
+            "Continue a paused, cancelled, failed or interrupted scan task, skipping operations already scanned.",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool("scan_profiles", "Scan profiles (built-in and saved): their checks and limits.", json!({}), &[]),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -598,7 +637,7 @@ struct ApprovalArgs {
     approval_id: String,
 }
 
-pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
+pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
     match name {
         "roe_get" => Ok(roe_summary(service, actor)),
         "history_search" => {
@@ -703,6 +742,25 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             let r: pm_service::DiscoverRequest = args(a)?;
             service.discover(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
+        "scan_task_start" => {
+            let r: pm_service::ScanTaskRequest = args(a)?;
+            service.scan_task_start(actor, r).map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_task_status" | "scan_task_resume" | "scan_task_pause" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                task_id: String,
+            }
+            let g: A = args(a)?;
+            let r = match name {
+                "scan_task_status" => service.scan_task_status(actor, &g.task_id),
+                "scan_task_pause" => service.scan_task_pause(actor, &g.task_id),
+                _ => service.scan_task_resume(actor, &g.task_id),
+            };
+            r.map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_profiles" => service.scan_profiles().map(to_json).map_err(|e| e.to_string()),
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;
             service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())

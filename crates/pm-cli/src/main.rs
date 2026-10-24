@@ -435,6 +435,22 @@ enum Command {
         #[command(subcommand)]
         action: ApprovalAction,
     },
+    /// Crawl and audit a site as one task; tasks stopped part way resume
+    /// where they left off.
+    ScanTask {
+        #[command(subcommand)]
+        action: ScanTaskAction,
+    },
+    /// Scan profiles: named sets of checks and limits.
+    ScanProfile {
+        #[command(subcommand)]
+        action: ScanProfileAction,
+    },
+    /// Scans that start on their own (run while `proxymind ui` or the desktop app is open).
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
     /// Manage test identities (users/roles and their sessions).
     Identity {
         #[command(subcommand)]
@@ -591,6 +607,85 @@ enum ProofAction {
     Show { id: i64 },
     /// Run a proof again with the same inputs (e.g. during a retest).
     Rerun { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum ScanTaskAction {
+    /// Crawl from a URL, then scan its origin's operations; shows progress until done.
+    Run {
+        url: String,
+        /// light, default, thorough, api-only or a saved profile
+        #[arg(long)]
+        profile: Option<String>,
+        /// Comma-separated checks (default: the profile's)
+        #[arg(long, value_delimiter = ',')]
+        checks: Vec<String>,
+        #[arg(long)]
+        no_crawl: bool,
+        #[arg(long)]
+        identity: Option<String>,
+    },
+    /// Continue a paused, cancelled, failed or interrupted task.
+    Resume { id: String },
+    /// Recent tasks.
+    List,
+    /// A task's progress and issues.
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScanProfileAction {
+    List,
+    /// Save a profile from a JSON file (name, description, checks, approval_checks,
+    /// crawl, max_pages, browser, max_targets, max_requests).
+    Save {
+        file: PathBuf,
+    },
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    List,
+    /// Add a schedule. Times are UTC.
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        identity: Option<String>,
+        /// Every hour
+        #[arg(long, conflicts_with_all = ["daily", "weekly"])]
+        hourly: bool,
+        /// Every day at HH:MM (UTC)
+        #[arg(long, conflicts_with = "weekly")]
+        daily: Option<String>,
+        /// Every week, e.g. mon@02:30 (UTC)
+        #[arg(long)]
+        weekly: Option<String>,
+    },
+    /// Start a schedule's scan now (in this process; shows progress).
+    Run {
+        id: i64,
+    },
+    Enable {
+        id: i64,
+    },
+    Disable {
+        id: i64,
+    },
+    Delete {
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -831,6 +926,70 @@ fn home_dir(cli: &Cli) -> Result<PathBuf> {
 use pm_service::ROE_SETTING;
 
 /// Opens the project's service with its saved ROE, or saves `roe_file` first.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Shows a scan task's progress until it stops. Stopping this process
+/// leaves the task resumable (`proxymind scan-task resume <id>`).
+async fn follow_scan_task(service: &Service, me: &Actor, id: &str) -> Result<()> {
+    eprintln!("task {id} (Ctrl-C stops it; `proxymind scan-task resume {id}` continues)");
+    let mut last = String::new();
+    loop {
+        let v = service.scan_task_status(me, id)?;
+        let line = format!(
+            "{:?}: {} pages, {}/{} operations, {} requests, {} issues{}",
+            v.status,
+            v.pages_crawled,
+            v.targets_done,
+            v.targets_total,
+            v.requests,
+            v.issues.len(),
+            v.current.as_deref().map(|c| format!(" · {c}")).unwrap_or_default()
+        );
+        if line != last {
+            eprintln!("{line}");
+            last = line;
+        }
+        if !v.status.running() {
+            print_scan_task(&v)?;
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+}
+
+fn print_scan_task(v: &pm_service::ScanTaskView) -> Result<()> {
+    out!(
+        "{} {:?}: {} pages crawled, {}/{} operations, {} requests{}",
+        v.task_id,
+        v.status,
+        v.pages_crawled,
+        v.targets_done,
+        v.targets_total,
+        v.requests,
+        if v.relogins > 0 { format!(", {} re-login(s)", v.relogins) } else { String::new() }
+    );
+    for i in &v.issues {
+        out!(
+            "  [{}] {} at {} ({}) #{}{}",
+            i.severity,
+            i.title,
+            i.operation,
+            i.point,
+            i.exchange_id,
+            i.finding_id.map(|f| format!(" finding {f}")).unwrap_or_default()
+        );
+    }
+    for n in &v.notes {
+        out!("  - {n}");
+    }
+    if let Some(e) = &v.error {
+        out!("  error: {e}");
+    }
+    Ok(())
+}
+
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
     let mut store = Store::open(project)?;
     let text = match roe_file {
@@ -1272,6 +1431,8 @@ async fn run() -> Result<()> {
                 pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
             }
             pm_service::watch_roe(service.clone());
+            // Scheduled scans start while the UI server runs.
+            tokio::spawn(service.clone().run_scheduler());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
                 .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
@@ -2126,6 +2287,163 @@ async fn run() -> Result<()> {
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
+                }
+            }
+        }
+        Command::ScanTask { action } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let me = human_actor(None)?;
+            match action {
+                ScanTaskAction::Run { url, profile, checks, no_crawl, identity } => {
+                    let req = pm_service::ScanTaskRequest {
+                        url: url.clone(),
+                        profile: profile.clone(),
+                        checks: checks.clone(),
+                        crawl: no_crawl.then_some(false),
+                        identity: identity.clone(),
+                        ..Default::default()
+                    };
+                    let v = service.scan_task_start(&me, req)?;
+                    follow_scan_task(&service, &me, &v.task_id).await?;
+                }
+                ScanTaskAction::Resume { id } => {
+                    service.scan_task_resume(&me, id)?;
+                    follow_scan_task(&service, &me, id).await?;
+                }
+                ScanTaskAction::List => {
+                    let list = service.scan_task_list(&me);
+                    if list.is_empty() {
+                        out!("No scan tasks yet. Start one with `proxymind scan-task run <url>`.");
+                    }
+                    for v in list {
+                        out!(
+                            "{}  {:<9} {}/{} operations  {} requests  {}{}",
+                            v.task_id,
+                            format!("{:?}", v.status).to_lowercase(),
+                            v.targets_done,
+                            v.targets_total,
+                            v.requests,
+                            v.url,
+                            v.profile.map(|p| format!("  [{p}]")).unwrap_or_default()
+                        );
+                    }
+                }
+                ScanTaskAction::Show { id, json } => {
+                    let v = service.scan_task_status(&me, id)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print_scan_task(&v)?;
+                    }
+                }
+            }
+        }
+        Command::ScanProfile { action } => {
+            let service = open_service(&cli.project, None)?;
+            let me = human_actor(None)?;
+            match action {
+                ScanProfileAction::List => {
+                    for p in service.scan_profiles()? {
+                        let checks = if p.checks.is_empty() {
+                            if p.approval_checks { "all checks".to_string() } else { "all safe checks".to_string() }
+                        } else {
+                            p.checks.join(",")
+                        };
+                        out!("{:<10} {}{}", p.name, if p.builtin { "(built-in) " } else { "" }, p.description);
+                        out!("           checks: {checks}");
+                    }
+                }
+                ScanProfileAction::Save { file } => {
+                    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+                    let p: pm_service::ScanProfile = serde_json::from_str(&text)?;
+                    let name = p.name.clone();
+                    service.scan_profile_save(&me, p)?;
+                    out!("saved profile {name}");
+                }
+                ScanProfileAction::Delete { name } => {
+                    let d = service.scan_profile_delete(&me, name)?;
+                    out!("{}", if d { format!("deleted {name}") } else { format!("no saved profile {name}") });
+                }
+            }
+        }
+        Command::Schedule { action } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            let me = human_actor(None)?;
+            match action {
+                ScheduleAction::List => {
+                    let list = service.schedule_list()?;
+                    if list.is_empty() {
+                        out!("No schedules. Add one with `proxymind schedule add --name … --url … --daily 02:00`.");
+                    }
+                    for s in list {
+                        let every = match &s.every {
+                            pm_service::Every::Hourly => "hourly".to_string(),
+                            pm_service::Every::Daily { at } => format!("daily {at} UTC"),
+                            pm_service::Every::Weekly { day, at } => format!("weekly {day} {at} UTC"),
+                        };
+                        out!(
+                            "#{:<3} {:<8} {:<24} {} {}  next in {} min{}",
+                            s.id,
+                            if s.enabled { "on" } else { "off" },
+                            s.name,
+                            every,
+                            s.request.url,
+                            ((s.next_run_ms - now_ms()) / 60_000).max(0),
+                            s.last_error.map(|e| format!("  (last: {e})")).unwrap_or_default()
+                        );
+                    }
+                }
+                ScheduleAction::Add { name, url, profile, identity, hourly, daily, weekly } => {
+                    let every = match (hourly, daily, weekly) {
+                        (true, _, _) => pm_service::Every::Hourly,
+                        (_, Some(at), _) => pm_service::Every::Daily { at: at.clone() },
+                        (_, _, Some(w)) => {
+                            let (day, at) = w.split_once('@').context("--weekly takes day@HH:MM, e.g. mon@02:30")?;
+                            pm_service::Every::Weekly { day: day.into(), at: at.into() }
+                        }
+                        _ => anyhow::bail!("say when: --hourly, --daily HH:MM or --weekly day@HH:MM"),
+                    };
+                    let s = service.schedule_save(
+                        &me,
+                        pm_service::ScanSchedule {
+                            name: name.clone(),
+                            every,
+                            request: pm_service::ScanTaskRequest {
+                                url: url.clone(),
+                                profile: profile.clone(),
+                                identity: identity.clone(),
+                                ..Default::default()
+                            },
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    )?;
+                    out!(
+                        "schedule #{} saved; next run in {} min (runs while `proxymind ui` or the desktop app is open)",
+                        s.id,
+                        (s.next_run_ms - now_ms()) / 60_000
+                    );
+                }
+                ScheduleAction::Run { id } => {
+                    let v = service.schedule_run_now(&me, *id)?;
+                    follow_scan_task(&service, &me, &v.task_id).await?;
+                }
+                ScheduleAction::Enable { id } | ScheduleAction::Disable { id } => {
+                    let mut s = service
+                        .schedule_list()?
+                        .into_iter()
+                        .find(|s| s.id == *id)
+                        .with_context(|| format!("no schedule #{id}"))?;
+                    s.enabled = matches!(action, ScheduleAction::Enable { .. });
+                    service.schedule_save(&me, s)?;
+                    out!(
+                        "schedule #{id} {}",
+                        if matches!(action, ScheduleAction::Enable { .. }) { "on" } else { "off" }
+                    );
+                }
+                ScheduleAction::Delete { id } => {
+                    let d = service.schedule_delete(&me, *id)?;
+                    out!("{}", if d { format!("deleted #{id}") } else { format!("no schedule #{id}") });
                 }
             }
         }

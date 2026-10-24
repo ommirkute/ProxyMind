@@ -3,6 +3,7 @@ import { api, openBrowser, toast, type Counters, type Status } from "./api";
 import { NavContext, usePref, type Page } from "./components";
 import { Icon } from "./icons";
 import Overview from "./pages/Overview";
+import Scans from "./pages/Scans";
 import { CommandPalette } from "./palette";
 import History from "./pages/History";
 import Intercept from "./pages/Intercept";
@@ -39,6 +40,7 @@ const GROUPS: Group[] = [
     { id: "overview", label: "Overview" },
     { id: "findings", label: "Findings" },
     { id: "issues", label: "Scanner issues" },
+    { id: "scans", label: "Scans" },
     { id: "approvals", label: "Approvals" },
     { id: "audit", label: "Audit log" },
   ] },
@@ -175,6 +177,7 @@ export default function App() {
 
   const PageView = {
     overview: Overview,
+    scans: Scans,
     history: History,
     assistant: Assistant,
     intercept: Intercept,

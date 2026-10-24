@@ -34,7 +34,7 @@ async fn crawls_then_audits_with_progress() {
     };
     assert_eq!(v.status, ScanTaskStatus::Done, "{v:?}");
     assert!(seen_progress && v.pages_crawled > 3 && v.targets_done == v.targets_total, "{v:?}");
-    let found: Vec<(&str, &str)> = v.issues.iter().map(|i| (i.operation.as_str(), i.finding.issue.check)).collect();
+    let found: Vec<(&str, &str)> = v.issues.iter().map(|i| (i.operation.as_str(), i.check.as_str())).collect();
     assert!(found.iter().any(|(op, c)| op.ends_with("/search") && *c == "reflected_input"), "{found:?}");
     assert!(found.iter().any(|(op, c)| op.ends_with("/api/recommend") && *c == "sql_error"), "{found:?}");
     // Strong issues became suspected findings; the list leaves issues out.

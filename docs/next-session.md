@@ -36,24 +36,9 @@ Pushed in the last commit:
 
 Finished on 2026-10-24: integration test (`crates/pm-service/tests/login_record.rs`), API, CLI, MCP (`identity_learn_logged_out`), the Authz page's "Record a login" card with an e2e step, and re-login counts plus a "session lost" stop in crawl-and-audit tasks. See the handoff section "Recorded logins and session expiry". Not done: `bench/run.sh` doesn't learn logged-out looks (its identities have no health checks); an option there is to record each user's login from the browse step.
 
-## 2. Task 44: scan profiles, scheduling and resume (about one session)
+## 2. Task 44: scan profiles, scheduling and resume — done
 
-- **Profiles**:
-  - `ScanProfile{name, checks, max_requests, rate, insertion points, approval checks, browser}` stored as a project setting (`scan_profiles`).
-  - Built-in profiles: `light` (passive + safe), `default`, `thorough` (all, including approval checks), `api-only`.
-  - `ScanTaskRequest.profile` fills in any fields left empty.
-- **Resume**:
-  - Persist each scan task's plan and progress in pm-store with a new append-only migration `scan_tasks`: id, request JSON, a per-target done set, issues so far, status.
-  - On start-up, tasks that were running come back as `paused`; `POST /scan/tasks/{id}/resume` skips targets already done.
-  - Also add pause and cancel.
-- **Scheduling**:
-  - A `schedules` table: cron-like `every` (hourly, daily HH:MM, weekly), profile, scope or start URL.
-  - A tokio ticker in `pm-service` starts tasks as the human who made the schedule, through the policy gate.
-  - Desktop and `proxymind ui` run the ticker; the CLI gets `schedule add|list|rm`.
-- **UI**: a Scans page under Dashboard with tasks (pause, resume, cancel), profiles (an editor) and schedules.
-- **Tests**:
-  - A resume after a simulated restart sends no duplicate requests.
-  - A schedule fires once per period (use an injectable clock).
+Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC; a lock so two processes on one project can't both fire a schedule.
 
 ## 3. Task 45: issue library and report templates (about half a session)
 
