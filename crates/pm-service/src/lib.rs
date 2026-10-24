@@ -8,6 +8,7 @@ mod approvals;
 mod assistant;
 mod authz;
 mod auto;
+mod browser;
 mod crawl;
 mod discover;
 mod findings;
@@ -37,6 +38,7 @@ mod ws_replay;
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
+pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use findings::{FindingUpdate, NewFinding};
@@ -130,6 +132,8 @@ pub struct Service {
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
     /// Recent Intruder attacks (running ones keep going in the background).
     attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// This process's proxy, for the built-in browser.
+    proxy_info: std::sync::OnceLock<browser::ProxyInfo>,
     /// Recent crawl-and-audit tasks.
     scan_tasks: parking_lot::Mutex<Vec<std::sync::Arc<scan_task::ScanTask>>>,
     /// Extra proxy listeners, when this process runs the proxy.
@@ -166,6 +170,7 @@ impl Service {
             plugins: parking_lot::RwLock::new(Vec::new()),
             attacks: parking_lot::Mutex::new(Vec::new()),
             scan_tasks: parking_lot::Mutex::new(Vec::new()),
+            proxy_info: std::sync::OnceLock::new(),
             listeners: std::sync::OnceLock::new(),
             session: parking_lot::Mutex::default(),
             session_lock: tokio::sync::Mutex::new(()),

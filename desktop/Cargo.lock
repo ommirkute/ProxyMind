@@ -2911,8 +2911,10 @@ name = "pm-scan"
 version = "0.0.1"
 dependencies = [
  "pm-http",
+ "ring",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -2943,6 +2945,7 @@ dependencies = [
  "pm-replay",
  "pm-scan",
  "pm-store",
+ "pm-tls",
  "pm-tools",
  "regex",
  "ring",
@@ -2974,11 +2977,13 @@ dependencies = [
  "anyhow",
  "parking_lot",
  "rcgen",
+ "ring",
  "rustls",
  "time",
  "tokio-rustls",
  "tracing",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

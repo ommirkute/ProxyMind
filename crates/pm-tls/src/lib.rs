@@ -32,6 +32,17 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
+/// SHA-256 of a certificate's SubjectPublicKeyInfo (PEM input): what
+/// Chromium's `--ignore-certificate-errors-spki-list` takes, base64-encoded.
+pub fn spki_sha256(pem: &str) -> Result<[u8; 32]> {
+    let der = pem_to_der(pem)?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der).map_err(|e| anyhow::anyhow!("bad certificate: {e}"))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, cert.tbs_certificate.subject_pki.raw);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    Ok(out)
+}
+
 /// The local certificate authority used to intercept TLS.
 pub struct CertAuthority {
     issuer: Issuer<'static, KeyPair>,
@@ -352,5 +363,16 @@ mod tests {
             b[3..5].copy_from_slice(&((cut - 5) as u16).to_be_bytes());
             let _ = peek_client_hello(&b);
         }
+    }
+
+    #[test]
+    fn spki_hash_matches_the_ca_key() {
+        let dir = std::env::temp_dir().join(format!("pm-tls-spki-{}", std::process::id()));
+        let ca = CertAuthority::load_or_create(&dir).unwrap();
+        let key = KeyPair::from_pem(&std::fs::read_to_string(dir.join(CA_KEY_FILE)).unwrap()).unwrap();
+        let (_, spki) = x509_parser::pem::parse_x509_pem(key.public_key_pem().as_bytes()).unwrap();
+        let expected = ring::digest::digest(&ring::digest::SHA256, &spki.contents);
+        assert_eq!(spki_sha256(ca.ca_pem()).unwrap().as_slice(), expected.as_ref());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

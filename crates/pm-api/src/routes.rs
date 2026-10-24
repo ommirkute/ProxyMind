@@ -75,6 +75,7 @@ pub fn api() -> Router<AppState> {
         .route("/roe", get(roe_get).put(roe_put))
         .route("/setup", get(setup))
         .route("/ca.pem", get(ca_pem))
+        .route("/browser/open", post(browser_open))
         .route("/roe/check", post(roe_check))
         .route("/events", get(events))
         .route("/exchanges", get(exchanges))
@@ -485,7 +486,12 @@ async fn setup(State(st): State<AppState>) -> ApiResult {
         "proxy": st.setup.proxy,
         "ca_available": st.setup.ca_pem.is_some(),
         "ca_sha256": st.setup.ca_fingerprint(),
+        "browser_available": st.service.browser_available(),
     }))
+}
+
+async fn browser_open(State(st): State<AppState>, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
+    ok(st.service.browser_open(&st.actor, r).await?)
 }
 
 /// The CA certificate, as a download (it is public, but stays behind the API token like everything here).

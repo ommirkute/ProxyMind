@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, openBrowser, toast } from "../api";
+import { Icon } from "../icons";
 import { Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
 import Listeners from "./Listeners";
 
@@ -7,6 +8,7 @@ interface SetupInfo {
   proxy: string | null;
   ca_available: boolean;
   ca_sha256: string | null;
+  browser_available?: boolean;
 }
 
 type Os = "macos" | "windows" | "linux" | "firefox" | "cli";
@@ -23,12 +25,40 @@ export default function Setup() {
   const info = useLoad(() => api.get<SetupInfo>("/setup"), []);
   const { counters } = useNav();
   const [os, setOs] = useState<Os>(guess());
+  const [startUrl, setStartUrl] = useState("");
   const proxy = info.data?.proxy ?? "127.0.0.1:8080";
   const [host, port] = proxy.includes(":") ? [proxy.slice(0, proxy.lastIndexOf(":")), proxy.slice(proxy.lastIndexOf(":") + 1)] : [proxy, "8080"];
 
   return (
     <div className="content">
       <ErrorBox error={info.error} />
+      {info.data?.browser_available && (
+        <div className="hero">
+          <span className="hero-icon"><Icon name="globe" size={22} /></span>
+          <div>
+            <h2>The easy way: ProxyMind's browser</h2>
+            <p className="small">
+              A Chromium window that already goes through the proxy and trusts ProxyMind's CA, for that window only:
+              nothing to configure, nothing installed on your system. It keeps its own logins and cookies between launches.
+            </p>
+          </div>
+          <div className="actions">
+            <input aria-label="Start page" placeholder="start page (default: scope)" value={startUrl} onChange={(e) => setStartUrl(e.target.value)} style={{ width: 240 }} />
+            <button
+              className="btn primary"
+              data-testid="setup-open-browser"
+              onClick={() =>
+                openBrowser(startUrl.trim() || undefined)
+                  .then((b) => toast(`Browser opened at ${b.url}`))
+                  .catch((e) => toast(e.message, "bad"))
+              }
+            >
+              <Icon name="globe" size={15} /> Launch browser
+            </button>
+          </div>
+        </div>
+      )}
+      <p className="small muted" style={{ margin: "0 0 12px" }}>Or set up your own browser:</p>
       <div className="split">
         <Panel title="1. Send traffic through the proxy">
           {info.data && !info.data.proxy ? (

@@ -1627,11 +1627,13 @@ dependencies = [
  "anyhow",
  "parking_lot",
  "rcgen",
+ "ring",
  "rustls",
  "time",
  "tokio-rustls",
  "tracing",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

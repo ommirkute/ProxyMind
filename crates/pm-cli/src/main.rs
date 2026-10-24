@@ -164,6 +164,10 @@ enum Command {
         /// addressed to localhost and carry the token.
         #[arg(long)]
         bind_any: bool,
+        /// Also open a browser window that goes through the proxy (its own
+        /// profile; trusts ProxyMind's CA without installing it)
+        #[arg(long)]
+        open_browser: bool,
     },
     /// Run an out-of-band (OAST) callback listener that records interactions in the project.
     OastServer {
@@ -1195,7 +1199,7 @@ async fn run() -> Result<()> {
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
         }
-        Command::Ui { listen, proxy, no_proxy, no_http2, actor, bind_any } => {
+        Command::Ui { listen, proxy, no_proxy, no_http2, actor, bind_any, open_browser } => {
             anyhow::ensure!(
                 listen.ip().is_loopback() || *bind_any,
                 "the UI/API must listen on a loopback address (inside a container, add --bind-any and publish the \
@@ -1230,6 +1234,17 @@ async fn run() -> Result<()> {
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
+                service.attach_proxy_info(pm_service::ProxyInfo {
+                    addr: proxy.to_string(),
+                    ca_pem: ca.ca_pem().to_string(),
+                    profile_dir: cli.project.with_extension("browser"),
+                });
+                if *open_browser {
+                    match service.browser_open(&me, Default::default()).await {
+                        Ok(b) => eprintln!("Browser opened at {} (profile {})", b.url, b.profile),
+                        Err(e) => eprintln!("Could not open the browser: {e}"),
+                    }
+                }
             } else {
                 pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
             }

@@ -133,6 +133,12 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
             service.attach_listeners(extra.clone())?;
             pm_service::watch_project(project, Some(rewriter), service.network().clone(), Some(extra))?;
             tokio::spawn(p.run(l));
+            // The built-in browser (Proxy → Open browser) uses this proxy.
+            service.attach_proxy_info(pm_service::ProxyInfo {
+                addr: proxy_addr.to_string(),
+                ca_pem: ca.ca_pem().to_string(),
+                profile_dir: project.with_extension("browser"),
+            });
             Some(proxy_addr)
         }
         Err(e) => {

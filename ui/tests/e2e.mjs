@@ -14,6 +14,8 @@ import { chromium } from "playwright-core";
 
 const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
 const SHOTS = process.env.SCREENSHOTS ?? join(tmpdir(), "proxymind-ui-shots");
+// ProxyMind's own browser window opens headless here (no display in CI).
+process.env.PROXYMIND_BROWSER_HEADLESS ??= "1";
 const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
 const project = join(dir, "ui.pmproj");
 const children = [];
@@ -785,6 +787,20 @@ try {
   const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
   check(caShown === new X509Certificate(pem).fingerprint256, "the CA fingerprint matches the downloaded certificate");
   check(await page.getByTestId("setup-proxy").textContent() === `127.0.0.1:${proxy}`, "the proxy address is shown");
+
+  console.log("Built-in browser");
+  await page.getByLabel("Start page").fill(`http://127.0.0.1:${shop}/search?q=from-pm-browser`);
+  await page.screenshot({ path: join(SHOTS, "7a-builtin-browser.png") });
+  const opened = page.waitForResponse((r) => r.url().endsWith("/api/v1/browser/open"));
+  await page.getByTestId("setup-open-browser").click();
+  const launch = await (await opened).json();
+  await page.getByTestId("toast").waitFor();
+  const seenByProxy = await page.waitForFunction(async () => {
+    const p = await (await fetch("/api/v1/exchanges?path=from-pm-browser&limit=5")).json();
+    return p.exchanges.some((x) => x.source === "proxy" && x.status === 200);
+  }, null, { timeout: 30000 }).then(() => true).catch(() => false);
+  check(seenByProxy, "ProxyMind's browser goes through the proxy (the page it opened is in history)");
+  if (launch.pid) { try { process.kill(launch.pid); } catch {} }
 
   await page.getByTestId("record-in-scope").check();
   await page.waitForFunction(async () => (await (await fetch("/api/v1/history/recording")).json()).in_scope_only === true);

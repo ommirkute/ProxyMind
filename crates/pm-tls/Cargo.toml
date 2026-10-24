@@ -17,6 +17,8 @@ time = "0.3.55"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tracing = "0.1.44"
 webpki-roots = "1.0.9"
+ring = "0.17.14"
+x509-parser = "0.18.1"
 
 [lints]
 workspace = true

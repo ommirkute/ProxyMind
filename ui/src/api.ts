@@ -293,3 +293,18 @@ export const originOf = (e: ExchangeSummary) => {
   const host = e.host.includes(":") ? `[${e.host}]` : e.host;
   return `${e.scheme}://${host}${e.port === def ? "" : `:${e.port}`}`;
 };
+
+export interface BrowserOpened {
+  url: string;
+  proxy: string;
+  pid: number | null;
+  profile: string;
+}
+
+/** Opens ProxyMind's browser window (through the proxy, trusting its CA). */
+export const openBrowser = (url?: string) => api.post<BrowserOpened>("/browser/open", url ? { url } : {});
+
+/** Shows a short message in the corner (the app shell listens). */
+export function toast(message: string, kind: "ok" | "bad" = "ok") {
+  window.dispatchEvent(new CustomEvent("pm-toast", { detail: { message, kind } }));
+}

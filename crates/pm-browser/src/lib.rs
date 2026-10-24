@@ -216,6 +216,107 @@ pub async fn render(chromium: &Path, doc: &Document, opts: &RenderOptions) -> Re
     result
 }
 
+// ---------------------------------------------------- browser window --
+
+/// Set to `1` to open the browser window headless (tests, CI, servers).
+pub const ENV_WINDOW_HEADLESS: &str = "PROXYMIND_BROWSER_HEADLESS";
+
+/// A browser window for manual testing, sent through ProxyMind's proxy.
+#[derive(Debug, Clone)]
+pub struct WindowOptions {
+    /// The proxy, e.g. `127.0.0.1:8080`.
+    pub proxy: String,
+    /// Base64 SHA-256 of the interception CA's public key: the browser
+    /// accepts certificates from that CA only, without installing it anywhere.
+    pub ca_spki: Option<String>,
+    /// Kept between launches (logins, cookies, settings).
+    pub profile_dir: PathBuf,
+    pub url: String,
+}
+
+/// Hosts Chromium calls by itself (not the site under test).
+const CHROME_SERVICE_HOSTS: &[&str] = &[
+    "android.clients.google.com",
+    "clients1.google.com",
+    "clients2.google.com",
+    "clientservices.googleapis.com",
+    "update.googleapis.com",
+    "safebrowsing.googleapis.com",
+    "optimizationguide-pa.googleapis.com",
+    "content-autofill.googleapis.com",
+    "edgedl.me.gvt1.com",
+    "redirector.gvt1.com",
+];
+
+/// A running browser window. Dropping it leaves the browser open.
+#[derive(Debug)]
+pub struct Window {
+    pub pid: Option<u32>,
+    pub profile_dir: PathBuf,
+}
+
+/// Opens a Chromium window whose every request (loopback included) goes
+/// through `opts.proxy`. Returns once the process has started.
+pub async fn open_window(chromium: &Path, opts: &WindowOptions) -> Result<Window> {
+    std::fs::create_dir_all(&opts.profile_dir)?;
+    let headless = std::env::var(ENV_WINDOW_HEADLESS).is_ok_and(|v| v == "1");
+    let no_sandbox = running_as_root() || std::env::var(ENV_NO_SANDBOX).is_ok_and(|v| v == "1");
+    let mut cmd = std::process::Command::new(chromium);
+    cmd.arg(format!("--user-data-dir={}", opts.profile_dir.display()))
+        .arg(format!("--proxy-server=http://{}", opts.proxy))
+        // Loopback targets go through the proxy too; Chromium's own service
+        // calls (device registration, updates, safe browsing) don't, so they
+        // stay out of the project.
+        .arg(format!("--proxy-bypass-list=<-loopback>;{}", CHROME_SERVICE_HOSTS.join(";")))
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            // Keep the browser's own background traffic out of the project.
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-sync",
+            "--disable-domain-reliability",
+            "--no-pings",
+            // No browser sign-in or Google new-tab content of its own.
+            "--allow-browser-signin=false",
+            "--disable-search-engine-choice-screen",
+            "--disable-features=Translate,OptimizationHints,MediaRouter,InterestFeedContentSuggestions,AutofillServerCommunication,NtpOneGoogleBar,NtpRealboxPedals,NtpModules,DiceWebSigninInterception",
+            // No "unsupported command-line flag" bar for the certificate pin.
+            "--test-type",
+            "--password-store=basic",
+            "--use-mock-keychain",
+        ]);
+    if let Some(spki) = &opts.ca_spki {
+        cmd.arg(format!("--ignore-certificate-errors-spki-list={spki}"));
+    }
+    if headless {
+        cmd.arg("--headless=new").arg("--remote-debugging-port=0");
+    }
+    if no_sandbox {
+        cmd.arg("--no-sandbox");
+    }
+    cmd.arg(&opts.url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child =
+        cmd.spawn().map_err(|e| Error::Launch { path: chromium.display().to_string(), reason: e.to_string() })?;
+    // A browser that dies at once (bad profile, missing libraries) is an error.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    if let Ok(Some(status)) = child.try_wait() {
+        // Another window on the same profile hands the URL over and exits 0.
+        if !status.success() {
+            return Err(Error::Launch {
+                path: chromium.display().to_string(),
+                reason: format!("exited with {status}"),
+            });
+        }
+    }
+    let pid = Some(child.id());
+    // Reap it in the background so it never lingers as a zombie.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(Window { pid, profile_dir: opts.profile_dir.clone() })
+}
+
 // ------------------------------------------------------------ process --
 
 struct Browser {

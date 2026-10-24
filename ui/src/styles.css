@@ -632,3 +632,26 @@ kbd {
 .palette-item svg { color: var(--muted); }
 .palette-item.on { background: var(--accent-soft); color: var(--accent-text); }
 .palette-item.on svg { color: var(--accent-text); }
+
+/* -------------------------------------------------------------- toast -- */
+
+.toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 120; display: flex; align-items: center; gap: 10px; max-width: 460px;
+  padding: 11px 14px; border-radius: var(--radius); background: var(--panel); border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg); font-size: 13px; animation: pop .16s var(--ease);
+}
+.toast.ok svg { color: var(--ok); }
+.toast.bad { border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+.toast.bad svg { color: var(--bad); }
+.hero {
+  display: flex; gap: 18px; align-items: center; padding: 20px 22px; margin-bottom: 18px; border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--panel)), var(--panel) 70%);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); box-shadow: var(--shadow);
+}
+.hero h2 { margin: 0 0 4px; font-size: 16px; }
+.hero p { margin: 0; color: var(--text-2); }
+.hero .hero-icon {
+  width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; flex: none; color: #fff;
+  background: linear-gradient(135deg, var(--accent), #b14cf0); box-shadow: 0 6px 18px rgba(91, 76, 240, .35);
+}
+.hero .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }

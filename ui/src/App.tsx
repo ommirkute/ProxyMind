@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type Counters, type Status } from "./api";
+import { api, openBrowser, toast, type Counters, type Status } from "./api";
 import { NavContext, usePref, type Page } from "./components";
 import { Icon } from "./icons";
 import Overview from "./pages/Overview";
@@ -82,6 +82,18 @@ export default function App() {
   const [theme, setTheme] = usePref<"system" | "light" | "dark">("pm-theme", "system");
   const [collapsed, setCollapsed] = usePref<boolean>("pm-sidebar-collapsed", false);
   const [palette, setPalette] = useState(false);
+  const [browserOk, setBrowserOk] = useState(false);
+  const [notice, setNotice] = useState<{ message: string; kind: string } | null>(null);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onToast = (e: Event) => {
+      setNotice((e as CustomEvent).detail);
+      clearTimeout(timer);
+      timer = setTimeout(() => setNotice(null), 4500);
+    };
+    window.addEventListener("pm-toast", onToast);
+    return () => window.removeEventListener("pm-toast", onToast);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -113,6 +125,7 @@ export default function App() {
         })
         .catch((e) => setAuthError(e.message));
     load();
+    api.get<{ browser_available?: boolean }>("/setup").then((s) => setBrowserOk(!!s.browser_available)).catch(() => {});
     // Pages that change what the header shows (e.g. the engagement) ask for a refresh.
     window.addEventListener("pm-status-changed", load);
     return () => window.removeEventListener("pm-status-changed", load);
@@ -293,6 +306,20 @@ export default function App() {
               </nav>
             )}
             <div className="topnav-status">
+              {browserOk && (
+                <button
+                  className="btn primary sm"
+                  data-testid="open-browser"
+                  title="Open a browser that goes through ProxyMind and trusts its CA"
+                  onClick={() =>
+                    openBrowser()
+                      .then((b) => toast(`Browser opened at ${b.url}`))
+                      .catch((e) => toast(e.message, "bad"))
+                  }
+                >
+                  <Icon name="globe" size={14} /> Open browser
+                </button>
+              )}
               <button className="pill search-pill" onClick={() => setPalette(true)} aria-label="Open command palette">
                 <Icon name="search" size={13} />
                 <span className="hide-narrow">Jump to…</span>
@@ -313,6 +340,12 @@ export default function App() {
           <main className="main">
             <PageView />
           </main>
+          {notice && (
+            <div className={`toast ${notice.kind}`} role="status" data-testid="toast">
+              <Icon name={notice.kind === "bad" ? "alert" : "check"} size={15} />
+              <span>{notice.message}</span>
+            </div>
+          )}
           <CommandPalette
             open={palette}
             onClose={() => setPalette(false)}
