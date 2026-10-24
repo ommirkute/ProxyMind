@@ -177,7 +177,16 @@ pub const CHECKS: &[&str] = &[
     "cache_deception",
     "mass_assignment",
     "proto_pollution",
+    "oauth",
+    "deserialization",
+    "request_smuggling",
+    "file_upload",
+    "race_condition",
 ];
+
+/// Checks that can affect other users or change the target for good: they
+/// raise the scan to the destructive tier, so a person approves them first.
+pub const APPROVAL_CHECKS: &[&str] = &["request_smuggling", "file_upload", "race_condition"];
 
 /// Checks that take several rounds (run after the one-shot ones).
 pub const MULTI_STEP: &[&str] = &[
@@ -196,6 +205,11 @@ pub const MULTI_STEP: &[&str] = &[
     "cache_deception",
     "mass_assignment",
     "proto_pollution",
+    "oauth",
+    "deserialization",
+    "request_smuggling",
+    "file_upload",
+    "race_condition",
 ];
 
 /// Headers that apps often pass to SQL (logging, analytics) or shells.
@@ -271,7 +285,7 @@ fn cookie_encode(s: &str) -> String {
     out
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

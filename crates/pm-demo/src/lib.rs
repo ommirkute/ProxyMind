@@ -267,6 +267,35 @@ pub const GROUND_TRUTH: &[Vuln] = &[
         path: "/graphql",
         description: "GraphQL runs cross-site requests with the session cookie: no token, any content type.",
     },
+    Vuln {
+        id: "VS-34",
+        class: "request_smuggling",
+        method: "GET",
+        path: "/legacy/status",
+        description: "The /legacy front end honours Transfer-Encoding but passes Content-Length on to a back end that \
+                      trusts it (TE.CL desync).",
+    },
+    Vuln {
+        id: "VS-35",
+        class: "oauth",
+        method: "GET",
+        path: "/oauth/authorize",
+        description: "Any redirect_uri is accepted, and codes are issued without state.",
+    },
+    Vuln {
+        id: "VS-36",
+        class: "deserialization",
+        method: "GET",
+        path: "/api/cart",
+        description: "The cart cookie is a base64 PHP-serialized array that the server unserializes.",
+    },
+    Vuln {
+        id: "VS-37",
+        class: "file_upload",
+        method: "POST",
+        path: "/api/avatar",
+        description: "Avatars of any type are stored and served from /uploads with a type from the extension (HTML runs).",
+    },
 ];
 
 /// Endpoints that look similar but are correctly protected (false-positive traps).
@@ -282,6 +311,7 @@ pub const SECURE_ENDPOINTS: &[&str] = &[
     "GET /api/notice",
     "GET /api/account/keys",
     "POST /api/signup",
+    "GET /oauth2/authorize",
 ];
 
 struct User {
@@ -323,6 +353,8 @@ struct State {
     registered: Vec<(String, String)>,
     /// VS-32: what got merged into "Object.prototype".
     proto: serde_json::Map<String, Value>,
+    /// VS-37: uploaded files by name.
+    uploads: HashMap<String, Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -495,6 +527,42 @@ fn reason(status: u16) -> &'static str {
 
 fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// VS-36: checks a PHP-serialized value the way unserialize() would fail:
+/// declared string lengths must match. Returns the strings, or the offset
+/// of the first error.
+fn php_unserialize_check(text: &str) -> Result<Vec<String>, usize> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(at) = text[i..].find("s:").map(|x| x + i) {
+        let digits: String = text[at + 2..].chars().take_while(char::is_ascii_digit).collect();
+        let n: usize = digits.parse().map_err(|_| at)?;
+        let start = at + 2 + digits.len() + 2; // past `:"`
+        let end = start + n;
+        if b.get(start - 2..start) != Some(b":\"") || b.get(end) != Some(&b'"') {
+            return Err(at);
+        }
+        out.push(text[start..end].to_string());
+        i = end;
+    }
+    Ok(out)
+}
+
+/// The first file in a multipart/form-data body: (file name, bytes).
+fn multipart_file(req: &Request) -> Option<(String, Vec<u8>)> {
+    let ct = req.header("content-type")?;
+    let boundary = ct.split(';').find_map(|x| x.trim().strip_prefix("boundary="))?.trim_matches('"');
+    let delim = format!("--{boundary}");
+    let body = String::from_utf8_lossy(&req.body).into_owned();
+    for part in body.split(delim.as_str()) {
+        let Some((head, data)) = part.split_once("\r\n\r\n") else { continue };
+        let Some(name) = head.split("filename=\"").nth(1).and_then(|x| x.split('"').next()) else { continue };
+        let data = data.strip_suffix("\r\n").unwrap_or(data);
+        return Some((name.to_string(), data.as_bytes().to_vec()));
+    }
+    None
 }
 
 /// VS-27: the HMAC key for login JWTs (a guessable one).
@@ -832,6 +900,7 @@ impl VulnShop {
                 cache: HashMap::new(),
                 registered: Vec::new(),
                 proto: serde_json::Map::new(),
+                uploads: HashMap::new(),
             })),
             counter: Arc::new(AtomicU64::new(0)),
             reset_codes: Arc::new(AtomicU64::new(400_000)),
@@ -902,7 +971,10 @@ impl VulnShop {
         if wants_ws && req.method == "GET" && req.path == "/ws/support" {
             return self.support_socket(s, &req, buf[head_end..].to_vec()).await;
         }
-        let resp = self.cached(&req).await;
+        let resp = match self.legacy_front_end(&req).await {
+            Some(r) => r,
+            None => self.cached(&req).await,
+        };
         let mut out = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nX-Request-Id: {}\r\nConnection: close\r\n",
             resp.status,
@@ -1053,6 +1125,25 @@ impl VulnShop {
     /// Fields that change on every response (noise for diffing tools).
     fn meta(&self) -> Value {
         json!({ "generated_at": now_ms() as u64, "request_id": self.counter.load(Ordering::Relaxed) })
+    }
+
+    /// VS-34: /legacy sits behind a front end that reads chunked bodies but
+    /// forwards Content-Length unchanged to a back end that trusts it. When
+    /// the two disagree, the back end waits for bytes that never come.
+    async fn legacy_front_end(&self, req: &Request) -> Option<Response> {
+        let chunked = req.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+        if !req.path.starts_with("/legacy") || !chunked {
+            return None;
+        }
+        let declared: usize = req.header("content-length").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        let Some(end) = req.body.windows(5).position(|w| w == b"0\r\n\r\n").map(|i| i + 5) else {
+            return Some(json_resp(400, json!({"error": "bad chunked body"})));
+        };
+        if declared > end {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            return Some(json_resp(504, json!({"error": "upstream timed out"})));
+        }
+        None
     }
 
     /// A shared cache in front of the app (VS-29, VS-30): static-looking
@@ -1374,6 +1465,107 @@ impl VulnShop {
                 let mut out = st.proto.clone();
                 out.extend(prefs);
                 json_resp(200, json!({"preferences": out}))
+            }
+            ("GET" | "POST", ["legacy", "status"]) => json_resp(200, json!({"status": "ok", "backend": "legacy-1.0"})),
+            ("GET", ["oauth", "authorize"]) => {
+                // VS-35: any redirect_uri, and no state needed.
+                let uri = req.query.get("redirect_uri").cloned().unwrap_or_default();
+                let clean = |v: &str| !v.contains(char::is_control);
+                let state_ok = req.query.get("state").is_none_or(|s| clean(s));
+                if !uri.starts_with("http")
+                    || !clean(&uri)
+                    || !state_ok
+                    || req.query.get("client_id").map(String::as_str) != Some("shop-web")
+                {
+                    return json_resp(400, json!({"error": "invalid_request"}));
+                }
+                let code = format!("c{:x}", self.counter.fetch_add(1, Ordering::Relaxed) * 7919);
+                let state = req.query.get("state").map(|s| format!("&state={s}")).unwrap_or_default();
+                let sep = if uri.contains('?') { '&' } else { '?' };
+                Response {
+                    status: 302,
+                    headers: vec![("Location".into(), format!("{uri}{sep}code={code}{state}"))],
+                    body: String::new(),
+                    content_type: "text/plain",
+                }
+            }
+            ("GET", ["oauth2", "authorize"]) => {
+                // Secure look-alike: the registered redirect_uri only, and state required.
+                let host = req.header("host").unwrap_or("");
+                let uri = req.query.get("redirect_uri").cloned().unwrap_or_default();
+                let state = req.query.get("state").cloned().unwrap_or_default();
+                if uri != format!("http://{host}/oauth/callback")
+                    || state.is_empty()
+                    || !state.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                {
+                    return json_resp(400, json!({"error": "invalid_request"}));
+                }
+                Response {
+                    status: 302,
+                    headers: vec![("Location".into(), format!("{uri}?code=c2&state={state}"))],
+                    body: String::new(),
+                    content_type: "text/plain",
+                }
+            }
+            ("GET", ["oauth", "callback"]) => Response {
+                status: 200,
+                headers: vec![],
+                body: "<!doctype html><p>Signed in.</p>".into(),
+                content_type: "text/html; charset=utf-8",
+            },
+            ("GET", ["api", "cart"]) => {
+                // VS-36: unserialize() on a cookie.
+                let cookie = req.cookie("cart").unwrap_or_else(|| "YToxOntzOjQ6Iml0ZW0iO3M6NjoiQ29mZmVlIjt9".into());
+                let Some(text) = b64_decode(&cookie).and_then(|b| String::from_utf8(b).ok()) else {
+                    return json_resp(400, json!({"error": "bad cart"}));
+                };
+                match php_unserialize_check(&text) {
+                    Ok(items) => json_resp(200, json!({"cart": items})),
+                    Err(at) => Response {
+                        status: 500,
+                        headers: vec![],
+                        body: format!(
+                            "<b>Notice</b>: unserialize(): Error at offset {at} of {} bytes in /var/www/cart.php on line 12",
+                            text.len()
+                        ),
+                        content_type: "text/html",
+                    },
+                }
+            }
+            ("POST", ["api", "avatar"]) => {
+                // VS-37: any file type, served back with a type from its extension.
+                let Some((name, data)) = multipart_file(req) else {
+                    return json_resp(400, json!({"error": "no file"}));
+                };
+                let name: String =
+                    name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).collect();
+                if name.is_empty() || data.len() > 256 * 1024 {
+                    return json_resp(400, json!({"error": "bad file"}));
+                }
+                if let Ok(mut st) = self.state.lock() {
+                    if st.uploads.len() > 100 {
+                        st.uploads.clear();
+                    }
+                    st.uploads.insert(name.clone(), data);
+                }
+                json_resp(201, json!({"url": format!("/uploads/{name}")}))
+            }
+            ("GET", ["uploads", name]) => {
+                let data = self.state.lock().ok().and_then(|st| st.uploads.get(*name).cloned());
+                let Some(data) = data else { return json_resp(404, json!({"error": "no such file"})) };
+                let content_type = match name.rsplit('.').next().unwrap_or("") {
+                    "html" | "htm" => "text/html",
+                    "svg" => "image/svg+xml",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    _ => "application/octet-stream",
+                };
+                Response {
+                    status: 200,
+                    headers: vec![],
+                    body: String::from_utf8_lossy(&data).into_owned(),
+                    content_type,
+                }
             }
             ("GET", ["help"]) => {
                 // Secure look-alike: the topic is HTML-encoded.

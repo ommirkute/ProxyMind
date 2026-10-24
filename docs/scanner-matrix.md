@@ -32,9 +32,9 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | SMTP / email header injection | ❌ | ❌ | 4 |
 | Log4Shell-style lookups (OOB) | ✅ step 2 (needs the DNS zone) | ✅ | 2 |
 | Server-side JavaScript / prototype pollution | ✅ step 4 (server-side, `__proto__` / `constructor.prototype` property reflection) | ✅ (client and server, blind) | 4 |
-| Java / .NET / PHP deserialization | ❌ | ✅ (Java) | 4 (approval) |
+| Java / .NET / PHP deserialization | ✅ step 4 (Java, PHP, pickle, .NET, Ruby: corrupted copies and error signatures; no gadget chains) | ✅ (Java) | 4 |
 | File path traversal / manipulation | ✅ | ✅ | 3 (more encodings, Windows) |
-| File upload (type bypass, web shell) | ❌ | ✅ | 4 (approval) |
+| File upload (type bypass, web shell) | ✅ step 4 (HTML, SVG and a harmless PHP echo, fetched back; needs approval) | ✅ | 4 (approval) |
 
 ## Client-side and reflection
 
@@ -58,7 +58,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Host header injection / password-reset poisoning | ✅ step 3 (Host, X-Forwarded-Host) | ✅ | 3 |
 | Web cache poisoning (unkeyed inputs) | ✅ step 4 (5 headers, cache buster, confirmed by a cache hit) | ❌ | 4 |
 | Web cache deception | ✅ step 4 (`/x.css` and `;x.css` suffixes, confirmed without credentials) | ❌ | 4 |
-| HTTP request smuggling (CL.TE, TE.CL, H2) | ❌ | ✅ | 4 (approval; can affect others) |
+| HTTP request smuggling (CL.TE, TE.CL, H2) | ✅ step 4 (CL.TE and TE.CL by timing, with a well-framed control; needs approval; H2 later) | ✅ | 4 (approval; can affect others) |
 | CORS: arbitrary / null / trusted-subdomain origins | ✅ passive + active (4 origins) | ✅ | 3 |
 | HTTP method override / TRACE | ❌ | ✅ (methods) | 3 |
 
@@ -69,9 +69,9 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | IDOR / broken object authorization | ✅ (differential authz, proven) | ✅ | – |
 | Authentication bypass (path, header, method tricks) | ✅ step 3 (8 path tricks, rewrite and IP headers, with a control) | ✅ | 3 |
 | Mass assignment | ✅ step 4 (role / isAdmin / admin / verified on submissions) | ✅ | 4 |
-| Race conditions | ✅ (Repeater race, single-packet) | ✅ | 4 (as a scan check) |
+| Race conditions | ✅ (Repeater race, single-packet) + step 4 scan check (one-time actions; needs approval) | ✅ | 4 |
 | JWT (none alg, weak secret, kid/jku) | ✅ step 4 (weak HMAC secret offline, unverified signature, alg none, no signature; kid/jku later) | ✅ | 4 |
-| OAuth / OIDC (redirect_uri, state, PKCE) | ❌ | ✅ | 4 |
+| OAuth / OIDC (redirect_uri, state, PKCE) | ✅ step 4 (redirect_uri to another site, prefix and user-info tricks; missing state; PKCE later) | ✅ | 4 |
 | GraphQL (introspection, batching, depth) | ✅ step 4 (introspection, batching, suggestions, GET/CSRF; depth limits later) | ✅ | 4 |
 | Hidden parameters (param mining) | ✅ step 3 (70 names, reflection or difference, bisected) | ✅ | 3 |
 
@@ -127,5 +127,6 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
    deception, prototype pollution, deserialization, file upload, mass
    assignment, race checks: the risky ones behind approval. *(4a done: JWT,
    GraphQL, cache poisoning and deception, mass assignment, prototype
-   pollution; 4b next: request smuggling, OAuth, deserialization, file
-   upload, race as a scan check)*
+   pollution; 4b done: request smuggling, OAuth, deserialization, file
+   upload, race as a scan check. Left for later: JWT kid/jku, GraphQL
+   depth limits, HTTP/2 smuggling, PKCE, deserialization gadget chains)*

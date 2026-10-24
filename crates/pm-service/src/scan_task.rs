@@ -207,7 +207,14 @@ impl Service {
             .iter()
             .chain(pm_scan::oob::CHECKS)
             .map(|c| c.to_string())
-            .filter(|c| req.checks.is_empty() || req.checks.contains(c))
+            // The approval-only checks run when asked for by name.
+            .filter(|c| {
+                if req.checks.is_empty() {
+                    !pm_scan::active::APPROVAL_CHECKS.contains(&c.as_str())
+                } else {
+                    req.checks.contains(c)
+                }
+            })
             .collect();
         for t in &mut targets {
             if t.submission {
@@ -215,7 +222,17 @@ impl Service {
             } else {
                 t.checks = all
                     .iter()
-                    .filter(|c| !matches!(c.as_str(), "stored_xss" | "csrf" | "mass_assignment" | "proto_pollution"))
+                    .filter(|c| {
+                        !matches!(
+                            c.as_str(),
+                            "stored_xss"
+                                | "csrf"
+                                | "mass_assignment"
+                                | "proto_pollution"
+                                | "file_upload"
+                                | "race_condition"
+                        )
+                    })
                     .cloned()
                     .collect();
             }

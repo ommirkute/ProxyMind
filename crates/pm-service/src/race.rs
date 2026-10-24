@@ -124,6 +124,19 @@ impl Service {
             }
         }
 
+        self.race_execute(actor, &out, req.identity.as_deref(), fix_cl, count, req.mode).await
+    }
+
+    /// Sends `count` copies at once and records them (the caller has asked the gate).
+    pub(crate) async fn race_execute(
+        &self,
+        actor: &Actor,
+        out: &crate::replay::Outgoing,
+        identity: Option<&str>,
+        fix_cl: bool,
+        count: usize,
+        mode: RaceModeChoice,
+    ) -> Result<RaceResult> {
         // One slot for the whole race: the point is to send at once.
         let _permit = self.acquire_slot(&out.endpoint.host).await?;
         let mut wire = self.redactor.unredact(&out.raw);
@@ -133,7 +146,7 @@ impl Service {
         if fix_cl {
             wire = pm_http::fix_content_length(&wire);
         }
-        let prefer_h2 = match req.mode {
+        let prefer_h2 = match mode {
             RaceModeChoice::Auto => out.endpoint.scheme == "https",
             RaceModeChoice::SinglePacket => true,
             RaceModeChoice::LastByte => false,
@@ -165,7 +178,7 @@ impl Service {
                 request: wire.clone(),
                 response: None,
                 error: None,
-                identity: req.identity.clone(),
+                identity: identity.map(str::to_string),
                 hypothesis_id: out.hypothesis_id,
             };
             let key = match r {

@@ -78,6 +78,14 @@ pub fn class_family(c: &str) -> &'static str {
         "cache_deception"
     } else if c.contains("proto") && c.contains("pollution") {
         "prototype_pollution"
+    } else if c.contains("smuggl") || c.contains("desync") {
+        "request_smuggling"
+    } else if c.contains("oauth") || c.contains("redirect_uri") {
+        "oauth"
+    } else if c.contains("deserial") {
+        "deserialization"
+    } else if c.contains("upload") {
+        "file_upload"
     } else if c.contains("nosql") {
         "nosqli"
     } else if c.contains("sql") {
@@ -264,6 +272,11 @@ mod tests {
             ("cache_poisoning", "cache_poisoning"),
             ("prototype_pollution", "prototype_pollution"),
             ("mass_assignment", "mass_assignment"),
+            ("request_smuggling", "request_smuggling"),
+            ("oauth", "oauth"),
+            ("deserialization", "deserialization"),
+            ("file_upload", "file_upload"),
+            ("race_condition", "race"),
         ] {
             assert_eq!(class_family(class), family, "{class}");
         }
@@ -279,7 +292,7 @@ mod tests {
             json!({"id": 4, "vuln_class": "idor", "status": "false_positive", "url": "http://x/api/invoices/6001"}),
         ];
         let s = score(&truth, &findings);
-        assert_eq!((s.found, s.proven, s.total), (2, 1, 33));
+        assert_eq!((s.found, s.proven, s.total), (2, 1, 37));
         // A known method must match: the same path with another method is another endpoint.
         let delete = vec![json!({"id": 7, "vuln_class": "idor", "status": "suspected", "method": "DELETE",
             "url": "http://x/api/orders/1001"})];

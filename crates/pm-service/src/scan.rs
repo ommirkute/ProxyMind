@@ -222,6 +222,14 @@ enum Plan {
     CacheDeception(Vec<(&'static str, Vec<u8>)>, Vec<u8>),
     MassAssignment(Vec<u8>),
     Proto(Vec<(&'static str, Vec<u8>)>),
+    /// (trick, request), and the request without `state`.
+    OAuth(Vec<(&'static str, Vec<u8>)>, Option<Vec<u8>>),
+    /// (point, format, request with a corrupted object)
+    Deser(Vec<(pm_scan::active::Point, &'static str, Vec<u8>)>),
+    Smuggling(pm_scan::advanced::SmugglingProbes),
+    Upload(Vec<(pm_scan::advanced::UploadKind, Vec<u8>)>),
+    /// Copies sent at once (run before the baseline, which would use up a one-time action).
+    Race(usize),
 }
 
 impl Plan {
@@ -242,6 +250,11 @@ impl Plan {
             Plan::CacheDeception(v, _) => v.len() * 2 + 1,
             Plan::MassAssignment(_) => 1,
             Plan::Proto(v) => v.len(),
+            Plan::OAuth(v, s) => v.len() + usize::from(s.is_some()),
+            Plan::Deser(v) => v.len(),
+            Plan::Smuggling(_) => 5,
+            Plan::Upload(v) => v.len() * 5,
+            Plan::Race(n) => *n,
         }
     }
 
@@ -266,6 +279,11 @@ impl Plan {
             }
             Plan::CachePoison(v) => v.iter().map(|(_, r, _)| r.clone()).collect(),
             Plan::MassAssignment(r) => vec![r.clone()],
+            Plan::OAuth(v, _) => v.iter().map(|(_, r)| r.clone()).collect(),
+            Plan::Deser(v) => v.iter().map(|(_, _, r)| r.clone()).collect(),
+            Plan::Smuggling(p) => vec![p.te_cl.clone(), p.cl_te.clone()],
+            Plan::Upload(v) => v.iter().map(|(_, r)| r.clone()).collect(),
+            Plan::Race(_) => vec![raw.as_bytes().to_vec()],
         }
     }
 }
@@ -275,9 +293,9 @@ impl Plan {
 pub struct ActiveScanRequest {
     /// The recorded request to scan (its target is used).
     pub exchange_id: i64,
-    /// Checks to run (default all): sql_error, cmd_injection,
-    /// reflected_input, open_redirect, path_traversal, ssti, and the
-    /// multi-step sql_boolean, sql_time and cmd_time.
+    /// Checks to run (default: all but request_smuggling, file_upload and
+    /// race_condition, which need approval and run only when named). See
+    /// `pm_scan::active::CHECKS` and `pm_scan::oob::CHECKS`.
     pub checks: Vec<String>,
     /// Most probe requests (default 300, max 2000).
     pub max_requests: Option<usize>,
@@ -435,7 +453,10 @@ impl Service {
                 pm_scan::oob::CHECKS.join(", ")
             )));
         }
-        let want = |c: &str| req.checks.is_empty() || req.checks.iter().any(|x| x == c);
+        // By default every check but the ones that need approval: those run when named.
+        let want = |c: &str| {
+            if req.checks.is_empty() { !act::APPROVAL_CHECKS.contains(&c) } else { req.checks.iter().any(|x| x == c) }
+        };
         let ex = self
             .store
             .lock()
@@ -542,12 +563,12 @@ impl Service {
         {
             use pm_scan::advanced as adv;
             let get = ex.summary.method.eq_ignore_ascii_case("GET");
+            // Tokens and serialized cookies are redacted in `raw`: look at the real request.
+            let real = String::from_utf8_lossy(&self.redactor.unredact(raw.as_bytes())).into_owned();
             if want("jwt") {
-                // Tokens are redacted in `raw`: look at the real request.
-                let real = String::from_utf8_lossy(&self.redactor.unredact(raw.as_bytes())).into_owned();
                 let tokens = adv::find_jwts(&real);
                 if !tokens.is_empty() {
-                    plans.push(Plan::Jwt(tokens, real));
+                    plans.push(Plan::Jwt(tokens, real.clone()));
                 }
             }
             if want("graphql") {
@@ -571,6 +592,39 @@ impl Service {
                 && let Some(r) = adv::with_privileged_fields(&raw, &marker)
             {
                 plans.push(Plan::MassAssignment(r));
+            }
+            if want("oauth") {
+                let v = adv::oauth_probes(&raw, &marker);
+                if !v.is_empty() {
+                    plans.push(Plan::OAuth(v, adv::without_query_param(&raw, "state")));
+                }
+            }
+            if want("deserialization") {
+                let v: Vec<_> = act::points_with(&real, &id_segments)
+                    .iter()
+                    .filter(|p| !matches!(p.kind, PointKind::Nested | PointKind::Header))
+                    .filter_map(|p| {
+                        let (kind, bad) = adv::deser_probe(&p.original)?;
+                        Some((p.clone(), kind, act::inject(&real, p, &bad)?))
+                    })
+                    .collect();
+                if !v.is_empty() {
+                    plans.push(Plan::Deser(v));
+                }
+            }
+            if want("request_smuggling")
+                && let Some(p) = adv::smuggling_probes(&raw)
+            {
+                plans.push(Plan::Smuggling(p));
+            }
+            if want("file_upload") && !get {
+                let v = adv::upload_probes(&raw, &marker);
+                if !v.is_empty() {
+                    plans.push(Plan::Upload(v));
+                }
+            }
+            if want("race_condition") && !get {
+                plans.push(Plan::Race(10));
             }
             if want("proto_pollution") && !get {
                 let v = adv::proto_probes(&raw, &marker);
@@ -628,7 +682,21 @@ impl Service {
         }
         planned += plans.iter().map(Plan::max_requests).sum::<usize>();
         let planned = planned.min(limit + 3);
-        let extra = serde_json::json!({ "active_scan": { "checks": req.checks, "max_requests": planned } });
+        // Smuggling, uploads and races can reach other users or stay on the
+        // target: a person approves them.
+        let risky: Vec<&str> = plans
+            .iter()
+            .filter_map(|p| match p {
+                Plan::Smuggling(_) => Some("request_smuggling"),
+                Plan::Upload(_) => Some("file_upload"),
+                Plan::Race(_) => Some("race_condition"),
+                _ => None,
+            })
+            .collect();
+        if !risky.is_empty() {
+            tier = Tier::Destructive;
+        }
+        let extra = serde_json::json!({ "active_scan": { "checks": req.checks, "max_requests": planned, "needs_approval_for": risky } });
         match self.gate_send_with(
             actor,
             "scan_active",
@@ -661,13 +729,76 @@ impl Service {
                 Ok::<_, crate::ServiceError>(sent)
             }
         };
+        // A race goes first: the baseline request would use up a one-time action.
+        let mut raced: Option<(usize, usize, Option<u16>, Vec<i64>)> = None;
+        if let Some(Plan::Race(n)) = plans.iter().find(|p| matches!(p, Plan::Race(_))) {
+            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+            if let crate::RaceResult::Done { exchange_ids, .. } =
+                self.race_execute(actor, &out, identity, true, *n, crate::RaceModeChoice::Auto).await?
+            {
+                let recorded = seen_of(ex.response.as_deref());
+                let mut ok = 0;
+                let mut status = None;
+                for id in &exchange_ids {
+                    let got = seen_of(self.store.lock().get_exchange(*id)?.and_then(|e| e.response).as_deref());
+                    // Same 2xx status as the recorded success (bodies carry counters and times).
+                    if got.status.is_some_and(|x| (200..300).contains(&x)) && got.status == recorded.status {
+                        ok += 1;
+                        status = got.status;
+                    }
+                }
+                sent_count += exchange_ids.len();
+                raced = Some((ok, exchange_ids.len(), status, exchange_ids));
+            }
+        }
         let b = send(raw.clone().into_bytes()).await?;
         let base_seen = seen_of(b.response.as_deref());
         let mut issues: Vec<ActiveFinding> = Vec::new();
+        if let Some((ok, n, status, ids)) = &raced {
+            let recorded = seen_of(ex.response.as_deref());
+            if *ok >= 2 && base_seen.status != recorded.status {
+                let evidence = format!(
+                    "{ok} of {n} copies sent at once succeeded ({}), but sent alone afterwards it is refused ({}): \
+                     a one-time action ran {ok} times",
+                    pm_proof::status_text(*status),
+                    pm_proof::status_text(base_seen.status)
+                );
+                issues.push(ActiveFinding {
+                    issue: adv_issue(
+                        "race_condition",
+                        "Race condition: a one-time action succeeds several times when requests arrive together",
+                        "high",
+                        "request as a whole",
+                        &format!("{n} copies at once"),
+                        evidence,
+                    ),
+                    exchange_id: ids.first().copied().unwrap_or(b.exchange_id),
+                });
+            } else if *ok == 0 {
+                notes.push(
+                    "race_condition: no copy succeeded; the action may already be used up for this account (scan a \
+                     recorded request that wasn't sent yet, or pass another identity)"
+                        .into(),
+                );
+            }
+        }
         let found = |issues: &[ActiveFinding], family: &str, pt: &str| {
             issues.iter().any(|f| f.issue.check.starts_with(family) && f.issue.point.ends_with(&pt.to_lowercase()))
         };
 
+        // On an OAuth authorization request, redirect_uri belongs to the oauth check.
+        if plans.iter().any(|p| matches!(p, Plan::OAuth(..))) {
+            probes.retain(|p| !(p.check == "open_redirect" && p.point.name == "redirect_uri"));
+        }
+        // Keep budget for the targeted checks (a few requests each), so the
+        // broad one-shot probes can't use it all up.
+        let reserve: usize = plans
+            .iter()
+            .filter(|p| !matches!(p, Plan::Bool(..) | Plan::Time(..) | Plan::NoSql(..) | Plan::Params(_)))
+            .map(Plan::max_requests)
+            .sum::<usize>()
+            .min(limit / 2);
+        let broad_limit = limit.saturating_sub(reserve);
         // 1. One-shot probes (fast).
         for p in &probes {
             // One issue per check and parameter is enough.
@@ -675,7 +806,7 @@ impl Service {
             {
                 continue;
             }
-            if sent_count >= limit {
+            if sent_count >= broad_limit {
                 notes.push(format!("stopped at the request limit ({limit})"));
                 break;
             }
@@ -712,7 +843,7 @@ impl Service {
             if found(&issues, family, &p.probe.point.name) || shell {
                 continue;
             }
-            if sent_count >= limit {
+            if sent_count >= broad_limit {
                 notes.push(format!("stopped at the request limit ({limit})"));
                 break;
             }
@@ -1255,6 +1386,190 @@ impl Service {
                                 ),
                                 exchange_id: m_sent.exchange_id,
                             });
+                        }
+                    }
+                    Plan::Race(_) => {} // ran before the baseline
+                    Plan::OAuth(tricks, no_state) => {
+                        use pm_scan::advanced as adv;
+                        for (trick, r) in tricks {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let o_sent = send(r.clone()).await?;
+                            let got = seen_of(o_sent.response.as_deref());
+                            if adv::oauth_leaks(&got, &marker) {
+                                let evidence = format!(
+                                    "with redirect_uri set to {trick}, the server redirects there: Location: {}",
+                                    got.location.clone().unwrap_or_default().chars().take(200).collect::<String>()
+                                );
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "oauth",
+                                        "OAuth redirect_uri is not checked: codes and tokens go to another site",
+                                        "high",
+                                        "query redirect_uri",
+                                        trick,
+                                        evidence,
+                                    ),
+                                    exchange_id: o_sent.exchange_id,
+                                });
+                                break;
+                            }
+                        }
+                        if let Some(r) = no_state
+                            && sent_count < limit
+                        {
+                            sent_count += 1;
+                            let n_sent = send(r.clone()).await?;
+                            let got = seen_of(n_sent.response.as_deref());
+                            if adv::oauth_without_state(&String::from_utf8_lossy(r), &got) {
+                                let evidence = "without the state parameter the server still issues a code or token \
+                                                (login CSRF: an attacker can log a victim into the attacker's account)"
+                                    .to_string();
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "oauth",
+                                        "OAuth works without state",
+                                        "medium",
+                                        "query state",
+                                        "state removed",
+                                        evidence,
+                                    ),
+                                    exchange_id: n_sent.exchange_id,
+                                });
+                            }
+                        }
+                    }
+                    Plan::Deser(probes) => {
+                        for (pt, kind, r) in probes {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let d_sent = send(r.clone()).await?;
+                            let got = seen_of(d_sent.response.as_deref());
+                            if let Some(err) = pm_scan::advanced::deser_error(&base_seen, &got) {
+                                let evidence = format!(
+                                    "{} holds a serialized {kind} object; a corrupted copy made the server fail with \
+                                     {err:?}: it deserializes what the client sends (gadget chains may run code)",
+                                    pt.name
+                                );
+                                let point = format!("{:?} {}", pt.kind, pt.name).to_lowercase();
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "deserialization",
+                                        "Insecure deserialization of client-supplied objects",
+                                        "high",
+                                        &point,
+                                        kind,
+                                        evidence,
+                                    ),
+                                    exchange_id: d_sent.exchange_id,
+                                });
+                            }
+                        }
+                    }
+                    Plan::Smuggling(probes) => {
+                        use pm_scan::advanced as adv;
+                        if sent_count + 3 > limit {
+                            continue;
+                        }
+                        // Exact bytes: no Content-Length fix-up.
+                        let send_exact = |raw: Vec<u8>| {
+                            let endpoint = endpoint.clone();
+                            async move {
+                                let mut o = self.outgoing(endpoint, &raw, false)?;
+                                o.hypothesis_id = req.hypothesis_id;
+                                let (sent, _) = self.send_as(actor, &o, identity, false, "scan").await?;
+                                Ok::<_, crate::ServiceError>(sent)
+                            }
+                        };
+                        sent_count += 1;
+                        let control = send_exact(probes.control.clone()).await?;
+                        if adv::hung(&base_ms, control.elapsed_ms) {
+                            notes.push("request_smuggling: even a well-framed probe is slow; skipped".into());
+                            continue;
+                        }
+                        for (name, probe) in [("TE.CL", &probes.te_cl), ("CL.TE", &probes.cl_te)] {
+                            if sent_count + 2 > limit {
+                                break;
+                            }
+                            sent_count += 1;
+                            let first = send_exact(probe.clone()).await?;
+                            if !adv::hung(&base_ms, first.elapsed_ms) {
+                                continue;
+                            }
+                            // Again, to rule out a slow moment.
+                            sent_count += 1;
+                            let again = send_exact(probe.clone()).await?;
+                            if adv::hung(&base_ms, again.elapsed_ms) {
+                                let evidence = format!(
+                                    "with conflicting Content-Length and Transfer-Encoding ({name}), the server waited \
+                                     {} ms and {} ms for the rest of the body, against {} ms for the same request \
+                                     framed consistently (baseline {:?} ms): the front end and back end disagree on \
+                                     where requests end",
+                                    first.elapsed_ms, again.elapsed_ms, control.elapsed_ms, base_ms
+                                );
+                                issues.push(ActiveFinding {
+                                    issue: adv_issue(
+                                        "request_smuggling",
+                                        "HTTP request smuggling (front end and back end disagree on framing)",
+                                        "high",
+                                        "request framing",
+                                        name,
+                                        evidence,
+                                    ),
+                                    exchange_id: again.exchange_id,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    Plan::Upload(probes) => {
+                        for (kind, r) in probes {
+                            if sent_count + 1 > limit {
+                                notes.push(format!("stopped at the request limit ({limit})"));
+                                break 'plans;
+                            }
+                            sent_count += 1;
+                            let up = seen_of(send(r.clone()).await?.response.as_deref());
+                            if !up.status.is_some_and(|s| (200..300).contains(&s)) {
+                                continue;
+                            }
+                            let file = kind.file_name(&marker);
+                            for loc in pm_scan::advanced::upload_locations(&up.body, &file) {
+                                let Some(get) = act::get_request(&raw, &loc) else { continue };
+                                if sent_count + 1 > limit {
+                                    break;
+                                }
+                                sent_count += 1;
+                                let f_sent = send(get).await?;
+                                let got = seen_of(f_sent.response.as_deref());
+                                if kind.verdict(&got, &marker) {
+                                    let (title, what) = match kind {
+                                        pm_scan::advanced::UploadKind::Php => (
+                                            "File upload: uploaded server code runs (remote code execution)",
+                                            "the uploaded PHP file ran when fetched",
+                                        ),
+                                        _ => (
+                                            "File upload: HTML or SVG files are served from the site (stored XSS)",
+                                            "the uploaded file is served back as a page that runs script",
+                                        ),
+                                    };
+                                    let evidence = format!(
+                                        "{file} was accepted and is served at {loc} ({}): {what}",
+                                        got.content_type.clone().unwrap_or_default()
+                                    );
+                                    issues.push(ActiveFinding {
+                                        issue: adv_issue("file_upload", title, "high", "request file", &file, evidence),
+                                        exchange_id: f_sent.exchange_id,
+                                    });
+                                    break;
+                                }
+                            }
                         }
                     }
                     Plan::Proto(probes) => {

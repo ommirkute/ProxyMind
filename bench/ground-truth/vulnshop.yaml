@@ -168,6 +168,26 @@ vulns:
     method: POST
     path: /graphql
     description: GraphQL takes cross-site requests with the session cookie (no token, any content type).
+  - id: VS-34
+    class: request_smuggling
+    method: GET
+    path: /legacy/status
+    description: the /legacy front end and back end disagree on framing (TE.CL).
+  - id: VS-35
+    class: oauth
+    method: GET
+    path: /oauth/authorize
+    description: any redirect_uri is accepted, and codes are issued without state.
+  - id: VS-36
+    class: deserialization
+    method: GET
+    path: /api/cart
+    description: the cart cookie is a PHP-serialized array the server unserializes.
+  - id: VS-37
+    class: file_upload
+    method: POST
+    path: /api/avatar
+    description: HTML and SVG avatars are stored and served as pages.
 secure:
   - GET /api/invoices/{id}
   - GET /api/admin/stats
@@ -180,3 +200,4 @@ secure:
   - GET /api/notice
   - GET /api/account/keys
   - POST /api/signup
+  - GET /oauth2/authorize

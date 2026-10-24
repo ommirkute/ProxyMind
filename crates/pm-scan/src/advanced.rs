@@ -456,6 +456,320 @@ pub fn polluted(got: &Seen, marker: &str) -> bool {
     serde_json::from_str::<Value>(&got.body).is_ok_and(|v| walk(&v, &format!("pm{marker}")))
 }
 
+// ----------------------------------------------- request smuggling (4b) --
+
+/// Timing probes for HTTP/1.1 request smuggling: a front end and back end
+/// that disagree on framing make the back end wait for bytes that never
+/// come. Built from the request's head as a POST.
+pub struct SmugglingProbes {
+    /// Content-Length says 4, the chunked body is longer: a TE back end waits.
+    pub cl_te: Vec<u8>,
+    /// Chunked ends after 5 bytes, Content-Length says 6: a CL back end waits.
+    pub te_cl: Vec<u8>,
+    /// Both framings agree: must be fast.
+    pub control: Vec<u8>,
+}
+
+pub fn smuggling_probes(raw: &str) -> Option<SmugglingProbes> {
+    let p = parse(raw)?;
+    if !p.version.starts_with("HTTP/1") {
+        return None;
+    }
+    let skip = ["content-length", "transfer-encoding", "content-type", "connection"];
+    let head: Vec<&str> = p
+        .rest_of_head
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| {
+            !l.is_empty() && !skip.contains(&l.split(':').next().unwrap_or("").trim().to_ascii_lowercase().as_str())
+        })
+        .collect();
+    let build = |cl: usize, body: &str| {
+        format!(
+            "POST {} {}\r\n{}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {cl}\r\n\
+             Transfer-Encoding: chunked\r\n\r\n{body}",
+            p.target,
+            p.version,
+            head.join("\r\n")
+        )
+        .into_bytes()
+    };
+    Some(SmugglingProbes {
+        cl_te: build(4, "1\r\nA\r\nX"),
+        te_cl: build(6, "0\r\n\r\nX"),
+        control: build(5, "0\r\n\r\n"),
+    })
+}
+
+/// A probe hung well past the baseline (the server waited for more body).
+pub fn hung(base_ms: &[u64], ms: u64) -> bool {
+    let max = base_ms.iter().copied().max().unwrap_or(0);
+    ms >= max + 4000
+}
+
+// -------------------------------------------------------------- OAuth --
+
+/// For an authorization request (a `redirect_uri` parameter): the request
+/// with redirect_uri pointing elsewhere, (trick, request).
+pub fn oauth_probes(raw: &str, marker: &str) -> Vec<(&'static str, Vec<u8>)> {
+    let Some(p) = parse(raw) else { return Vec::new() };
+    let Some((path, query)) = p.target.split_once('?') else { return Vec::new() };
+    let pairs: Vec<(String, String)> = query
+        .split('&')
+        .map(|kv| kv.split_once('=').map_or((kv.to_string(), String::new()), |(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    let Some(orig) = pairs.iter().find(|(k, _)| k == "redirect_uri").map(|(_, v)| crate::active::percent_decode(v))
+    else {
+        return Vec::new();
+    };
+    let evil = format!("pm{marker}.example");
+    let host = url_host(&orig).unwrap_or_default();
+    let mut tricks = vec![("another site", format!("https://{evil}/callback"))];
+    if !host.is_empty() {
+        tricks.push(("registered host as a prefix", format!("https://{host}.{evil}/callback")));
+        tricks.push(("registered host as user info", format!("https://{host}@{evil}/callback")));
+    }
+    tricks
+        .into_iter()
+        .map(|(what, uri)| {
+            let q: Vec<String> = pairs
+                .iter()
+                .map(
+                    |(k, v)| {
+                        if k == "redirect_uri" { format!("{k}={}", percent_encode(&uri)) } else { format!("{k}={v}") }
+                    },
+                )
+                .collect();
+            (what, rebuild(&p, &format!("{path}?{}", q.join("&")), p.body))
+        })
+        .collect()
+}
+
+fn url_host(u: &str) -> Option<String> {
+    let rest = u.split_once("://")?.1;
+    let auth = rest.split(['/', '?', '#']).next()?;
+    let host = auth.rsplit('@').next()?;
+    Some(host.to_ascii_lowercase())
+}
+
+/// The request without query parameter `name`.
+pub fn without_query_param(raw: &str, name: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    let (path, query) = p.target.split_once('?')?;
+    let kept: Vec<&str> = query.split('&').filter(|kv| kv.split('=').next() != Some(name)).collect();
+    if kept.len() == query.split('&').count() {
+        return None;
+    }
+    let target = if kept.is_empty() { path.to_string() } else { format!("{path}?{}", kept.join("&")) };
+    Some(rebuild(&p, &target, p.body))
+}
+
+/// The response sends the user (with a code or token) to our host.
+pub fn oauth_leaks(got: &Seen, marker: &str) -> bool {
+    let evil = format!("pm{marker}.example").to_ascii_lowercase();
+    got.location.as_deref().and_then(url_host).is_some_and(|h| h == evil || h.ends_with(&format!(".{evil}")))
+}
+
+/// A code or token issued for a request without `state` (login CSRF).
+pub fn oauth_without_state(raw: &str, got: &Seen) -> bool {
+    let has_state = parse(raw)
+        .and_then(|p| p.target.split_once('?').map(|(_, q)| q.split('&').any(|kv| kv.starts_with("state="))))
+        .unwrap_or(false);
+    let issued = got.location.as_deref().is_some_and(|l| l.contains("code=") || l.contains("access_token="));
+    !has_state && issued
+}
+
+// --------------------------------------------------- deserialization --
+
+/// What a value holds: (format, corrupted copy). Base64 values stay base64.
+pub fn deser_probe(value: &str) -> Option<(&'static str, String)> {
+    let php = |t: &str| {
+        let b = t.as_bytes();
+        b.len() > 4
+            && matches!(b[0], b'a' | b'O' | b's' | b'i' | b'b' | b'C')
+            && b[1] == b':'
+            && t[2..].starts_with(|c: char| c.is_ascii_digit())
+    };
+    if php(value) {
+        return Some(("PHP", corrupt_php(value)?));
+    }
+    let bytes = b64_any(value)?;
+    let kind = if bytes.starts_with(&[0xAC, 0xED, 0x00, 0x05]) {
+        "Java"
+    } else if bytes.len() > 2 && bytes[0] == 0x80 && (2..=5).contains(&bytes[1]) {
+        "Python pickle"
+    } else if bytes.starts_with(&[0x00, 0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]) {
+        ".NET BinaryFormatter"
+    } else if bytes.starts_with(&[0x04, 0x08]) {
+        "Ruby Marshal"
+    } else if std::str::from_utf8(&bytes).is_ok_and(php) {
+        let t = corrupt_php(std::str::from_utf8(&bytes).ok()?)?;
+        return Some(("PHP", b64_std(t.as_bytes())));
+    } else {
+        return None;
+    };
+    // Cut the stream short and end it with junk: a deserializer fails loudly.
+    let mut cut = bytes[..bytes.len() * 2 / 3].to_vec();
+    cut.extend_from_slice(&[0xFF, 0xFE, 0x7F]);
+    Some((kind, b64_std(&cut)))
+}
+
+fn corrupt_php(t: &str) -> Option<String> {
+    // Make the first declared string length wrong: `s:6:"Coffee"` → `s:13:"Coffee"`.
+    let at = t.find("s:")?;
+    let digits: String = t[at + 2..].chars().take_while(char::is_ascii_digit).collect();
+    let n: usize = digits.parse().ok()?;
+    Some(format!("{}s:{}{}", &t[..at], n + 7, &t[at + 2 + digits.len()..]))
+}
+
+fn b64_any(v: &str) -> Option<Vec<u8>> {
+    let v = v.trim();
+    if v.len() < 8 || !v.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'-' | b'_')) {
+        return None;
+    }
+    b64url_decode(v)
+}
+
+fn b64_std(data: &[u8]) -> String {
+    let mut out = b64url(data).replace('-', "+").replace('_', "/");
+    while !out.len().is_multiple_of(4) {
+        out.push('=');
+    }
+    out
+}
+
+/// Error text that shows the server deserialized our corrupted object.
+pub const DESER_ERRORS: &[(&str, &str)] = &[
+    ("java.io.StreamCorruptedException", "Java"),
+    ("java.io.EOFException", "Java"),
+    ("java.io.InvalidClassException", "Java"),
+    ("invalid stream header", "Java"),
+    ("ObjectInputStream", "Java"),
+    ("unserialize()", "PHP"),
+    ("__PHP_Incomplete_Class", "PHP"),
+    ("UnpicklingError", "Python"),
+    ("pickle data was truncated", "Python"),
+    ("_pickle.", "Python"),
+    ("SerializationException", ".NET"),
+    ("BinaryFormatter", ".NET"),
+    ("marshal data too short", "Ruby"),
+];
+
+/// The deserialization error in `got` that `base` doesn't have.
+pub fn deser_error(base: &Seen, got: &Seen) -> Option<&'static str> {
+    DESER_ERRORS.iter().find(|(e, _)| got.body.contains(e) && !base.body.contains(e)).map(|(e, _)| *e)
+}
+
+// -------------------------------------------------------- file upload --
+
+/// What an upload probe checks once the file is fetched back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadKind {
+    Html,
+    Svg,
+    Php,
+}
+
+impl UploadKind {
+    pub fn file_name(self, marker: &str) -> String {
+        let ext = match self {
+            UploadKind::Html => "html",
+            UploadKind::Svg => "svg",
+            UploadKind::Php => "php",
+        };
+        format!("pm{marker}.{ext}")
+    }
+
+    fn content(self, marker: &str) -> (&'static str, String) {
+        match self {
+            UploadKind::Html => {
+                ("text/html", format!("<html><body><pmx-{marker}>pm{marker}</pmx-{marker}></body></html>"))
+            }
+            UploadKind::Svg => (
+                "image/svg+xml",
+                format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><script>/*pm{marker}*/</script></svg>"),
+            ),
+            // Harmless: prints a string only if PHP runs it.
+            UploadKind::Php => ("image/png", format!("<?php echo 'pm' . '{marker}' . 'run'; ?>")),
+        }
+    }
+
+    /// Whether the fetched file shows the risk.
+    pub fn verdict(self, got: &Seen, marker: &str) -> bool {
+        let ct = got.content_type.as_deref().or(got.header("content-type")).unwrap_or("").to_ascii_lowercase();
+        match self {
+            UploadKind::Html => ct.contains("html") && got.body.contains(&format!("<pmx-{marker}>")),
+            UploadKind::Svg => ct.contains("svg") && got.body.contains(&format!("<script>/*pm{marker}*/")),
+            UploadKind::Php => got.body.contains(&format!("pm{marker}run")) && !got.body.contains("<?php"),
+        }
+    }
+}
+
+/// Multipart uploads with the file part replaced: (kind, request).
+pub fn upload_probes(raw: &str, marker: &str) -> Vec<(UploadKind, Vec<u8>)> {
+    let Some(p) = parse(raw) else { return Vec::new() };
+    let ct = p
+        .rest_of_head
+        .lines()
+        .find_map(|l| {
+            l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-type")).map(|(_, v)| v.trim())
+        })
+        .unwrap_or("");
+    if !ct.to_ascii_lowercase().starts_with("multipart/form-data") {
+        return Vec::new();
+    }
+    let Some(boundary) = ct.split(';').find_map(|x| x.trim().strip_prefix("boundary=")).map(|b| b.trim_matches('"'))
+    else {
+        return Vec::new();
+    };
+    let delim = format!("--{boundary}");
+    let parts: Vec<&str> = p.body.split(delim.as_str()).collect();
+    let Some(file_idx) = parts.iter().position(|x| x.contains("filename=")) else { return Vec::new() };
+    let field = parts[file_idx].split("name=\"").nth(1).and_then(|x| x.split('"').next()).unwrap_or("file").to_string();
+    [UploadKind::Html, UploadKind::Svg, UploadKind::Php]
+        .into_iter()
+        .map(|k| {
+            let (ctype, data) = k.content(marker);
+            let part = format!(
+                "\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{}\"\r\nContent-Type: {ctype}\r\n\r\n{data}\r\n",
+                k.file_name(marker)
+            );
+            let mut new_parts: Vec<String> = parts.iter().map(|x| x.to_string()).collect();
+            new_parts[file_idx] = part;
+            let body = new_parts.join(delim.as_str());
+            (k, rebuild(&p, p.target, &body))
+        })
+        .collect()
+}
+
+/// Where the upload response says the file went (paths and URLs that end
+/// in the file name), then the usual folders. At most 4, as origin-form paths.
+pub fn upload_locations(body: &str, file_name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (at, _) in body.match_indices(file_name) {
+        let start = body[..at]
+            .rfind(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '(' | '=' | ','))
+            .map_or(0, |i| i + 1);
+        let found = &body[start..at + file_name.len()];
+        let path = match found.split_once("://") {
+            Some((_, rest)) => rest.find('/').map(|i| rest[i..].to_string()),
+            None if found.starts_with('/') => Some(found.to_string()),
+            None => None,
+        };
+        if let Some(path) = path.filter(|x| !out.contains(x)) {
+            out.push(path);
+        }
+    }
+    for dir in ["/uploads/", "/files/", "/static/uploads/", "/images/"] {
+        let p = format!("{dir}{file_name}");
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out.truncate(4);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +870,102 @@ mod tests {
         assert!(polluted(&seen(200, r#"{"theme":"dark","pmpmP":"polluted"}"#), "pmP"));
         assert!(!polluted(&seen(200, r#"{"__proto__":{"pmpmP":"polluted"}}"#), "pmP"), "an echo is not pollution");
         assert!(proto_probes(form, "pmP").is_empty());
+    }
+
+    #[test]
+    fn smuggling_probes_disagree_on_framing() {
+        let raw = "GET /legacy/status HTTP/1.1\r\nHost: x\r\nCookie: a=1\r\nContent-Length: 0\r\n\r\n";
+        let p = smuggling_probes(raw).unwrap();
+        let te_cl = String::from_utf8(p.te_cl).unwrap();
+        assert!(te_cl.starts_with("POST /legacy/status HTTP/1.1\r\nHost: x\r\nCookie: a=1\r\n"), "{te_cl}");
+        assert!(te_cl.contains("Content-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nX"));
+        assert_eq!(te_cl.matches("Content-Length").count(), 1);
+        assert!(
+            String::from_utf8(p.cl_te)
+                .unwrap()
+                .ends_with("Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\nX")
+        );
+        assert!(
+            String::from_utf8(p.control)
+                .unwrap()
+                .ends_with("Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+        );
+        assert!(hung(&[20, 30], 6000) && !hung(&[20, 30], 900));
+        assert!(smuggling_probes("GET / HTTP/2\r\nhost: x\r\n\r\n").is_none());
+    }
+
+    #[test]
+    fn oauth_redirect_uri_tricks() {
+        let raw = "GET /oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Fshop.test%2Fcb&state=s HTTP/1.1\r\nHost: x\r\n\r\n";
+        let p = oauth_probes(raw, "Q");
+        assert_eq!(p.len(), 3);
+        let first = String::from_utf8_lossy(&p[0].1);
+        assert!(first.contains("redirect_uri=https%3A%2F%2FpmQ.example%2Fcallback&state=s"), "{first}");
+        assert!(String::from_utf8_lossy(&p[2].1).contains("shop.test%40pmQ.example"));
+        let to = |l: &str| Seen { status: Some(302), location: Some(l.into()), ..Default::default() };
+        assert!(oauth_leaks(&to("https://pmQ.example/callback?code=1"), "Q"));
+        assert!(oauth_leaks(&to("https://shop.test.pmQ.example/callback?code=1"), "Q"));
+        assert!(!oauth_leaks(&to("http://shop.test/cb?error=bad_redirect&x=pmQ.example"), "Q"));
+        assert!(!oauth_without_state(raw, &to("http://shop.test/cb?code=1")));
+        assert!(oauth_without_state(&raw.replace("&state=s", ""), &to("http://shop.test/cb?code=1")));
+        assert!(oauth_probes("GET /x?a=1 HTTP/1.1\r\nHost: x\r\n\r\n", "Q").is_empty());
+        let no_state = String::from_utf8(without_query_param(raw, "state").unwrap()).unwrap();
+        assert!(no_state.starts_with(
+            "GET /oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Fshop.test%2Fcb HTTP/1.1"
+        ));
+        assert!(without_query_param(&no_state, "state").is_none());
+    }
+
+    #[test]
+    fn serialized_values_are_recognised_and_corrupted() {
+        let php = r#"a:1:{s:4:"item";s:6:"Coffee";}"#;
+        assert_eq!(deser_probe(php).unwrap(), ("PHP", r#"a:1:{s:11:"item";s:6:"Coffee";}"#.to_string()));
+        let (kind, c) = deser_probe(&b64_std(php.as_bytes())).unwrap();
+        assert_eq!(kind, "PHP");
+        assert_eq!(String::from_utf8(b64url_decode(&c).unwrap()).unwrap(), r#"a:1:{s:11:"item";s:6:"Coffee";}"#);
+        let java = b64_std(&[0xAC, 0xED, 0x00, 0x05, 0x73, 0x72, 0x00, 0x04, 0x55, 0x73, 0x65, 0x72]);
+        assert_eq!(deser_probe(&java).unwrap().0, "Java");
+        assert_eq!(deser_probe(&b64_std(&[0x80, 0x04, 0x95, 0x10, 0, 0, 0, 0, 0])).unwrap().0, "Python pickle");
+        for plain in ["coffee", "12345678", "aGVsbG8gd29ybGQ=", "a:b"] {
+            assert!(deser_probe(plain).is_none(), "{plain}");
+        }
+        let base = Seen { status: Some(200), body: "ok".into(), ..Default::default() };
+        let err = Seen {
+            status: Some(500),
+            body: "unserialize(): Error at offset 9 of 30 bytes".into(),
+            ..Default::default()
+        };
+        assert_eq!(deser_error(&base, &err), Some("unserialize()"));
+        assert_eq!(deser_error(&err, &err.clone()), None);
+    }
+
+    #[test]
+    fn upload_probes_and_locations() {
+        let raw = "POST /api/avatar HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=XyZ\r\n\r\n\
+                   --XyZ\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n\
+                   --XyZ\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n\
+                   --XyZ--\r\n";
+        let p = upload_probes(raw, "U");
+        assert_eq!(p.iter().map(|x| x.0).collect::<Vec<_>>(), [UploadKind::Html, UploadKind::Svg, UploadKind::Php]);
+        let html = String::from_utf8(p[0].1.clone()).unwrap();
+        assert!(html.contains("name=\"note\"\r\n\r\nhi\r\n--XyZ\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"pmU.html\"\r\nContent-Type: text/html\r\n\r\n<html>"), "{html}");
+        assert!(html.ends_with("</html>\r\n--XyZ--\r\n") && !html.contains("PNGDATA"));
+        assert_eq!(
+            upload_locations(r#"{"url":"http://x/uploads/pmU.html","path":"/media/pmU.html"}"#, "pmU.html"),
+            ["/uploads/pmU.html", "/media/pmU.html", "/files/pmU.html", "/static/uploads/pmU.html"]
+        );
+        let served = |ct: &str, body: &str| Seen {
+            status: Some(200),
+            content_type: Some(ct.into()),
+            body: body.into(),
+            ..Default::default()
+        };
+        assert!(UploadKind::Html.verdict(&served("text/html", "<html><body><pmx-U>pmU</pmx-U>"), "U"));
+        assert!(!UploadKind::Html.verdict(&served("text/plain", "<html><body><pmx-U>pmU</pmx-U>"), "U"));
+        assert!(UploadKind::Php.verdict(&served("text/html", "pmUrun"), "U"));
+        assert!(!UploadKind::Php.verdict(&served("image/png", "<?php echo 'pm' . 'U' . 'run'; ?>"), "U"));
+        assert!(
+            upload_probes("POST /x HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{}", "U").is_empty()
+        );
     }
 }

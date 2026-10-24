@@ -97,11 +97,18 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("cache_deception", "cache_deception"),
     ("mass_assignment", "mass_assignment"),
     ("proto_pollution", "prototype_pollution"),
+    ("oauth", "oauth"),
+    ("deserialization", "deserialization"),
+    // Approval only: a separate pass (see auto_active_sweep).
+    ("request_smuggling", "request_smuggling"),
+    ("file_upload", "file_upload"),
+    ("race_condition", "race_condition"),
 ];
 
 /// Checks run on recorded submissions (POST, PUT, PATCH): these re-send the
 /// request, so they change state on the target like the original did.
-const SWEEP_SUBMIT_CHECKS: &[&str] = &["stored_xss", "csrf", "jwt", "graphql", "mass_assignment", "proto_pollution"];
+const SWEEP_SUBMIT_CHECKS: &[&str] =
+    &["stored_xss", "csrf", "jwt", "graphql", "mass_assignment", "proto_pollution", "deserialization"];
 const SWEEP_MAX_SUBMITS: usize = 10;
 /// Of those, the ones that only make sense on submissions.
 const SUBMIT_ONLY: &[&str] = &["stored_xss", "csrf", "mass_assignment", "proto_pollution"];
@@ -275,6 +282,48 @@ impl Service {
                 issues.into_iter().filter(|f| f.issue.check != "jwt" || seen_jwt.insert(f.issue.title)).collect();
             sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
         }
+        // Checks that need approval: one more pass, only when the rules of
+        // engagement let this actor run destructive-tier actions without asking.
+        let allowed =
+            self.policy.roe().tier_decision(actor.kind, pm_policy::Tier::Destructive) == pm_policy::Decision::Allow;
+        if !allowed {
+            sweep.skipped.push(
+                "request smuggling, file upload and race checks: they need approval (run them with scan_active)".into(),
+            );
+            return Ok(sweep);
+        }
+        for t in self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)? {
+            let checks: Vec<String> = if t.submission {
+                vec!["file_upload".into(), "race_condition".into()]
+            } else {
+                vec!["request_smuggling".into()]
+            };
+            let r = self
+                .scan_active(
+                    actor,
+                    ActiveScanRequest {
+                        exchange_id: t.exchange_id,
+                        checks,
+                        max_requests: Some(60),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            match r {
+                Ok(ActiveScanResult::Done { requests, issues, .. }) => {
+                    sweep.requests += requests;
+                    sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
+                }
+                Ok(ActiveScanResult::PendingApproval { .. } | ActiveScanResult::Denied { .. }) => {
+                    sweep.skipped.push(
+                        "request smuggling, file upload and race checks: they need approval (run them with scan_active)"
+                            .into(),
+                    );
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
         Ok(sweep)
     }
 
@@ -295,7 +344,7 @@ impl Service {
         let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
         let checks: Vec<String> = SWEEP_CHECKS
             .iter()
-            .filter(|(c, _)| runnable(c) && !SUBMIT_ONLY.contains(c))
+            .filter(|(c, _)| runnable(c) && !SUBMIT_ONLY.contains(c) && !pm_scan::active::APPROVAL_CHECKS.contains(c))
             .map(|(c, _)| c.to_string())
             .collect();
         let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();

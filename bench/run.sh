@@ -48,7 +48,10 @@ PIDS+=($!)
 sleep 1
 app_browse
 sleep 1
-printf 'version: 1\nengagement:\n  name: "bench %s"\nscope:\n  include: ["%s/"]\n' "$APP" "$APP_URL" > "$WORK/roe.yaml"
+# The apps are throwaway and isolated, so the sweep may also run the checks
+# that normally need approval (request smuggling, file upload, races).
+printf 'version: 1\nengagement:\n  name: "bench %s"\nscope:\n  include: ["%s/"]\ntiers:\n  human:\n    destructive: allow\n' \
+  "$APP" "$APP_URL" > "$WORK/roe.yaml"
 "${P[@]}" roe use "$WORK/roe.yaml" >/dev/null
 
 step "capture identities"
