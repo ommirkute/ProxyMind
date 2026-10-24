@@ -3,3 +3,5 @@
 *.pmproj-*
 .proxymind/
 .DS_Store
+# The built-in browser's profile next to a project
+*.browser/

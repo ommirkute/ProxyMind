@@ -118,6 +118,9 @@ pub fn api() -> Router<AppState> {
         .route("/identities", get(identities))
         .route("/identities/capture", post(identity_capture))
         .route("/identities/{name}/check", post(identity_check))
+        .route("/identities/record-login", post(identity_record_login))
+        .route("/identities/{name}/learn-logged-out", post(identity_learn_logged_out))
+        .route("/history/mark", get(history_mark))
         .route("/authz/check", post(authz_check))
         .route("/authz/results", get(authz_results))
         .route("/authz/candidates", get(authz_candidates))
@@ -128,9 +131,20 @@ pub fn api() -> Router<AppState> {
         .route("/scan/tasks", get(scan_tasks_list).post(scan_task_start))
         .route("/scan/tasks/{id}", get(scan_task_status))
         .route("/scan/tasks/{id}/cancel", post(scan_task_cancel))
+        .route("/scan/tasks/{id}/pause", post(scan_task_pause))
+        .route("/scan/tasks/{id}/resume", post(scan_task_resume))
+        .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
+        .route("/scan/profiles/{name}", axum::routing::delete(scan_profile_delete))
+        .route("/scan/schedules", get(scan_schedules).post(scan_schedule_save))
+        .route("/scan/schedules/{id}", axum::routing::delete(scan_schedule_delete))
+        .route("/scan/schedules/{id}/run", post(scan_schedule_run))
         .route("/hypotheses", get(hypotheses))
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
+        .route("/findings/{id}/retest", post(finding_retest))
+        .route("/library", get(library))
+        .route("/report/templates", get(report_templates).post(report_template_save))
+        .route("/report/templates/{name}", axum::routing::delete(report_template_delete))
         .route("/proofs", post(proof_run))
         .route("/proofs/{id}", get(proof))
         .route("/proofs/{id}/rerun", post(proof_rerun))
@@ -295,6 +309,28 @@ async fn identity_check(State(st): State<AppState>, Path(name): Path<String>) ->
     ok(st.service.identity_check(&st.actor, &name).await?)
 }
 
+#[derive(Deserialize)]
+struct RecordLoginBody {
+    name: String,
+    #[serde(default)]
+    role: Option<String>,
+    from: i64,
+    #[serde(default)]
+    to: Option<i64>,
+}
+
+async fn identity_record_login(State(st): State<AppState>, Json(b): Json<RecordLoginBody>) -> ApiResult {
+    ok(st.service.identity_record_login(&st.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.from, b.to)?)
+}
+
+async fn identity_learn_logged_out(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.identity_learn_logged_out(&st.actor, &name).await?)
+}
+
+async fn history_mark(State(st): State<AppState>) -> ApiResult {
+    ok(serde_json::json!({ "id": st.service.history_mark()? }))
+}
+
 async fn authz_check(State(st): State<AppState>, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
     ok(st.service.authz_check(&st.actor, r).await?)
 }
@@ -335,6 +371,42 @@ async fn scan_task_status(State(st): State<AppState>, Path(id): Path<String>) ->
 
 async fn scan_task_cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
     ok(st.service.scan_task_cancel(&st.actor, &id)?)
+}
+
+async fn scan_task_pause(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_pause(&st.actor, &id)?)
+}
+
+async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_resume(&st.actor, &id)?)
+}
+
+async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.scan_profiles()?)
+}
+
+async fn scan_profile_save(State(st): State<AppState>, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
+    ok(st.service.scan_profile_save(&st.actor, p)?)
+}
+
+async fn scan_profile_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.scan_profile_delete(&st.actor, &name)? }))
+}
+
+async fn scan_schedules(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.schedule_list()?)
+}
+
+async fn scan_schedule_save(State(st): State<AppState>, Json(s): Json<pm_service::ScanSchedule>) -> ApiResult {
+    ok(st.service.schedule_save(&st.actor, s)?)
+}
+
+async fn scan_schedule_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.schedule_delete(&st.actor, id)? }))
+}
+
+async fn scan_schedule_run(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.schedule_run_now(&st.actor, id)?)
 }
 
 async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {
@@ -410,23 +482,50 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
 #[derive(serde::Deserialize)]
 struct ReportQuery {
     format: Option<String>,
+    template: Option<String>,
+    min_severity: Option<String>,
+    /// Comma-separated statuses to include.
+    statuses: Option<String>,
+    evidence: Option<bool>,
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
-    let (ct, body) = match q.format.as_deref().unwrap_or("md") {
-        "md" | "markdown" => ("text/markdown; charset=utf-8", st.service.report_markdown()?),
-        "json" => ("application/json", st.service.report_json()?),
-        "sarif" => ("application/sarif+json", st.service.report_sarif()?),
-        // Served as a download only, and with its own CSP: it contains target content.
-        "html" => ("text/html; charset=utf-8", st.service.report_html()?),
-        other => {
-            return Err(pm_service::ServiceError::Invalid(format!(
-                "unknown format {other}; use md, json, sarif or html"
-            ))
-            .into());
-        }
+    let opts = pm_service::ReportOptions {
+        min_severity: q.min_severity.clone(),
+        statuses: q
+            .statuses
+            .as_deref()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default(),
+        evidence: q.evidence,
     };
-    Ok(([(header::CONTENT_TYPE, ct), (header::CONTENT_DISPOSITION, "attachment")], body).into_response())
+    let format = q.format.as_deref().unwrap_or("md");
+    let r = st.service.report_render(q.template.as_deref(), format, &opts).await?;
+    // Always a download: reports hold target content (escaped, with their own
+    // CSP). The UI previews HTML in a sandboxed srcdoc frame instead.
+    let disposition = format!("attachment; filename=\"proxymind-report.{}\"", r.extension);
+    Ok(([(header::CONTENT_TYPE, r.content_type.to_string()), (header::CONTENT_DISPOSITION, disposition)], r.body)
+        .into_response())
+}
+
+async fn finding_retest(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.finding_retest(&st.actor, id).await?)
+}
+
+async fn library() -> ApiResult {
+    ok(pm_service::pm_scan::library::LIBRARY)
+}
+
+async fn report_templates(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.report_templates()?)
+}
+
+async fn report_template_save(State(st): State<AppState>, Json(t): Json<pm_service::ReportTemplate>) -> ApiResult {
+    ok(st.service.report_template_save(&st.actor, t)?)
+}
+
+async fn report_template_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.report_template_delete(&st.actor, &name)? }))
 }
 
 async fn intercept_state(State(st): State<AppState>) -> ApiResult {

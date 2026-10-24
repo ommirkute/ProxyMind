@@ -37,6 +37,13 @@ export const api = {
   patch: <T>(path: string, body: unknown) => call<T>("PATCH", path, body),
   put: <T>(path: string, body: unknown) => call<T>("PUT", path, body),
   del: <T>(path: string) => call<T>("DELETE", path),
+  /** A GET whose body is text (not JSON), e.g. a rendered report. */
+  text: async (path: string): Promise<string> => {
+    const res = await fetch(`/api/v1${path}`, { credentials: "same-origin" });
+    const text = await res.text();
+    if (!res.ok) throw new ApiError(res.status, text || res.statusText);
+    return text;
+  },
 };
 
 /** Saves text as a file in the browser (for downloads that need a POST). */
@@ -174,7 +181,25 @@ export interface IdentityInfo {
   headers: string[];
   has_health_check: boolean;
   has_login: boolean;
+  logged_out: boolean;
+  login_steps: number;
   created_by: string;
+}
+
+export interface LoginRecording {
+  name: string;
+  steps: { exchange_id: number; method: string; url: string; extracts: string[]; uses: string[] }[];
+  cookies: string[];
+  headers: string[];
+  health_check: number | null;
+  notes: string[];
+}
+
+export interface LoggedOutLearned {
+  name: string;
+  logged_out: { statuses: number[]; location_contains: string; body_contains: string };
+  health_contains: string | null;
+  exchange_ids: number[];
 }
 
 export interface AuthzRow {
@@ -262,7 +287,44 @@ export interface Finding {
   actor: string;
   created_ms: number;
   proofs?: Proof[];
+  issue?: IssueType;
+  retest?: Retest | null;
+  duplicates?: number;
 }
+
+export interface IssueType {
+  id: string;
+  name: string;
+  severity: string;
+  cwe: number[];
+  owasp: string;
+  owasp_api?: string;
+  aliases: string[];
+  background: string;
+  impact: string;
+  remediation: string;
+  references: string[];
+}
+
+export interface Retest {
+  finding_id: number;
+  method: string;
+  reproduced: boolean | null;
+  summary: string;
+  exchange_ids: number[];
+  ts_ms: number;
+  by: string;
+}
+
+export interface ReportTemplate {
+  name: string;
+  description: string;
+  format: "html" | "md";
+  body: string;
+  builtin: boolean;
+}
+
+export const cweUrl = (n: number) => `https://cwe.mitre.org/data/definitions/${n}.html`;
 
 export type ProofResult =
   | { status: "completed"; proof_id: number; proven: boolean; confidence: string; reasons: string[]; exchange_ids: number[] }

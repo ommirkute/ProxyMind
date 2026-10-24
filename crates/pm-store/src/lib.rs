@@ -198,11 +198,57 @@ CREATE TABLE assistant_chats (
     updated_ms INTEGER NOT NULL
 );
 "#,
+    r#"
+-- Crawl-and-audit tasks (request, progress and operations done as JSON),
+-- so they can be resumed after a restart.
+CREATE TABLE scan_tasks (
+    id         TEXT PRIMARY KEY,
+    actor      TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+-- Scans that start on their own (definition as JSON).
+CREATE TABLE scan_schedules (
+    id          INTEGER PRIMARY KEY,
+    created_by  TEXT NOT NULL,
+    data        TEXT NOT NULL,
+    enabled     INTEGER NOT NULL,
+    next_run_ms INTEGER NOT NULL
+);
+"#,
+    r#"
+-- Finding workflow: the last retest (JSON) and how many duplicates were merged in.
+ALTER TABLE findings ADD COLUMN retest TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN duplicates INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
 /// proofs, findings, OAST interactions): column name → value.
 pub type Row = serde_json::Map<String, serde_json::Value>;
+
+/// A stored crawl-and-audit task; `data` is the service's JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanTaskRow {
+    pub id: String,
+    pub actor: String,
+    pub status: String,
+    pub data: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+/// A stored scan schedule; `data` is the service's JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleRow {
+    pub id: i64,
+    pub created_by: String,
+    pub data: String,
+    pub enabled: bool,
+    pub next_run_ms: i64,
+}
 
 /// A stored test identity. `data` holds credentials: never show it to agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1001,6 +1047,70 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn upsert_scan_task(&mut self, r: &ScanTaskRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO scan_tasks (id, actor, status, data, created_ms, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data,
+                 updated_ms = excluded.updated_ms",
+            params![r.id, r.actor, r.status, r.data, r.created_ms, r.updated_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The newest tasks first.
+    pub fn list_scan_tasks(&self, limit: usize) -> Result<Vec<ScanTaskRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, actor, status, data, created_ms, updated_ms FROM scan_tasks
+             ORDER BY created_ms DESC, rowid DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(ScanTaskRow {
+                id: r.get(0)?,
+                actor: r.get(1)?,
+                status: r.get(2)?,
+                data: r.get(3)?,
+                created_ms: r.get(4)?,
+                updated_ms: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Saves a schedule; id 0 inserts a new one. Returns the id.
+    pub fn save_schedule(&mut self, r: &ScheduleRow) -> Result<i64> {
+        if r.id == 0 {
+            self.conn.execute(
+                "INSERT INTO scan_schedules (created_by, data, enabled, next_run_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![r.created_by, r.data, r.enabled, r.next_run_ms],
+            )?;
+            return Ok(self.conn.last_insert_rowid());
+        }
+        self.conn.execute(
+            "UPDATE scan_schedules SET data = ?2, enabled = ?3, next_run_ms = ?4 WHERE id = ?1",
+            params![r.id, r.data, r.enabled, r.next_run_ms],
+        )?;
+        Ok(r.id)
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<ScheduleRow>> {
+        let mut stmt =
+            self.conn.prepare("SELECT id, created_by, data, enabled, next_run_ms FROM scan_schedules ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ScheduleRow {
+                id: r.get(0)?,
+                created_by: r.get(1)?,
+                data: r.get(2)?,
+                enabled: r.get(3)?,
+                next_run_ms: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_schedule(&mut self, id: i64) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM scan_schedules WHERE id = ?1", [id])? == 1)
+    }
+
     pub fn delete_identity(&mut self, name: &str) -> Result<bool> {
         Ok(self.conn.execute("DELETE FROM identities WHERE name = ?1", [name])? == 1)
     }
@@ -1128,6 +1238,8 @@ impl Store {
                 "proof_id",
                 "evidence",
                 "actor",
+                "retest",
+                "duplicates",
                 "created_ms",
                 "updated_ms",
             ],

@@ -25,9 +25,12 @@ mod proof;
 mod race;
 mod replay;
 mod report;
+mod report_template;
 mod roe;
 mod rules;
 mod scan;
+mod scan_profile;
+mod scan_schedule;
 mod scan_task;
 mod search;
 mod session;
@@ -42,7 +45,7 @@ pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
-pub use findings::{FindingUpdate, NewFinding};
+pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
@@ -61,10 +64,16 @@ pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use replay::{ReplayRequest, ReplayResult};
-pub use report::{Report, ReportEvidence, ReportFinding, ReportProof};
+pub use report::{
+    Report, ReportEvidence, ReportFinding, ReportIssue, ReportIssueGroup, ReportOptions, ReportOwaspGroup, ReportProof,
+    SeverityCount,
+};
+pub use report_template::{Rendered, ReportTemplate, TEMPLATES_SETTING, builtin_templates};
 pub use roe::{ROE_SETTING, RoeView, watch_roe};
 pub use rules::{RULES_SETTING, load_rules, sync_rules};
 pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, ScanIssue};
+pub use scan_profile::{PROFILES_SETTING, ScanProfile, builtin_profiles};
+pub use scan_schedule::{Every, ScanSchedule, next_run_after};
 pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
 pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
 pub use session::{
@@ -144,6 +153,8 @@ pub struct Service {
     session: parking_lot::Mutex<session::SessionState>,
     /// One macro run at a time.
     session_lock: tokio::sync::Mutex<()>,
+    /// Automatic logins after an identity looked logged out, per identity.
+    relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
 }
@@ -160,7 +171,7 @@ impl Service {
         if let Err(e) = network::sync_network(&store, sender.network()) {
             tracing::warn!("network settings not applied: {e}");
         }
-        Ok(Self {
+        let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
             store: Mutex::new(store),
@@ -176,8 +187,11 @@ impl Service {
             listeners: std::sync::OnceLock::new(),
             session: parking_lot::Mutex::default(),
             session_lock: tokio::sync::Mutex::new(()),
+            relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
-        })
+        };
+        svc.load_scan_tasks();
+        Ok(svc)
     }
 
     /// Sets the passive-check plugins to run with the passive scan. Callers

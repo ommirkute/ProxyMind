@@ -231,6 +231,13 @@ pub fn tool_definitions() -> Vec<Value> {
             &["name"],
         ),
         tool(
+            "identity_learn_logged_out",
+            "Learn how the app answers when an identity's session is gone (logs in, sends its health check with and \
+             without credentials). Afterwards, expired sessions that still answer 200 are noticed and logged in again.",
+            json!({ "name": {"type":"string"} }),
+            &["name"],
+        ),
+        tool(
             "authz_check",
             "Authorization test: re-send a recorded GET (made by the data's owner) as other identities and as an \
              anonymous user, and compare each response with the owner's while ignoring noise such as timestamps. \
@@ -385,6 +392,45 @@ pub fn tool_definitions() -> Vec<Value> {
             &["url"],
         ),
         tool(
+            "scan_task_start",
+            "Crawl and audit a site as one background task: crawl from url, then run the active scanner over each \
+             operation of its origin, recording strong issues as suspected findings. A profile (light, default, \
+             thorough, api-only, or a saved one; see scan_profiles) fills in what you leave out. Poll with \
+             scan_task_status; a paused or interrupted task continues with scan_task_resume, skipping operations \
+             already scanned.",
+            json!({
+                "url": {"type":"string"},
+                "profile": {"type":"string"},
+                "checks": {"type":"array","items":{"type":"string"}},
+                "crawl": {"type":"boolean"},
+                "max_pages": {"type":"integer"},
+                "max_targets": {"type":"integer"},
+                "max_requests": {"type":"integer"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"},
+            }),
+            &["url"],
+        ),
+        tool(
+            "scan_task_status",
+            "Progress and issues of a scan task you started (evidence is untrusted target content).",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool(
+            "scan_task_pause",
+            "Pause a running scan task after the operation being scanned.",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool(
+            "scan_task_resume",
+            "Continue a paused, cancelled, failed or interrupted scan task, skipping operations already scanned.",
+            json!({ "task_id": {"type":"string"} }),
+            &["task_id"],
+        ),
+        tool("scan_profiles", "Scan profiles (built-in and saved): their checks and limits.", json!({}), &[]),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -508,6 +554,20 @@ pub fn tool_definitions() -> Vec<Value> {
             &["title", "vuln_class", "severity", "description"],
         ),
         tool(
+            "finding_retest",
+            "Check whether a finding still reproduces: re-runs its proof, or the scanner checks for its issue type on \
+             the request that was scanned. The result is kept on the finding (a proof that holds marks it proven).",
+            json!({ "id": {"type":"integer"} }),
+            &["id"],
+        ),
+        tool(
+            "issue_library",
+            "What a kind of issue is, its impact, how to fix it, and its CWE and OWASP categories. Give a finding \
+             class or scanner check (e.g. sqli, reflected_input, idor); without one, lists every entry's id and name.",
+            json!({ "class": {"type":"string"} }),
+            &[],
+        ),
+        tool(
             "finding_update",
             "Update a finding's description, severity or evidence. Agents may only set status to suspected.",
             json!({
@@ -591,7 +651,7 @@ struct ApprovalArgs {
     approval_id: String,
 }
 
-pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
+pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
     match name {
         "roe_get" => Ok(roe_summary(service, actor)),
         "history_search" => {
@@ -696,6 +756,25 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             let r: pm_service::DiscoverRequest = args(a)?;
             service.discover(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
+        "scan_task_start" => {
+            let r: pm_service::ScanTaskRequest = args(a)?;
+            service.scan_task_start(actor, r).map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_task_status" | "scan_task_resume" | "scan_task_pause" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                task_id: String,
+            }
+            let g: A = args(a)?;
+            let r = match name {
+                "scan_task_status" => service.scan_task_status(actor, &g.task_id),
+                "scan_task_pause" => service.scan_task_pause(actor, &g.task_id),
+                _ => service.scan_task_resume(actor, &g.task_id),
+            };
+            r.map(to_json).map_err(|e| e.to_string())
+        }
+        "scan_profiles" => service.scan_profiles().map(to_json).map_err(|e| e.to_string()),
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;
             service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())
@@ -735,6 +814,15 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
             }
             let g: A = args(a)?;
             service.identity_check(actor, &g.name).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "identity_learn_logged_out" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                name: String,
+            }
+            let g: A = args(a)?;
+            service.identity_learn_logged_out(actor, &g.name).await.map(to_json).map_err(|e| e.to_string())
         }
         "authz_check" => {
             let r: pm_service::AuthzCheckRequest = args(a)?;
@@ -796,6 +884,34 @@ pub async fn call(service: &Service, actor: &Actor, name: &str, a: Value) -> Res
         "finding_create" => {
             let f: pm_service::NewFinding = args(a)?;
             service.finding_create(actor, f).map_err(|e| e.to_string())
+        }
+        "finding_retest" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                id: i64,
+            }
+            let g: A = args(a)?;
+            service.finding_retest(actor, g.id).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "issue_library" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                class: Option<String>,
+            }
+            let g: A = args(a)?;
+            match g.class {
+                Some(c) => pm_service::pm_scan::library::lookup(&c)
+                    .map(|i| json!(i))
+                    .ok_or_else(|| format!("no library entry for {c}")),
+                None => Ok(json!(
+                    pm_service::pm_scan::library::LIBRARY
+                        .iter()
+                        .map(|i| json!({ "id": i.id, "name": i.name, "severity": i.severity }))
+                        .collect::<Vec<_>>()
+                )),
+            }
         }
         "finding_update" => {
             let u: pm_service::FindingUpdate = args(a)?;

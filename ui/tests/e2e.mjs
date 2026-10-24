@@ -259,6 +259,37 @@ try {
     check(f === "html" ? text.includes("Any user can read any order") && text.includes("default-src 'none'") : JSON.parse(text).version === "2.1.0", `${f} report downloads`);
   }
 
+  console.log("Issue library, retest and report builder");
+  await page.getByTestId("issue-card").waitFor();
+  check(await page.getByTestId("issue-card").textContent().then((t) => t.includes("Broken object level authorization") && t.includes("CWE-639")),
+    "the finding shows its issue library entry");
+  await page.getByTestId("retest").click();
+  await page.waitForSelector('[data-testid="retest-result"]', { timeout: 30000 });
+  check(await page.getByTestId("retest-result").textContent().then((t) => t.includes("reproduced") && t.includes("proof still holds")),
+    "retest re-runs the proof");
+  await page.locator('[data-testid="report-builder"] summary').first().click();
+  await page.getByLabel("Report template").selectOption("executive");
+  await page.getByLabel("Report format").selectOption("md");
+  {
+    const [dl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("report-download").click()]);
+    const text = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c).toString());
+    check(text.includes("executive summary") && text.includes("Overall risk:** high"), "executive Markdown report downloads");
+  }
+  await page.getByLabel("Report template").selectOption("compliance");
+  await page.getByLabel("Report format").selectOption("html");
+  await page.getByTestId("report-preview").click();
+  const frame = page.frameLocator('iframe[title="Report preview"]');
+  await frame.locator("text=A01:2021 Broken Access Control").first().waitFor({ timeout: 10000 });
+  check(true, "compliance report preview groups findings by OWASP category");
+  await page.screenshot({ path: join(SHOTS, "4c-report-builder.png"), fullPage: true });
+  await open("library");
+  await page.getByLabel("Search the library").fill("CWE-89");
+  await page.locator('[data-testid="library"] strong', { hasText: "SQL injection" }).first().click();
+  await page.getByTestId("issue-card").getByText("parameterised queries").first().waitFor();
+  check(true, "the issue library is searchable by CWE");
+  await page.screenshot({ path: join(SHOTS, "4d-library.png") });
+  await open("findings");
+
   console.log("XSS proof");
   await page.getByRole("button", { name: "New finding" }).click();
   await page.getByLabel("Title").fill("Reflected XSS in search");
@@ -885,6 +916,51 @@ try {
   await page.getByLabel("Delete rule 1").click();
   await page.getByTestId("session-save").click();
   await page.waitForSelector("text=Saved. Rules apply");
+
+  console.log("Scans: profiles, schedules, tasks");
+  await open("scans");
+  await page.locator('[data-testid="scan-profiles"] strong', { hasText: "api-only" }).waitFor();
+  check(true, "built-in scan profiles are listed");
+  await page.getByLabel("Profile name").fill("e2e-quick");
+  await page.getByLabel("Profile checks").fill("reflected_input");
+  await page.getByText("crawl first").click();
+  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.locator('[data-testid="scan-profiles"] strong', { hasText: "e2e-quick" }).waitFor();
+  check(true, "a saved profile joins the list");
+  await page.getByLabel("Scan URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByLabel("Scan profile").selectOption("e2e-quick");
+  await page.getByTestId("scan-start").click();
+  await page.locator('[data-testid="scan-tasks"] td', { hasText: "e2e-quick" }).first().waitFor();
+  await page.locator('[data-testid="scan-tasks"] tr', { hasText: "e2e-quick" }).filter({ hasText: "done" }).first().waitFor({ timeout: 60000 });
+  check(true, "a scan with a saved profile runs to the end");
+  await page.getByLabel("Schedule name").fill("e2e nightly");
+  await page.getByLabel("Schedule URL").fill(`http://127.0.0.1:${shop}/`);
+  await page.getByLabel("Schedule profile").selectOption("e2e-quick");
+  await page.getByLabel("Schedule frequency").selectOption("weekly");
+  await page.getByLabel("Schedule day").selectOption("sun");
+  await page.getByTestId("schedule-add").click();
+  await page.locator('[data-testid="scan-schedules"] td', { hasText: "every sun at 02:00 UTC" }).waitFor();
+  check(true, "a weekly schedule is saved");
+  await page.locator('[data-testid="scan-schedules"]').getByRole("button", { name: "Run now" }).click();
+  await page.locator('[data-testid="scan-tasks"] td', { hasText: "schedule #" }).first().waitFor({ timeout: 10000 });
+  check(true, "Run now starts the schedule's scan");
+  await page.screenshot({ path: join(SHOTS, "2c-scans.png"), fullPage: true });
+
+  console.log("Recorded login");
+  await open("authz");
+  await page.getByLabel("Login identity name").fill("carol");
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await page.waitForSelector("text=recording after #");
+  await browseAs(proxy, shop, "alice", ["/api/me"]);
+  await page.getByRole("button", { name: "Stop & save" }).click();
+  await page.waitForSelector('[data-testid="record-login-result"] >> text=1-step login');
+  check(true, "a login done through the proxy becomes a login recipe");
+  await page.waitForSelector('[data-testid="logged-out-learned"]', { timeout: 15000 });
+  const learnedText = await page.getByTestId("logged-out-learned").textContent();
+  check(learnedText.includes("logged out when") || learnedText.includes("usual signs"), `logged-out look learned (${learnedText})`);
+  await page.locator("td", { hasText: "knows its logged-out look" }).first().waitFor({ timeout: 5000 });
+  check(true, "the identity list shows the learned logged-out look");
+  await page.screenshot({ path: join(SHOTS, "3b-record-login.png"), fullPage: true });
 
   console.log("Model, coverage and audit");
   await open("model");

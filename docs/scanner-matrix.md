@@ -102,7 +102,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | Proof oracles (differential authz, timing, OAST, browser reflection) | ✅ | ❌ | – |
 | Ordering fast → slow, request budget | ✅ step 1 | ✅ | 1 |
 | Policy gate, approvals, audit for every probe | ✅ | ❌ | – |
-| Session handling during scans | ✅ (rules, macros) | ✅ (health monitor) | – |
+| Session handling during scans | ✅ (rules, macros, recorded logins, learned logged-out look) | ✅ (health monitor) | – |
 | Scan checkpoint / resume | ❌ | ✅ | 4 |
 | WAF evasion encodings | ❌ | ✅ | 4 |
 | Backslash-powered (payload-free) anomaly detection | ❌ | ❌ | 4 |
