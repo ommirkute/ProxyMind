@@ -131,7 +131,7 @@ impl Sender {
                     let end = pm_http::find_head_end(&raw)?.unwrap_or(raw.len());
                     let head = pm_http::parse_response_head(&raw[..end])?;
                     // `elapsed`: release to response headers, the useful timing in a race.
-                    Ok(Response { raw, head, conn: AfterResponse::Done, elapsed, sent: Some(sent) })
+                    Ok(Response { raw, head, conn: AfterResponse::Done, elapsed, sent: Some(sent), cut_short: None })
                 };
                 tokio::time::timeout(read_timeout, read).await.context("timed out waiting for the response")?
             });

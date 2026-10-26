@@ -107,6 +107,38 @@ impl<S: AsyncRead + Unpin> Conn<S> {
             }
         }
     }
+
+    /// Like [`Conn::read_body`], but a server that closes before the body it
+    /// announced is complete still yields what it sent, with a note saying
+    /// so (some servers send a wrong Content-Length).
+    pub async fn read_body_lenient(&mut self, kind: BodyKind) -> Result<(Vec<u8>, Option<String>)> {
+        match kind {
+            BodyKind::ContentLength(n) => {
+                let n = usize::try_from(n)?;
+                while self.buf.len() < n {
+                    if !self.fill().await? {
+                        let got = self.buf.len();
+                        let note = format!("the server closed the connection after {got} of {n} announced body bytes");
+                        return Ok((std::mem::take(&mut self.buf), Some(note)));
+                    }
+                }
+                Ok((self.buf.drain(..n).collect(), None))
+            }
+            BodyKind::Chunked => {
+                let mut scanner = ChunkedScanner::new();
+                loop {
+                    if let Some(len) = scanner.scan(&self.buf)? {
+                        return Ok((self.buf.drain(..len).collect(), None));
+                    }
+                    if !self.fill().await? {
+                        let note = "the server closed the connection in the middle of a chunked body".to_string();
+                        return Ok((std::mem::take(&mut self.buf), Some(note)));
+                    }
+                }
+            }
+            other => Ok((self.read_body(other).await?, None)),
+        }
+    }
 }
 
 /// A response read from a server.
@@ -120,6 +152,9 @@ pub struct Response {
     /// The bytes actually sent, when they differ from the request given
     /// (an HTTP/2 request downgraded to HTTP/1.1).
     pub sent: Option<Vec<u8>>,
+    /// Set when the server closed before the body it announced was
+    /// complete: `raw` holds what arrived.
+    pub cut_short: Option<String>,
 }
 
 /// What happens to the connection after the response.
@@ -426,15 +461,21 @@ async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Insta
                 conn: AfterResponse::Upgraded(conn),
                 elapsed: started.elapsed(),
                 sent: None,
+                cut_short: None,
             });
         }
         if (100..200).contains(&head.status) {
             continue;
         }
         let kind = head.body_kind(method)?;
-        raw.extend_from_slice(&conn.read_body(kind).await?);
-        let after = if kind == BodyKind::UntilClose { AfterResponse::ClosedAfterBody } else { AfterResponse::Done };
-        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed(), sent: None });
+        let (body, cut_short) = conn.read_body_lenient(kind).await?;
+        raw.extend_from_slice(&body);
+        let after = if kind == BodyKind::UntilClose || cut_short.is_some() {
+            AfterResponse::ClosedAfterBody
+        } else {
+            AfterResponse::Done
+        };
+        return Ok(Response { raw, head, conn: after, elapsed: started.elapsed(), sent: None, cut_short });
     }
 }
 
@@ -473,6 +514,25 @@ mod tests {
         let r = s.send(&ep, b"GET /a%2e%2e HTTP/1.1\r\nHost: x\r\n\r\n", "GET", None).await.unwrap();
         assert_eq!(r.head.status, 200);
         assert!(r.raw.ends_with(b"GET /a%2e%2e HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_short_is_kept_with_a_note() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut c = Conn::new(s);
+            let _ = c.read_head().await;
+            // Announces 10 bytes, sends 5, closes (a wrong Content-Length).
+            let _ = c.io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello").await;
+        });
+        let s = Sender::new(false).unwrap();
+        let ep = Endpoint::new("http", "127.0.0.1", port);
+        let r = s.send(&ep, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n", "GET", None).await.unwrap();
+        assert_eq!(r.head.status, 200);
+        assert!(r.raw.ends_with(b"\r\n\r\nhello"));
+        assert!(r.cut_short.as_deref().is_some_and(|n| n.contains("5 of 10")), "{:?}", r.cut_short);
     }
 
     #[tokio::test]

@@ -79,7 +79,14 @@ impl Sender {
             let raw = render_h2_response(parts.status.as_u16(), &headers, &data);
             let end = pm_http::find_head_end(&raw)?.unwrap_or(raw.len());
             let head = pm_http::parse_response_head(&raw[..end])?;
-            Ok(Response { raw, head, conn: AfterResponse::Done, elapsed: started.elapsed(), sent: None })
+            Ok(Response {
+                raw,
+                head,
+                conn: AfterResponse::Done,
+                elapsed: started.elapsed(),
+                sent: None,
+                cut_short: None,
+            })
         };
         tokio::time::timeout(self.read_timeout, read).await.context("timed out waiting for the response")?
     }

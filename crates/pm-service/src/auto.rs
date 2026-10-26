@@ -91,6 +91,8 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("nosql_error", "nosqli"),
     ("ldap_error", "ldap_injection"),
     ("xpath_error", "xpath_injection"),
+    // Unencoded `"'<` in an HTML page: worth a finding (prove it with the reflection oracle).
+    ("reflected_input", "xss"),
     ("dom_xss", "dom_xss"),
     // Submissions only (see SWEEP_SUBMIT_CHECKS).
     ("stored_xss", "stored_xss"),

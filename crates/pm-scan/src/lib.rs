@@ -291,6 +291,10 @@ const ERRORS: &[(&str, &str)] = &[
     ("mysql.connector.errors", "MySQL error"),
     ("django.db.utils.", "SQL error (Django)"),
     ("sqlite_error", "SQLite error"),
+    // Before the generic Node.js trace below: the trace runs through the ORM's SQL dialect.
+    ("sequelizedatabaseerror", "SQL error (Sequelize)"),
+    ("sequelize/lib/dialects/", "SQL error (Sequelize)"),
+    ("knex/lib/dialects/", "SQL error (Knex)"),
     ("traceback (most recent call last)", "Python traceback"),
     ("at java.", "Java stack trace"),
     ("exception in thread", "Java stack trace"),

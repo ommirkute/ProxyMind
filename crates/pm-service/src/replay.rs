@@ -300,6 +300,8 @@ impl Service {
                 }
                 record.status = Some(resp.head.status);
                 record.response = Some(resp.raw);
+                // Kept with the response: what arrived is still worth seeing.
+                record.error = resp.cut_short;
                 (Some(resp.head.status), None, resp.elapsed.as_millis() as u64)
             }
             Err(e) => {
