@@ -67,7 +67,7 @@ Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, fi
 
 ## Small follow-ups noticed
 
-- The Juice Shop browser crawl visited only about 6 pages before the hash-route fix. Re-run `bench/run.sh juice-shop` and record the page count and score. The last scores were VulnShop 24/38, VAmPI 3/8 and Juice Shop 4/9, with 0 false positives.
+- The Juice Shop browser crawl visited only about 6 pages before the hash-route fix. Re-run `bench/run.sh juice-shop` and record the page count and score. Scores on 2026-10-26: VulnShop 25/38, VAmPI 5/8, Juice Shop 9/9, 0 false positives (see bench/README.md).
 - Chromium still makes two Google calls that we cannot block (documented in handoff).
 - On November 1, re-run CI on the latest commit of the branch.
 
