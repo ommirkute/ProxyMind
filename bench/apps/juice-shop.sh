@@ -19,6 +19,9 @@ app_browse() {
     "${CURL[@]}" "${A[@]}" "$APP_URL/api/Products" >/dev/null
     "${CURL[@]}" "${A[@]}" "$APP_URL/rest/products/search?q=apple" >/dev/null
     "${CURL[@]}" "${A[@]}" "$APP_URL/api/Feedbacks" >/dev/null
+    "${CURL[@]}" "${A[@]}" "$APP_URL/api/Users" >/dev/null
+    # A password "change" to the same password: the form a user fills in.
+    "${CURL[@]}" "${A[@]}" "$APP_URL/rest/user/change-password?current=$pw&new=$pw&repeat=$pw" >/dev/null
   done
 }
 

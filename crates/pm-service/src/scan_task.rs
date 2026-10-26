@@ -418,7 +418,7 @@ impl Service {
             })
             .collect();
         for t in &mut targets {
-            if t.submission {
+            if t.submission || t.fixed {
                 t.checks.retain(|c| all.contains(c));
             } else {
                 t.checks = all

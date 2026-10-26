@@ -413,10 +413,10 @@ pub static LIBRARY: &[IssueType] = &[
         "broken_authentication",
         "Broken authentication",
         "high",
-        [287],
+        [287, 620],
         A07,
         API2,
-        ["authn", "authentication"],
+        ["authn", "authentication", "password_change"],
         "Authentication can be skipped, guessed or reused, for example a sensitive function that needs no \
          login or a token that is never checked.",
         "Attackers act as other users.",
@@ -426,6 +426,20 @@ pub static LIBRARY: &[IssueType] = &[
             "https://cwe.mitre.org/data/definitions/287.html",
             "https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html"
         ]
+    ),
+    issue!(
+        "user_enumeration",
+        "Account enumeration",
+        "low",
+        [204],
+        A07,
+        API2,
+        ["username_enumeration", "account_enumeration"],
+        "The login answers differently (status or message) for an account that doesn't exist than for a wrong \
+         password.",
+        "Attackers learn which accounts exist and can focus password guessing and phishing on them.",
+        "Answer every failed login the same way (same status, message and timing), and limit failed attempts.",
+        ["https://cwe.mitre.org/data/definitions/204.html"]
     ),
     issue!(
         "jwt",

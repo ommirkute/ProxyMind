@@ -230,6 +230,10 @@ enum Plan {
     Upload(Vec<(pm_scan::advanced::UploadKind, Vec<u8>)>),
     /// Copies sent at once (run before the baseline, which would use up a one-time action).
     Race(usize),
+    /// A login with a wrong password (twice) and an unknown account.
+    UserEnum(pm_scan::advanced::EnumProbes),
+    /// A password change without the current password (request, field removed).
+    PasswordChange(Vec<u8>, String),
 }
 
 impl Plan {
@@ -255,6 +259,8 @@ impl Plan {
             Plan::Smuggling(_) => 5,
             Plan::Upload(v) => v.len() * 5,
             Plan::Race(n) => *n,
+            Plan::UserEnum(_) => 3,
+            Plan::PasswordChange(..) => 1,
         }
     }
 
@@ -284,6 +290,8 @@ impl Plan {
             Plan::Smuggling(p) => vec![p.te_cl.clone(), p.cl_te.clone()],
             Plan::Upload(v) => v.iter().map(|(_, r)| r.clone()).collect(),
             Plan::Race(_) => vec![raw.as_bytes().to_vec()],
+            Plan::UserEnum(p) => vec![p.wrong_password.clone(), p.unknown_user.clone()],
+            Plan::PasswordChange(r, _) => vec![r.clone()],
         }
     }
 }
@@ -592,6 +600,17 @@ impl Service {
                 && let Some(r) = adv::with_privileged_fields(&raw, &marker)
             {
                 plans.push(Plan::MassAssignment(r));
+            }
+            if want("user_enumeration")
+                && !get
+                && let Some(p) = adv::enum_probes(&raw, &marker)
+            {
+                plans.push(Plan::UserEnum(p));
+            }
+            if want("password_change")
+                && let Some((r, field)) = adv::without_current_password(&raw)
+            {
+                plans.push(Plan::PasswordChange(r, field));
             }
             if want("oauth") {
                 let v = adv::oauth_probes(&raw, &marker);
@@ -1363,13 +1382,18 @@ impl Service {
                         }
                     }
                     Plan::MassAssignment(r) => {
-                        if !base_seen.status.is_some_and(|s| (200..300).contains(&s)) || sent_count + 1 > limit {
+                        // A sign-up re-sent as is fails ("already taken"): compare
+                        // with the recorded success instead.
+                        let ok = |s: &pm_scan::active::Seen| s.status.is_some_and(|x| (200..300).contains(&x));
+                        let recorded = seen_of(ex.response.as_deref());
+                        let base = if ok(&base_seen) { &base_seen } else { &recorded };
+                        if !ok(base) || sent_count + 1 > limit {
                             continue;
                         }
                         sent_count += 1;
                         let m_sent = send(r.clone()).await?;
                         let got = seen_of(m_sent.response.as_deref());
-                        let fields = pm_scan::advanced::mass_assigned(&base_seen, &got, &marker);
+                        let fields = pm_scan::advanced::mass_assigned(base, &got, &marker);
                         if !fields.is_empty() {
                             let evidence = format!(
                                 "privileged fields added to the submission came back set: {}",
@@ -1389,6 +1413,63 @@ impl Service {
                         }
                     }
                     Plan::Race(_) => {} // ran before the baseline
+                    Plan::UserEnum(p) => {
+                        if sent_count + 3 > limit {
+                            continue;
+                        }
+                        sent_count += 3;
+                        let w = send(p.wrong_password.clone()).await?;
+                        let a = send(p.wrong_password.clone()).await?;
+                        let u = send(p.unknown_user.clone()).await?;
+                        let (ws, as_, us) = (
+                            seen_of(w.response.as_deref()),
+                            seen_of(a.response.as_deref()),
+                            seen_of(u.response.as_deref()),
+                        );
+                        if let Some(evidence) = pm_scan::advanced::enumerates(p, &ws, &as_, &us) {
+                            issues.push(ActiveFinding {
+                                issue: adv_issue(
+                                    "user_enumeration",
+                                    "Login reveals which accounts exist",
+                                    "medium",
+                                    "login",
+                                    "unknown account vs wrong password",
+                                    evidence,
+                                ),
+                                exchange_id: u.exchange_id,
+                            });
+                        }
+                    }
+                    Plan::PasswordChange(r, field) => {
+                        let recorded = seen_of(ex.response.as_deref());
+                        let ok = |s: &pm_scan::active::Seen| s.status.is_some_and(|x| (200..300).contains(&x));
+                        if !ok(&recorded) || sent_count + 1 > limit {
+                            continue;
+                        }
+                        sent_count += 1;
+                        let p_sent = send(r.clone()).await?;
+                        let got = seen_of(p_sent.response.as_deref());
+                        let refused = ["incorrect", "wrong", "invalid", "required", "missing", "not match"]
+                            .iter()
+                            .any(|w| got.body.to_ascii_lowercase().contains(w));
+                        if ok(&got) && got.status == recorded.status && !refused {
+                            issues.push(ActiveFinding {
+                                issue: adv_issue(
+                                    "password_change",
+                                    "Password change doesn't check the current password",
+                                    "high",
+                                    &format!("parameter {field}"),
+                                    &format!("{field} removed"),
+                                    format!(
+                                        "without {field} the password change still succeeds (status {}): a stolen \
+                                         session or a CSRF can take over the account",
+                                        got.status.unwrap_or(0)
+                                    ),
+                                ),
+                                exchange_id: p_sent.exchange_id,
+                            });
+                        }
+                    }
                     Plan::OAuth(tricks, no_state) => {
                         use pm_scan::advanced as adv;
                         for (trick, r) in tricks {

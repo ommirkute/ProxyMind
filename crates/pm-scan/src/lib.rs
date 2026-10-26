@@ -368,7 +368,7 @@ fn body(x: &Exchange, out: &mut Vec<Issue>) {
             }
         }
     }
-    if x.is_html() && lower.contains("<title>index of /") {
+    if x.is_html() && (lower.contains("<title>index of /") || lower.contains("<title>listing directory /")) {
         out.push(issue(
             "directory_listing",
             "Directory listing",

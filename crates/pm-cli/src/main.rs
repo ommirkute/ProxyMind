@@ -2171,6 +2171,9 @@ async fn run() -> Result<()> {
                     }
                 }
                 out!("{} candidates, {} checked, {} leaks", r.candidates, r.checks, r.leaks);
+                for l in &r.exposures {
+                    out!("  ? suspected exposure {}: {} (finding #{})", l.operation, l.evidence, l.finding_id);
+                }
                 for p in &r.results {
                     out!(
                         "  {} {}: {} reads {}'s data (finding #{})",

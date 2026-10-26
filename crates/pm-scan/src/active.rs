@@ -182,6 +182,8 @@ pub const CHECKS: &[&str] = &[
     "request_smuggling",
     "file_upload",
     "race_condition",
+    "user_enumeration",
+    "password_change",
 ];
 
 /// Checks that can affect other users or change the target for good: they

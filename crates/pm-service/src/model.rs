@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::{Result, Service, ServiceError, now_ms};
 
 /// How many recent exchanges the model is built from.
-const MODEL_WINDOW: usize = 20_000;
+pub(crate) const MODEL_WINDOW: usize = 20_000;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -225,7 +225,7 @@ impl Service {
 
 /// Which identity a recorded request was made as, by matching its
 /// credentials (session-like cookie values or auth headers).
-fn resolve_identity(request: &[u8], identities: &[Identity]) -> Option<String> {
+pub(crate) fn resolve_identity(request: &[u8], identities: &[Identity]) -> Option<String> {
     let auth = pm_identity::auth_from_request(request);
     if auth.is_empty() {
         return None;

@@ -1576,6 +1576,7 @@ name = "pm-scan"
 version = "0.0.1"
 dependencies = [
  "pm-http",
+ "regex",
  "ring",
  "serde",
  "serde_json",

@@ -30,6 +30,8 @@ pub struct AutoReport {
     pub checks: usize,
     pub leaks: usize,
     pub results: Vec<AutoProven>,
+    /// Responses to one test user that show another's email (lists of users…).
+    pub exposures: Vec<ScanLead>,
 }
 
 /// A strong active-scan signal recorded as a suspected finding.
@@ -49,6 +51,9 @@ pub(crate) struct ScanTarget {
     pub checks: Vec<String>,
     /// A POST, PUT or PATCH (only re-sent by the submission checks).
     pub submission: bool,
+    /// Only these checks suit it (a login, a password change): callers must
+    /// not widen the list.
+    pub fixed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -103,7 +108,28 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("request_smuggling", "request_smuggling"),
     ("file_upload", "file_upload"),
     ("race_condition", "race_condition"),
+    // Logins and password changes only (see LOGIN_CHECKS, scan_targets).
+    ("user_enumeration", "user_enumeration"),
+    ("password_change", "broken_authentication"),
 ];
+
+/// Checks run on recorded logins: injections (the login is re-sent with a
+/// payload, which changes nothing) and account enumeration.
+const LOGIN_CHECKS: &[&str] = &["sql_error", "sql_boolean", "nosql_operator", "user_enumeration"];
+const MAX_LOGINS: usize = 3;
+
+/// Whether an operation is a login.
+fn is_login(template: &str) -> bool {
+    let t = template.to_ascii_lowercase();
+    ["login", "signin", "sign-in", "sign_in", "authenticate", "/auth/token", "/session"].iter().any(|w| t.contains(w))
+}
+
+/// Whether an operation changes a password: only the password-change check
+/// runs on it (any other probe could change the test user's password).
+fn is_password_change(template: &str) -> bool {
+    let t = template.to_ascii_lowercase();
+    t.contains("password") && !t.contains("forgot") && !t.contains("reset")
+}
 
 /// Checks run on recorded submissions (POST, PUT, PATCH): these re-send the
 /// request, so they change state on the target like the original did.
@@ -210,6 +236,8 @@ impl Service {
                     evidence: note.into(),
                 });
             }
+            sweep.leads.extend(self.listed_files(actor, &found).await?);
+            sweep.leads.extend(self.debug_endpoints(actor, &origin).await?);
             let spec = found.iter().find(|f| {
                 f.status == 200
                     && f.note == Some("API description")
@@ -292,7 +320,8 @@ impl Service {
             );
             return Ok(sweep);
         }
-        for t in self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)? {
+        let targets = self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)?;
+        for t in targets.into_iter().filter(|t| !t.fixed) {
             let checks: Vec<String> = if t.submission {
                 vec!["file_upload".into(), "race_condition".into()]
             } else {
@@ -344,9 +373,16 @@ impl Service {
         let runnable = |c: &str| pm_scan::active::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
         let checks: Vec<String> = SWEEP_CHECKS
             .iter()
-            .filter(|(c, _)| runnable(c) && !SUBMIT_ONLY.contains(c) && !pm_scan::active::APPROVAL_CHECKS.contains(c))
+            .filter(|(c, _)| {
+                runnable(c)
+                    && !SUBMIT_ONLY.contains(c)
+                    && !pm_scan::active::APPROVAL_CHECKS.contains(c)
+                    && !matches!(*c, "user_enumeration" | "password_change")
+            })
             .map(|(c, _)| c.to_string())
             .collect();
+        let login_checks: Vec<String> = LOGIN_CHECKS.iter().map(|c| c.to_string()).collect();
+        let password_checks: Vec<String> = vec!["password_change".into()];
         let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
         let same_origin = |o: &&pm_model::Operation| origin.is_none_or(|x| o.origin.eq_ignore_ascii_case(x));
         // GETs that worked, minus ones whose name says they change state
@@ -355,7 +391,7 @@ impl Service {
             .operations
             .iter()
             .filter(same_origin)
-            .filter(|o| o.method == "GET" && !changes_state(&o.template))
+            .filter(|o| o.method == "GET" && !changes_state(&o.template) && !is_password_change(&o.template))
             // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass candidates).
             .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
             .collect();
@@ -377,12 +413,29 @@ impl Service {
             .iter()
             .filter(same_origin)
             .filter(|o| matches!(o.method.as_str(), "POST" | "PUT" | "PATCH"))
-            .filter(|o| !changes_state(&o.template) && !o.template.to_ascii_lowercase().contains("login"))
+            .filter(|o| !changes_state(&o.template) && !is_login(&o.template) && !is_password_change(&o.template))
             .filter(|o| o.statuses.keys().any(|s| (200..300).contains(s)))
             .take(max_submits)
-            .map(|o| (o, &submit_checks));
+            .map(|o| (o, &submit_checks, false));
+        // Logins answer 401 to a wrong password: any answer will do.
+        let logins = model
+            .operations
+            .iter()
+            .filter(same_origin)
+            .filter(|o| o.method == "POST" && is_login(&o.template) && !o.statuses.is_empty())
+            .take(MAX_LOGINS)
+            .map(|o| (o, &login_checks, true));
+        // Password changes that worked.
+        let password_changes = model
+            .operations
+            .iter()
+            .filter(same_origin)
+            .filter(|o| is_password_change(&o.template) && o.statuses.keys().any(|s| (200..300).contains(s)))
+            .take(MAX_LOGINS)
+            .map(|o| (o, &password_checks, true));
         let mut out = Vec::new();
-        for (op, checks) in ops.chain(submits) {
+        let ops = ops.map(|(o, c)| (o, c, false));
+        for (op, checks, fixed) in ops.chain(submits).chain(logins).chain(password_changes) {
             // The recent example with the most insertion points (an imported
             // example may lack the browser's cookies and headers).
             // Prefer a request that worked, then one carrying tokens, then
@@ -400,6 +453,7 @@ impl Service {
                     exchange_id: example,
                     checks: checks.clone(),
                     submission: op.method != "GET",
+                    fixed,
                 });
             }
         }
@@ -552,6 +606,201 @@ impl Service {
                 reasons,
             });
         }
+        report.exposures = self.cross_user_exposure(actor)?;
         Ok(report)
+    }
+
+    /// Directory listings discovery found: fetches the confidential-looking
+    /// files they link to (key stores, backups, documents) and records the
+    /// most telling one that answers.
+    async fn listed_files(&self, actor: &Actor, found: &[crate::Found]) -> Result<Vec<ScanLead>> {
+        let mut leads = Vec::new();
+        for f in found.iter().filter(|f| f.status == 200 && f.url.ends_with('/')) {
+            let Ok(ex) = self.exchange_raw(f.exchange_id) else { continue };
+            let text = ex.response.as_deref().map(pm_identity::response_text).unwrap_or_default();
+            let lower = text.to_ascii_lowercase();
+            if !(lower.contains("<title>index of /") || lower.contains("<title>listing directory /")) {
+                continue;
+            }
+            let words: Vec<String> = pm_scan::advanced::sensitive_listed_files(&text)
+                .iter()
+                .filter_map(|h| h.trim_end_matches('/').rsplit('/').next().map(str::to_string))
+                .filter(|w| !w.is_empty())
+                .take(5)
+                .collect();
+            if words.is_empty() {
+                continue;
+            }
+            let req = DiscoverRequest { url: f.url.clone(), words, max_requests: Some(10), ..Default::default() };
+            let DiscoverResult::Done { found: files, .. } = self.discover(actor, req).await? else { continue };
+            let Some(file) = files.iter().find(|x| x.status == 200) else { continue };
+            let finding = self.finding_create(
+                actor,
+                NewFinding {
+                    title: format!("Confidential file in a public directory listing: {}", file.url),
+                    vuln_class: "exposure".into(),
+                    severity: "medium".into(),
+                    description: format!(
+                        "{} lists its files to anyone, and {} answers ({} bytes). Check what the listed files \
+                         reveal; take the folder off the web or require a login.",
+                        f.url, file.url, file.length
+                    ),
+                    url: Some(file.url.clone()),
+                    evidence: vec![f.exchange_id, file.exchange_id],
+                    hypothesis_id: None,
+                },
+            )?;
+            leads.push(ScanLead {
+                operation: format!("GET {}", file.url),
+                check: "exposure".into(),
+                finding_id: finding["id"].as_i64().unwrap_or_default(),
+                evidence: "file in a directory listing".into(),
+            });
+        }
+        Ok(leads)
+    }
+
+    /// Debug and dump endpoints under the app's API collections
+    /// (`/users/v1/_debug`): records any that answer with credentials.
+    async fn debug_endpoints(&self, actor: &Actor, origin: &str) -> Result<Vec<ScanLead>> {
+        const WORDS: &[&str] = &["_debug", "debug", "dump", "export", "_all", "all", "internal"];
+        let mut prefixes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for op in self.model()?.operations.iter().filter(|o| o.origin.eq_ignore_ascii_case(origin)) {
+            let fixed: Vec<&str> =
+                op.template.split('/').filter(|s| !s.is_empty()).take_while(|s| !s.contains('{')).collect();
+            if !fixed.is_empty() && fixed.len() <= 4 && !fixed.iter().any(|s| s.contains('.')) {
+                prefixes.insert(format!("/{}", fixed.join("/")));
+            }
+        }
+        let mut leads = Vec::new();
+        for prefix in prefixes.into_iter().take(8) {
+            let req = DiscoverRequest {
+                url: format!("{origin}{prefix}/"),
+                words: WORDS.iter().map(|w| w.to_string()).collect(),
+                max_requests: Some(WORDS.len() + 4),
+                ..Default::default()
+            };
+            let Ok(DiscoverResult::Done { found, .. }) = self.discover(actor, req).await else { continue };
+            for f in found.iter().filter(|f| f.status == 200) {
+                let Ok(ex) = self.exchange_raw(f.exchange_id) else { continue };
+                let Some(resp) = ex.response.as_deref() else { continue };
+                let (_, body) = pm_http::split_message(resp);
+                let body = pm_http::decode_chunked(body).unwrap_or_else(|| body.to_vec());
+                let keys = pm_scan::advanced::credential_keys(&String::from_utf8_lossy(&body));
+                if keys.is_empty() {
+                    continue;
+                }
+                let finding = self.finding_create(
+                    actor,
+                    NewFinding {
+                        title: format!("Debug endpoint exposes credentials: {}", f.url),
+                        vuln_class: "exposure".into(),
+                        severity: "high".into(),
+                        description: format!(
+                            "{} answers without being linked from the app, and its response holds {} values. \
+                             Remove the endpoint from production.",
+                            f.url,
+                            keys.join(", ")
+                        ),
+                        url: Some(f.url.clone()),
+                        evidence: vec![f.exchange_id],
+                        hypothesis_id: None,
+                    },
+                )?;
+                leads.push(ScanLead {
+                    operation: format!("GET {}", f.url),
+                    check: "exposure".into(),
+                    finding_id: finding["id"].as_i64().unwrap_or_default(),
+                    evidence: format!("credentials: {}", keys.join(", ")),
+                });
+                break;
+            }
+        }
+        Ok(leads)
+    }
+
+    /// Recorded responses to one (non-admin) test user that show another
+    /// test user's email: lists of users and other cross-account leaks.
+    /// One finding per operation. Sends nothing.
+    pub(crate) fn cross_user_exposure(&self, actor: &Actor) -> Result<Vec<ScanLead>> {
+        let (identities, exchanges) = {
+            let store = self.store.lock();
+            let ids: Vec<pm_identity::Identity> =
+                store.list_identities()?.iter().filter_map(|r| serde_json::from_str(&r.data).ok()).collect();
+            (ids, store.recent_exchanges(crate::model::MODEL_WINDOW)?)
+        };
+        let users: Vec<&pm_identity::Identity> =
+            identities.iter().filter(|i| !i.role.to_ascii_lowercase().contains("admin")).collect();
+        if users.len() < 2 {
+            return Ok(Vec::new());
+        }
+        // Who sent each response (recorded traffic, not ProxyMind's own probes).
+        let seen: Vec<(String, &pm_store::Exchange, String)> = exchanges
+            .iter()
+            .filter(|e| matches!(e.summary.source.as_str(), "proxy" | "crawl" | "import"))
+            .filter(|e| e.summary.method == "GET" && e.summary.status.is_some_and(|s| (200..300).contains(&s)))
+            .filter_map(|e| {
+                let who =
+                    e.summary.identity.clone().or_else(|| crate::model::resolve_identity(&e.request, &identities))?;
+                let text = String::from_utf8_lossy(pm_http::split_message(e.response.as_deref()?).1).into_owned();
+                Some((who, e, text))
+            })
+            .collect();
+        // Each user's own email: one in their responses that names them, or
+        // that their own profile (`/me`, `whoami`, `/profile`, `/account`) shows.
+        let mut own: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+        for (who, e, text) in &seen {
+            let name = who.to_ascii_lowercase();
+            let path = e.summary.path.to_ascii_lowercase();
+            let profile = ["/me", "whoami", "/profile", "/account"].iter().any(|p| path.contains(p));
+            for m in pm_scan::advanced::emails(text) {
+                let local = m.split('@').next().unwrap_or("");
+                if (name.len() >= 3 && local.contains(&name)) || profile {
+                    own.entry(who.clone()).or_default().insert(m);
+                }
+            }
+        }
+        let mut leads = Vec::new();
+        let mut done = std::collections::BTreeSet::new();
+        for (who, e, text) in &seen {
+            if !users.iter().any(|u| &u.name == who) {
+                continue;
+            }
+            let found = pm_scan::advanced::emails(text);
+            let other = users.iter().filter(|u| &u.name != who).find_map(|u| {
+                own.get(&u.name)
+                    .and_then(|mine| mine.iter().find(|m| found.contains(*m)).map(|m| (u.name.clone(), m.clone())))
+            });
+            let Some((victim, email)) = other else { continue };
+            let template = pm_model::template_path(e.summary.path.split('?').next().unwrap_or("")).0;
+            let origin = pm_core::url(&e.summary.scheme, &e.summary.host, e.summary.port, "");
+            if !done.insert(format!("{origin}{template}")) {
+                continue;
+            }
+            let url = format!("{origin}{}", e.summary.path.split('?').next().unwrap_or(""));
+            let finding = self.finding_create(
+                actor,
+                NewFinding {
+                    title: format!("{who} sees {victim}'s data in GET {template}"),
+                    vuln_class: "exposure".into(),
+                    severity: "medium".into(),
+                    description: format!(
+                        "The response to {who} (exchange {}) contains {victim}'s email address ({email}). A list \
+                         of other users, or another account's data, is open to every logged-in user.",
+                        e.summary.id
+                    ),
+                    url: Some(url),
+                    evidence: vec![e.summary.id],
+                    hypothesis_id: None,
+                },
+            )?;
+            leads.push(ScanLead {
+                operation: format!("GET {origin}{template}"),
+                check: "exposure".into(),
+                finding_id: finding["id"].as_i64().unwrap_or_default(),
+                evidence: format!("{who} sees {victim}'s email"),
+            });
+        }
+        Ok(leads)
     }
 }
