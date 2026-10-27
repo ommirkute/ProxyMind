@@ -323,10 +323,19 @@ fn request(
         target.push('?');
         target.push_str(&query.join("&"));
     }
-    let mut req =
-        format!("{} {target} HTTP/1.1\r\nHost: {}\r\n", method.to_ascii_uppercase(), host.unwrap_or("example.invalid"));
-    for p in params.iter().filter(|p| p.location == "header" && p.required) {
-        req.push_str(&format!("{}: {}\r\n", p.name, p.example.replace(['\r', '\n'], "")));
+    // The spec may come from the target: nothing in it may break a line.
+    let target: String = target
+        .bytes()
+        .map(|b| if b.is_ascii_graphic() { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    let host = host
+        .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._:[]".contains(&b)))
+        .unwrap_or("example.invalid");
+    let mut req = format!("{} {target} HTTP/1.1\r\nHost: {host}\r\n", method.to_ascii_uppercase());
+    let token =
+        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    for p in params.iter().filter(|p| p.location == "header" && p.required && token(&p.name)) {
+        req.push_str(&format!("{}: {}\r\n", p.name, p.example.replace(['\r', '\n', '\0'], "")));
     }
     let body_text = if form {
         Some((
@@ -452,5 +461,20 @@ paths:
         let started = std::time::Instant::now();
         assert!(parse(&doc).is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn hostile_specs_cannot_break_the_request() {
+        let spec = r#"{"openapi":"3.0.0","servers":[{"url":"http://api.test/v1 x\r\nEvil: 1"}],
+            "paths":{"/a b\r\nX-Injected: 1\r\n\r\nGET /other":{"get":{"parameters":[
+              {"name":"X-Ok","in":"header","required":true,"example":"v\r\nX-Bad: 1"},
+              {"name":"Bad: Name","in":"header","required":true}]}}}}"#;
+        let s = parse(spec).unwrap();
+        let r = &s.operations[0].example_request;
+        let end = pm_http::find_head_end(r.as_bytes()).unwrap().unwrap();
+        assert_eq!(end, r.len(), "one request only: {r:?}");
+        let head = pm_http::parse_request_head(r.as_bytes()).unwrap();
+        assert!(head.target.contains("%0D%0AX-Injected:"), "{r:?}");
+        assert!(!r.contains("\r\nX-Injected") && !r.contains("\r\nX-Bad") && !r.contains("Bad: Name"), "{r:?}");
     }
 }
