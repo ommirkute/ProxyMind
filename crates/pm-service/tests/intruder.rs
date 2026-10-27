@@ -200,3 +200,31 @@ async fn attacks_pause_resume_and_cancel() {
     assert!(v.done > b && v.done < 200, "{} of 200", v.done);
     assert!(s.intruder_control(&human(), &attack_id, "fly").is_ok(), "finished attacks ignore controls");
 }
+
+#[tokio::test]
+async fn payloads_cannot_walk_out_of_scope() {
+    let addr = VulnShop::start_local().await.unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+    let roe = format!("version: 1\nscope:\n  include: [\"{url}/api/\"]\n  exclude: [\"{url}/api/admin/\"]\n");
+    let s = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap());
+    let r = s
+        .intruder_run(
+            &human(),
+            IntruderRequest {
+                url: Some(url.clone()),
+                raw: "GET /api/products/§1§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+                payload_sets: vec![list(&["2", "../admin/users", "../../search?q=x"])],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let IntruderResult::Done { results, .. } = r else { panic!("{r:?}") };
+    assert!(results[0].status.is_some(), "in scope: sent");
+    for row in &results[1..] {
+        assert_eq!(row.status, None, "{row:?}");
+        let ex = s.exchange_raw(row.exchange_id).unwrap();
+        assert!(ex.response.is_none(), "never sent");
+        assert!(ex.summary.error.as_deref().unwrap_or_default().contains("out of scope"), "{:?}", ex.summary.error);
+    }
+}
