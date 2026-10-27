@@ -29,7 +29,12 @@ impl Proxy {
         ctx: Ctx,
     ) -> Result<()> {
         let me = ctx.me;
-        let mut conn = h2::server::handshake(io).await.context("HTTP/2 handshake with client")?;
+        // Each stream may buffer a body: bound how many run at once.
+        let mut conn = h2::server::Builder::new()
+            .max_concurrent_streams(128)
+            .handshake(io)
+            .await
+            .context("HTTP/2 handshake with client")?;
         while let Some(next) = conn.accept().await {
             let (req, respond) = next.context("HTTP/2 stream from client")?;
             let this = self.clone();
