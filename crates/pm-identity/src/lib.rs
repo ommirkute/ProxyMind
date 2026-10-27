@@ -344,13 +344,22 @@ pub fn apply(raw: &[u8], auth: &AuthMaterial) -> Vec<u8> {
         out.extend_from_slice(line);
         out.extend_from_slice(eol);
     }
-    let mut cookies: Vec<String> = auth.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    // Values can come from a target (values extracted at login): one with a
+    // line break would add headers or a whole second request, so it's dropped.
+    let clean = |s: &str| !s.contains(['\r', '\n', '\0']);
+    let mut cookies: Vec<String> = auth
+        .cookies
+        .iter()
+        .filter(|(k, v)| clean(k) && clean(v) && !k.contains([';', '=']))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
     cookies.extend(kept_cookies);
     if !cookies.is_empty() {
         out.extend_from_slice(format!("Cookie: {}", cookies.join("; ")).as_bytes());
         out.extend_from_slice(eol);
     }
-    for (h, v) in &auth.headers {
+    for (h, v) in auth.headers.iter().filter(|(h, v)| clean(h) && clean(v) && !h.contains(':') && !h.trim().is_empty())
+    {
         out.extend_from_slice(format!("{h}: {v}").as_bytes());
         out.extend_from_slice(eol);
     }
@@ -433,5 +442,18 @@ Authorization: Bearer bob-token\r\n\r\n"
         assert!(h.passes(b"HTTP/1.1 200 OK\r\n\r\n{\"email\":\"alice@x\"}"));
         assert!(!h.passes(b"HTTP/1.1 200 OK\r\n\r\n{\"email\":\"bob@x\"}"));
         assert!(!h.passes(b"HTTP/1.1 401 Unauthorized\r\n\r\nalice@"));
+    }
+
+    #[test]
+    fn values_with_line_breaks_are_dropped() {
+        let auth = AuthMaterial {
+            cookies: vec![("session".into(), "ok".into()), ("evil".into(), "x\r\nX-Injected: 1".into())],
+            headers: vec![
+                ("Authorization".into(), "Bearer t\r\n\r\nDELETE /users HTTP/1.1".into()),
+                ("X-Api-Key".into(), "fine".into()),
+            ],
+        };
+        let out = String::from_utf8(apply(b"GET / HTTP/1.1\r\nHost: shop\r\n\r\n", &auth)).unwrap();
+        assert_eq!(out, "GET / HTTP/1.1\r\nHost: shop\r\nCookie: session=ok\r\nX-Api-Key: fine\r\n\r\n");
     }
 }

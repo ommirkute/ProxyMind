@@ -225,7 +225,8 @@ impl Service {
             })?;
             learned.extend(step.absorb(&mut run, &resp));
             for x in &step.extract {
-                match x.find(&resp) {
+                // Target content: a line break would let it add to the next request.
+                match x.find(&resp).filter(|v| crate::session::header_safe(v)) {
                     Some(v) => {
                         vars.insert(x.name.clone(), v);
                     }

@@ -1128,6 +1128,7 @@ async fn run() -> Result<()> {
             let extra = pm_proxy::Listeners::new(proxy.clone(), Some(*listen));
             pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra))?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+            pm_proxy::listeners::warn_if_exposed(*listen);
             eprintln!("ProxyMind listening on http://{listen}");
             eprintln!("Project: {}", cli.project.display());
             eprintln!("CA certificate (install in your browser): {}", ca.ca_cert_path().display());
@@ -1428,6 +1429,7 @@ async fn run() -> Result<()> {
                 pm_service::watch_project(&cli.project, Some(rewriter), service.network().clone(), Some(extra))?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
+                pm_proxy::listeners::warn_if_exposed(*proxy);
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
                 service.attach_proxy_info(pm_service::ProxyInfo {

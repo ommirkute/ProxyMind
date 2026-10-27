@@ -438,4 +438,19 @@ paths:
             "remote refs are not fetched"
         );
     }
+
+    #[test]
+    fn yaml_alias_bombs_are_refused() {
+        let mut doc = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+        for i in 1..12 {
+            let p = i - 1;
+            doc.push_str(&format!(
+                "a{i}: &a{i} [*a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}]\n"
+            ));
+        }
+        doc.push_str("openapi: 3.0.0\npaths: {}\n");
+        let started = std::time::Instant::now();
+        assert!(parse(&doc).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 }

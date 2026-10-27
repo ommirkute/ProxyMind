@@ -69,6 +69,9 @@ fn ok<T: serde::Serialize>(v: T) -> ApiResult {
     Ok(Json(serde_json::to_value(v).unwrap_or(Value::Null)))
 }
 
+/// Request size limit for imported API descriptions.
+const SPEC_LIMIT: usize = 32 * 1024 * 1024;
+
 pub fn api() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
@@ -109,9 +112,10 @@ pub fn api() -> Router<AppState> {
         .route("/tools/sequencer", post(tools_sequencer))
         .route("/tools/sequencer/analyze", post(tools_sequencer_analyze))
         .route("/openapi", get(openapi_get))
-        .route("/openapi/import", post(openapi_import))
+        // API descriptions are often larger than the 2 MB default.
+        .route("/openapi/import", post(openapi_import).layer(axum::extract::DefaultBodyLimit::max(SPEC_LIMIT)))
         .route("/graphql", get(graphql_get))
-        .route("/graphql/import", post(graphql_import))
+        .route("/graphql/import", post(graphql_import).layer(axum::extract::DefaultBodyLimit::max(SPEC_LIMIT)))
         .route("/replay", post(replay))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}/{decision}", post(decide))
