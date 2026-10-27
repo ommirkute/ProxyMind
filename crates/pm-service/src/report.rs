@@ -282,8 +282,22 @@ impl Service {
                 }),
             });
         }
-        let (audit, audit_ok) = match crate::verify_audit(&self.store.lock()) {
-            Ok(n) => (format!("{n} records, hash chain verified"), true),
+        let verified = crate::verify_audit(&self.store.lock());
+        let (audit, audit_ok) = match verified {
+            // The head hash lets anyone holding this report check later that
+            // no records were cut off the end (`proxymind audit verify --anchor`).
+            Ok(n) => {
+                let head = self
+                    .store
+                    .lock()
+                    .audit_records()?
+                    .last()
+                    .map(|r| r.hash.iter().take(12).map(|b| format!("{b:02x}")).collect::<String>());
+                match head {
+                    Some(h) => (format!("{n} records, hash chain verified, head {h}"), true),
+                    None => (format!("{n} records, hash chain verified"), true),
+                }
+            }
             Err(e) => (format!("verification failed: {e}"), false),
         };
         let mut report = Report {

@@ -908,8 +908,14 @@ enum RoeAction {
 
 #[derive(Subcommand)]
 enum AuditAction {
-    /// Check that no audit record was changed, removed or reordered.
-    Verify,
+    /// Check that no audit record was changed, removed or reordered. Prints
+    /// the head hash: note it (e.g. in the report) and pass it to --anchor
+    /// later to also detect records cut off the end.
+    Verify {
+        /// A head hash printed by an earlier verify (a prefix of 12+ hex digits).
+        #[arg(long)]
+        anchor: Option<String>,
+    },
     /// List audit records, newest first.
     List {
         #[arg(long, short = 'n', default_value_t = 25)]
@@ -2654,10 +2660,21 @@ async fn run() -> Result<()> {
             eprintln!("Users: alice/alice123, bob/bob123, admin/admin123. Log in with POST /api/login.");
             pm_demo::VulnShop::new().serve(l).await;
         }
-        Command::Audit { action: AuditAction::Verify } => {
+        Command::Audit { action: AuditAction::Verify { anchor } } => {
             let store = Store::open(&cli.project)?;
             let n = pm_service::verify_audit(&store)?;
-            out!("✓ audit log intact: {n} records, chain verified");
+            let records = store.audit_records()?;
+            let hex = |h: &[u8]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            if let Some(a) = anchor {
+                let a = a.trim().to_ascii_lowercase();
+                anyhow::ensure!(a.len() >= 12 && a.chars().all(|c| c.is_ascii_hexdigit()), "give 12+ hex digits");
+                let Some(at) = records.iter().position(|r| hex(&r.hash).starts_with(&a)) else {
+                    anyhow::bail!("anchor {a} is not in the audit log: records were removed from the end");
+                };
+                out!("✓ anchor found at record {} of {n}", at + 1);
+            }
+            let head = records.last().map(|r| hex(&r.hash)).unwrap_or_default();
+            out!("✓ audit log intact: {n} records, chain verified (head {})", &head[..head.len().min(24)]);
         }
         Command::Audit { action: AuditAction::List { limit, json } } => {
             let store = Store::open(&cli.project)?;
