@@ -479,6 +479,16 @@ fn highlight_of(tags: &str) -> Option<String> {
     v.iter().find_map(|t| t.strip_prefix("highlight:").map(str::to_string))
 }
 
+/// Creates a new, empty file only its owner can read (on Unix), for copies
+/// of project data. Fails if the file exists.
+pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         // A sealed project (pm-vault) must be unlocked first.
@@ -491,6 +501,11 @@ impl Store {
                 path.display(),
                 path.display()
             );
+        }
+        // A project holds traffic and credentials: a new one is readable by
+        // its owner only (SQLite gives the -wal and -shm files the same mode).
+        if !path.exists() {
+            let _ = create_private(path);
         }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
@@ -991,6 +1006,8 @@ impl Store {
     /// to `path`, which must not exist yet.
     pub fn snapshot_to(&self, path: &Path) -> Result<()> {
         let p = path.to_str().context("snapshot path is not valid UTF-8")?;
+        // VACUUM INTO accepts an empty file: make it owner-only first.
+        create_private(path).with_context(|| format!("creating {}", path.display()))?;
         self.conn.execute("VACUUM INTO ?1", [p])?;
         Ok(())
     }
@@ -1372,6 +1389,24 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_projects_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pm-store-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.pmproj");
+        let _ = std::fs::remove_file(&path);
+        let mut s = Store::open(&path).unwrap();
+        s.set_setting("x", "y").unwrap();
+        for f in ["p.pmproj", "p.pmproj-wal"] {
+            let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{f} is {mode:o}");
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_due_schedule_is_claimed_once() {

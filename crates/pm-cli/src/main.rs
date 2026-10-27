@@ -2773,7 +2773,7 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
             let tmp = temp_beside(&out, "partial");
             let opened = (|| -> Result<u64> {
                 let mut input = std::io::BufReader::new(std::fs::File::open(file)?);
-                let mut output = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+                let mut output = std::io::BufWriter::new(pm_store::create_private(&tmp)?);
                 Ok(pm_vault::open(&mut input, &mut output, &pass)?)
             })();
             match opened {
