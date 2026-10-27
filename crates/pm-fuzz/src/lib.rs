@@ -288,7 +288,7 @@ fn numbers(r: &str) -> Result<Vec<String>, FuzzError> {
     if step <= 0 {
         return Err(bad());
     }
-    let count = (to - from).unsigned_abs() / step as u64 + 1;
+    let count = (to.abs_diff(from) / step as u64).saturating_add(1);
     if count as usize > MAX_REQUESTS {
         return Err(FuzzError::TooMany(count as usize));
     }
@@ -654,6 +654,8 @@ mod tests {
         let e = s.expand().unwrap();
         assert_eq!(&e[..3], ["-2", "1", "4"]);
         assert!(e.contains(&"999999".to_string()));
+        assert!(matches!(numbers("-9223372036854775808-9223372036854775807"), Err(FuzzError::TooMany(_))));
+        assert_eq!(numbers("9223372036854775806-9223372036854775807").unwrap().len(), 2);
         assert!(matches!(
             PayloadSet {
                 list: vec![],
