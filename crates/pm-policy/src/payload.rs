@@ -154,11 +154,43 @@ pub fn classify_http(raw: &[u8]) -> PayloadClass {
     if ids >= 50 {
         c.raise(Tier::ActiveIntrusive, format!("bulk action: {ids} ids in one request"));
     }
+    // Frameworks that honour a method override run another method than
+    // the request line says: a POST with `X-HTTP-Method-Override: DELETE`
+    // or `_method=DELETE` deletes.
+    let mut method = method;
+    if let Some(m) = method_override(head, &normalise(&format!("{target}&{body}"))) {
+        let tier = crate::Tier::for_http_method(&m);
+        if tier > crate::Tier::for_http_method(&method) {
+            c.raise(tier, format!("method override to {m}"));
+        }
+        method = m;
+    }
     // A bulk action that also deletes is destructive.
     if method == "DELETE" && c.reasons.iter().any(|r| r.starts_with("bulk")) {
         c.raise(Tier::Destructive, "bulk delete".into());
     }
     c
+}
+
+/// The method a request asks the server to use instead of its own:
+/// `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` headers,
+/// or a `_method` parameter (Rails, Laravel). `params` is the normalised
+/// target and body.
+fn method_override(head: &str, params: &str) -> Option<String> {
+    const HEADERS: &[&str] = &["x-http-method-override", "x-http-method", "x-method-override"];
+    for line in head.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':')
+            && HEADERS.contains(&name.trim().to_ascii_lowercase().as_str())
+        {
+            let v = value.trim().to_ascii_uppercase();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    let at = params.find("_method=")?;
+    let v: String = params[at + "_method=".len()..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    (!v.is_empty()).then(|| v.to_ascii_uppercase())
 }
 
 /// Classifies free text (a WebSocket message, a body).
@@ -415,5 +447,19 @@ mod tests {
         assert_eq!(normalise(r"\u0041\x42"), "ab");
         assert_eq!(normalise("100%"), "100%");
         assert_eq!(normalise("%zz"), "%zz");
+    }
+
+    #[test]
+    fn method_overrides_count() {
+        let t = |raw: &str| classify_http(raw.as_bytes()).tier;
+        assert_eq!(t("POST /api/users/7 HTTP/1.1\r\nX-HTTP-Method-Override: DELETE\r\n\r\n"), Tier::Destructive);
+        assert_eq!(t("POST /api/users/7 HTTP/1.1\r\nx-method-override: delete\r\n\r\n"), Tier::Destructive);
+        assert_eq!(
+            t("POST /users/7 HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n_method=delete&x=1"),
+            Tier::Destructive
+        );
+        assert_eq!(t("POST /users/7?_method=DELETE HTTP/1.1\r\n\r\n"), Tier::Destructive);
+        assert_eq!(t("GET /x HTTP/1.1\r\nX-HTTP-Method-Override: PUT\r\n\r\n"), Tier::ActiveIntrusive);
+        assert_eq!(t("POST /x HTTP/1.1\r\nX-HTTP-Method-Override: GET\r\n\r\n"), Tier::Read, "never lowers");
     }
 }

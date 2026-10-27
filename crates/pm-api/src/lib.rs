@@ -81,25 +81,32 @@ impl AppState {
     }
 }
 
-/// Creates a random API token.
-pub fn new_token() -> String {
-    // Two OAST-style tokens give 160 bits of mixed state; plenty for a
-    // local, per-install secret.
-    format!("{}{}", pm_service::pm_oast::new_token(), pm_service::pm_oast::new_token())
+/// Marks tokens made from the system's secure random source. Token files
+/// from older versions (made from the clock and process id, so guessable)
+/// lack it and are replaced.
+const TOKEN_PREFIX: &str = "pm2_";
+
+/// Creates a random API token: 256 bits from the system's secure random source.
+pub fn new_token() -> anyhow::Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 32];
+    SystemRandom::new().fill(&mut b).map_err(|_| anyhow::anyhow!("no secure randomness from the system"))?;
+    Ok(format!("{TOKEN_PREFIX}{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>()))
 }
 
-/// Loads the token from `path`, creating it (mode 0600) if missing.
+/// Loads the token from `path`, creating it (mode 0600) if missing or made
+/// by an older version.
 pub fn load_or_create_token(path: &std::path::Path) -> anyhow::Result<String> {
     if let Ok(t) = std::fs::read_to_string(path) {
         let t = t.trim().to_string();
-        if t.len() >= 32 {
+        if t.starts_with(TOKEN_PREFIX) && t.len() >= TOKEN_PREFIX.len() + 64 {
             return Ok(t);
         }
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let t = new_token();
+    let t = new_token()?;
     #[cfg(unix)]
     {
         use std::io::Write;

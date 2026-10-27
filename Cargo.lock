@@ -1478,6 +1478,7 @@ version = "0.0.1"
 dependencies = [
  "pm-core",
  "pm-http",
+ "ring",
  "serde",
  "tokio",
 ]
