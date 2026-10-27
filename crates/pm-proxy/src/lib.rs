@@ -29,6 +29,9 @@ pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
+/// Records waiting for the writer thread at most.
+const RECORD_QUEUE: usize = 4096;
+
 enum Record {
     Exchange(Box<NewExchange>, Option<u64>),
     Ws(u64, NewWsMessage),
@@ -39,10 +42,11 @@ enum Record {
 pub type RecordFilter = Arc<dyn Fn(&NewExchange) -> bool + Send + Sync>;
 
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
-/// never waits on the database.
+/// doesn't wait on the database. The queue is bounded: if the disk falls
+/// far behind, the proxy waits rather than holding traffic in memory.
 #[derive(Clone)]
 pub struct Recorder {
-    tx: std::sync::mpsc::Sender<Record>,
+    tx: std::sync::mpsc::SyncSender<Record>,
     next_key: Arc<std::sync::atomic::AtomicU64>,
     filter: Arc<parking_lot::RwLock<Option<RecordFilter>>>,
 }
@@ -50,7 +54,7 @@ pub struct Recorder {
 impl Recorder {
     /// Starts the writer thread. It runs until every `Recorder` is dropped.
     pub fn spawn(mut store: Store) -> (Self, std::thread::JoinHandle<()>) {
-        let (tx, rx) = std::sync::mpsc::channel::<Record>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Record>(RECORD_QUEUE);
         let handle = std::thread::spawn(move || {
             // Upgraded exchanges by key, so their WebSocket messages can be
             // linked to the row id. Records arrive in order on one thread.
