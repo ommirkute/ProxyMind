@@ -651,7 +651,14 @@ struct ApprovalArgs {
     approval_id: String,
 }
 
+/// Runs a tool. Every result passes the same filter (for agents: secrets
+/// redacted, evidence tagged as untrusted), for MCP and the built-in assistant.
 pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
+    let v = run(service, actor, name, a).await?;
+    Ok(service.json_for(actor, v))
+}
+
+async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
     match name {
         "roe_get" => Ok(roe_summary(service, actor)),
         "history_search" => {

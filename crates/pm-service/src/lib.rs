@@ -210,6 +210,30 @@ impl Service {
         self.redacts_for(actor).then_some(&self.redactor)
     }
 
+    /// A stored result (finding, proof) as `actor` may see it: for agents,
+    /// secrets in every string are replaced by placeholders and evidence
+    /// fields are tagged as untrusted target content.
+    pub fn json_for(&self, actor: &Actor, mut v: serde_json::Value) -> serde_json::Value {
+        fn walk(v: &mut serde_json::Value, r: Option<&Redactor>, wrap: bool, key: &str) {
+            match v {
+                serde_json::Value::String(s) => {
+                    if let Some(r) = r {
+                        *s = r.redact(s);
+                    }
+                    if wrap && key == "evidence" && !s.is_empty() && !s.starts_with("<untrusted_target_content>") {
+                        *s = pm_ai::wrap_untrusted(s);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, r, wrap, key)),
+                serde_json::Value::Object(o) => o.iter_mut().for_each(|(k, x)| walk(x, r, wrap, k)),
+                _ => {}
+            }
+        }
+        let wrap = actor.kind == pm_policy::ActorKind::Agent;
+        walk(&mut v, self.redactor_for(actor), wrap, "");
+        v
+    }
+
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
@@ -359,21 +383,42 @@ scope:
         let params = json!({"raw": "POST /x HTTP/1.1"});
         let auth = s.authorize(req("agent:a", Tier::ActiveIntrusive, "https://app.example.com/x"), &params).unwrap();
         let Authorization::PendingApproval { approval_id, .. } = auth else { panic!("expected pending: {auth:?}") };
+        let agent_a = Actor::parse("agent:a").unwrap();
 
         // Not approved yet.
-        assert!(s.run_approved(&approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &params).is_err());
         // Agents can't approve.
         assert!(s.decide_approval(&approval_id, &Actor::parse("agent:a").unwrap(), true).is_err());
         s.decide_approval(&approval_id, &Actor::parse("human:alice").unwrap(), true).unwrap();
+        // Another actor, or another action, can't use it.
+        assert!(s.run_approved(&Actor::parse("agent:b").unwrap(), "replay_send", &approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "race_send", &approval_id, &params).is_err());
         // Changed parameters are not covered by the approval.
-        assert!(s.run_approved(&approval_id, &json!({"raw": "DELETE /x HTTP/1.1"})).is_err());
-        assert!(matches!(s.run_approved(&approval_id, &params).unwrap(), Authorization::Allowed { .. }));
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &json!({"raw": "DELETE /x HTTP/1.1"})).is_err());
+        assert!(matches!(
+            s.run_approved(&agent_a, "replay_send", &approval_id, &params).unwrap(),
+            Authorization::Allowed { .. }
+        ));
         // Single use.
-        assert!(s.run_approved(&approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &params).is_err());
 
         let store = s.store.lock();
-        // authorize, run(not approved), decide(rejected), decide(approved), run(mismatch), run(ok), run(used)
-        assert_eq!(verify_audit(&store).unwrap(), 7);
+        // authorize, run(not approved), decide(rejected), decide(approved), run(other actor), run(other action),
+        // run(mismatch), run(ok), run(used)
+        assert_eq!(verify_audit(&store).unwrap(), 9);
+    }
+
+    #[test]
+    fn agent_results_are_redacted_and_tagged() {
+        let s = service();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";
+        let v = json!({ "evidence": format!("token {jwt}"), "proofs": [{ "note": jwt }], "id": 3 });
+        let agent = s.json_for(&Actor::parse("agent:a").unwrap(), v.clone());
+        let text = agent.to_string();
+        assert!(!text.contains(jwt), "{text}");
+        assert!(agent["evidence"].as_str().unwrap().starts_with("<untrusted_target_content>"));
+        assert_eq!(s.json_for(&Actor::parse("agent:a").unwrap(), agent.clone()), agent, "applied once");
+        assert_eq!(s.json_for(&Actor::parse("human:h").unwrap(), v.clone()), v);
     }
 
     #[test]
@@ -422,7 +467,10 @@ scope:
         assert_eq!(cli.approvals(Some("pending"), 10).unwrap()[0].id, approval_id);
         cli.decide_approval(&approval_id, &Actor::parse("human:omkar").unwrap(), true).unwrap();
         assert!(cli.decide_approval(&approval_id, &Actor::parse("human:other").unwrap(), false).is_err());
-        assert!(matches!(mcp.run_approved(&approval_id, &params).unwrap(), Authorization::Allowed { .. }));
+        assert!(matches!(
+            mcp.run_approved(&Actor::parse("agent:a").unwrap(), "replay_send", &approval_id, &params).unwrap(),
+            Authorization::Allowed { .. }
+        ));
         assert_eq!(cli.approval(&approval_id).unwrap().unwrap().status, "used");
         drop((mcp, cli));
         for ext in ["", "-wal", "-shm"] {

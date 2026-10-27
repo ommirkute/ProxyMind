@@ -228,10 +228,11 @@ impl Service {
         if !payload_reasons.is_empty() {
             summary.push_str(&format!(" [payload: {}]", payload_reasons.join("; ")));
         }
-        let action = ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
+        let request =
+            ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
         match approval_id {
-            Some(id) => self.run_approved(id, &params),
-            None => self.authorize(action, &params),
+            Some(id) => self.run_approved(actor, action, id, &params),
+            None => self.authorize(request, &params),
         }
     }
 

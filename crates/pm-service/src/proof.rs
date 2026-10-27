@@ -129,7 +129,7 @@ impl Service {
             format!(" [payload: {}]", payload_reasons.join("; "))
         };
         match approval {
-            Some(id) => self.run_approved(id, params),
+            Some(id) => self.run_approved(actor, action, id, params),
             None => self.authorize(
                 ActionRequest {
                     actor: actor.clone(),
