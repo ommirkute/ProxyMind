@@ -457,7 +457,15 @@ pub fn parse_curl(cmd: &str) -> Result<CurlRequest, String> {
     if get || head_only {
         if !joined.is_empty() {
             parts.target.push(if parts.target.contains('?') { '&' } else { '?' });
-            parts.target.push_str(&joined);
+            // Like the URL itself: spaces, control and non-ASCII bytes are
+            // percent-encoded, so the data can't break the request line.
+            for b in joined.bytes() {
+                if b.is_ascii_graphic() {
+                    parts.target.push(b as char);
+                } else {
+                    parts.target.push_str(&format!("%{b:02X}"));
+                }
+            }
         }
     } else {
         body = joined.into_bytes();
@@ -541,6 +549,9 @@ mod tests {
         let g = parse_curl("curl -G --data-urlencode 'q=a b&c' \"http://a.test/s\" -I").unwrap();
         assert_eq!(g.method, "HEAD");
         assert_eq!(g.url.target, "/s?q=a%20b%26c");
+        // Found by fuzzing: raw -d data with a line break broke the request line.
+        let g = parse_curl("curl -G --json $'{\\r\\nX-Injected: 1' http://a.test/").unwrap();
+        assert_eq!(g.url.target, "/?{%0D%0AX-Injected:%201");
 
         let j = parse_curl(r#"curl --json '{"a":1}' a.test -H 'Host:' -H 'X-Empty;' -F f=@x --weird"#).unwrap();
         let r = raw(&j);
