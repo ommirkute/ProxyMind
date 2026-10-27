@@ -297,7 +297,18 @@ impl Jar {
                 None => (host.clone(), true),
             };
             self.cookies.retain(|c| !(c.domain == domain && c.name == name));
-            if !expired && !value.is_empty() {
+            // Targets choose what they set: keep the jar (and the Cookie
+            // headers built from it) bounded, like browsers do.
+            let too_big = name.len() + value.len() > 4096;
+            if !expired && !value.is_empty() && !too_big {
+                if self.cookies.iter().filter(|c| c.domain == domain).count() >= 180
+                    && let Some(i) = self.cookies.iter().position(|c| c.domain == domain)
+                {
+                    self.cookies.remove(i); // the oldest for this domain
+                }
+                if self.cookies.len() >= 3000 {
+                    self.cookies.remove(0);
+                }
                 self.cookies.push(JarCookie { domain, host_only, name, value });
             }
         }
@@ -872,6 +883,20 @@ Set-Cookie: evil=3; Domain=other.test\r\n\r\n",
         assert!(jar.for_host("other.test").is_empty(), "cookies for other sites are ignored");
         jar.absorb("app.shop.test", b"HTTP/1.1 200 OK\r\nSet-Cookie: sid=; Max-Age=0\r\n\r\n");
         assert_eq!(jar.for_host("app.shop.test"), vec![("wide".into(), "2".into())]);
+    }
+
+    #[test]
+    fn the_jar_is_bounded() {
+        let mut jar = Jar::default();
+        let mut resp = String::from("HTTP/1.1 200 OK\r\n");
+        for i in 0..400 {
+            resp.push_str(&format!("Set-Cookie: c{i}=v\r\n"));
+        }
+        resp.push_str(&format!("Set-Cookie: big={}\r\n\r\n", "x".repeat(5000)));
+        jar.absorb("shop.test", resp.as_bytes());
+        let sent = jar.for_host("shop.test");
+        assert_eq!(sent.len(), 180);
+        assert_eq!(sent.last().unwrap().0, "c399", "the newest are kept");
     }
 
     #[test]
