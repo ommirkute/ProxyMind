@@ -38,7 +38,7 @@ Finished on 2026-10-24: integration test (`crates/pm-service/tests/login_record.
 
 ## 2. Task 44: scan profiles, scheduling and resume — done
 
-Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC; a lock so two processes on one project can't both fire a schedule.
+Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC.
 
 ## 3. Task 45: issue library and report templates — done
 

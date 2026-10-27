@@ -1092,6 +1092,16 @@ impl Store {
         Ok(r.id)
     }
 
+    /// Moves a due schedule's next run from `due` to `next`, only if no one
+    /// else did first. Two processes on one project tick the same
+    /// schedules; the one whose claim succeeds starts the run.
+    pub fn claim_schedule(&mut self, id: i64, due: i64, next: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE scan_schedules SET next_run_ms = ?3 WHERE id = ?1 AND next_run_ms = ?2 AND enabled",
+            params![id, due, next],
+        )? == 1)
+    }
+
     pub fn list_schedules(&self) -> Result<Vec<ScheduleRow>> {
         let mut stmt =
             self.conn.prepare("SELECT id, created_by, data, enabled, next_run_ms FROM scan_schedules ORDER BY id")?;
@@ -1362,6 +1372,18 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_due_schedule_is_claimed_once() {
+        let mut s = Store::open_in_memory().unwrap();
+        let row =
+            ScheduleRow { id: 0, created_by: "human:t".into(), data: "{}".into(), enabled: true, next_run_ms: 100 };
+        let id = s.save_schedule(&row).unwrap();
+        assert!(s.claim_schedule(id, 100, 200).unwrap());
+        assert!(!s.claim_schedule(id, 100, 200).unwrap(), "a second process sees it taken");
+        s.save_schedule(&ScheduleRow { id, enabled: false, next_run_ms: 300, ..row }).unwrap();
+        assert!(!s.claim_schedule(id, 300, 400).unwrap(), "disabled");
+    }
 
     fn sample(path: &str, body: &[u8]) -> NewExchange {
         NewExchange {
