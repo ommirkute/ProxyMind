@@ -255,7 +255,10 @@ pub fn run_passive(p: &Installed, exchanges: &[ExchangeLine]) -> Result<(Vec<Plu
     let stdout = child.stdout.take().ok_or_else(|| err("no stdout".into()))?;
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
-        let _ = BufReader::new(stdout).take(MAX_OUTPUT as u64).read_to_end(&mut out);
+        let mut r = BufReader::new(stdout);
+        let _ = (&mut r).take(MAX_OUTPUT as u64).read_to_end(&mut out);
+        // Keep draining past the limit so the plugin isn't blocked writing.
+        let _ = std::io::copy(&mut r, &mut std::io::sink());
         out
     });
     let timeout = Duration::from_secs(spec.timeout_seconds.unwrap_or(60).clamp(1, 600));

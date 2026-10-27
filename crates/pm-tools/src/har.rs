@@ -419,7 +419,8 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// `2024-01-02T03:04:05.678Z` (or with a `+hh:mm` offset) as Unix milliseconds.
 pub fn parse_iso8601(s: &str) -> Option<i64> {
-    let b = s.trim().as_bytes();
+    let s = s.trim();
+    let b = s.as_bytes();
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let part = b.get(r)?;
         part.iter().all(u8::is_ascii_digit).then(|| part.iter().fold(0i64, |a, d| a * 10 + i64::from(d - b'0')))
@@ -574,6 +575,8 @@ mod tests {
         assert_eq!(parse_iso8601("2024-02-29T01:30:00+0130"), Some(1_709_164_800_000));
         assert_eq!(parse_iso8601("2024-13-01T00:00:00Z"), None);
         assert_eq!(parse_iso8601("yesterday"), None);
+        assert_eq!(parse_iso8601(" 2024-02-29T00:00:00.5Z "), Some(1_709_164_800_500), "padded");
+        assert_eq!(parse_iso8601("\u{e9}\u{e9}2024-02-29T00:00:00.5Z"), None);
     }
 
     #[test]

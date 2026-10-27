@@ -22,6 +22,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use time::{Duration, OffsetDateTime};
 
+/// Certificates kept for reuse, one per host name.
+const MAX_CACHED_CERTS: usize = 10_000;
+
 pub use tokio_rustls::rustls::server::Acceptor;
 pub use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
 
@@ -108,10 +111,15 @@ impl CertAuthority {
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
             .with_single_cert(vec![leaf.der().clone(), self.ca_der.clone()], key)?;
-        // HTTP/2 to the client comes in milestone M1; offer HTTP/1.1 only for now.
+        // HTTP/1.1 by default; the proxy adds h2 when it offers HTTP/2.
         cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
         let cfg = Arc::new(cfg);
-        self.cache.lock().insert(host, cfg.clone());
+        let mut cache = self.cache.lock();
+        // Clients choose the names (SNI, CONNECT), so the cache can't grow forever.
+        if cache.len() >= MAX_CACHED_CERTS {
+            cache.clear();
+        }
+        cache.insert(host, cfg.clone());
         Ok(cfg)
     }
 }
