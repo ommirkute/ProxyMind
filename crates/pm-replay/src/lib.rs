@@ -21,6 +21,9 @@ pub mod race;
 pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy};
 
 const READ_CHUNK: usize = 16 * 1024;
+/// The most a connection buffers for one message (a hostile peer could
+/// otherwise send an endless body and exhaust memory).
+pub const MAX_MESSAGE: usize = 256 << 20;
 
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
@@ -56,6 +59,9 @@ impl<S: AsyncRead + Unpin> Conn<S> {
     /// Reads more bytes into the buffer. Returns false at end of stream.
     async fn fill(&mut self) -> Result<bool> {
         let start = self.buf.len();
+        if start >= MAX_MESSAGE {
+            bail!("message larger than {} MB", MAX_MESSAGE >> 20);
+        }
         self.buf.resize(start + READ_CHUNK, 0);
         let n = self.io.read(&mut self.buf[start..]).await;
         self.buf.truncate(start + *n.as_ref().unwrap_or(&0));
@@ -203,19 +209,19 @@ impl Sender {
 
     /// The bytes to write for `request`: unchanged, except when plain HTTP
     /// goes through an HTTP proxy (absolute-form target, proxy login).
-    fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+    fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
         // Parallel sends speak HTTP/1.1: HTTP/2 text is downgraded for them.
         if pm_http::h2text::is_http2_request(request)
             && let Ok(r) = pm_http::h2text::h2_request(request)
         {
             let h1 = pm_http::h2text::downgrade_request(&r, &pm_core::authority(&ep.scheme, &ep.host, ep.port));
-            return std::borrow::Cow::Owned(self.wire_bytes(ep, &h1).into_owned());
+            return Ok(std::borrow::Cow::Owned(self.wire_bytes(ep, &h1)?.into_owned()));
         }
         match self.net.upstream_for(&ep.host) {
             Some(p) if p.kind == ProxyKind::Http && ep.scheme != "https" => {
-                std::borrow::Cow::Owned(net::for_http_proxy(request, &ep.host, ep.port, &p))
+                Ok(std::borrow::Cow::Owned(net::for_http_proxy(request, &ep.host, ep.port, &p)?))
             }
-            _ => std::borrow::Cow::Borrowed(request),
+            _ => Ok(std::borrow::Cow::Borrowed(request)),
         }
     }
 
@@ -374,9 +380,10 @@ impl Sender {
             return self.send_h2(ep, request, method, check).await;
         }
         let started = Instant::now();
+        let wire = self.wire_bytes(ep, request)?;
         let io = self.connect(ep, check).await?;
         let mut conn = Conn::new(io);
-        conn.io.write_all(&self.wire_bytes(ep, request)).await?;
+        conn.io.write_all(&wire).await?;
         conn.io.flush().await?;
         tokio::time::timeout(self.read_timeout, read_response(conn, method, started))
             .await
@@ -393,10 +400,14 @@ impl Sender {
         requests: &[(Vec<u8>, String)],
         check: Option<AddrCheck<'_>>,
     ) -> Vec<Result<Response>> {
-        let wire: Vec<Vec<u8>> = requests.iter().map(|(r, _)| self.wire_bytes(ep, r).into_owned()).collect();
+        let wire: Vec<Vec<u8>> =
+            requests.iter().map(|(r, _)| self.wire_bytes(ep, r).map(|w| w.into_owned()).unwrap_or_default()).collect();
         let mut conns = Vec::with_capacity(requests.len());
         for req in &wire {
             let r = async {
+                if req.is_empty() {
+                    bail!("cannot send this request through the HTTP upstream proxy");
+                }
                 let mut c = Conn::new(self.connect(ep, check).await?);
                 if req.len() > 1 {
                     c.io.write_all(&req[..req.len() - 1]).await?;

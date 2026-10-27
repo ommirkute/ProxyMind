@@ -316,25 +316,36 @@ pub(crate) async fn socks5_connect<S: AsyncRead + AsyncWrite + Unpin>(
 /// A plain-HTTP request rewritten for an HTTP proxy: absolute-form target
 /// and, if set, a Proxy-Authorization header. The origin server receives
 /// what the proxy makes of it.
-pub(crate) fn for_http_proxy(request: &[u8], host: &str, port: u16, proxy: &UpstreamProxy) -> Vec<u8> {
-    let mut out = request.to_vec();
-    if let Ok(Some(end)) = pm_http::find_head_end(request)
-        && let Ok(head) = pm_http::parse_request_head(&request[..end])
-        && head.target.starts_with('/')
-    {
-        let h = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
-        let origin = if port == 80 { format!("http://{h}") } else { format!("http://{h}:{port}") };
-        if let Some(r) = pm_http::replace_request_target(request, &format!("{origin}{}", head.target)) {
-            out = r;
-        }
-    }
+///
+/// The proxy goes wherever the target names, so the target always names
+/// the endpoint that was checked: an absolute-form target for another host
+/// gets the endpoint's origin, and requests whose target can't be pinned
+/// (authority-form, `*`, unparseable) are refused.
+pub(crate) fn for_http_proxy(request: &[u8], host: &str, port: u16, proxy: &UpstreamProxy) -> Result<Vec<u8>> {
+    let end = match pm_http::find_head_end(request) {
+        Ok(Some(end)) => end,
+        _ => bail!("cannot send an incomplete request head through an HTTP upstream proxy"),
+    };
+    let head = pm_http::parse_request_head(&request[..end])
+        .map_err(|e| anyhow::anyhow!("cannot send through an HTTP upstream proxy: {e}"))?;
+    let path = if head.target.starts_with('/') {
+        head.target.as_str()
+    } else if let Some((_, _, path)) = pm_http::split_absolute_target(&head.target) {
+        path
+    } else {
+        bail!("only origin-form and absolute-form targets can go through an HTTP upstream proxy");
+    };
+    let h = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    let origin = if port == 80 { format!("http://{h}") } else { format!("http://{h}:{port}") };
+    let mut out = pm_http::replace_request_target(request, &format!("{origin}{path}"))
+        .ok_or_else(|| anyhow::anyhow!("cannot rewrite the request target for the upstream proxy"))?;
     if let Some(auth) = proxy.basic_auth()
         && let Some(eol) = out.windows(2).position(|w| w == b"\r\n")
     {
         let line = format!("\r\nProxy-Authorization: {auth}");
         out.splice(eol..eol, line.into_bytes());
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -352,16 +363,32 @@ mod tests {
     #[test]
     fn plain_http_requests_get_absolute_form_and_proxy_auth() {
         let p = UpstreamProxy { username: "u".into(), password: "p".into(), ..Default::default() };
-        let out = for_http_proxy(b"GET /a?b=1 HTTP/1.1\r\nHost: x\r\n\r\n", "shop.test", 8080, &p);
+        let out = for_http_proxy(b"GET /a?b=1 HTTP/1.1\r\nHost: x\r\n\r\n", "shop.test", 8080, &p).unwrap();
         assert_eq!(
             out,
             b"GET http://shop.test:8080/a?b=1 HTTP/1.1\r\nProxy-Authorization: Basic dTpw\r\nHost: x\r\n\r\n"
         );
         let anon = UpstreamProxy::default();
         assert_eq!(
-            for_http_proxy(b"GET / HTTP/1.1\r\n\r\n", "shop.test", 80, &anon),
+            for_http_proxy(b"GET / HTTP/1.1\r\n\r\n", "shop.test", 80, &anon).unwrap(),
             b"GET http://shop.test/ HTTP/1.1\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn upstream_proxy_targets_are_pinned_to_the_checked_endpoint() {
+        let anon = UpstreamProxy::default();
+        assert_eq!(
+            for_http_proxy(b"GET http://elsewhere.test/x?y HTTP/1.1\r\n\r\n", "shop.test", 80, &anon).unwrap(),
+            b"GET http://shop.test/x?y HTTP/1.1\r\n\r\n"
+        );
+        assert_eq!(
+            for_http_proxy(b"GET http://elsewhere.test HTTP/1.1\r\n\r\n", "shop.test", 81, &anon).unwrap(),
+            b"GET http://shop.test:81/ HTTP/1.1\r\n\r\n"
+        );
+        assert!(for_http_proxy(b"CONNECT elsewhere.test:443 HTTP/1.1\r\n\r\n", "shop.test", 80, &anon).is_err());
+        assert!(for_http_proxy(b"OPTIONS * HTTP/1.1\r\n\r\n", "shop.test", 80, &anon).is_err());
+        assert!(for_http_proxy(b"GET / HTTP/1.1\r\nHost: x", "shop.test", 80, &anon).is_err());
     }
 
     #[test]

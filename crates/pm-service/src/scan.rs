@@ -1727,18 +1727,16 @@ impl Service {
         }
         // 5. Callbacks: wait out the rest of the window, then match tokens.
         if !oob_sent.is_empty() {
-            let tokens: std::collections::HashSet<&str> = oob_sent.iter().map(|(p, _)| p.token.as_str()).collect();
-            let hits = loop {
-                let rows = self.store.lock().rows("oast_interactions", None, 5000)?;
-                let hits: Vec<_> = rows
-                    .into_iter()
-                    .filter(|r| r.get("token").and_then(|t| t.as_str()).is_some_and(|t| tokens.contains(t)))
-                    .collect();
-                if std::time::Instant::now() >= oob_deadline {
-                    break hits;
+            let tokens: std::collections::BTreeSet<&str> = oob_sent.iter().map(|(p, _)| p.token.as_str()).collect();
+            tokio::time::sleep_until(oob_deadline.into()).await;
+            // Looked up by token: unrelated callbacks can't push these out of view.
+            let mut hits = Vec::new();
+            {
+                let store = self.store.lock();
+                for t in tokens {
+                    hits.extend(store.rows("oast_interactions", Some(("token", &serde_json::json!(t))), 20)?);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            };
+            }
             for (p, exchange_id) in &oob_sent {
                 let mine: Vec<_> =
                     hits.iter().filter(|h| h.get("token").and_then(|t| t.as_str()) == Some(p.token.as_str())).collect();

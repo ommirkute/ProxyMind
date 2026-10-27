@@ -73,8 +73,11 @@ where
         tokio::spawn(async move {
             let mut buf = vec![0u8; 8192];
             let mut len = 0;
+            // One deadline for the whole head, so a slow sender can't hold
+            // the connection open a byte at a time.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
             while len < buf.len() {
-                let read = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf[len..])).await;
+                let read = tokio::time::timeout_at(deadline, s.read(&mut buf[len..])).await;
                 match read {
                     Ok(Ok(0)) | Err(_) | Ok(Err(_)) => break,
                     Ok(Ok(n)) => len += n,

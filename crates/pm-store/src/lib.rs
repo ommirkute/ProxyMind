@@ -1297,6 +1297,25 @@ impl Store {
     }
 
     /// Rows of a table, optionally where `column = value`, newest first.
+    /// How many rows a table has (matching `filter`, if given).
+    pub fn count_rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>) -> Result<u64> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        let n: i64 = match filter {
+            Some((col, v)) => {
+                if col != "id" && !cols.contains(&col) {
+                    anyhow::bail!("unknown column {col} for {table}");
+                }
+                self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                    [Self::to_sql(v)],
+                    |r| r.get(0),
+                )?
+            }
+            None => self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?,
+        };
+        Ok(n.max(0) as u64)
+    }
+
     pub fn rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>, limit: usize) -> Result<Vec<Row>> {
         let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
         let mut all: Vec<&str> = vec!["id"];
