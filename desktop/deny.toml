@@ -1,0 +1,15 @@
+# Advisories for the desktop app's own lockfile (CI: the "deny" job).
+# Real vulnerabilities fail the build. The ignored notices below mark crates
+# as unmaintained; they come in through Tauri's dependency tree and have no
+# maintained replacement we can choose. Review this list on Tauri upgrades.
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, unmaintained; via Tauri (build-time macro)" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range, unmaintained; via Tauri's urlpattern" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common, unmaintained; via Tauri's urlpattern" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property, unmaintained; via Tauri's urlpattern" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version, unmaintained; via Tauri's urlpattern" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident, unmaintained; via Tauri's urlpattern" },
+]
