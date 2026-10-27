@@ -354,8 +354,9 @@ pub fn decode_chunked(body: &[u8]) -> Option<Vec<u8>> {
         if size == 0 {
             return Some(out);
         }
-        out.extend_from_slice(body.get(i..i + size)?);
-        i += size;
+        let end = i.checked_add(size)?;
+        out.extend_from_slice(body.get(i..end)?);
+        i = end;
         if body[i..].starts_with(b"\r\n") {
             i += 2;
         } else if body[i..].starts_with(b"\n") {
@@ -522,6 +523,8 @@ mod tests {
     fn decodes_chunked_for_display() {
         assert_eq!(decode_chunked(b"4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\n\r\n").unwrap(), b"Wikipedia");
         assert_eq!(decode_chunked(b"zz\r\n"), None);
+        // Found by fuzzing: a size near usize::MAX overflowed the offset.
+        assert_eq!(decode_chunked(b"ffffffffffffffff\n\n\nxx"), None);
     }
 
     #[test]
