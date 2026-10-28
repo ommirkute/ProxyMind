@@ -1,4 +1,4 @@
-// Reading and editing raw HTTP requests as text (Repeater, Intruder).
+// Reading and editing raw HTTP requests as text (Replay, Fuzzer).
 // Lines may end in \n or \r\n; edits keep the request's own line endings.
 
 export interface Param {
@@ -158,7 +158,7 @@ export function redirectOf(resp: string | null | undefined): string | null {
 
 /**
  * Marks the values of query and form parameters, top-level JSON strings
- * and numbers, and cookies with § (Burp's "Auto §"). Existing markers are
+ * and numbers, and cookies with § ("Auto-mark"). Existing markers are
  * removed first.
  */
 export function autoMark(raw: string): string {

@@ -38,7 +38,7 @@ Prefer a container? `docker build -t proxymind .` builds an image with the UI an
 ./target/release/proxymind ui        # prints a login link: open it in your browser
 ```
 
-`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, a site map and content search (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests, responses and WebSocket messages), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Repeater (send as any identity, or race a request with the HTTP/2 single-packet attack), passive scanner issues (headers, cookies, CORS, errors, secrets; nothing sent), an active scanner (SQL errors, reflection, open redirect, traversal, SSTI; leads with proof hints), OpenAPI/Swagger and GraphQL (introspection) import, HAR import and export, Copy as cURL and Paste cURL, a Decoder, Comparer and Sequencer, a crawler (GET only, in scope, skips logout/delete links), content discovery (hidden files and folders, soft 404s filtered), Intruder (fuzz marked positions with payload lists, number ranges or built-in lists; anomalies highlighted), a proxy setup page (CA download, per-OS steps), an engagement page to edit the rules of engagement, approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
+`proxymind ui` starts the proxy (`127.0.0.1:8080`) and the web UI (`127.0.0.1:7777`) together: history with a request/response viewer, a site map and content search (including WebSocket messages, which you can replay on a new connection), an intercept queue (hold, edit, forward or drop requests, responses and WebSocket messages), match-and-replace rules, network settings (upstream proxy, client certificates), a built-in assistant, Replay (send as any identity, or race a request with the HTTP/2 single-packet attack), passive scanner issues (headers, cookies, CORS, errors, secrets; nothing sent), an active scanner (SQL errors, reflection, open redirect, traversal, SSTI; leads with proof hints), OpenAPI/Swagger and GraphQL (introspection) import, HAR import and export, Copy as cURL and Paste cURL, a Codec, Diff and Token analyzer, a crawler (GET only, in scope, skips logout/delete links), content discovery (hidden files and folders, soft 404s filtered), a Fuzzer (fuzz marked positions with payload lists, number ranges or built-in lists; anomalies highlighted), a proxy setup page (CA download, per-OS steps), an engagement page to edit the rules of engagement, approvals for agent actions, identities and authorization checks, the app model and coverage, findings with one-click proofs, and the audit log. Everything updates live.
 
 ![Findings with a proven IDOR](docs/images/ui-findings.png)
 
@@ -119,7 +119,7 @@ Match-and-replace rules (add or strip headers, rewrite bodies) live in the proje
 ./target/release/proxymind rules show
 ```
 
-Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Repeater, agents and proofs all use them.
+Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Replay, agents and proofs all use them.
 
 Want your own checks? A passive-check plugin is any program that reads exchanges as JSON lines and prints issues (`proxymind plugin add examples/plugins/jwt-check`); acting plugins use the MCP tools as `plugin:<name>` under stricter rules ([ADR-0014](docs/adr/0014-plugins.md)).
 
@@ -155,11 +155,11 @@ crates/
   pm-plugin    plugins: per-user registry, passive-check protocol ✅ working
   pm-vault     sealed (encrypted) project files                 ✅ working
   pm-scan      passive scanner checks                           ✅ working
-  pm-tools     decoder, comparer, sequencer                     ✅ working
+  pm-tools     codec, diff, token analyzer                      ✅ working
   pm-openapi   OpenAPI 3 / Swagger 2 import                     ✅ working
   pm-graphql   GraphQL introspection import                     ✅ working
   pm-crawl     crawler: links, forms, robots.txt, sitemaps      ✅ working
-  pm-fuzz      Intruder: positions, attack modes, anomalies     ✅ working
+  pm-fuzz      Fuzzer: positions, attack modes, anomalies     ✅ working
   pm-proof     proof oracles (authz, timing, OAST, reflection)  ✅ working
   pm-browser   headless Chromium for offline XSS proofs         ✅ working
   pm-oast      out-of-band callback listener (HTTP and DNS)     ✅ working

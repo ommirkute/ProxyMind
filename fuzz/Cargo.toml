@@ -66,8 +66,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "intruder_template"
-path = "fuzz_targets/intruder_template.rs"
+name = "fuzzer_template"
+path = "fuzz_targets/fuzzer_template.rs"
 test = false
 doc = false
 bench = false

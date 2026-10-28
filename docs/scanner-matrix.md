@@ -69,7 +69,7 @@ Legend: ✅ have · 🟡 partial · ❌ missing · step = build order (below).
 | IDOR / broken object authorization | ✅ (differential authz, proven) | ✅ | – |
 | Authentication bypass (path, header, method tricks) | ✅ step 3 (8 path tricks, rewrite and IP headers, with a control) | ✅ | 3 |
 | Mass assignment | ✅ step 4 (role / isAdmin / admin / verified on submissions) | ✅ | 4 |
-| Race conditions | ✅ (Repeater race, single-packet) + step 4 scan check (one-time actions; needs approval) | ✅ | 4 |
+| Race conditions | ✅ (Replay race, single-packet) + step 4 scan check (one-time actions; needs approval) | ✅ | 4 |
 | JWT (none alg, weak secret, kid/jku) | ✅ step 4 (weak HMAC secret offline, unverified signature, alg none, no signature; kid/jku later) | ✅ | 4 |
 | OAuth / OIDC (redirect_uri, state, PKCE) | ✅ step 4 (redirect_uri to another site, prefix and user-info tricks; missing state; PKCE later) | ✅ | 4 |
 | GraphQL (introspection, batching, depth) | ✅ step 4 (introspection, batching, suggestions, GET/CSRF; depth limits later) | ✅ | 4 |

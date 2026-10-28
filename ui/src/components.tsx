@@ -1,11 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "repeater" | "intruder" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions";
+export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions";
 
 export interface Nav {
   page: Page;
-  /** Optional argument for the page, e.g. an exchange id for the Repeater. */
+  /** Optional argument for the page, e.g. an exchange id for the Replay. */
   arg?: number | string;
   go: (page: Page, arg?: number | string) => void;
   counters: Counters | null;

@@ -40,7 +40,7 @@ const QUERY_FIELDS: [string, string][] = [
   ["reqlen", "request length in bytes"],
   ["time", "response time in ms"],
   ["id", "exchange number"],
-  ["source", "proxy, replay, intruder…"],
+  ["source", "proxy, replay, fuzzer…"],
   ["actor", "who sent it, e.g. agent:claude"],
   ["identity", "test identity used"],
   ["comment", "your comment"],
@@ -62,7 +62,7 @@ function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
     "host:*.example.com method:POST param:id",
     "respheader:set-cookie -respheader:set-cookie=httponly",
     "len:>100000 time:>1000",
-    "is:inscope -source:intruder comment:idor",
+    "is:inscope -source:fuzzer comment:idor",
   ];
   return (
     <div className="query-help small" data-testid="query-help">
@@ -231,8 +231,8 @@ export default function History() {
   const urlOf = (r: ExchangeSummary) => originOf(r) + r.path;
 
   const menuItems = (r: ExchangeSummary): MenuItem[] => [
-    { label: "Send to Repeater", hint: "Ctrl+R", onClick: () => go("repeater", r.id) },
-    { label: "Send to Intruder", hint: "Ctrl+I", onClick: () => go("intruder", r.id) },
+    { label: "Send to Replay", hint: "Ctrl+R", onClick: () => go("replay", r.id) },
+    { label: "Send to Fuzzer", hint: "Ctrl+I", onClick: () => go("fuzzer", r.id) },
     { label: "Active scan", onClick: () => go("issues", r.id) },
     { label: "Authorization check…", onClick: () => go("authz", r.id) },
     { label: "Copy URL", onClick: () => copyText(urlOf(r)).then(() => setNote("URL copied.")) },
@@ -268,7 +268,7 @@ export default function History() {
       if (next) go("history", next.id);
     } else if ((e.ctrlKey || e.metaKey) && selected && (e.key === "r" || e.key === "i")) {
       e.preventDefault();
-      go(e.key === "r" ? "repeater" : "intruder", selected);
+      go(e.key === "r" ? "replay" : "fuzzer", selected);
     }
   };
 
@@ -315,7 +315,7 @@ export default function History() {
             </select>
             <select aria-label="Source" value={filters.source} onChange={(e) => setFilters({ source: e.target.value })}>
               <option value="">any source</option>
-              {["proxy", "replay", "import", "crawl", "discover", "scan", "intruder", "authz", "proof", "login", "health"].map((m) => (
+              {["proxy", "replay", "import", "crawl", "discover", "scan", "fuzzer", "authz", "proof", "login", "health"].map((m) => (
                 <option key={m}>{m}</option>
               ))}
             </select>
@@ -458,7 +458,7 @@ function VirtualRows({
     if (top < el.scrollTop) el.scrollTop = top;
     else if (top + ROW * 2 > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW * 2 - el.clientHeight;
   }, [selected, rows]);
-  if (rows.length === 0) return <Empty>No traffic matches. Point your browser at the proxy, or use the Repeater.</Empty>;
+  if (rows.length === 0) return <Empty>No traffic matches. Point your browser at the proxy, or use the Replay.</Empty>;
   const first = Math.max(0, Math.floor(scroll / ROW) - 10);
   const last = Math.min(rows.length, Math.ceil((scroll + height) / ROW) + 10);
   return (
@@ -589,8 +589,8 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <CommentBox key={s.comment ?? ""} value={s.comment ?? ""} onSave={(c) => saveAnnotation(s.highlight, c)} />
       </div>
       <div className="row" style={{ marginTop: 10 }}>
-        <button className="btn" onClick={() => go("repeater", id)}>Send to Repeater</button>
-        <button className="btn" onClick={() => go("intruder", id)}>Send to Intruder</button>
+        <button className="btn" onClick={() => go("replay", id)}>Send to Replay</button>
+        <button className="btn" onClick={() => go("fuzzer", id)}>Send to Fuzzer</button>
         <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
         <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
         <button className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>

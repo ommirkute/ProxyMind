@@ -224,11 +224,11 @@ impl Service {
     }
 }
 
-/// Most bytes of UI state kept per key (e.g. Repeater tabs).
+/// Most bytes of UI state kept per key (e.g. Replay tabs).
 pub const UI_STATE_MAX: usize = 8 * 1024 * 1024;
 
 impl Service {
-    /// Saved UI state for this project (e.g. Repeater tabs), if any.
+    /// Saved UI state for this project (e.g. Replay tabs), if any.
     pub fn ui_state_get(&self, key: &str) -> Result<serde_json::Value> {
         check_ui_key(key)?;
         Ok(self

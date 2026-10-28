@@ -3,7 +3,7 @@
 **Status:** Accepted
 
 ## Context
-ADR-0002 keeps HTTP/1.x byte-exact. HTTP/2 has no such bytes to keep: HPACK and framing are re-encoded on every hop. Testers and models still need to read, edit and resend HTTP/2 requests, and the same tools (rules, intercept, Repeater, identities, authz checks, redaction) should work on them without a second code path.
+ADR-0002 keeps HTTP/1.x byte-exact. HTTP/2 has no such bytes to keep: HPACK and framing are re-encoded on every hop. Testers and models still need to read, edit and resend HTTP/2 requests, and the same tools (rules, intercept, Replay, identities, authz checks, redaction) should work on them without a second code path.
 
 ## Decision
 - HTTP/2 messages are shown, edited and stored as HTTP/1-style text with `HTTP/2` as the version and `host:` standing for `:authority` (`pm_http::h2text`). Split `cookie` headers are joined (RFC 9113 §8.2.3).

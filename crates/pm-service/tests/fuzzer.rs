@@ -1,4 +1,4 @@
-//! Intruder against VulnShop, through the policy gate.
+//! Fuzzer against VulnShop, through the policy gate.
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use pm_service::pm_fuzz::{Mode, PayloadSet};
 use pm_service::pm_identity::{AuthMaterial, Identity, LoginRecipe, LoginStep};
 use pm_service::pm_policy::{Actor, Policy, Roe};
 use pm_service::pm_store::Store;
-use pm_service::{IntruderRequest, IntruderResult, Service};
+use pm_service::{FuzzerRequest, FuzzerResult, Service};
 
 fn human() -> Actor {
     Actor::parse("human:tester").unwrap()
@@ -58,7 +58,7 @@ fn list(xs: &[&str]) -> PayloadSet {
 #[tokio::test]
 async fn fuzzes_ids_as_an_identity_and_points_out_anomalies() {
     let (s, url) = setup().await;
-    let req = IntruderRequest {
+    let req = FuzzerRequest {
         url: Some(url.clone()),
         raw: "GET /api/orders/§2001§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
         payload_sets: vec![list(&["1001", "1002", "9999"])],
@@ -68,19 +68,19 @@ async fn fuzzes_ids_as_an_identity_and_points_out_anomalies() {
     };
     // Agents need approval: fuzzing is intrusive.
     let agent = Actor::parse("agent:test").unwrap();
-    let r = s.intruder_run(&agent, req.clone()).await.unwrap();
-    let IntruderResult::PendingApproval { approval_id, summary, .. } = r else { panic!("{r:?}") };
-    assert!(summary.starts_with("intruder (Sniper, 3 requests)"), "{summary}");
+    let r = s.fuzzer_run(&agent, req.clone()).await.unwrap();
+    let FuzzerResult::PendingApproval { approval_id, summary, .. } = r else { panic!("{r:?}") };
+    assert!(summary.starts_with("fuzzer (one at a time, 3 requests)"), "{summary}");
     // Changing the payloads invalidates the approval: it covers the whole attack.
-    let changed = IntruderRequest {
+    let changed = FuzzerRequest {
         payload_sets: vec![list(&["1001", "1002", "1003"])],
         approval_id: Some(approval_id.clone()),
         ..req.clone()
     };
-    assert!(s.intruder_run(&agent, changed).await.is_err());
+    assert!(s.fuzzer_run(&agent, changed).await.is_err());
 
-    let r = s.intruder_run(&human(), req).await.unwrap();
-    let IntruderResult::Done { baseline, results, anomalies } = r else { panic!("{r:?}") };
+    let r = s.fuzzer_run(&human(), req).await.unwrap();
+    let FuzzerResult::Done { baseline, results, anomalies } = r else { panic!("{r:?}") };
     assert_eq!(baseline.status, Some(200), "bob's own order");
     let statuses: Vec<_> = results.iter().map(|r| r.status).collect();
     assert_eq!(statuses, vec![Some(200), Some(200), Some(404)], "VS-1: bob reads alice's orders");
@@ -98,9 +98,9 @@ async fn fuzzes_ids_as_an_identity_and_points_out_anomalies() {
 async fn reflection_and_bad_attacks() {
     let (s, url) = setup().await;
     let r = s
-        .intruder_run(
+        .fuzzer_run(
             &human(),
-            IntruderRequest {
+            FuzzerRequest {
                 url: Some(url.clone()),
                 raw: "GET /search?q=§hello§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
                 payload_sets: vec![PayloadSet { builtin: Some("xss".into()), url_encode: true, ..list(&[]) }],
@@ -109,10 +109,10 @@ async fn reflection_and_bad_attacks() {
         )
         .await
         .unwrap();
-    let IntruderResult::Done { results, .. } = r else { panic!("{r:?}") };
+    let FuzzerResult::Done { results, .. } = r else { panic!("{r:?}") };
     assert!(results.iter().all(|r| r.reflected), "VS-6 reflects every payload");
 
-    let bad = |raw: &str, sets: Vec<PayloadSet>, mode: Mode| IntruderRequest {
+    let bad = |raw: &str, sets: Vec<PayloadSet>, mode: Mode| FuzzerRequest {
         url: Some(url.clone()),
         raw: raw.into(),
         payload_sets: sets,
@@ -120,17 +120,17 @@ async fn reflection_and_bad_attacks() {
         ..Default::default()
     };
     for r in [
-        bad("GET / HTTP/1.1\r\n\r\n", vec![list(&["a"])], Mode::Sniper),
-        bad("GET /§a§/§b§ HTTP/1.1\r\n\r\n", vec![list(&["a"])], Mode::Pitchfork),
-        bad("GET /§a§ HTTP/1.1\r\n\r\n", vec![list(&[])], Mode::Sniper),
+        bad("GET / HTTP/1.1\r\n\r\n", vec![list(&["a"])], Mode::OneAtATime),
+        bad("GET /§a§/§b§ HTTP/1.1\r\n\r\n", vec![list(&["a"])], Mode::Paired),
+        bad("GET /§a§ HTTP/1.1\r\n\r\n", vec![list(&[])], Mode::OneAtATime),
     ] {
-        assert!(s.intruder_run(&human(), r).await.is_err());
+        assert!(s.fuzzer_run(&human(), r).await.is_err());
     }
 }
 
 async fn wait_done(s: &Service, id: &str) -> pm_service::AttackView {
     for _ in 0..300 {
-        let v = s.intruder_status(&human(), id, 0).unwrap();
+        let v = s.fuzzer_status(&human(), id, 0).unwrap();
         if !matches!(v.status, pm_service::AttackStatus::Running | pm_service::AttackStatus::Paused) {
             return v;
         }
@@ -142,7 +142,7 @@ async fn wait_done(s: &Service, id: &str) -> pm_service::AttackView {
 #[tokio::test]
 async fn background_attacks_with_extract_and_concurrency() {
     let (s, url) = setup().await;
-    let req = IntruderRequest {
+    let req = FuzzerRequest {
         url: Some(url.clone()),
         raw: "GET /api/orders/§1001§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
         payload_sets: vec![PayloadSet { numbers: Some("1001-1004".into()), ..Default::default() }],
@@ -153,7 +153,7 @@ async fn background_attacks_with_extract_and_concurrency() {
         concurrency: Some(3),
         ..Default::default()
     };
-    let pm_service::IntruderStart::Started { attack_id, total } = s.intruder_start(&human(), req).unwrap() else {
+    let pm_service::FuzzerStart::Started { attack_id, total } = s.fuzzer_start(&human(), req).unwrap() else {
         panic!("not started")
     };
     assert_eq!(total, 4);
@@ -166,39 +166,39 @@ async fn background_attacks_with_extract_and_concurrency() {
     assert!(rows[0].matches.len() == 1 && rows[3].matches.is_empty());
     assert_eq!(v.extract_columns.len(), 1);
     // Polling from an offset returns only newer rows; the list shows the attack.
-    assert!(s.intruder_status(&human(), &attack_id, 4).unwrap().rows.is_empty());
-    assert_eq!(s.intruder_list(&human())[0].attack_id, attack_id);
+    assert!(s.fuzzer_status(&human(), &attack_id, 4).unwrap().rows.is_empty());
+    assert_eq!(s.fuzzer_list(&human())[0].attack_id, attack_id);
     // Agents can't see other actors' attacks.
-    assert!(s.intruder_status(&Actor::parse("agent:other").unwrap(), &attack_id, 0).is_err());
+    assert!(s.fuzzer_status(&Actor::parse("agent:other").unwrap(), &attack_id, 0).is_err());
 }
 
 #[tokio::test]
 async fn attacks_pause_resume_and_cancel() {
     let (s, url) = setup().await;
-    let req = IntruderRequest {
+    let req = FuzzerRequest {
         url: Some(url.clone()),
         raw: "GET /api/products?x=§a§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
         payload_sets: vec![PayloadSet { null_payloads: Some(200), ..Default::default() }],
         throttle_ms: Some(20),
         ..Default::default()
     };
-    let pm_service::IntruderStart::Started { attack_id, .. } = s.intruder_start(&human(), req).unwrap() else {
+    let pm_service::FuzzerStart::Started { attack_id, .. } = s.fuzzer_start(&human(), req).unwrap() else {
         panic!("not started")
     };
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert_eq!(s.intruder_control(&human(), &attack_id, "pause").unwrap(), pm_service::AttackStatus::Paused);
+    assert_eq!(s.fuzzer_control(&human(), &attack_id, "pause").unwrap(), pm_service::AttackStatus::Paused);
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let a = s.intruder_status(&human(), &attack_id, 0).unwrap().done;
+    let a = s.fuzzer_status(&human(), &attack_id, 0).unwrap().done;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let b = s.intruder_status(&human(), &attack_id, 0).unwrap().done;
+    let b = s.fuzzer_status(&human(), &attack_id, 0).unwrap().done;
     assert!(b <= a + 1, "paused: {a} → {b}");
-    s.intruder_control(&human(), &attack_id, "resume").unwrap();
+    s.fuzzer_control(&human(), &attack_id, "resume").unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert_eq!(s.intruder_control(&human(), &attack_id, "cancel").unwrap(), pm_service::AttackStatus::Cancelled);
+    assert_eq!(s.fuzzer_control(&human(), &attack_id, "cancel").unwrap(), pm_service::AttackStatus::Cancelled);
     let v = wait_done(&s, &attack_id).await;
     assert_eq!(v.status, pm_service::AttackStatus::Cancelled);
     assert!(v.done > b && v.done < 200, "{} of 200", v.done);
-    assert!(s.intruder_control(&human(), &attack_id, "fly").is_ok(), "finished attacks ignore controls");
+    assert!(s.fuzzer_control(&human(), &attack_id, "fly").is_ok(), "finished attacks ignore controls");
 }
 
 #[tokio::test]
@@ -208,9 +208,9 @@ async fn payloads_cannot_walk_out_of_scope() {
     let roe = format!("version: 1\nscope:\n  include: [\"{url}/api/\"]\n  exclude: [\"{url}/api/admin/\"]\n");
     let s = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap());
     let r = s
-        .intruder_run(
+        .fuzzer_run(
             &human(),
-            IntruderRequest {
+            FuzzerRequest {
                 url: Some(url.clone()),
                 raw: "GET /api/products/§1§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
                 payload_sets: vec![list(&["2", "../admin/users", "../../search?q=x"])],
@@ -219,7 +219,7 @@ async fn payloads_cannot_walk_out_of_scope() {
         )
         .await
         .unwrap();
-    let IntruderResult::Done { results, .. } = r else { panic!("{r:?}") };
+    let FuzzerResult::Done { results, .. } = r else { panic!("{r:?}") };
     assert!(results[0].status.is_some(), "in scope: sent");
     for row in &results[1..] {
         assert_eq!(row.status, None, "{row:?}");

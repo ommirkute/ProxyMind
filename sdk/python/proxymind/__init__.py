@@ -212,9 +212,9 @@ class Client:
         body = self._args(raw=raw, url=url, exchange_id=exchange_id, identity=identity, approval_id=approval_id, **extra)
         return self._check(self._post("/replay", body))
 
-    def intruder(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
+    def fuzzer(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
         """Fuzz positions marked §like this§. payload_sets: [{"list": [...]}, {"numbers": "1-10"}, {"builtin": "sqli"}]."""
-        return self._check(self._post("/intruder", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
+        return self._check(self._post("/fuzzer", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
 
     def crawl(self, url: str, **extra: Any) -> dict:
         return self._check(self._post("/crawl", self._args(url=url, **extra)))
@@ -253,8 +253,8 @@ class Client:
     def compare(self, a: int, b: int) -> dict:
         return self._post("/tools/compare", {"a": a, "b": b})
 
-    def sequencer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
-        return self._check(self._post("/tools/sequencer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
+    def token_analyzer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
+        return self._check(self._post("/tools/token-analyzer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
 
     def import_har(self, har: str) -> dict:
         """Adds a HAR file's exchanges (text) to history; sends nothing. Returns {imported, exchange_ids, skipped}."""

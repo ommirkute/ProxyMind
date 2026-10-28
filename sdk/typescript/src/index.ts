@@ -280,8 +280,8 @@ export class Client {
   }
 
   /** Fuzz positions marked §like this§. payload_sets: [{ list: [...] }, { numbers: "1-10" }, { builtin: "sqli" }]. */
-  intruder(raw: string, payload_sets: Json[], opts: Json = {}): Promise<Json> {
-    return this.act("/intruder", { raw, payload_sets, ...opts });
+  fuzzer(raw: string, payload_sets: Json[], opts: Json = {}): Promise<Json> {
+    return this.act("/fuzzer", { raw, payload_sets, ...opts });
   }
 
   crawl(url: string, opts: Json = {}): Promise<Json> {
@@ -328,8 +328,8 @@ export class Client {
     return this.post("/tools/compare", { a, b });
   }
 
-  sequencer(exchange_id: number, locator: string, samples = 100, opts: Json = {}): Promise<Json> {
-    return this.act("/tools/sequencer", { exchange_id, locator, samples, ...opts });
+  tokenAnalyzer(exchange_id: number, locator: string, samples = 100, opts: Json = {}): Promise<Json> {
+    return this.act("/tools/token-analyzer", { exchange_id, locator, samples, ...opts });
   }
 
   /** Adds a HAR file's exchanges to history; sends nothing. */

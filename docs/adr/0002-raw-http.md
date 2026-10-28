@@ -13,4 +13,4 @@ HTTP/2 will use the `h2` crate, because HPACK and framing make byte-exact pass-t
 ## Consequences
 - Byte-exact pass-through, verified by an end-to-end test.
 - We own the edge cases (chunk extensions, bare LF, obsolete line folding). Mitigation: fuzzing (`cargo-fuzz`) and golden-file tests in CI.
-- Framing is decided conservatively (any `chunked` in Transfer-Encoding wins) so the proxy never hangs. Smuggling tests that need different framing will use the raw Repeater, not the proxy path.
+- Framing is decided conservatively (any `chunked` in Transfer-Encoding wins) so the proxy never hangs. Smuggling tests that need different framing will use the raw Replay, not the proxy path.

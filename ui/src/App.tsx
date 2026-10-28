@@ -8,8 +8,8 @@ import Library from "./pages/Library";
 import { CommandPalette } from "./palette";
 import History from "./pages/History";
 import Intercept from "./pages/Intercept";
-import Repeater from "./pages/Repeater";
-import Intruder from "./pages/Intruder";
+import Replay from "./pages/Replay";
+import Fuzzer from "./pages/Fuzzer";
 import Rules from "./pages/Rules";
 import Approvals from "./pages/Approvals";
 import Assistant from "./pages/Assistant";
@@ -57,10 +57,10 @@ const GROUPS: Group[] = [
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
-  { id: "repeater", label: "Repeater", icon: "repeater", section: "Testing", pages: [{ id: "repeater", label: "Repeater" }] },
-  { id: "intruder", label: "Intruder", icon: "intruder", section: "Testing", pages: [{ id: "intruder", label: "Intruder" }] },
+  { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
+  { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
-  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Decoder, Comparer, Sequencer" }, { id: "library", label: "Issue library" }] },
+  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
   { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
@@ -184,8 +184,8 @@ export default function App() {
     assistant: Assistant,
     intercept: Intercept,
     rules: Rules,
-    repeater: Repeater,
-    intruder: Intruder,
+    replay: Replay,
+    fuzzer: Fuzzer,
     approvals: Approvals,
     authz: Authz,
     model: Model,

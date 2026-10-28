@@ -129,13 +129,26 @@ pub struct Validity {
     pub contains: String,
 }
 
+/// A tool (exchange source) name, lowercased, with the names used before
+/// the 2026-10-28 rename mapped to the current ones.
+fn canonical_tool(name: &str) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    match n.as_str() {
+        "repeater" => "replay".into(),
+        "intruder" => "fuzzer".into(),
+        "sequencer" => "token_analyzer".into(),
+        _ => n,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionRule {
     pub name: String,
     pub enabled: bool,
-    /// Tools (exchange sources) covered: replay, intruder, scan, crawl,
-    /// discover, sequencer, proof, authz, graphql, openapi. Empty: all.
+    /// Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
+    /// discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    /// Older names (repeater, intruder, sequencer) still match.
     pub tools: Vec<String>,
     /// Host patterns (`api.example.com`, `*.example.com`). Empty: all.
     pub hosts: Vec<String>,
@@ -167,7 +180,7 @@ impl Default for SessionRule {
 impl SessionRule {
     fn covers(&self, source: &str, host: &str) -> bool {
         self.enabled
-            && (self.tools.is_empty() || self.tools.iter().any(|t| t.eq_ignore_ascii_case(source)))
+            && (self.tools.is_empty() || self.tools.iter().any(|t| canonical_tool(t) == canonical_tool(source)))
             && (self.hosts.is_empty() || self.hosts.iter().any(|h| host_matches(h, host)))
     }
 }

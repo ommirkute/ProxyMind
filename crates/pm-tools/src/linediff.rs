@@ -1,4 +1,4 @@
-//! Line diff (longest common subsequence) for the Comparer. Large inputs
+//! Line diff (longest common subsequence) for the Diff tool. Large inputs
 //! are cut so the quadratic table stays small.
 
 use serde::Serialize;

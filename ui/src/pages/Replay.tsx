@@ -40,7 +40,7 @@ interface Step {
   notes?: string[];
 }
 
-/** A Repeater tab, saved in the project (`/api/v1/ui/repeater`). */
+/** A Replay tab, saved in the project (`/api/v1/ui/replay`). */
 interface RTab {
   id: string;
   name: string;
@@ -80,7 +80,7 @@ const blank = (n: number): RTab => ({
   pos: -1,
 });
 
-export default function Repeater() {
+export default function Replay() {
   const { arg, go } = useNav();
   const [state, setState] = useState<Saved | null>(null);
   const [tmp, setTmp] = useState<Record<string, Transient>>({});
@@ -98,7 +98,9 @@ export default function Repeater() {
   // Load saved tabs once.
   useEffect(() => {
     api
-      .get<Saved | null>("/ui/repeater")
+      .get<Saved | null>("/ui/replay")
+      // Tabs saved before the rename live under the old key.
+      .then((s) => (s?.tabs?.length ? s : api.get<Saved | null>("/ui/repeater").catch(() => null)))
       .then((s) => {
         const tabs = s?.tabs?.length ? s.tabs : [blank(1)];
         setState({ tabs, active: tabs.some((t) => t.id === s?.active) ? s!.active : tabs[0].id });
@@ -114,7 +116,7 @@ export default function Repeater() {
   // Save (debounced) whenever tabs change.
   useEffect(() => {
     if (!state || !loaded.current) return;
-    const t = setTimeout(() => api.put("/ui/repeater", state).catch(() => {}), 600);
+    const t = setTimeout(() => api.put("/ui/replay", state).catch(() => {}), 600);
     return () => clearTimeout(t);
   }, [state]);
 
@@ -127,11 +129,11 @@ export default function Repeater() {
     });
   }, []);
 
-  // A request sent here from History (#/repeater/<id>) or another page opens in a new tab.
+  // A request sent here from History (#/replay/<id>) or another page opens in a new tab.
   useEffect(() => {
     if (!state) return;
     if (arg) {
-      window.history.replaceState(null, "", "#/repeater");
+      window.history.replaceState(null, "", "#/replay");
       api
         .get<ExchangeDetail>(`/exchanges/${arg}`)
         .then((ex) => addTab({ name: `#${arg}`, url: originOf(ex.summary), raw: ex.request.replace(/\r\n/g, "\n") }))
@@ -139,9 +141,9 @@ export default function Repeater() {
       return;
     }
     try {
-      const draft = sessionStorage.getItem("pm_repeater_draft");
+      const draft = sessionStorage.getItem("pm_replay_draft");
       if (draft) {
-        sessionStorage.removeItem("pm_repeater_draft");
+        sessionStorage.removeItem("pm_replay_draft");
         const d = JSON.parse(draft) as { url: string; raw: string; name?: string };
         addTab({ name: d.name ?? "draft", url: d.url, raw: d.raw.replace(/\r\n/g, "\n") });
       }
@@ -273,8 +275,8 @@ export default function Repeater() {
   };
 
   return (
-    <div className="content repeater">
-      <div className="rtabs" role="tablist" aria-label="Repeater tabs">
+    <div className="content replay">
+      <div className="rtabs" role="tablist" aria-label="Replay tabs">
         {state.tabs.map((x) => (
           <div key={x.id} role="tab" aria-selected={x.id === tab.id} className={`rtab ${x.id === tab.id ? "active" : ""}`}
             onClick={() => setState({ ...state, active: x.id })}
@@ -292,7 +294,7 @@ export default function Repeater() {
         <button className="rtab add" title="Duplicate this tab" onClick={() => addTab({ name: `${tab.name} copy`, url: tab.url, raw: tab.raw, identity: tab.identity })}>⧉</button>
       </div>
 
-      <div className="row repeater-bar">
+      <div className="row replay-bar">
         <button className="btn primary" onClick={() => send()} disabled={action.busy || !tab.url} data-testid="send" title="Ctrl+Enter">
           {action.busy ? "Sending…" : t.approval ? "Send approved" : "Send"}
         </button>
@@ -326,7 +328,7 @@ export default function Repeater() {
       {curlWarnings.length > 0 && <div className="notice small">Ignored: {curlWarnings.join("; ")}</div>}
       <ErrorBox error={action.error} />
 
-      <div className={`repeater-grid ${inspector ? "" : "no-inspector"}`}>
+      <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
         <section className="pane">
           <h3 className="pane-title">Request</h3>
           <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} spellCheck={false} />
@@ -371,7 +373,7 @@ export default function Repeater() {
                 decodedBody={detail?.view.response?.body?.text}
                 loadB64={step.exchange_id != null ? () => api.get<ExchangeDetail>(`/exchanges/${step.exchange_id}?bytes=1`).then((d) => d.response_b64) : undefined}
                 empty={step.error ? "No response" : "Loading…"}
-                testid="repeater-response"
+                testid="replay-response"
               />
             </>
           )}

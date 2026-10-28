@@ -1,5 +1,5 @@
 //! Network settings (upstream proxy, client certificates), stored in the
-//! project and used by every sender: proxy, Repeater, agents and proofs.
+//! project and used by every sender: proxy, Replay, agents and proofs.
 
 use std::sync::Arc;
 

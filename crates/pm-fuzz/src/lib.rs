@@ -1,7 +1,7 @@
-//! Intruder: send a request many times with payloads in marked positions,
+//! Fuzzer: send a request many times with payloads in marked positions,
 //! then point out the responses that stand out.
 //!
-//! Positions are marked with `§`, as in Burp: `GET /orders/§1001§ HTTP/1.1`.
+//! Positions are marked with `§`: `GET /orders/§1001§ HTTP/1.1`.
 //! The text between the markers is the original value, used for the
 //! baseline request. This crate is pure: it builds the requests and analyses
 //! results; the service layer sends them through the policy gate.
@@ -18,7 +18,7 @@ pub const MAX_REQUESTS: usize = 10_000;
 pub enum FuzzError {
     NoPositions,
     UnbalancedMarkers,
-    /// Pitchfork / cluster bomb need one payload set per position.
+    /// Paired / all combinations need one payload set per position.
     SetCount {
         positions: usize,
         sets: usize,
@@ -55,19 +55,31 @@ impl std::fmt::Display for FuzzError {
 
 impl std::error::Error for FuzzError {}
 
-/// How payloads are placed (Burp's four attack types).
+/// How payloads are placed in the positions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     /// One position at a time, the others keep their original value.
     #[default]
-    Sniper,
+    OneAtATime,
     /// The same payload in every position at once.
-    BatteringRam,
+    SameEverywhere,
     /// Set i in position i, advancing together (stops at the shortest set).
-    Pitchfork,
+    Paired,
     /// Every combination of the sets.
-    ClusterBomb,
+    AllCombinations,
+}
+
+impl Mode {
+    /// The name people see, e.g. "one at a time".
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::OneAtATime => "one at a time",
+            Mode::SameEverywhere => "same everywhere",
+            Mode::Paired => "paired",
+            Mode::AllCombinations => "all combinations",
+        }
+    }
 }
 
 /// One payload set.
@@ -92,7 +104,7 @@ pub struct PayloadSet {
     /// Each word as written, lower case, UPPER case and Capitalised.
     #[serde(default)]
     pub case_variants: Vec<String>,
-    /// Applied to each payload in order (Burp's payload processing).
+    /// Applied to each payload in order (payload processing).
     #[serde(default)]
     pub processing: Vec<Rule>,
     /// Percent-encode each payload (for query strings and form bodies),
@@ -372,17 +384,17 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
         Planned { raw: t.fill(&filled), payloads: vals.iter().map(|v| v.map(str::to_string)).collect() }
     };
     let total = match mode {
-        Mode::Sniper | Mode::BatteringRam => {
+        Mode::OneAtATime | Mode::SameEverywhere => {
             if sets.len() != 1 {
                 return Err(FuzzError::SetCount { positions: 1, sets: sets.len() });
             }
-            if mode == Mode::Sniper { n * sets[0].len() } else { sets[0].len() }
+            if mode == Mode::OneAtATime { n * sets[0].len() } else { sets[0].len() }
         }
-        Mode::Pitchfork | Mode::ClusterBomb => {
+        Mode::Paired | Mode::AllCombinations => {
             if sets.len() != n {
                 return Err(FuzzError::SetCount { positions: n, sets: sets.len() });
             }
-            if mode == Mode::Pitchfork {
+            if mode == Mode::Paired {
                 sets.iter().map(Vec::len).min().unwrap_or(0)
             } else {
                 sets.iter().try_fold(1usize, |acc, s| acc.checked_mul(s.len())).unwrap_or(usize::MAX)
@@ -394,7 +406,7 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
     }
     let mut out = Vec::with_capacity(total);
     match mode {
-        Mode::Sniper => {
+        Mode::OneAtATime => {
             for pos in 0..n {
                 for p in &sets[0] {
                     let mut vals = vec![None; n];
@@ -403,17 +415,17 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
                 }
             }
         }
-        Mode::BatteringRam => {
+        Mode::SameEverywhere => {
             for p in &sets[0] {
                 out.push(make(vec![Some(p.as_str()); n]));
             }
         }
-        Mode::Pitchfork => {
+        Mode::Paired => {
             for i in 0..total {
                 out.push(make(sets.iter().map(|s| Some(s[i].as_str())).collect()));
             }
         }
-        Mode::ClusterBomb => {
+        Mode::AllCombinations => {
             let mut idx = vec![0usize; n];
             for _ in 0..total {
                 out.push(make(idx.iter().enumerate().map(|(p, &i)| Some(sets[p][i].as_str())).collect()));
@@ -432,7 +444,7 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
 }
 
 /// Pulls a value out of each response for its own results column
-/// (Burp's grep - extract): text between two markers, or a regex's first
+/// (extract): text between two markers, or a regex's first
 /// group (or whole match).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -619,19 +631,19 @@ mod tests {
     }
 
     #[test]
-    fn modes_place_payloads_like_burp() {
+    fn modes_place_payloads() {
         let t = Template::parse("§a§-§b§").unwrap();
         let raws = |m, sets: &[Vec<String>]| plan(&t, m, sets).unwrap().into_iter().map(|p| p.raw).collect::<Vec<_>>();
-        assert_eq!(raws(Mode::Sniper, &[set(&["1", "2"])]), ["1-b", "2-b", "a-1", "a-2"]);
-        assert_eq!(raws(Mode::BatteringRam, &[set(&["1", "2"])]), ["1-1", "2-2"]);
-        assert_eq!(raws(Mode::Pitchfork, &[set(&["1", "2", "3"]), set(&["x", "y"])]), ["1-x", "2-y"]);
-        assert_eq!(raws(Mode::ClusterBomb, &[set(&["1", "2"]), set(&["x", "y"])]), ["1-x", "1-y", "2-x", "2-y"]);
-        let p = plan(&t, Mode::Sniper, &[set(&["1"])]).unwrap();
+        assert_eq!(raws(Mode::OneAtATime, &[set(&["1", "2"])]), ["1-b", "2-b", "a-1", "a-2"]);
+        assert_eq!(raws(Mode::SameEverywhere, &[set(&["1", "2"])]), ["1-1", "2-2"]);
+        assert_eq!(raws(Mode::Paired, &[set(&["1", "2", "3"]), set(&["x", "y"])]), ["1-x", "2-y"]);
+        assert_eq!(raws(Mode::AllCombinations, &[set(&["1", "2"]), set(&["x", "y"])]), ["1-x", "1-y", "2-x", "2-y"]);
+        let p = plan(&t, Mode::OneAtATime, &[set(&["1"])]).unwrap();
         assert_eq!(p[1].payloads, vec![None, Some("1".to_string())]);
-        assert!(matches!(plan(&t, Mode::Pitchfork, &[set(&["1"])]), Err(FuzzError::SetCount { .. })));
-        assert_eq!(plan(&t, Mode::Sniper, &[vec![]]), Err(FuzzError::EmptySet(0)));
+        assert!(matches!(plan(&t, Mode::Paired, &[set(&["1"])]), Err(FuzzError::SetCount { .. })));
+        assert_eq!(plan(&t, Mode::OneAtATime, &[vec![]]), Err(FuzzError::EmptySet(0)));
         let big: Vec<String> = (0..120).map(|i| i.to_string()).collect();
-        assert_eq!(plan(&t, Mode::ClusterBomb, &[big.clone(), big]), Err(FuzzError::TooMany(14400)));
+        assert_eq!(plan(&t, Mode::AllCombinations, &[big.clone(), big]), Err(FuzzError::TooMany(14400)));
     }
 
     #[test]

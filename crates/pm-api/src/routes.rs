@@ -101,16 +101,16 @@ pub fn api() -> Router<AppState> {
         .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
-        .route("/intruder", post(intruder))
-        .route("/intruder/attacks", get(attacks_list).post(attack_start))
-        .route("/intruder/attacks/{id}", get(attack_status))
-        .route("/intruder/attacks/{id}/{action}", post(attack_control))
+        .route("/fuzzer", post(fuzzer))
+        .route("/fuzzer/attacks", get(attacks_list).post(attack_start))
+        .route("/fuzzer/attacks/{id}", get(attack_status))
+        .route("/fuzzer/attacks/{id}/{action}", post(attack_control))
         .route("/crawl", post(crawl))
         .route("/discover", post(discover))
         .route("/tools/decode", post(tools_decode))
         .route("/tools/compare", post(tools_compare))
-        .route("/tools/sequencer", post(tools_sequencer))
-        .route("/tools/sequencer/analyze", post(tools_sequencer_analyze))
+        .route("/tools/token-analyzer", post(tools_token_analyzer))
+        .route("/tools/token-analyzer/analyze", post(tools_token_analyzer_analyze))
         .route("/openapi", get(openapi_get))
         // API descriptions are often larger than the 2 MB default.
         .route("/openapi/import", post(openapi_import).layer(axum::extract::DefaultBodyLimit::max(SPEC_LIMIT)))
@@ -726,8 +726,11 @@ async fn tools_compare(State(st): State<AppState>, Json(r): Json<CompareBody>) -
     ok(st.service.compare_exchanges(&st.actor, r.a, r.b)?)
 }
 
-async fn tools_sequencer(State(st): State<AppState>, Json(r): Json<pm_service::SequencerRequest>) -> ApiResult {
-    ok(st.service.sequencer_run(&st.actor, r).await?)
+async fn tools_token_analyzer(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::TokenAnalyzerRequest>,
+) -> ApiResult {
+    ok(st.service.token_analyzer_run(&st.actor, r).await?)
 }
 
 #[derive(serde::Deserialize)]
@@ -735,24 +738,24 @@ struct TokensBody {
     tokens: Vec<String>,
 }
 
-async fn tools_sequencer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
-    ok(st.service.sequencer_analyze(&r.tokens)?)
+async fn tools_token_analyzer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
+    ok(st.service.token_analyzer_analyze(&r.tokens)?)
 }
 
 async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {
     ok(st.service.crawl(&st.actor, r).await?)
 }
 
-async fn intruder(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
-    ok(st.service.intruder_run(&st.actor, r).await?)
+async fn fuzzer(State(st): State<AppState>, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
+    ok(st.service.fuzzer_run(&st.actor, r).await?)
 }
 
-async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::IntruderRequest>) -> ApiResult {
-    ok(st.service.intruder_start(&st.actor, r)?)
+async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
+    ok(st.service.fuzzer_start(&st.actor, r)?)
 }
 
 async fn attacks_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.intruder_list(&st.actor))
+    ok(st.service.fuzzer_list(&st.actor))
 }
 
 #[derive(serde::Deserialize)]
@@ -761,11 +764,11 @@ struct FromQuery {
 }
 
 async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FromQuery>) -> ApiResult {
-    ok(st.service.intruder_status(&st.actor, &id, q.from.unwrap_or(0))?)
+    ok(st.service.fuzzer_status(&st.actor, &id, q.from.unwrap_or(0))?)
 }
 
 async fn attack_control(State(st): State<AppState>, Path((id, action)): Path<(String, String)>) -> ApiResult {
-    ok(json!({ "status": st.service.intruder_control(&st.actor, &id, &action)? }))
+    ok(json!({ "status": st.service.fuzzer_control(&st.actor, &id, &action)? }))
 }
 
 async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {

@@ -1,6 +1,6 @@
 [package]
 name = "pm-replay"
-description = "Send engine for Repeater-style replays and parallel sends."
+description = "Send engine for replays and parallel sends."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

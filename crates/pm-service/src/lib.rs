@@ -12,11 +12,11 @@ mod browser;
 mod crawl;
 mod discover;
 mod findings;
+mod fuzzer;
 mod graphql;
 mod history;
 mod identity;
 mod intercept;
-mod intruder;
 mod login_record;
 mod model;
 mod network;
@@ -46,13 +46,11 @@ pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
+pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
-pub use intruder::{
-    AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
-};
 pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
@@ -80,7 +78,7 @@ pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
-pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
+pub use tools::{DecodeRequest, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
@@ -141,8 +139,8 @@ pub struct Service {
     roe_text: parking_lot::Mutex<Option<String>>,
     /// Passive-check plugins the user installed (never from the project).
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
-    /// Recent Intruder attacks (running ones keep going in the background).
-    attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// Recent Fuzzer attacks (running ones keep going in the background).
+    attacks: parking_lot::Mutex<Vec<std::sync::Arc<fuzzer::Attack>>>,
     /// This process's proxy, for the built-in browser.
     proxy_info: std::sync::OnceLock<browser::ProxyInfo>,
     /// Recent crawl-and-audit tasks.

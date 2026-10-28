@@ -317,7 +317,7 @@ enum Command {
     /// Compare two recorded exchanges.
     Compare { a: i64, b: i64 },
     /// Token randomness: re-send a token-issuing request and analyse the tokens.
-    Sequencer {
+    TokenAnalyzer {
         exchange_id: i64,
         /// cookie:<name>, header:<name>, json:/pointer or between:<a>|<b>
         #[arg(long)]
@@ -376,7 +376,7 @@ enum Command {
         action: ProjectAction,
     },
     /// Fuzz a request: payloads in positions marked §like this§, anomalies pointed out.
-    Intruder {
+    Fuzzer {
         /// Target as scheme://host[:port] (or use --exchange)
         #[arg(long, required_unless_present = "exchange")]
         url: Option<String>,
@@ -386,8 +386,8 @@ enum Command {
         /// File with the raw request, positions marked §like this§
         #[arg(long)]
         raw_file: PathBuf,
-        /// sniper, battering_ram, pitchfork or cluster_bomb
-        #[arg(long, default_value = "sniper")]
+        /// one_at_a_time, same_everywhere, paired or all_combinations
+        #[arg(long, default_value = "one_at_a_time")]
         mode: String,
         /// A payload file (one payload per line); repeat for one set per position
         #[arg(long = "payloads")]
@@ -1878,12 +1878,12 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Sequencer { exchange_id, locator, samples, identity } => {
+        Command::TokenAnalyzer { exchange_id, locator, samples, identity } => {
             let service = open_service(&cli.project, None)?;
             let r = service
-                .sequencer_run(
+                .token_analyzer_run(
                     &human_actor(None)?,
-                    pm_service::SequencerRequest {
+                    pm_service::TokenAnalyzerRequest {
                         exchange_id: *exchange_id,
                         locator: locator.clone(),
                         samples: Some(*samples),
@@ -1991,7 +1991,7 @@ async fn run() -> Result<()> {
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
-        Command::Intruder {
+        Command::Fuzzer {
             url,
             exchange,
             raw_file,
@@ -2005,8 +2005,9 @@ async fn run() -> Result<()> {
             json,
         } => {
             let service = open_service(&cli.project, None)?;
-            let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode))
-                .map_err(|_| anyhow::anyhow!("mode must be sniper, battering_ram, pitchfork or cluster_bomb"))?;
+            let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode)).map_err(|_| {
+                anyhow::anyhow!("mode must be one_at_a_time, same_everywhere, paired or all_combinations")
+            })?;
             let set =
                 |list: Vec<String>, numbers: Option<String>, builtin: Option<String>| pm_service::pm_fuzz::PayloadSet {
                     list,
@@ -2025,9 +2026,9 @@ async fn run() -> Result<()> {
             }
             anyhow::ensure!(!sets.is_empty(), "give payloads with --payloads, --numbers or --builtin");
             let r = service
-                .intruder_run(
+                .fuzzer_run(
                     &human_actor(None)?,
-                    pm_service::IntruderRequest {
+                    pm_service::FuzzerRequest {
                         url: url.clone(),
                         exchange_id: *exchange,
                         raw: std::fs::read_to_string(raw_file)?,
@@ -2040,8 +2041,8 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             match (&r, *json) {
-                (pm_service::IntruderResult::Done { baseline, results, anomalies }, false) => {
-                    let line = |label: &str, r: &pm_service::IntruderRow| -> Result<()> {
+                (pm_service::FuzzerResult::Done { baseline, results, anomalies }, false) => {
+                    let line = |label: &str, r: &pm_service::FuzzerRow| -> Result<()> {
                         out!(
                             "{label:>5}  #{:<6} {:>5}  {:>7} B  {:>6} ms  {}{}",
                             r.exchange_id,

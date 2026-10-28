@@ -1,4 +1,4 @@
-//! Sending requests (Repeater-style replays) through the policy gate, as
+//! Sending requests (replays) through the policy gate, as
 //! recorded or as any test identity.
 
 use std::time::{Duration, Instant};

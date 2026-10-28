@@ -87,7 +87,12 @@ impl Service {
             // What ProxyMind sent to test things (probes, payloads, re-sends)
             // isn't how the app is used; discovery counts only for what it found.
             .filter(|(e, _)| {
-                !matches!(e.summary.source.as_str(), "authz" | "proof" | "scan" | "intruder" | "sequencer" | "race")
+                !matches!(
+                    e.summary.source.as_str(),
+                    "authz" | "proof" | "scan" | "fuzzer" | "token_analyzer" | "race"
+                        // names used before 2026-10-28
+                        | "intruder" | "sequencer"
+                )
             })
             .filter(|(e, _)| e.summary.source != "discover" || e.summary.status.is_some_and(|s| s < 400))
             .map(|(e, who)| Observation {

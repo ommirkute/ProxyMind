@@ -125,10 +125,10 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
-            "intruder_run",
+            "fuzzer_run",
             "Fuzz a request: mark positions in raw with §original§ (e.g. GET /api/orders/§1001§), give payload sets, \
-             and ProxyMind sends the baseline plus one request per payload (sniper: one position at a time; \
-             battering_ram: same payload everywhere; pitchfork: set i in position i together; cluster_bomb: every \
+             and ProxyMind sends the baseline plus one request per payload (one_at_a_time: one position at a time; \
+             same_everywhere: same payload everywhere; paired: set i in position i together; all_combinations: every \
              combination), max 10000. Returns status, body length, time, grep matches, extracted values and reflection \
              per request, and anomalies: results that differ from the baseline or the rest. Payload sets take list, \
              numbers (\"1000-1050\" or \"0-100:10\"), builtin (ids, sqli, xss, traversal, ssti, methods_override), \
@@ -140,7 +140,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "exchange_id": {"type":"integer","description":"Recorded request whose target to use"},
                 "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
                 "raw": {"type":"string","description":"Request with positions marked §like this§"},
-                "mode": {"type":"string","enum":["sniper","battering_ram","pitchfork","cluster_bomb"]},
+                "mode": {"type":"string","enum":["one_at_a_time","same_everywhere","paired","all_combinations"]},
                 "payload_sets": {"type":"array","items":{"type":"object","properties":{
                     "list":{"type":"array","items":{"type":"string"}},
                     "numbers":{"type":"string"},
@@ -361,7 +361,7 @@ pub fn tool_definitions() -> Vec<Value> {
             &["a", "b"],
         ),
         tool(
-            "sequencer_run",
+            "token_analyzer_run",
             "Token randomness: re-send a token-issuing request samples times (default 100) and analyse the tokens at \
              locator (cookie:<name>, header:<name>, json:/pointer, between:<a>|<b>): entropy estimate, constant \
              positions, duplicates, counters. Returns statistics only, never the tokens. May need approval.",
@@ -755,9 +755,9 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
             let g: A = args(a)?;
             service.compare_exchanges(actor, g.a, g.b).map_err(|e| e.to_string())
         }
-        "sequencer_run" => {
-            let r: pm_service::SequencerRequest = args(a)?;
-            service.sequencer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        "token_analyzer_run" => {
+            let r: pm_service::TokenAnalyzerRequest = args(a)?;
+            service.token_analyzer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "discover_content" => {
             let r: pm_service::DiscoverRequest = args(a)?;
@@ -786,9 +786,9 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
             let r: pm_service::CrawlRequest = args(a)?;
             service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
-        "intruder_run" => {
-            let r: pm_service::IntruderRequest = args(a)?;
-            service.intruder_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        "fuzzer_run" => {
+            let r: pm_service::FuzzerRequest = args(a)?;
+            service.fuzzer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "ws_send" => {
             let r: pm_service::WsReplayRequest = args(a)?;

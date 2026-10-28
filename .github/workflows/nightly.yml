@@ -25,7 +25,7 @@ jobs:
           - dns_query
           - payload_classifier
           - crawl_extract
-          - intruder_template
+          - fuzzer_template
           - passive_checks
           - openapi_spec
           - har_curl

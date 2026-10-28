@@ -32,7 +32,7 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
-/// A request read from a cURL command, ready for Repeater.
+/// A request read from a cURL command, ready for Replay.
 #[derive(Debug, Clone, Serialize)]
 pub struct CurlParsed {
     /// Where to send it (scheme://host[:port]).
@@ -163,7 +163,7 @@ impl Service {
         curl::to_curl(&url, &raw).map_err(ServiceError::Invalid)
     }
 
-    /// Reads a curl command into a request for Repeater. Sends nothing.
+    /// Reads a curl command into a request for Replay. Sends nothing.
     pub fn curl_parse(&self, command: &str) -> Result<CurlParsed> {
         if command.len() > 10 * 1024 * 1024 {
             return Err(ServiceError::Invalid("command larger than 10 MB".into()));

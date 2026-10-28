@@ -13,7 +13,7 @@ interface Page {
   next_before_id?: number;
 }
 
-/** WebSocket messages across every connection, newest first (like Burp's WebSockets history). */
+/** WebSocket messages across every connection, newest first. */
 export default function WsHistory() {
   const { counters, go } = useNav();
   const [host, setHost] = useState("");

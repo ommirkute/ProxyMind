@@ -143,10 +143,10 @@ try {
   await page.screenshot({ path: join(SHOTS, "0-history-dark.png") });
   await page.getByRole("button", { name: /^Theme:/ }).click();
   await page.keyboard.press("Control+k");
-  await page.getByLabel("Go to", { exact: true }).fill("repeat");
+  await page.getByLabel("Go to", { exact: true }).fill("replay");
   await page.screenshot({ path: join(SHOTS, "0-palette.png") });
   await page.keyboard.press("Enter");
-  check(await page.evaluate(() => location.hash) === "#/repeater", "the command palette jumps to a page");
+  check(await page.evaluate(() => location.hash) === "#/replay", "the command palette jumps to a page");
 
   console.log("Proxy: top tabs, HTTP history tools");
   await page.getByTestId("tab-dashboard").click();
@@ -303,10 +303,10 @@ try {
     "a headless browser runs the reflected payload");
   await page.screenshot({ path: join(SHOTS, "4b-xss-proof.png") });
 
-  console.log("Repeater");
-  await page.goto(link.replace(/\/auth.*/, `/#/repeater/${orderId}`));
+  console.log("Replay");
+  await page.goto(link.replace(/\/auth.*/, `/#/replay/${orderId}`));
   await page.locator(".rtab.active", { hasText: `#${orderId}` }).waitFor();
-  check(await page.evaluate(() => location.hash) === "#/repeater", "a request sent from History opens in its own tab");
+  check(await page.evaluate(() => location.hash) === "#/replay", "a request sent from History opens in its own tab");
   await page.getByLabel("Send as").selectOption("anonymous");
   await page.getByTestId("send").click();
   await page.waitForSelector('[data-testid="replay-result"]');
@@ -330,11 +330,11 @@ try {
   check(await page.getByLabel("Raw request").inputValue().then((v) => v.includes("Cookie: a=1; theme=light")), "Inspector edits a cookie");
   await page.getByRole("button", { name: "New tab" }).click();
   check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
-  await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
+  await page.screenshot({ path: join(SHOTS, "5-replay.png") });
   await sleep(900); // saved after a short pause
   await page.reload();
   await page.locator(".rtab", { hasText: `#${orderId}` }).waitFor();
-  check(true, "Repeater tabs survive a reload (saved in the project)");
+  check(true, "Replay tabs survive a reload (saved in the project)");
 
   console.log("cURL and HAR");
   await page.goto(link.replace(/\/auth.*/, `/#/history/${orderId}`));
@@ -342,7 +342,7 @@ try {
   await page.waitForSelector('[data-testid="curl-command"]');
   const curlCmd = await page.getByTestId("curl-command").textContent();
   check(curlCmd.startsWith("curl ") && curlCmd.includes("/api/orders/"), "copy as cURL");
-  await page.goto(link.replace(/\/auth.*/, "/#/repeater"));
+  await page.goto(link.replace(/\/auth.*/, "/#/replay"));
   await page.getByTestId("paste-curl").click();
   await page.getByLabel("cURL command").fill(curlCmd);
   await page.getByTestId("parse-curl").click();
@@ -373,26 +373,26 @@ try {
   check(await page.locator('[data-testid="search-hit"] mark').first().textContent() === "alice@", "the match is highlighted");
   await page.screenshot({ path: join(SHOTS, "5c-sitemap.png") });
 
-  console.log("Intruder");
-  await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
+  console.log("Fuzzer");
+  await page.goto(link.replace(/\/auth.*/, `/#/fuzzer/${orderId}`));
   await page.waitForFunction(() => document.querySelector('textarea[aria-label="Request"]')?.value.includes("/api/orders"));
   await page.getByLabel("Request").fill("GET /api/orders?id=1&q=x HTTP/1.1\nHost: shop\nCookie: s=abc\n\n");
   await page.getByTestId("auto-mark").click();
-  check((await page.getByLabel("Request").inputValue()).includes("?id=§1§&q=§x§") && (await page.getByLabel("Request").inputValue()).includes("s=§abc§"), "Auto § marks query values and cookies");
+  check((await page.getByLabel("Request").inputValue()).includes("?id=§1§&q=§x§") && (await page.getByLabel("Request").inputValue()).includes("s=§abc§"), "Auto-mark marks query values and cookies");
   await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");
-  await page.getByLabel("Mode").selectOption("sniper");
+  await page.getByLabel("Mode").selectOption("one_at_a_time");
   await page.getByLabel("Send as").selectOption("bob");
   await page.getByLabel("Payload type").selectOption("list");
   await page.getByLabel("Payloads", { exact: true }).fill("1001\n1002\n9999");
   await page.getByLabel("Grep").fill("alice@");
   await page.getByRole("button", { name: "Add extract" }).click();
   await page.getByLabel("Extract 1 regex").fill("([a-z]+@[a-z.]+)");
-  await page.getByTestId("intruder-run").click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="intruder-summary"]')?.textContent?.includes("· done ·"));
-  check(await page.getByTestId("intruder-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
+  await page.getByTestId("fuzzer-run").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"));
+  check(await page.getByTestId("fuzzer-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
   check((await page.getByTestId("extract-cell").allTextContents()).some((t) => t.startsWith("alice@")), "an extract column shows alice's email");
   check((await page.getByTestId("anomaly").count()) === 3, "alice's orders (grep) and the 404 stand out");
-  await page.screenshot({ path: join(SHOTS, "5b-intruder.png") });
+  await page.screenshot({ path: join(SHOTS, "5b-fuzzer.png") });
 
   console.log("Approvals (an agent asks over MCP)");
   const mcp = start(["mcp", "--actor", "agent:claude"]);
@@ -576,8 +576,8 @@ try {
   await page.getByTestId("intercept-toggle").click();
   await page.waitForSelector("text=Intercept is OFF");
 
-  console.log("Race condition (Repeater races VulnShop's one-time gift card)");
-  await open("repeater");
+  console.log("Race condition (Replay races VulnShop's one-time gift card)");
+  await open("replay");
   await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
   const card = '{"code":"WELCOME10"}';
   await page.getByLabel("Raw request").fill(
@@ -743,9 +743,9 @@ try {
   await page.waitForSelector('[data-testid="graphql-summary"]');
   check(await page.getByTestId("graphql-summary").textContent().then((t) => t.startsWith("3 operations")), "introspection lists 3 operations");
   await page.screenshot({ path: join(SHOTS, "7b-graphql.png"), fullPage: true });
-  await page.getByTestId("graphql-repeater-invoice").click();
+  await page.getByTestId("graphql-replay-invoice").click();
   await page.waitForFunction(() => document.querySelector("textarea")?.value.includes("query Invoice"));
-  check(true, "an example opens in Repeater");
+  check(true, "an example opens in Replay");
   await open("model");
 
   console.log("Passive issues");
@@ -777,7 +777,7 @@ try {
 
   console.log("Tools");
   await open("tools");
-  await page.getByLabel("Decoder input").fill("JTNDc2NyaXB0JTNF");
+  await page.getByLabel("Codec input").fill("JTNDc2NyaXB0JTNF");
   await page.getByTestId("decode").click();
   await page.waitForSelector('[data-testid="decode-step"]');
   check(await page.getByTestId("decode-step").last().textContent() === "<script>", "smart decode peels base64 then URL encoding");
@@ -794,9 +794,9 @@ try {
   await page.getByLabel("Token exchange").fill(String(resetId));
   await page.getByLabel("Samples").fill("20");
   await page.getByLabel("Token locator").fill("json:/debug_code");
-  await page.getByTestId("sequencer").click();
-  await page.waitForSelector('[data-testid="sequencer-result"]', { timeout: 60000 });
-  check(await page.getByTestId("sequencer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "sequencer spots the counter");
+  await page.getByTestId("token-analyzer").click();
+  await page.waitForSelector('[data-testid="token-analyzer-result"]', { timeout: 60000 });
+  check(await page.getByTestId("token-analyzer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "token analyzer spots the counter");
   await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
 
   console.log("Engagement (rules of engagement)");
