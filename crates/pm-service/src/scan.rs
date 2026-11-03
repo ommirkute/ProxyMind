@@ -66,7 +66,7 @@ impl Service {
         let mut groups: BTreeMap<(String, String, String, String), ScanIssue> = BTreeMap::new();
         let mut lines: Vec<pm_plugin::ExchangeLine> = Vec::new();
         let mut where_of: std::collections::HashMap<i64, (String, String)> = std::collections::HashMap::new();
-        let plugins = self.plugins.read().clone();
+        let plugins = self.enabled_plugins();
         for s in summaries {
             let Some(ex) = self.store.lock().get_exchange(s.id)? else { continue };
             let Some(resp) = ex.response.as_deref() else { continue };

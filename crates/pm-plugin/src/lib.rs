@@ -10,14 +10,25 @@
 //!   stdin, closes it, and reads one JSON line per issue from its stdout.
 //!   They send nothing themselves; what they report is untrusted input that
 //!   is validated, clipped and labelled with the plugin's name.
+//! - **Active-check plugins** ([`active`]) propose requests for one recorded
+//!   exchange; ProxyMind sends them through the policy gate and gives the
+//!   responses back to the plugin, which reports issues. They never touch
+//!   the network themselves.
+//!
+//! Every plugin process runs in a [`sandbox`]: a clean environment, no
+//! network where the OS allows it (Linux user namespaces), memory and CPU
+//! limits, a timeout and capped output.
 //!
 //! Plugins are installed per user (a registry in the ProxyMind home
 //! directory), never per project: a project file handed over by someone
 //! else must not decide what runs on your machine.
 
+pub mod active;
+pub mod sandbox;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +61,22 @@ pub struct Manifest {
     pub description: String,
     #[serde(default)]
     pub passive: Option<Passive>,
+    #[serde(default)]
+    pub active: Option<active::Active>,
+}
+
+impl Manifest {
+    /// "passive", "active" or both.
+    pub fn kinds(&self) -> Vec<&'static str> {
+        let mut k = Vec::new();
+        if self.passive.is_some() {
+            k.push("passive");
+        }
+        if self.active.is_some() {
+            k.push("active");
+        }
+        k
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -93,10 +120,19 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
             m.name
         )));
     }
-    match &m.passive {
-        Some(p) if p.command.is_empty() => return Err(PluginError::Invalid("passive.command is empty".into())),
-        None => return Err(PluginError::Invalid("the plugin declares nothing to run (add `passive:`)".into())),
-        _ => {}
+    if m.passive.is_none() && m.active.is_none() {
+        return Err(PluginError::Invalid("the plugin declares nothing to run (add `passive:` or `active:`)".into()));
+    }
+    if m.passive.as_ref().is_some_and(|p| p.command.is_empty()) {
+        return Err(PluginError::Invalid("passive.command is empty".into()));
+    }
+    if let Some(a) = &m.active {
+        if a.command.is_empty() {
+            return Err(PluginError::Invalid("active.command is empty".into()));
+        }
+        if a.max_requests.is_some_and(|n| n == 0 || n > active::MAX_PROBES) {
+            return Err(PluginError::Invalid(format!("active.max_requests must be 1 to {}", active::MAX_PROBES)));
+        }
     }
     Ok(m)
 }
@@ -149,6 +185,17 @@ impl Registry {
 
     pub fn enabled(&self) -> Vec<Installed> {
         self.plugins.iter().filter(|p| p.enabled).cloned().collect()
+    }
+
+    /// Turns a plugin on or off. Returns false if there is no such plugin.
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> bool {
+        match self.plugins.iter_mut().find(|p| p.manifest.name == name) {
+            Some(p) => {
+                p.enabled = enabled;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -231,28 +278,34 @@ pub fn parse_issues(plugin: &str, output: &str, known: &std::collections::HashSe
 /// Runs a passive plugin over `exchanges` and returns its issues and how
 /// many output lines were rejected.
 pub fn run_passive(p: &Installed, exchanges: &[ExchangeLine]) -> Result<(Vec<PluginIssue>, usize)> {
-    let name = p.manifest.name.clone();
-    let err = |why: String| PluginError::Run { name: name.clone(), why };
-    let spec = p.manifest.passive.as_ref().ok_or_else(|| err("not a passive plugin".into()))?;
-    let mut program = PathBuf::from(&spec.command[0]);
-    if spec.command[0].starts_with("./") {
-        program = p.dir.join(&spec.command[0][2..]);
-    }
-    let mut child = Command::new(&program)
-        .args(&spec.command[1..])
-        .current_dir(&p.dir)
+    let spec = p.manifest.passive.as_ref().ok_or_else(|| run_err(p, "not a passive plugin".into()))?;
+    let input: Vec<u8> =
+        exchanges.iter().filter_map(|x| serde_json::to_string(x).ok()).flat_map(|l| (l + "\n").into_bytes()).collect();
+    let out = run(p, &spec.command, spec.timeout_seconds.unwrap_or(60), input)?;
+    let known = exchanges.iter().map(|x| x.exchange_id).collect();
+    Ok(parse_issues(&p.manifest.name, &String::from_utf8_lossy(&out), &known))
+}
+
+fn run_err(p: &Installed, why: String) -> PluginError {
+    PluginError::Run { name: p.manifest.name.clone(), why }
+}
+
+/// Runs one plugin command in the sandbox: writes `input` to its stdin and
+/// returns its stdout (at most [`MAX_OUTPUT`] bytes).
+pub(crate) fn run(p: &Installed, command: &[String], timeout_seconds: u64, input: Vec<u8>) -> Result<Vec<u8>> {
+    let timeout = Duration::from_secs(timeout_seconds.clamp(1, 600));
+    let mut cmd = sandbox::command(&p.dir, command, timeout).map_err(|why| run_err(p, why))?;
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| err(format!("could not start {}: {e}", program.display())))?;
-    let input: Vec<u8> =
-        exchanges.iter().filter_map(|x| serde_json::to_string(x).ok()).flat_map(|l| (l + "\n").into_bytes()).collect();
-    let mut stdin = child.stdin.take().ok_or_else(|| err("no stdin".into()))?;
+        .map_err(|e| run_err(p, format!("could not start {}: {e}", command[0])))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| run_err(p, "no stdin".into()))?;
     let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(&input);
     });
-    let stdout = child.stdout.take().ok_or_else(|| err("no stdout".into()))?;
+    let stdout = child.stdout.take().ok_or_else(|| run_err(p, "no stdout".into()))?;
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
         let mut r = BufReader::new(stdout);
@@ -261,7 +314,6 @@ pub fn run_passive(p: &Installed, exchanges: &[ExchangeLine]) -> Result<(Vec<Plu
         let _ = std::io::copy(&mut r, &mut std::io::sink());
         out
     });
-    let timeout = Duration::from_secs(spec.timeout_seconds.unwrap_or(60).clamp(1, 600));
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(s) = child.try_wait()? {
@@ -270,17 +322,16 @@ pub fn run_passive(p: &Installed, exchanges: &[ExchangeLine]) -> Result<(Vec<Plu
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(err(format!("stopped after {} s", timeout.as_secs())));
+            return Err(run_err(p, format!("stopped after {} s", timeout.as_secs())));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let _ = writer.join();
     let out = reader.join().unwrap_or_default();
     if !status.success() {
-        return Err(err(format!("exited with {status}")));
+        return Err(run_err(p, format!("exited with {status}")));
     }
-    let known = exchanges.iter().map(|x| x.exchange_id).collect();
-    Ok(parse_issues(&p.manifest.name, &String::from_utf8_lossy(&out), &known))
+    Ok(out)
 }
 
 /// Reads JSON lines from a plugin's stdin (for plugins written in Rust and

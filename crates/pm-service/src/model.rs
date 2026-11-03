@@ -89,7 +89,7 @@ impl Service {
             .filter(|(e, _)| {
                 !matches!(
                     e.summary.source.as_str(),
-                    "authz" | "proof" | "scan" | "fuzzer" | "token_analyzer" | "race"
+                    "authz" | "proof" | "scan" | "fuzzer" | "token_analyzer" | "race" | "plugin"
                         // names used before 2026-10-28
                         | "intruder" | "sequencer"
                 )
