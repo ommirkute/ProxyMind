@@ -84,6 +84,12 @@ class ClientTest(unittest.TestCase):
         self.assertIn("ssti", checks)
         self.assertEqual(self.pm.decode("JTNDc2NyaXB0JTNF")[-1]["output"], "<script>")
         self.assertIsInstance(self.pm.issues(), list)
+        plugins = self.pm.plugins()
+        self.assertEqual(plugins["plugins"], [])
+        self.assertIn("summary", plugins["sandbox"])
+        with self.assertRaises(ApiError) as nope:
+            self.pm.plugin_check("missing", ex)
+        self.assertEqual(nope.exception.status, 404)
         with self.assertRaises(ApiError) as e:
             self.pm.exchange(999999)
         self.assertEqual(e.exception.status, 404)

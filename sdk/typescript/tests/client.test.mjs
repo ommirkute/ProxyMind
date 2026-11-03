@@ -71,6 +71,10 @@ test("scans, tools and errors", { skip }, async () => {
   const ex = await get("/greet?name=ann");
   assert.ok((await pm.scanActive(ex)).issues.some((i) => i.check === "ssti"));
   assert.equal((await pm.decode("JTNDc2NyaXB0JTNF")).at(-1).output, "<script>");
+  const plugins = await pm.plugins();
+  assert.deepEqual(plugins.plugins, []);
+  assert.ok(typeof plugins.sandbox.summary === "string");
+  await assert.rejects(pm.pluginCheck("missing", ex), (e) => e instanceof ApiError && e.status === 404);
   await assert.rejects(pm.exchange(999999), (e) => e instanceof ApiError && e.status === 404);
   await assert.rejects(pm.replay({ url: "http://example.org", raw: "GET / HTTP/1.1\r\nHost: example.org\r\n\r\n" }), Denied);
 });

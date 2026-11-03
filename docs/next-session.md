@@ -44,7 +44,10 @@ Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project 
 
 Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, findings filled in from it, duplicate merging, fixed / accepted-risk statuses, retest, executive / technical / compliance templates plus saved MiniJinja templates, HTML / Markdown / PDF output, API/CLI/MCP, and the UI report builder and Issue library page. See the handoff section "Issue library, finding workflow and report templates". Left for later: a Word (.docx) export; per-finding comments and assignment (belongs with team use).
 
-## 4. Task 46: plugin platform (about one to two sessions)
+## 4. Task 46: plugin platform — part 1 done (2026-11-03)
+
+Done: active-check plugins through the gate, the sandbox (clean env; Linux: no network, resource limits), the Plugins page, API/CLI/MCP/SDK (see the handoff, ADR-0015). A Python helper (`proxymind.plugin`) exists. Still open from the list below: UI panels, a WASM runtime, signed manifests, a TypeScript helper.
+
 
 - Plugins today are passive checks over a process protocol (`crates/pm-plugin`; see `docs/adr`). Extend the protocol:
   - `active_check`: a plugin returns probes, and the service sends them through the policy gate (tiers apply).

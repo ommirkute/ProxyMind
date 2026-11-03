@@ -234,6 +234,7 @@ export default function History() {
     { label: "Send to Replay", hint: "Ctrl+R", onClick: () => go("replay", r.id) },
     { label: "Send to Fuzzer", hint: "Ctrl+I", onClick: () => go("fuzzer", r.id) },
     { label: "Active scan", onClick: () => go("issues", r.id) },
+    { label: "Plugin check…", onClick: () => go("plugins", r.id) },
     { label: "Authorization check…", onClick: () => go("authz", r.id) },
     { label: "Copy URL", onClick: () => copyText(urlOf(r)).then(() => setNote("URL copied.")) },
     {

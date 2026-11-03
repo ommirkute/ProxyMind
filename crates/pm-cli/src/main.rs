@@ -548,10 +548,27 @@ enum PluginAction {
     /// Install the plugin in a directory (it must contain proxymind-plugin.yaml).
     /// Plugins run as you, with your permissions: install only code you trust.
     Add { dir: PathBuf },
-    /// List installed plugins.
+    /// List installed plugins and what the sandbox can do on this machine.
     List,
     /// Uninstall a plugin by name.
     Remove { name: String },
+    /// Turn a plugin on (installed plugins start on).
+    Enable { name: String },
+    /// Turn a plugin off without uninstalling it.
+    Disable { name: String },
+    /// Run an active-check plugin on a recorded exchange (its requests go
+    /// through the policy gate).
+    Check {
+        name: String,
+        /// The recorded exchange to check.
+        #[arg(long)]
+        exchange: i64,
+        /// Send the plugin's requests as this identity.
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1393,7 +1410,7 @@ async fn run() -> Result<()> {
             let actor = Actor::parse(actor)?;
             anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
             let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
@@ -1411,7 +1428,7 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             let me = human_actor(actor.as_deref())?;
             let mut setup = pm_api::ProxySetup::default();
             if !*no_proxy {
@@ -1602,7 +1619,7 @@ async fn run() -> Result<()> {
         }
         Command::Scan { host, min_severity, json } => {
             let service = open_service(&cli.project, None)?;
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             let issues = service.scan_passive(
                 &human_actor(None)?,
                 &pm_service::ScanFilter { host: host.clone(), min_severity: min_severity.clone(), limit: None },
@@ -1634,9 +1651,13 @@ async fn run() -> Result<()> {
                     let p = reg.add(dir)?.clone();
                     reg.save()?;
                     out!("✓ installed {} {} from {}", p.manifest.name, p.manifest.version, p.dir.display());
-                    out!(
-                        "  It runs with the passive scan (`proxymind scan`, the Issues page). It runs as you: install only code you trust."
-                    );
+                    if p.manifest.passive.is_some() {
+                        out!("  Passive: runs with the passive scan (`proxymind scan`, the Issues page).");
+                    }
+                    if p.manifest.active.is_some() {
+                        out!("  Active: run it on a recorded request (`proxymind plugin check`, the Plugins page).");
+                    }
+                    out!("  Sandbox: {}. Install only code you trust.", pm_plugin::sandbox::status().summary);
                 }
                 PluginAction::List => {
                     if reg.plugins.is_empty() {
@@ -1644,12 +1665,62 @@ async fn run() -> Result<()> {
                     }
                     for p in &reg.plugins {
                         out!(
-                            "{:<20} {:<8} {}  ({})",
+                            "{:<20} {:<8} {:<15} {:<3} {}  ({})",
                             p.manifest.name,
                             p.manifest.version,
+                            p.manifest.kinds().join("+"),
+                            if p.enabled { "on" } else { "off" },
                             p.manifest.description,
                             p.dir.display()
                         );
+                    }
+                    out!("Sandbox: {}", pm_plugin::sandbox::status().summary);
+                }
+                PluginAction::Enable { name } | PluginAction::Disable { name } => {
+                    let on = matches!(action, PluginAction::Enable { .. });
+                    anyhow::ensure!(reg.set_enabled(name, on), "no plugin named {name}");
+                    reg.save()?;
+                    out!("✓ {name} is {}", if on { "on" } else { "off" });
+                }
+                PluginAction::Check { name, exchange, identity, json } => {
+                    let service = open_service(&cli.project, None)?;
+                    service.attach_plugin_home(home.clone());
+                    let req = pm_service::PluginCheckRequest {
+                        plugin: name.clone(),
+                        exchange_id: *exchange,
+                        identity: identity.clone(),
+                        approval_id: None,
+                    };
+                    let r = service.plugin_check(&human_actor(None)?, req).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&r)?);
+                    } else {
+                        match r {
+                            pm_service::PluginCheckResult::Done { issues, exchange_ids, notes } => {
+                                out!("Sent {} request(s): exchanges {:?}", exchange_ids.len(), exchange_ids);
+                                for i in &issues {
+                                    out!(
+                                        "  [{}] {} — {} (exchange {})",
+                                        i.severity,
+                                        i.title,
+                                        i.evidence,
+                                        i.exchange_id
+                                    );
+                                }
+                                if issues.is_empty() {
+                                    out!("  no issues");
+                                }
+                                for n in notes {
+                                    out!("  note: {n}");
+                                }
+                            }
+                            pm_service::PluginCheckResult::Denied { reasons } => {
+                                anyhow::bail!("denied: {}", reasons.join("; "))
+                            }
+                            pm_service::PluginCheckResult::PendingApproval { summary, .. } => {
+                                out!("Needs approval: {summary}")
+                            }
+                        }
                     }
                 }
                 PluginAction::Remove { name } => {
@@ -2809,16 +2880,11 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
     Ok(())
 }
 
-/// The user's enabled passive-check plugins; problems are reported, not fatal.
-fn user_plugins(cli: &Cli) -> Vec<pm_plugin::Installed> {
-    match home_dir(cli)
-        .map_err(|e| e.to_string())
-        .and_then(|h| pm_plugin::Registry::load(&h).map_err(|e| e.to_string()))
-    {
-        Ok(r) => r.enabled(),
-        Err(e) => {
-            eprintln!("plugins not loaded: {e}");
-            Vec::new()
-        }
+/// Points the service at the user's plugin registry (read when used, so
+/// changes apply without a restart); problems are reported, not fatal.
+fn attach_plugins(cli: &Cli, service: &pm_service::Service) {
+    match home_dir(cli) {
+        Ok(h) => service.attach_plugin_home(h),
+        Err(e) => eprintln!("plugins not loaded: {e}"),
     }
 }

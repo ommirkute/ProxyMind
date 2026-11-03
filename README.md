@@ -121,7 +121,7 @@ Match-and-replace rules (add or strip headers, rewrite bodies) live in the proje
 
 Behind a corporate proxy, or testing an API that needs a client certificate? Set an upstream proxy (HTTP or SOCKS5, with optional login and a bypass list) and client certificates per host in the UI's Network page or with a file ([`examples/network.yaml`](examples/network.yaml)). The proxy, Replay, agents and proofs all use them.
 
-Want your own checks? A passive-check plugin is any program that reads exchanges as JSON lines and prints issues (`proxymind plugin add examples/plugins/jwt-check`); acting plugins use the MCP tools as `plugin:<name>` under stricter rules ([ADR-0014](docs/adr/0014-plugins.md)).
+Want your own checks? A plugin is any program that speaks JSON lines. Passive plugins read recorded exchanges and print issues (`examples/plugins/jwt-check`); active plugins propose requests for one recorded exchange, ProxyMind sends them through the policy gate and the plugin judges the answers (`examples/plugins/debug-switch`). Plugins are installed per user (`proxymind plugin add <dir>`), managed on the Plugins page, and run sandboxed: a clean environment, and on Linux no network access and resource limits ([ADR-0014](docs/adr/0014-plugins.md), [ADR-0015](docs/adr/0015-active-plugins-and-sandbox.md)). Acting plugins use the MCP tools as `plugin:<name>` under stricter rules.
 
 Handing a project to a client or storing it? `proxymind -p client.pmproj project lock --remove` seals it into an encrypted `client.pmlock` (Argon2id passphrase, authenticated encryption); `proxymind project unlock client.pmlock` restores it.
 
@@ -152,7 +152,7 @@ crates/
   pm-diff      semantic diff with learned noise masks           ✅ working
   pm-model     live app model: operations, objects, ownership   ✅ working
   pm-ledger    hypotheses and coverage                          ✅ working
-  pm-plugin    plugins: per-user registry, passive-check protocol ✅ working
+  pm-plugin    plugins: registry, passive/active protocols, sandbox ✅ working
   pm-vault     sealed (encrypted) project files                 ✅ working
   pm-scan      passive scanner checks                           ✅ working
   pm-tools     codec, diff, token analyzer                      ✅ working

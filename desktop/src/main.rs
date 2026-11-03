@@ -97,11 +97,8 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
     let roe =
         store.get_setting("roe")?.with_context(|| format!("{} has no rules of engagement yet", project.display()))?;
     let service = Arc::new(Service::new(store, Policy::new(Roe::parse(&roe)?))?);
-    // The user's passive-check plugins (ADR-0014).
-    match pm_plugin::Registry::load(home) {
-        Ok(r) => service.set_plugins(r.enabled()),
-        Err(e) => eprintln!("plugins not loaded: {e}"),
-    }
+    // The user's plugins (ADR-0014, ADR-0015), read from their registry when used.
+    service.attach_plugin_home(home.to_path_buf());
     // ROE edits (Engagement page, `proxymind roe use`) apply while the app runs.
     pm_service::watch_roe(service.clone());
     // Scheduled scans start while the app is open.

@@ -293,6 +293,16 @@ export class Client {
     return this.act("/discover", { url, ...opts });
   }
 
+  /** Installed plugins (per user) and what the plugin sandbox does here. */
+  plugins(): Promise<Json> {
+    return this.get("/plugins");
+  }
+
+  /** Runs an active-check plugin on a recorded exchange; its requests go through the policy gate. */
+  pluginCheck(plugin: string, exchange_id: number, opts: { identity?: string; approval_id?: string } = {}): Promise<Json> {
+    return this.act("/plugins/check", { plugin, exchange_id, ...opts });
+  }
+
   scanActive(exchange_id: number, opts: { checks?: string[] } & Json = {}): Promise<Json> {
     return this.act("/scan/active", { exchange_id, ...opts });
   }

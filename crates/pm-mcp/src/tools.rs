@@ -431,6 +431,27 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool("scan_profiles", "Scan profiles (built-in and saved): their checks and limits.", json!({}), &[]),
         tool(
+            "plugin_list",
+            "The user's installed plugins (passive checks run with scan_issues; active checks run with plugin_check), \
+             whether each is on, and what the plugin sandbox does on this machine.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "plugin_check",
+            "Run an active-check plugin on one recorded exchange: the plugin proposes requests (to that exchange's \
+             host only), ProxyMind sends them through the policy gate (intrusive at least, so agents usually get \
+             pending_approval listing the exact requests; retry with approval_id once approved), then the plugin \
+             judges the responses and reports issues (leads, not findings).",
+            json!({
+                "plugin": {"type":"string"},
+                "exchange_id": {"type":"integer"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"}
+            }),
+            &["plugin", "exchange_id"],
+        ),
+        tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
              out or delete), plus robots.txt and sitemaps. Pages go into history and the app model. Returns pages \
@@ -782,6 +803,11 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
             r.map(to_json).map_err(|e| e.to_string())
         }
         "scan_profiles" => service.scan_profiles().map(to_json).map_err(|e| e.to_string()),
+        "plugin_list" => Ok(to_json(service.plugin_list())),
+        "plugin_check" => {
+            let r: pm_service::PluginCheckRequest = args(a)?;
+            service.plugin_check(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;
             service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())

@@ -799,6 +799,38 @@ try {
   check(await page.getByTestId("token-analyzer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "token analyzer spots the counter");
   await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
 
+  console.log("Plugins");
+  let python = false;
+  try {
+    execFileSync("python3", ["--version"]);
+    python = true;
+  } catch {
+    console.log("  (python3 not found: skipping the active plugin)");
+  }
+  if (python) {
+    pm("plugin", "add", new URL("../../examples/plugins/debug-switch", import.meta.url).pathname);
+    await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+    const productsId = await page.evaluate(async () => {
+      for (let i = 0; i < 50; i++) {
+        const rows = (await (await fetch("/api/v1/exchanges?path=/api/products&limit=20")).json()).exchanges;
+        const row = rows.find((r) => r.path === "/api/products");
+        if (row) return row.id;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return null;
+    });
+    await open(`plugins/${productsId}`);
+    await page.waitForSelector('[data-testid="plugin-table"]');
+    check(await page.getByTestId("plugin-sandbox").textContent().then((t) => t.startsWith("Sandbox:")), "the plugin sandbox status is shown");
+    await page.getByTestId("plugin-run").click();
+    await page.waitForSelector('[data-testid="plugin-result"]', { timeout: 60000 });
+    check(await page.getByTestId("plugin-result").textContent().then((t) => t.includes("Hidden debug switch")), "an active plugin finds the hidden debug switch");
+    await page.screenshot({ path: join(SHOTS, "6f-plugins.png"), fullPage: true });
+    await page.getByTestId("plugin-toggle-debug-switch").click();
+    await page.getByText("Off · turn on").waitFor();
+    check(/debug-switch\s+\S+\s+active\s+off/.test(pm("plugin", "list")), "turning a plugin off is saved in the user's registry");
+  }
+
   console.log("Engagement (rules of engagement)");
   await open("engagement");
   await page.waitForSelector('[data-testid="roe-summary"]');

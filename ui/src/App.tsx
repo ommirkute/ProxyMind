@@ -19,6 +19,7 @@ import Network from "./pages/Network";
 import Findings from "./pages/Findings";
 import Issues from "./pages/Issues";
 import Tools from "./pages/Tools";
+import Plugins from "./pages/Plugins";
 import Audit from "./pages/Audit";
 import SiteMap from "./pages/SiteMap";
 import Engagement from "./pages/Engagement";
@@ -60,7 +61,7 @@ const GROUPS: Group[] = [
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
-  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "library", label: "Issue library" }] },
+  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
   { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
@@ -191,6 +192,7 @@ export default function App() {
     model: Model,
     issues: Issues,
     tools: Tools,
+    plugins: Plugins,
     sitemap: SiteMap,
     engagement: Engagement,
     setup: Setup,

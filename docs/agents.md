@@ -89,6 +89,8 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
 | `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
+| `plugin_list` | The user's plugins (passive and/or active, on or off) and what the plugin sandbox does on this machine |
+| `plugin_check` | Run an active-check plugin on one recorded exchange: its proposed requests (that exchange's host only) go through the gate as one batch, at least intrusive, so you usually get `pending_approval` listing the exact requests; retry with `approval_id`. Returns the plugin's issues (leads) and the exchanges sent |
 | `scan_issues` | Passive scan of recorded traffic (sends nothing): security headers, cookies, CORS, version disclosure, database errors, secrets, directory listings, plus installed passive-check plugins (`<plugin>/<check>`); grouped, most severe first. Leads to test, not findings |
 | `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
 | `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies; secrets are replaced before matching, snippets are untrusted |

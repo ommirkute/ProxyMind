@@ -224,6 +224,17 @@ class Client:
         """Looks for hidden files and folders under url (GET only; built-in list unless words are given)."""
         return self._check(self._post("/discover", self._args(url=url, words=words, extensions=extensions, **extra)))
 
+    def plugins(self) -> dict:
+        """Installed plugins (per user) and what the plugin sandbox does here: {plugins, sandbox, registry}."""
+        return self._get("/plugins")
+
+    def plugin_check(self, plugin: str, exchange_id: int, identity: Optional[str] = None,
+                     approval_id: Optional[str] = None) -> dict:
+        """Runs an active-check plugin on a recorded exchange; its requests go through the policy gate.
+        Returns {issues, exchange_ids, notes}; raises PendingApproval or Denied otherwise."""
+        return self._check(self._post("/plugins/check", self._args(
+            plugin=plugin, exchange_id=exchange_id, identity=identity, approval_id=approval_id)))
+
     def scan_active(self, exchange_id: int, checks: Optional[list] = None, **extra: Any) -> dict:
         return self._check(self._post("/scan/active", self._args(exchange_id=exchange_id, checks=checks, **extra)))
 

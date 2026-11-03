@@ -2856,6 +2856,7 @@ name = "pm-plugin"
 version = "0.0.1"
 dependencies = [
  "pm-core",
+ "pm-http",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3152,7 +3153,6 @@ dependencies = [
  "anyhow",
  "axum",
  "pm-api",
- "pm-plugin",
  "pm-proxy",
  "pm-service",
  "pm-store",

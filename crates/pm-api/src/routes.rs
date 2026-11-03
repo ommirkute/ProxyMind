@@ -137,6 +137,9 @@ pub fn api() -> Router<AppState> {
         .route("/scan/tasks/{id}/cancel", post(scan_task_cancel))
         .route("/scan/tasks/{id}/pause", post(scan_task_pause))
         .route("/scan/tasks/{id}/resume", post(scan_task_resume))
+        .route("/plugins", get(plugins))
+        .route("/plugins/check", post(plugin_check))
+        .route("/plugins/{name}", axum::routing::put(plugin_set))
         .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
         .route("/scan/profiles/{name}", axum::routing::delete(scan_profile_delete))
         .route("/scan/schedules", get(scan_schedules).post(scan_schedule_save))
@@ -383,6 +386,24 @@ async fn scan_task_pause(State(st): State<AppState>, Path(id): Path<String>) -> 
 
 async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
     ok(st.service.scan_task_resume(&st.actor, &id)?)
+}
+
+async fn plugins(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.plugin_list())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginSet {
+    enabled: bool,
+}
+
+async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b): Json<PluginSet>) -> ApiResult {
+    ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
+}
+
+async fn plugin_check(State(st): State<AppState>, Json(r): Json<pm_service::PluginCheckRequest>) -> ApiResult {
+    ok(st.service.plugin_check(&st.actor, r).await?)
 }
 
 async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
