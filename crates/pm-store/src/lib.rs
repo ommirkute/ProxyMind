@@ -223,6 +223,28 @@ CREATE TABLE scan_schedules (
 ALTER TABLE findings ADD COLUMN retest TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN duplicates INTEGER NOT NULL DEFAULT 0;
 "#,
+    r#"
+-- Collaborator payloads: tokens handed out for out-of-band tests, so
+-- interactions can be shown under the payload that caused them.
+CREATE TABLE oast_payloads (
+    id         INTEGER PRIMARY KEY,
+    token      TEXT NOT NULL UNIQUE,
+    note       TEXT NOT NULL DEFAULT '',
+    actor      TEXT NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+-- Organizer: exchanges kept aside for later, with a status and a note.
+CREATE TABLE organizer (
+    id          INTEGER PRIMARY KEY,
+    exchange_id INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'new',
+    note        TEXT NOT NULL DEFAULT '',
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL,
+    updated_ms  INTEGER NOT NULL
+);
+CREATE INDEX organizer_exchange ON organizer(exchange_id);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1271,6 +1293,8 @@ impl Store {
                 "updated_ms",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
+            "oast_payloads" => &["token", "note", "actor", "created_ms"],
+            "organizer" => &["exchange_id", "status", "note", "actor", "created_ms", "updated_ms"],
             _ => return None,
         })
     }
@@ -1375,6 +1399,12 @@ impl Store {
             Ok(m)
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes one row of an engagement table. Returns false if there was none.
+    pub fn delete_row(&mut self, table: &str, id: i64) -> Result<bool> {
+        Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        Ok(self.conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])? == 1)
     }
 
     pub fn row(&self, table: &str, id: i64) -> Result<Option<Row>> {

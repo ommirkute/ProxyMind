@@ -686,7 +686,7 @@ const OPENAPI: &str = r##"{
 }"##;
 
 const HOME: &str = "<!doctype html><html><head><title>VulnShop</title></head><body>\
-<h1>VulnShop</h1><p>A deliberately vulnerable demo shop. Do not expose it to a network.</p>\
+<h1>VulnShop</h1><!-- TODO before launch: remove the debug switch on /api/products --><p>A deliberately vulnerable demo shop. Do not expose it to a network.</p>\
 <form method=post action=/api/login><input name=username><input type=password name=password>\
 <button>Log in</button></form><a href=/api/products>Products</a> \
 <form action=/search><input name=q><button>Search</button></form> <a href=\"/search?q=coffee\">Coffee</a> \

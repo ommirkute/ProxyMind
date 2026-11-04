@@ -9,6 +9,7 @@
 
 pub mod codec;
 pub mod curl;
+pub mod engage;
 pub mod har;
 pub mod hql;
 pub mod linediff;

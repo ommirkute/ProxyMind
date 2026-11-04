@@ -9,8 +9,10 @@ mod assistant;
 mod authz;
 mod auto;
 mod browser;
+mod collaborator;
 mod crawl;
 mod discover;
+mod engage;
 mod findings;
 mod fuzzer;
 mod graphql;
@@ -44,8 +46,10 @@ pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
+pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorStatus};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
+pub use engage::{EngageFilter, FoundComment, FoundScript, TargetAnalysis};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
@@ -141,6 +145,8 @@ pub struct Service {
     roe_text: parking_lot::Mutex<Option<String>>,
     /// Passive-check plugins the user installed (never from the project).
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
+    /// The Collaborator callback listener this process runs, if any.
+    oast_listening: std::sync::OnceLock<std::net::SocketAddr>,
     /// The user's home directory, whose plugin registry is read when used.
     plugin_home: std::sync::OnceLock<std::path::PathBuf>,
     /// Recent Fuzzer attacks (running ones keep going in the background).
@@ -184,6 +190,7 @@ impl Service {
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             plugin_home: std::sync::OnceLock::new(),
+            oast_listening: std::sync::OnceLock::new(),
             attacks: parking_lot::Mutex::new(Vec::new()),
             scan_tasks: parking_lot::Mutex::new(Vec::new()),
             proxy_info: std::sync::OnceLock::new(),
