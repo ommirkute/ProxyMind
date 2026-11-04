@@ -23,6 +23,7 @@ mod login_record;
 mod model;
 mod network;
 mod openapi;
+mod organizer;
 mod plugins;
 mod proof;
 mod race;
@@ -63,6 +64,7 @@ pub use network::{
     load_network, sync_listeners, sync_network, watch_project,
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
+pub use organizer::{ORGANIZER_STATUSES, OrganizerItem, OrganizerUpdate};
 pub use plugins::{PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
@@ -79,12 +81,14 @@ pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, S
 pub use scan_profile::{PROFILES_SETTING, ScanProfile, builtin_profiles};
 pub use scan_schedule::{Every, ScanSchedule, next_run_after};
 pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
-pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
+pub use search::{
+    MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView, WsSearchHit, WsSearchRequest, WsSearchResult,
+};
 pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
-pub use tools::{DecodeRequest, TokenAnalyzerRequest, TokenAnalyzerResult};
+pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};

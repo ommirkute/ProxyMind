@@ -106,7 +106,16 @@ impl Service {
             .await
             .map_err(|e| ServiceError::Invalid(format!("can't listen on {listen}: {e}")))?;
         let bound = l.local_addr().map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        let public = public_url.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| format!("http://{bound}"));
+        // Without a public URL, payloads point here; "all interfaces" isn't an
+        // address a target can call, so loopback stands in (local labs).
+        let reach = match bound.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::from(([127, 0, 0, 1], bound.port())),
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 1], bound.port()))
+            }
+            _ => bound,
+        };
+        let public = public_url.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| format!("http://{reach}"));
         self.set_oast_public_url(public.trim())?;
         let _ = self.oast_listening.set(bound);
         let me = self.clone();

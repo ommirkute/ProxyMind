@@ -2945,6 +2945,7 @@ dependencies = [
  "anyhow",
  "futures-util",
  "jiff",
+ "memchr",
  "minijinja",
  "parking_lot",
  "pm-ai",

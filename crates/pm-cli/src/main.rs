@@ -82,9 +82,16 @@ enum Command {
         regex: bool,
         #[arg(long)]
         case_sensitive: bool,
-        /// request, response or both
+        /// both, request, response, headers, bodies, request_headers, request_body, response_headers or
+        /// response_body
         #[arg(long, default_value = "both")]
         part: String,
+        /// List exchanges that do NOT match
+        #[arg(long)]
+        invert: bool,
+        /// Only in-scope exchanges
+        #[arg(long)]
+        in_scope: bool,
         /// Only hosts containing this text
         #[arg(long)]
         host: Option<String>,
@@ -1173,7 +1180,7 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Search { query, regex, case_sensitive, part, host, limit, json } => {
+        Command::Search { query, regex, case_sensitive, part, invert, in_scope, host, limit, json } => {
             let service = open_service(&cli.project, None)?;
             let r = service.history_search_text(
                 &human_actor(None)?,
@@ -1182,8 +1189,14 @@ async fn run() -> Result<()> {
                     regex: *regex,
                     case_sensitive: *case_sensitive,
                     part: Some(part.clone()),
+                    invert: *invert,
                     max_scan: Some(pm_service::MAX_SCAN),
-                    filter: pm_store::HistoryFilter { host: host.clone(), limit: Some(*limit), ..Default::default() },
+                    filter: pm_store::HistoryFilter {
+                        host: host.clone(),
+                        limit: Some(*limit),
+                        in_scope: in_scope.then_some(true),
+                        ..Default::default()
+                    },
                 },
             )?;
             if *json {

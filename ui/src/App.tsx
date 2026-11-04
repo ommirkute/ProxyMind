@@ -26,6 +26,10 @@ import Engagement from "./pages/Engagement";
 import Setup from "./pages/Setup";
 import WsHistory from "./pages/WsHistory";
 import Sessions from "./pages/Sessions";
+import Collaborator from "./pages/Collaborator";
+import Engage from "./pages/Engage";
+import Search from "./pages/Search";
+import Organizer from "./pages/Organizer";
 
 interface Group {
   id: string;
@@ -40,6 +44,7 @@ interface Group {
 const GROUPS: Group[] = [
   { id: "dashboard", label: "Dashboard", icon: "dashboard", section: "Workspace", pages: [
     { id: "overview", label: "Overview" },
+    { id: "search", label: "Search" },
     { id: "findings", label: "Findings" },
     { id: "issues", label: "Scanner issues" },
     { id: "scans", label: "Scans" },
@@ -49,6 +54,7 @@ const GROUPS: Group[] = [
   { id: "target", label: "Target", icon: "target", section: "Workspace", pages: [
     { id: "sitemap", label: "Site map & Search" },
     { id: "model", label: "Model & Coverage" },
+    { id: "engage", label: "Engagement tools" },
     { id: "engagement", label: "Scope & rules" },
   ] },
   { id: "proxy", label: "Proxy", icon: "proxy", section: "Testing", pages: [
@@ -61,6 +67,8 @@ const GROUPS: Group[] = [
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
+  { id: "collaborator", label: "Collaborator", icon: "collab", section: "Testing", pages: [{ id: "collaborator", label: "Collaborator" }] },
+  { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
   { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
   { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
@@ -103,6 +111,9 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPalette((p) => !p);
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        window.location.hash = "#/search";
       }
     };
     window.addEventListener("keydown", onKey);
@@ -201,6 +212,10 @@ export default function App() {
     findings: Findings,
     audit: Audit,
     network: Network,
+    collaborator: Collaborator,
+    engage: Engage,
+    search: Search,
+    organizer: Organizer,
   }[route.page];
 
   const group = groupOf(route.page);

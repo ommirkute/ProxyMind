@@ -59,7 +59,31 @@ fn text_of(raw: &[u8], max: usize) -> String {
     t[..cut].to_string()
 }
 
+/// A change to a request in the Replay editor (nothing is sent).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestTransform {
+    /// GET ⇄ POST, moving the parameters between query and body.
+    ChangeMethod { raw: String },
+    /// Re-encode the body's parameters.
+    ConvertBody { raw: String, to: pm_tools::reqedit::BodyEncoding },
+}
+
 impl Service {
+    /// Rewrites a request's text (method or body encoding); nothing is sent.
+    pub fn request_transform(&self, t: &RequestTransform) -> Result<Value> {
+        let (RequestTransform::ChangeMethod { raw } | RequestTransform::ConvertBody { raw, .. }) = t;
+        if raw.len() > pm_tools::codec::MAX_OUTPUT {
+            return Err(ServiceError::Invalid("request larger than 4 MB".into()));
+        }
+        let out = match t {
+            RequestTransform::ChangeMethod { raw } => pm_tools::reqedit::change_method(raw),
+            RequestTransform::ConvertBody { raw, to } => pm_tools::reqedit::convert_body(raw, *to),
+        }
+        .map_err(ServiceError::Invalid)?;
+        Ok(json!({ "raw": out }))
+    }
+
     /// Encodes/decodes locally (nothing is sent).
     pub fn decode(&self, req: &DecodeRequest) -> Result<Value> {
         if req.input.len() > pm_tools::codec::MAX_OUTPUT {

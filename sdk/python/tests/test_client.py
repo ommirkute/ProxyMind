@@ -134,6 +134,23 @@ class ClientTest(unittest.TestCase):
         origins = [s["origin"] for s in self.pm.site_map()]
         self.assertIn(self.url, origins)
 
+    def test_organizer_engagement_tools_and_request_helpers(self):
+        self.get("/")
+        ex = self.get("/api/products")
+        item = self.pm.organizer_add(ex, "look at this")
+        self.pm.organizer_update(item["id"], status="done")
+        self.assertEqual([i["id"] for i in self.pm.organizer(status="done")], [item["id"]])
+        self.pm.organizer_delete(item["id"])
+        self.assertEqual(self.pm.organizer(status="done"), [])
+        self.assertTrue(self.pm.engage_analyze(in_scope=False)["requests"] > 0)
+        self.assertIn("framable", self.pm.clickjacking(ex))
+        self.assertIn("<form", self.pm.csrf_poc(ex, technique="form"))
+        post = self.pm.request_transform("GET /a?x=1 HTTP/1.1\r\nHost: h\r\n\r\n")
+        self.assertTrue(post.startswith("POST /a ") and post.endswith("x=1"))
+        self.assertTrue(self.pm.request_transform(post, op="convert_body", to="json").endswith('{"x":"1"}'))
+        self.assertIn("hits", self.pm.search("coffee", part="response_body", invert=True))
+        self.assertIn("hits", self.pm.search_ws("anything"))
+
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.
         with self.assertRaises(PendingApproval) as p:

@@ -655,3 +655,8 @@ kbd {
   background: linear-gradient(135deg, var(--accent), #b14cf0); box-shadow: 0 6px 18px rgba(91, 76, 240, .35);
 }
 .hero .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+/* A button that looks like a link (copy-to-clipboard values). */
+button.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+button.link:hover { text-decoration: underline; }
+.search-hit { margin-bottom: 6px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; }

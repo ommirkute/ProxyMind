@@ -107,6 +107,16 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   assert.equal((await pm.history({ source: "import", path: "/ts-copied" })).length, 1);
   assert.ok((await pm.search("coffee", { part: "response" })).hits.length > 0);
   assert.ok((await pm.siteMap()).some((s) => s.origin === url));
+  const item = await pm.organizerAdd(ex, "ts note");
+  await pm.organizerUpdate(item.id, { status: "postponed" });
+  assert.deepEqual((await pm.organizer("postponed")).map((i) => i.id), [item.id]);
+  await pm.organizerDelete(item.id);
+  assert.ok((await pm.engageAnalyze({ in_scope: false })).requests > 0);
+  assert.ok("framable" in (await pm.clickjacking(ex)));
+  const post = await pm.requestTransform("GET /a?x=1 HTTP/1.1\r\nHost: h\r\n\r\n");
+  assert.ok(post.startsWith("POST /a ") && post.endsWith("x=1"));
+  assert.ok((await pm.requestTransform(post, "json")).endsWith('{"x":"1"}'));
+  assert.ok("hits" in (await pm.searchWs("anything")));
 });
 
 test("rules of engagement, discovery and GraphQL", { skip }, async () => {

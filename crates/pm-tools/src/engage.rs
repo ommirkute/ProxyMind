@@ -269,7 +269,7 @@ fn pct(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn form_pairs(s: &str) -> Vec<(String, String)> {
+pub(crate) fn form_pairs(s: &str) -> Vec<(String, String)> {
     s.split('&')
         .filter(|p| !p.is_empty())
         .map(|p| {
@@ -479,7 +479,7 @@ pub fn csrf_poc(origin: &str, raw: &[u8], technique: CsrfTechnique, auto_submit:
     Ok(page)
 }
 
-fn multipart_fields(body: &str, content_type: &str) -> Vec<(String, String)> {
+pub(crate) fn multipart_fields(body: &str, content_type: &str) -> Vec<(String, String)> {
     let Some(boundary) =
         content_type.split("boundary=").nth(1).map(|b| b.trim_matches('"').split(';').next().unwrap_or("").to_string())
     else {

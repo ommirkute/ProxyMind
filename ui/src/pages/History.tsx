@@ -236,6 +236,17 @@ export default function History() {
     { label: "Active scan", onClick: () => go("issues", r.id) },
     { label: "Plugin check…", onClick: () => go("plugins", r.id) },
     { label: "Authorization check…", onClick: () => go("authz", r.id) },
+    {
+      label: "Send to Organizer",
+      onClick: () =>
+        api
+          .post("/organizer", { exchange_id: r.id })
+          .then(() => setNote(`#${r.id} sent to the Organizer.`))
+          .catch((e) => setError(e.message)),
+    },
+    { label: "Generate CSRF PoC…", onClick: () => go("engage", `csrf:${r.id}`) },
+    { label: "Find references", onClick: () => go("engage", `refs:${r.id}`) },
+    { label: "Test clickjacking", onClick: () => go("engage", `clickjack:${r.id}`) },
     { label: "Copy URL", onClick: () => copyText(urlOf(r)).then(() => setNote("URL copied.")) },
     {
       label: "Copy as cURL",

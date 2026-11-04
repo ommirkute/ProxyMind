@@ -315,6 +315,23 @@ export default function Replay() {
         <label className="small row" style={{ gap: 4 }} title="Follow same-origin redirects automatically (up to 5)">
           <input type="checkbox" checked={tab.autoFollow} onChange={(e) => update({ autoFollow: e.target.checked })} /> follow redirects
         </label>
+        <select
+          aria-label="Change request"
+          data-testid="request-transform"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (!v) return;
+            const body = v === "method" ? { op: "change_method", raw: tab.raw } : { op: "convert_body", raw: tab.raw, to: v };
+            action.run(async () => editRaw((await api.post<{ raw: string }>("/tools/request-transform", body)).raw));
+          }}
+        >
+          <option value="">Request…</option>
+          <option value="method">Change method (GET ⇄ POST)</option>
+          <option value="url_encoded">Body as URL-encoded form</option>
+          <option value="multipart">Body as multipart form</option>
+          <option value="json">Body as JSON</option>
+        </select>
         <button className="btn" onClick={() => setCurlOpen((o) => !o)} data-testid="paste-curl">Paste cURL…</button>
         <button className="btn" onClick={() => setInspector((i) => !i)} aria-pressed={inspector}>Inspector</button>
       </div>
