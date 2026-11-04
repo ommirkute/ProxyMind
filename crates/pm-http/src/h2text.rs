@@ -185,6 +185,16 @@ pub fn h2_response(raw: &[u8]) -> Result<H2Response> {
     }
 }
 
+/// A response head's headers as HTTP/2 sends them: lowercase names, without
+/// connection-specific ones (the body is passed on as it streams).
+pub fn h2_headers(head: &crate::ResponseHead) -> Vec<(String, Vec<u8>)> {
+    head.headers
+        .iter()
+        .map(|h| (h.name.to_ascii_lowercase(), h.value.trim_ascii().to_vec()))
+        .filter(|(n, _)| !CONNECTION_SPECIFIC.contains(&n.as_str()) && !n.starts_with(':'))
+        .collect()
+}
+
 /// True when a response's status line says `HTTP/2`.
 pub fn is_http2_response(raw: &[u8]) -> bool {
     raw.starts_with(b"HTTP/2 ") || raw.starts_with(b"HTTP/2.0 ")

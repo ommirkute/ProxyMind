@@ -18,6 +18,7 @@ mod h2send;
 pub mod net;
 pub mod race;
 
+pub use h2send::StreamedResponse;
 pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy};
 
 const READ_CHUNK: usize = 16 * 1024;
@@ -63,9 +64,85 @@ impl<S: AsyncRead + Unpin> Conn<S> {
             bail!("message larger than {} MB", MAX_MESSAGE >> 20);
         }
         self.buf.resize(start + READ_CHUNK, 0);
-        let n = self.io.read(&mut self.buf[start..]).await;
+        let n = match self.io.read(&mut self.buf[start..]).await {
+            // Many TLS servers close without a close_notify alert. HTTP
+            // framing (Content-Length, chunked) still tells a complete body
+            // from a cut one, so treat it as the end of the stream.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(0),
+            other => other,
+        };
         self.buf.truncate(start + *n.as_ref().unwrap_or(&0));
         Ok(n? > 0)
+    }
+
+    async fn fill_within(&mut self, idle: Duration) -> Result<bool> {
+        tokio::time::timeout(idle, self.fill())
+            .await
+            .map_err(|_| anyhow!("nothing arrived for {} s", idle.as_secs()))?
+    }
+
+    /// The next piece of a body, exactly as framed on the wire (chunked
+    /// bodies stay chunked). `None` once the body is complete; waits at most
+    /// `idle` for more bytes.
+    pub async fn body_chunk(&mut self, b: &mut BodyStream, idle: Duration) -> Result<Option<Vec<u8>>> {
+        if b.done {
+            return Ok(None);
+        }
+        loop {
+            match b.kind {
+                BodyKind::None => {
+                    b.done = true;
+                    return Ok(None);
+                }
+                BodyKind::ContentLength(n) => {
+                    if b.read >= n {
+                        b.done = true;
+                        return Ok(None);
+                    }
+                    if self.buf.is_empty() && !self.fill_within(idle).await? {
+                        b.cut_short = Some(format!(
+                            "the server closed the connection after {} of {n} announced body bytes",
+                            b.read
+                        ));
+                        b.done = true;
+                        return Ok(None);
+                    }
+                    let k = (self.buf.len() as u64).min(n - b.read) as usize;
+                    b.read += k as u64;
+                    return Ok(Some(self.buf.drain(..k).collect()));
+                }
+                BodyKind::UntilClose => {
+                    if self.buf.is_empty() && !self.fill_within(idle).await? {
+                        b.done = true;
+                        return Ok(None);
+                    }
+                    b.read += self.buf.len() as u64;
+                    return Ok(Some(std::mem::take(&mut self.buf)));
+                }
+                BodyKind::Chunked => {
+                    if let Some(len) = b.scanner.scan(&self.buf)? {
+                        b.done = true;
+                        b.read += len as u64;
+                        return Ok(Some(self.buf.drain(..len).collect()));
+                    }
+                    let n = b.scanner.scanned();
+                    if n > 0 {
+                        b.scanner.consume(n);
+                        b.read += n as u64;
+                        return Ok(Some(self.buf.drain(..n).collect()));
+                    }
+                    if !self.fill_within(idle).await? {
+                        b.cut_short = Some("the server closed the connection in the middle of a chunked body".into());
+                        b.done = true;
+                        if self.buf.is_empty() {
+                            return Ok(None);
+                        }
+                        b.read += self.buf.len() as u64;
+                        return Ok(Some(std::mem::take(&mut self.buf)));
+                    }
+                }
+            }
+        }
     }
 
     /// Reads one message head. `None` means the peer closed cleanly between messages.
@@ -161,6 +238,40 @@ pub struct Response {
     /// Set when the server closed before the body it announced was
     /// complete: `raw` holds what arrived.
     pub cut_short: Option<String>,
+}
+
+/// Reading a body piece by piece (see [`Conn::body_chunk`]).
+#[derive(Debug)]
+pub struct BodyStream {
+    kind: BodyKind,
+    scanner: ChunkedScanner,
+    done: bool,
+    /// Body bytes read so far (as framed).
+    pub read: u64,
+    /// Set when the server closed before the body it announced was complete.
+    pub cut_short: Option<String>,
+}
+
+impl BodyStream {
+    pub fn new(kind: BodyKind) -> Self {
+        Self { kind, scanner: ChunkedScanner::new(), done: false, read: 0, cut_short: None }
+    }
+
+    pub fn kind(&self) -> BodyKind {
+        self.kind
+    }
+}
+
+/// A response whose head has arrived; read the body with [`Conn::body_chunk`].
+pub struct ResponseStart {
+    /// Interim (1xx) heads, then the final head, as received.
+    pub raw_head: Vec<u8>,
+    pub head: ResponseHead,
+    pub body: BodyStream,
+    /// The connection, positioned at the body (after `101`, at the new protocol).
+    pub conn: Conn<Box<dyn Io>>,
+    /// The bytes actually sent, when they differ from the request given.
+    pub sent: Option<Vec<u8>>,
 }
 
 /// What happens to the connection after the response.
@@ -390,6 +501,44 @@ impl Sender {
             .context("timed out waiting for the response")?
     }
 
+    /// Sends one raw HTTP/1.1 request and returns as soon as the response
+    /// head has arrived (waiting at most `head_timeout` for it), so the body
+    /// can be passed on while it streams.
+    pub async fn send_start(
+        &self,
+        ep: &Endpoint,
+        request: &[u8],
+        method: &str,
+        check: Option<AddrCheck<'_>>,
+        head_timeout: Duration,
+    ) -> Result<ResponseStart> {
+        if pm_http::h2text::is_http2_request(request) {
+            bail!("streaming sends speak HTTP/1.1");
+        }
+        let wire = self.wire_bytes(ep, request)?;
+        let sent = (wire.as_ref() != request).then(|| wire.to_vec());
+        let io = self.connect(ep, check).await?;
+        let mut conn = Conn::new(io);
+        conn.io.write_all(&wire).await?;
+        conn.io.flush().await?;
+        let read_heads = async {
+            let mut raw = Vec::new();
+            loop {
+                let head_raw = conn.read_head().await?.ok_or_else(|| anyhow!("server closed without responding"))?;
+                let head = pm_http::parse_response_head(&head_raw)?;
+                raw.extend_from_slice(&head_raw);
+                if head.status == 101 || !(100..200).contains(&head.status) {
+                    return anyhow::Ok((raw, head));
+                }
+            }
+        };
+        let (raw_head, head) = tokio::time::timeout(head_timeout, read_heads)
+            .await
+            .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))??;
+        let kind = if head.status == 101 { BodyKind::None } else { head.body_kind(method)? };
+        Ok(ResponseStart { raw_head, head, body: BodyStream::new(kind), conn, sent })
+    }
+
     /// Sends several requests so they arrive at (almost) the same moment, for
     /// race-condition testing. Each request gets its own connection; all but
     /// the last byte of every request is sent first, then the final bytes are
@@ -515,6 +664,42 @@ mod tests {
             }
         });
         port
+    }
+
+    async fn pieces(kind: BodyKind, wire: &'static [&'static [u8]]) -> (Vec<u8>, BodyStream) {
+        let (mut tx, rx) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            for w in wire {
+                tx.write_all(w).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut c = Conn::new(rx);
+        let mut b = BodyStream::new(kind);
+        let mut out = Vec::new();
+        while let Some(p) = c.body_chunk(&mut b, Duration::from_secs(2)).await.unwrap() {
+            out.extend_from_slice(&p);
+        }
+        (out, b)
+    }
+
+    #[tokio::test]
+    async fn bodies_stream_piece_by_piece() {
+        let (body, b) = pieces(BodyKind::ContentLength(10), &[b"01234", b"56789", b"NEXT"]).await;
+        assert_eq!((body.as_slice(), b.read, b.cut_short.is_none()), (&b"0123456789"[..], 10, true));
+        let (body, b) = pieces(BodyKind::Chunked, &[b"5\r\nhel", b"lo\r\n0\r\n\r\n", b"NEXT"]).await;
+        assert_eq!(body, b"5\r\nhello\r\n0\r\n\r\n", "framing kept, the next message left alone");
+        assert!(b.cut_short.is_none());
+        let (body, b) = pieces(BodyKind::ContentLength(10), &[b"01234"]).await;
+        assert_eq!(body, b"01234");
+        assert!(b.cut_short.unwrap().contains("5 of 10"));
+        let (body, _) = pieces(BodyKind::UntilClose, &[b"a", b"b"]).await;
+        assert_eq!(body, b"ab");
+        // Nothing for longer than the idle time: an error, not a hang.
+        let (_tx, rx) = tokio::io::duplex(64);
+        let mut c = Conn::new(rx);
+        let mut b = BodyStream::new(BodyKind::Chunked);
+        assert!(c.body_chunk(&mut b, Duration::from_millis(50)).await.is_err());
     }
 
     #[tokio::test]

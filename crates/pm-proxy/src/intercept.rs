@@ -204,6 +204,12 @@ impl InterceptQueue {
         self.matches(Kind::WsToServer, scheme, host, port, path)
     }
 
+    /// Whether a message of this kind would be held (responses are then
+    /// read whole before the browser gets them).
+    pub fn wants(&self, kind: Kind, scheme: &str, host: &str, port: u16, path: &str) -> bool {
+        self.matches(kind, scheme, host, port, path)
+    }
+
     /// Holds a message if the settings say so, and waits for a decision.
     #[allow(clippy::too_many_arguments)]
     pub async fn hold(

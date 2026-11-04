@@ -233,6 +233,16 @@ impl ChunkedScanner {
         Self::default()
     }
 
+    /// How many bytes at the start of the buffer are checked so far.
+    pub fn scanned(&self) -> usize {
+        self.pos
+    }
+
+    /// The caller removed the first `n` scanned bytes from its buffer.
+    pub fn consume(&mut self, n: usize) {
+        self.pos -= n.min(self.pos);
+    }
+
     /// Returns `Some(len)` when `buf[..len]` is the complete raw body.
     pub fn scan(&mut self, buf: &[u8]) -> Result<Option<usize>> {
         loop {
@@ -256,8 +266,12 @@ impl ChunkedScanner {
                     self.state = if size == 0 { ChunkState::Trailers } else { ChunkState::Data(size) };
                 }
                 ChunkState::Data(size) => {
+                    // Take what has arrived, so a large chunk can be passed
+                    // on while it streams.
                     let avail = (buf.len() - self.pos) as u64;
                     if avail < size {
+                        self.pos = buf.len();
+                        self.state = ChunkState::Data(size - avail);
                         return Ok(None);
                     }
                     self.pos += size as usize;
@@ -336,6 +350,74 @@ pub fn split_message(raw: &[u8]) -> (&[u8], &[u8]) {
     match find_head_end(raw) {
         Ok(Some(end)) => raw.split_at(end),
         _ => (raw, &[]),
+    }
+}
+
+/// Decodes a chunked body as it streams in (to pass the payload on, e.g.
+/// as HTTP/2 data). Trailers are skipped.
+#[derive(Debug, Default)]
+pub struct ChunkDecoder {
+    state: DecodeState,
+    line: Vec<u8>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum DecodeState {
+    #[default]
+    Size,
+    Data(u64),
+    DataEnd,
+    Trailers,
+    Done,
+}
+
+impl ChunkDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends the payload in `input` to `out`. Returns true once the final
+    /// chunk and trailers have been seen (later bytes are ignored).
+    pub fn feed(&mut self, mut input: &[u8], out: &mut Vec<u8>) -> Result<bool> {
+        while !input.is_empty() || self.state == DecodeState::Done {
+            match self.state {
+                DecodeState::Done => return Ok(true),
+                DecodeState::Data(n) => {
+                    let k = (n.min(input.len() as u64)) as usize;
+                    out.extend_from_slice(&input[..k]);
+                    input = &input[k..];
+                    self.state = if n == k as u64 { DecodeState::DataEnd } else { DecodeState::Data(n - k as u64) };
+                }
+                DecodeState::Size | DecodeState::DataEnd | DecodeState::Trailers => {
+                    let Some(nl) = memchr::memchr(b'\n', input) else {
+                        self.line.extend_from_slice(input);
+                        if self.line.len() > 4096 {
+                            return Err(HttpError::BadChunk("chunk size line too long"));
+                        }
+                        return Ok(false);
+                    };
+                    self.line.extend_from_slice(&input[..nl]);
+                    input = &input[nl + 1..];
+                    let line = std::mem::take(&mut self.line);
+                    let line = line.strip_suffix(b"\r").unwrap_or(&line);
+                    self.state = match self.state {
+                        DecodeState::Size => {
+                            let hex = line.split(|&b| b == b';').next().unwrap_or_default().trim_ascii();
+                            let size = std::str::from_utf8(hex)
+                                .ok()
+                                .and_then(|s| u64::from_str_radix(s, 16).ok())
+                                .ok_or(HttpError::BadChunk("bad chunk size"))?;
+                            if size == 0 { DecodeState::Trailers } else { DecodeState::Data(size) }
+                        }
+                        DecodeState::DataEnd if line.is_empty() => DecodeState::Size,
+                        DecodeState::DataEnd => return Err(HttpError::BadChunk("missing CRLF after chunk data")),
+                        _ if line.is_empty() => DecodeState::Done,
+                        _ => DecodeState::Trailers,
+                    };
+                }
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -517,6 +599,32 @@ mod tests {
         assert_eq!(split_absolute_target("/x"), None);
         assert_eq!(split_host_port("a.com", 80), Some(("a.com".into(), 80)));
         assert_eq!(split_host_port("[::1]:8443", 443), Some(("::1".into(), 8443)));
+    }
+
+    #[test]
+    fn decodes_chunks_as_they_stream() {
+        let body = b"4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nX-T: 1\r\n\r\nNEXT";
+        for split in 1..body.len() {
+            let mut d = ChunkDecoder::new();
+            let mut out = Vec::new();
+            let done = d.feed(&body[..split], &mut out).unwrap() | d.feed(&body[split..], &mut out).unwrap();
+            assert!(done, "split {split}");
+            assert_eq!(out, b"Wikipedia", "split {split}");
+        }
+        assert!(ChunkDecoder::new().feed(b"zz\r\n", &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn the_scanner_passes_big_chunks_on_as_they_arrive() {
+        let mut s = ChunkedScanner::new();
+        let mut buf = b"a\r\n01234".to_vec();
+        assert_eq!(s.scan(&buf).unwrap(), None);
+        assert_eq!(s.scanned(), buf.len(), "the partial chunk counts as checked");
+        let n = s.scanned();
+        buf.drain(..n);
+        s.consume(n);
+        buf.extend_from_slice(b"56789\r\n0\r\n\r\nrest");
+        assert_eq!(s.scan(&buf).unwrap(), Some(buf.len() - 4));
     }
 
     #[test]
