@@ -508,10 +508,11 @@ impl Proxy {
             let buffered = pm_http::h2text::is_http2_request(&record.request)
                 || self.buffers_response(&target.scheme, &target.host, target.port, &path);
             if !buffered {
-                let start = match self.sender.send_start(&ep, &record.request, &method, check, HEAD_TIMEOUT).await {
-                    Ok(start) => start,
-                    Err(e) => return self.bad_gateway(client, &target.host, target.port, record, started, e).await,
-                };
+                let start =
+                    match self.sender.send_start_pooled(&ep, &record.request, &method, check, HEAD_TIMEOUT).await {
+                        Ok(start) => start,
+                        Err(e) => return self.bad_gateway(client, &target.host, target.port, record, started, e).await,
+                    };
                 if let Some(sent) = &start.sent {
                     record.request.clone_from(sent);
                 }
@@ -562,6 +563,11 @@ impl Proxy {
                 record.duration_ms = Some(started.elapsed().as_millis() as i64);
                 record.response = Some(capture);
                 self.recorder.record(record);
+                // A complete response leaves the server connection reusable.
+                if !client_gone && !failed && !server_close && body.is_complete() && body.kind() != BodyKind::UntilClose
+                {
+                    self.sender.release(&ep, up);
+                }
                 let close = client_gone
                     || failed
                     || head.wants_close()

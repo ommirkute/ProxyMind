@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 
 mod h2send;
 pub mod net;
+mod pool;
 pub mod race;
 
 pub use h2send::StreamedResponse;
@@ -260,6 +261,11 @@ impl BodyStream {
     pub fn kind(&self) -> BodyKind {
         self.kind
     }
+
+    /// The whole body arrived (nothing was cut short).
+    pub fn is_complete(&self) -> bool {
+        self.done && self.cut_short.is_none()
+    }
 }
 
 /// A response whose head has arrived; read the body with [`Conn::body_chunk`].
@@ -290,6 +296,8 @@ pub struct Sender {
     net: Network,
     connect_timeout: Duration,
     read_timeout: Duration,
+    /// Connections kept for the proxy (see [`Sender::send_start_pooled`]).
+    pool: std::sync::Arc<pool::Pool>,
 }
 
 impl Sender {
@@ -300,6 +308,7 @@ impl Sender {
             net: Network::default(),
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(60),
+            pool: std::sync::Arc::default(),
         })
     }
 
@@ -521,22 +530,67 @@ impl Sender {
         let mut conn = Conn::new(io);
         conn.io.write_all(&wire).await?;
         conn.io.flush().await?;
-        let read_heads = async {
-            let mut raw = Vec::new();
-            loop {
-                let head_raw = conn.read_head().await?.ok_or_else(|| anyhow!("server closed without responding"))?;
-                let head = pm_http::parse_response_head(&head_raw)?;
-                raw.extend_from_slice(&head_raw);
-                if head.status == 101 || !(100..200).contains(&head.status) {
-                    return anyhow::Ok((raw, head));
-                }
-            }
-        };
-        let (raw_head, head) = tokio::time::timeout(head_timeout, read_heads)
-            .await
-            .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))??;
+        let (raw_head, head) = read_heads(&mut conn, head_timeout).await?;
         let kind = if head.status == 101 { BodyKind::None } else { head.body_kind(method)? };
         Ok(ResponseStart { raw_head, head, body: BodyStream::new(kind), conn, sent })
+    }
+
+    /// The pool key for an endpoint: same target, same way of reaching it.
+    pub(crate) fn pool_key(&self, ep: &Endpoint) -> String {
+        format!(
+            "{}|{}|{}|{:?}|{:?}",
+            ep.scheme,
+            ep.host.to_ascii_lowercase(),
+            ep.port,
+            self.net.upstream_for(&ep.host),
+            self.net.address_for(&ep.host)
+        )
+    }
+
+    /// Like [`Sender::send_start`], reusing a kept connection for requests
+    /// that are safe to retry (GET, HEAD, OPTIONS). If the kept connection
+    /// turns out closed before anything came back, it sends on a new one.
+    /// For the proxy: hand the connection back with [`Sender::release`].
+    pub async fn send_start_pooled(
+        &self,
+        ep: &Endpoint,
+        request: &[u8],
+        method: &str,
+        check: Option<AddrCheck<'_>>,
+        head_timeout: Duration,
+    ) -> Result<ResponseStart> {
+        if pm_http::h2text::is_http2_request(request) || !retry_safe(method) {
+            return self.send_start(ep, request, method, check, head_timeout).await;
+        }
+        let key = self.pool_key(ep);
+        let wire = self.wire_bytes(ep, request)?;
+        let sent = (wire.as_ref() != request).then(|| wire.to_vec());
+        while let Some(mut conn) = self.pool.take_h1(&key) {
+            if !pool::alive(&mut conn).await {
+                continue;
+            }
+            if conn.io.write_all(&wire).await.is_err() || conn.io.flush().await.is_err() {
+                continue;
+            }
+            match read_heads(&mut conn, head_timeout).await {
+                Ok((raw_head, head)) => {
+                    let kind = if head.status == 101 { BodyKind::None } else { head.body_kind(method)? };
+                    return Ok(ResponseStart { raw_head, head, body: BodyStream::new(kind), conn, sent });
+                }
+                // Closed before anything came back: the server dropped the
+                // idle connection. Try the next one, then a new one.
+                Err(_) if conn.buf.is_empty() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        self.send_start(ep, request, method, check, head_timeout).await
+    }
+
+    /// Keeps a connection whose response was read completely, for reuse.
+    pub fn release(&self, ep: &Endpoint, conn: Conn<Box<dyn Io>>) {
+        if conn.buf.is_empty() {
+            self.pool.put_h1(self.pool_key(ep), conn);
+        }
     }
 
     /// Sends several requests so they arrive at (almost) the same moment, for
@@ -606,6 +660,32 @@ where
         }
     }
     out
+}
+
+/// Requests that may be sent again if a kept connection was closed.
+pub(crate) fn retry_safe(method: &str) -> bool {
+    matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS")
+}
+
+/// Reads interim (1xx) heads and the final head (or `101`).
+pub(crate) async fn read_heads(
+    conn: &mut Conn<Box<dyn Io>>,
+    head_timeout: Duration,
+) -> Result<(Vec<u8>, ResponseHead)> {
+    let read = async {
+        let mut raw = Vec::new();
+        loop {
+            let head_raw = conn.read_head().await?.ok_or_else(|| anyhow!("server closed without responding"))?;
+            let head = pm_http::parse_response_head(&head_raw)?;
+            raw.extend_from_slice(&head_raw);
+            if head.status == 101 || !(100..200).contains(&head.status) {
+                return anyhow::Ok((raw, head));
+            }
+        }
+    };
+    tokio::time::timeout(head_timeout, read)
+        .await
+        .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))?
 }
 
 async fn read_response(mut conn: Conn<Box<dyn Io>>, method: &str, started: Instant) -> Result<Response> {

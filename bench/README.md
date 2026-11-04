@@ -49,3 +49,20 @@ The model-free baseline (`proxymind bench auto`) has three steps, all through th
 Measured 2026-10-26 after the detection pass driven by these benchmarks: logins are scanned (SQL injection in Juice Shop's login, JS-1; account enumeration in VAmPI's, VA-6), password changes are re-sent without the current password (JS-6), sign-ups get a unique email per probe (JS-4), discovery finds debug endpoints that leak credentials under API collections (VA-2) and confidential files in directory listings (JS-8, which needed the HTTP client to keep a body the server cut short), the access-control pass flags responses that show another test user's email (JS-5), and reflected input becomes an XSS finding (VS-6). VAmPI's remaining misses need state-changing tests (VA-4 changes another user's password, VA-5's sign-up doesn't echo the admin flag) or a ReDoS (VA-7).
 
 Measured 2026-10-20 against the pinned images, after scanner step 1 (blind SQL injection by true/false pairs and delays, in parameters and headers; command injection; error confirmation): VulnShop's blind SQLi (VS-3), command injection (VS-14) and User-Agent SQLi (VS-15) are now found. Its other bugs sit on endpoints that nothing links to and its OpenAPI file doesn't list, or need a browser (XSS), concurrency (race) or a second step (GraphQL, reset codes): that's what agents are for. `bench/run.sh` also starts an OAST listener (on the Docker bridge, so containers can reach it) for the out-of-band checks; VulnShop's SSRF (VS-4) is only reachable from an endpoint nothing links to, and its blind XXE (VS-16) is a POST, which the sweep doesn't send. The sweep scans GETs with parameters first, then up to 20 without (headers and cookies), and skips paths whose names change state (`/createdb`, `/logout`…). After step 3b the sweep also renders HTML pages in headless Chromium for DOM XSS (VS-25), and re-sends up to 10 recorded submissions (not logins) for stored XSS (VS-23, values looked for on pages from history) and CSRF (VS-24; a request accepted without cookies isn't counted); the base64-JSON SQLi (VS-26) is found through nested insertion points. Juice Shop and VAmPI are unchanged. Step 4a adds JWT, GraphQL, web cache, mass assignment and prototype pollution checks: VulnShop's VS-27…VS-33 are all found, plus two real token bugs the ground truth lacked until then: VAmPI's JWT secret is `random` (VA-8) and Juice Shop accepts unsigned `alg: none` tokens (JS-9). App-wide bugs like these use `method: "*"` and `path: "*"` in the ground truth. Step 4b adds OAuth and deserialization checks, plus request smuggling, file upload and race checks that need approval; `bench/run.sh` allows them for its throwaway apps (`tiers: human: destructive: allow`). VulnShop's VS-34…VS-37 are found; its race (VS-5) needs a one-time action that hasn't been used yet, which the recorded traffic doesn't have.
+
+## Proxy traffic matrix
+
+`bench/proxy/run.sh` checks the intercepting proxy against real-world traffic patterns, through `proxymind proxy`, over plain HTTP, HTTPS with HTTP/2 to the proxy (as browsers do) and HTTPS with HTTP/1.1:
+
+- server-sent events and slowly chunked responses arrive as they're sent;
+- a 300 MB download and a 70 s long poll complete;
+- `Expect: 100-continue` uploads don't stall; a 50 MB upload completes;
+- 40 keep-alive requests share one server connection, and a connection the server closed while idle is retried;
+- 204, 304, HEAD, 302 and close-delimited responses end correctly, and gzip bodies stay byte-exact.
+
+```bash
+PROXYMIND=$PWD/target/debug/proxymind bench/proxy/run.sh            # all 30 cases, about 5 minutes
+PROXYMIND=$PWD/target/debug/proxymind bench/proxy/run.sh https-sse-streams   # one case
+```
+
+2026-11-04: 30/30 (7 of the first 18 cases passed before responses streamed).

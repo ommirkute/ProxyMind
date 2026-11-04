@@ -221,6 +221,7 @@ impl Proxy {
         let head_only = method.eq_ignore_ascii_case("HEAD") || matches!(r.head.status, 204 | 304);
         let mut capture = r.raw_head.clone();
         let mut truncated = false;
+        let mut reusable = head_only;
         let sent_head = b.body(()).context("building the HTTP/2 response").and_then(|head| {
             respond.send_response(head, head_only).context("sending the response head to the browser")
         });
@@ -251,6 +252,7 @@ impl Proxy {
                     stream.send_reset(h2::Reason::INTERNAL_ERROR);
                 } else {
                     let _ = stream.send_data(Bytes::new(), true);
+                    reusable = true;
                 }
             }
             Ok(_) => {}
@@ -269,6 +271,9 @@ impl Proxy {
         record.duration_ms = Some(started.elapsed().as_millis() as i64);
         record.response = Some(capture);
         self.recorder.record(record);
+        if reusable && let Some(conn) = r.into_reusable() {
+            self.sender.release(&ep, conn);
+        }
         Ok(())
     }
 }

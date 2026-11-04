@@ -122,3 +122,72 @@ async fn the_proxy_answers_100_continue() {
         got.extend_from_slice(&buf[..n]);
     }
 }
+
+/// A keep-alive backend that counts connections. With `drop_after_each`, it
+/// closes every connection after one response without saying so (like a
+/// server whose idle timeout just expired).
+async fn counting_backend(drop_after_each: bool) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c2 = count.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                    buf.drain(..end);
+                    if s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.is_err() || drop_after_each
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, count)
+}
+
+async fn get_via(proxy_port: u16, backend: u16, n: usize) -> usize {
+    let mut c = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+    let mut ok = 0;
+    for _ in 0..n {
+        c.write_all(format!("GET http://127.0.0.1:{backend}/ HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !got.ends_with(b"\r\n\r\nok") {
+            let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf)).await.unwrap().unwrap();
+            if n == 0 {
+                return ok;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        ok += 1;
+    }
+    ok
+}
+
+#[tokio::test]
+async fn server_connections_are_reused_and_dead_ones_retried() {
+    let (proxy_port, _) = proxy("pool").await;
+    let (backend, count) = counting_backend(false).await;
+    assert_eq!(get_via(proxy_port, backend, 10).await, 10);
+    assert_eq!(get_via(proxy_port, backend, 5).await, 5, "a second browser connection");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1, "one server connection for all 15");
+
+    // The server drops each connection after its response: the kept one is
+    // dead next time, and the proxy notices and sends on a new one.
+    let (flaky, opened) = counting_backend(true).await;
+    assert_eq!(get_via(proxy_port, flaky, 4).await, 4);
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 4);
+}

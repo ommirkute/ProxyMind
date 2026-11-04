@@ -8,7 +8,9 @@ use pm_http::h2text::{downgrade_request, h2_request, render_h2_response};
 use pm_http::{BodyKind, ChunkDecoder, ResponseHead};
 use tokio::io::AsyncWriteExt;
 
-use crate::{AddrCheck, AfterResponse, BodyStream, Conn, Endpoint, Io, Response, Sender, read_response};
+use crate::{
+    AddrCheck, AfterResponse, BodyStream, Conn, Endpoint, Io, Response, Sender, read_heads, read_response, retry_safe,
+};
 
 /// Largest response body read over HTTP/2.
 const MAX_BODY: usize = 64 << 20;
@@ -122,6 +124,19 @@ pub struct StreamedResponse {
 }
 
 impl StreamedResponse {
+    /// The HTTP/1.1 connection, if the response was read completely and the
+    /// connection can carry another request.
+    pub fn into_reusable(self) -> Option<Conn<Box<dyn Io>>> {
+        match self.body {
+            StreamBody::H1 { conn, body, .. }
+                if body.is_complete() && body.kind() != BodyKind::UntilClose && !self.head.wants_close() =>
+            {
+                Some(conn)
+            }
+            _ => None,
+        }
+    }
+
     /// The next piece of the body: `(raw, payload)`, where `raw` is how
     /// history records it and `payload` is the content (chunked framing
     /// removed). `None` once the body is complete.
@@ -174,7 +189,9 @@ impl StreamedResponse {
 
 impl Sender {
     /// Like [`Sender::send_h2`], but returns once the response head has
-    /// arrived, so the body can be passed on while it streams.
+    /// arrived, so the body can be passed on while it streams. For the
+    /// proxy: it shares one HTTP/2 connection per host, and reuses kept
+    /// HTTP/1.1 connections (see [`Sender::send_start_pooled`]).
     pub async fn send_h2_start(
         &self,
         ep: &Endpoint,
@@ -185,73 +202,113 @@ impl Sender {
     ) -> Result<StreamedResponse> {
         let req = h2_request(request).map_err(|e| anyhow!("not a valid HTTP/2 request: {e}"))?;
         let authority = req.authority.clone().unwrap_or_else(|| pm_core::authority(&ep.scheme, &ep.host, ep.port));
+        let key = self.pool_key(ep);
+
+        // The host's shared HTTP/2 connection.
+        if let Some(client) = self.pool.h2(&key) {
+            match tokio::time::timeout(Duration::from_secs(5), client.ready()).await {
+                Ok(Ok(client)) => match h2_send_on(client, ep, &req, &authority, head_timeout).await {
+                    Ok(r) => return Ok(r),
+                    Err(e) if !retry_safe(method) => {
+                        self.pool.drop_h2(&key);
+                        return Err(e);
+                    }
+                    Err(_) => self.pool.drop_h2(&key),
+                },
+                _ => self.pool.drop_h2(&key),
+            }
+        }
+        // A kept HTTP/1.1 connection: this host doesn't speak HTTP/2.
+        if retry_safe(method) && self.pool.h1_has(&key) {
+            let bytes = downgrade_request(&req, &authority);
+            while let Some(mut conn) = self.pool.take_h1(&key) {
+                if !crate::pool::alive(&mut conn).await
+                    || conn.io.write_all(&bytes).await.is_err()
+                    || conn.io.flush().await.is_err()
+                {
+                    continue;
+                }
+                match read_heads(&mut conn, head_timeout).await {
+                    Ok((raw_head, head)) => return h1_streamed(conn, raw_head, head, bytes, method),
+                    Err(_) if conn.buf.is_empty() => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
         let (io, h2) = self.connect_with(ep, check, true).await?;
         if !h2 {
             let bytes = downgrade_request(&req, &authority);
             let mut conn = Conn::new(io);
             conn.io.write_all(&bytes).await?;
             conn.io.flush().await?;
-            let read_heads = async {
-                let mut raw = Vec::new();
-                loop {
-                    let head_raw =
-                        conn.read_head().await?.ok_or_else(|| anyhow!("server closed without responding"))?;
-                    let head = pm_http::parse_response_head(&head_raw)?;
-                    raw.extend_from_slice(&head_raw);
-                    if !(100..200).contains(&head.status) {
-                        return anyhow::Ok((raw, head));
-                    }
-                }
-            };
-            let (raw_head, head) = tokio::time::timeout(head_timeout, read_heads)
-                .await
-                .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))??;
-            let kind = head.body_kind(method)?;
-            let decoder = (kind == BodyKind::Chunked).then(ChunkDecoder::new);
-            return Ok(StreamedResponse {
-                raw_head,
-                head,
-                sent: Some(bytes),
-                read: 0,
-                cut_short: None,
-                body: StreamBody::H1 { conn, body: BodyStream::new(kind), decoder },
-            });
+            let (raw_head, head) = read_heads(&mut conn, head_timeout).await?;
+            return h1_streamed(conn, raw_head, head, bytes, method);
         }
-
         let (client, connection) = h2::client::handshake(io).await.context("HTTP/2 handshake")?;
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        let mut client = client.ready().await.context("HTTP/2 connection")?;
-        let uri = format!("{}://{authority}{}", ep.scheme, req.path);
-        let mut builder = http::Request::builder().method(req.method.as_str()).uri(&uri);
-        for (name, value) in &req.headers {
-            let value =
-                http::HeaderValue::from_bytes(value).with_context(|| format!("header {name} has a bad value"))?;
-            builder = builder.header(name.as_str(), value);
-        }
-        let http_req = builder.body(()).with_context(|| format!("can't send {} {uri} over HTTP/2", req.method))?;
-        let end = req.body.is_empty();
-        let (resp, mut stream) = client.send_request(http_req, end).context("sending the HTTP/2 request")?;
-        if !end {
-            stream.send_data(Bytes::from(req.body.clone()), true).context("sending the HTTP/2 body")?;
-        }
-        let resp = tokio::time::timeout(head_timeout, resp)
-            .await
-            .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))?
-            .context("HTTP/2 response")?;
-        let (parts, body) = resp.into_parts();
-        let headers: Vec<(String, Vec<u8>)> =
-            parts.headers.iter().map(|(n, v)| (n.as_str().to_string(), v.as_bytes().to_vec())).collect();
-        let raw_head = render_h2_response(parts.status.as_u16(), &headers, &[]);
-        let head = pm_http::parse_response_head(&raw_head)?;
-        Ok(StreamedResponse {
-            raw_head,
-            head,
-            sent: None,
-            read: 0,
-            cut_short: None,
-            body: StreamBody::H2 { body, done: false },
-        })
+        let client = client.ready().await.context("HTTP/2 connection")?;
+        self.pool.put_h2(key, client.clone());
+        h2_send_on(client, ep, &req, &authority, head_timeout).await
     }
+}
+
+fn h1_streamed(
+    conn: Conn<Box<dyn Io>>,
+    raw_head: Vec<u8>,
+    head: ResponseHead,
+    sent: Vec<u8>,
+    method: &str,
+) -> Result<StreamedResponse> {
+    let kind = head.body_kind(method)?;
+    let decoder = (kind == BodyKind::Chunked).then(ChunkDecoder::new);
+    Ok(StreamedResponse {
+        raw_head,
+        head,
+        sent: Some(sent),
+        read: 0,
+        cut_short: None,
+        body: StreamBody::H1 { conn, body: BodyStream::new(kind), decoder },
+    })
+}
+
+/// Sends one request on an HTTP/2 connection and waits for the head.
+async fn h2_send_on(
+    mut client: h2::client::SendRequest<Bytes>,
+    ep: &Endpoint,
+    req: &pm_http::h2text::H2Request,
+    authority: &str,
+    head_timeout: Duration,
+) -> Result<StreamedResponse> {
+    let uri = format!("{}://{authority}{}", ep.scheme, req.path);
+    let mut builder = http::Request::builder().method(req.method.as_str()).uri(&uri);
+    for (name, value) in &req.headers {
+        let value = http::HeaderValue::from_bytes(value).with_context(|| format!("header {name} has a bad value"))?;
+        builder = builder.header(name.as_str(), value);
+    }
+    let http_req = builder.body(()).with_context(|| format!("can't send {} {uri} over HTTP/2", req.method))?;
+    let end = req.body.is_empty();
+    let (resp, mut stream) = client.send_request(http_req, end).context("sending the HTTP/2 request")?;
+    if !end {
+        stream.send_data(Bytes::from(req.body.clone()), true).context("sending the HTTP/2 body")?;
+    }
+    let resp = tokio::time::timeout(head_timeout, resp)
+        .await
+        .map_err(|_| anyhow!("no response within {} s", head_timeout.as_secs()))?
+        .context("HTTP/2 response")?;
+    let (parts, body) = resp.into_parts();
+    let headers: Vec<(String, Vec<u8>)> =
+        parts.headers.iter().map(|(n, v)| (n.as_str().to_string(), v.as_bytes().to_vec())).collect();
+    let raw_head = render_h2_response(parts.status.as_u16(), &headers, &[]);
+    let head = pm_http::parse_response_head(&raw_head)?;
+    Ok(StreamedResponse {
+        raw_head,
+        head,
+        sent: None,
+        read: 0,
+        cut_short: None,
+        body: StreamBody::H2 { body, done: false },
+    })
 }
