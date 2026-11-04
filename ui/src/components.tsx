@@ -225,7 +225,17 @@ export function Highlighted({ text, q }: { text: string; q: string }) {
   return <>{out}</>;
 }
 
-export type ViewMode = "pretty" | "raw" | "hex";
+export type ViewMode = "pretty" | "raw" | "hex" | "render";
+
+/** Blocks every fetch from a rendered page: target content must not reach out from the UI. */
+const RENDER_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:">`;
+
+function htmlBody(text: string, decodedBody?: string | null): string | null {
+  const end = text.search(/\r?\n\r?\n/);
+  const head = end < 0 ? text : text.slice(0, end);
+  if (!/^HTTP\//.test(head) || !/^content-type:\s*[^\r\n]*html/im.test(head)) return null;
+  return decodedBody ?? (end < 0 ? "" : text.slice(end).replace(/^\r?\n\r?\n/, ""));
+}
 
 /**
  * A request or response with Pretty / Raw / Hex views and a search box.
@@ -282,14 +292,31 @@ export function MessageView({
     }
   };
   if (text == null) return <Empty>{empty ?? "Nothing to show"}</Empty>;
+  const html = htmlBody(text, decodedBody);
+  const modes: ViewMode[] = html != null ? ["pretty", "raw", "hex", "render"] : ["pretty", "raw", "hex"];
+  if (mode === "render" && html != null) {
+    return (
+      <div className="msgview" data-testid={testid}>
+        <div className="msgbar">
+          {modes.map((m) => (
+            <button key={m} className={`seg ${mode === m ? "on" : ""}`} onClick={() => choose(m)} aria-pressed={mode === m}>
+              {m[0].toUpperCase() + m.slice(1)}
+            </button>
+          ))}
+          <span className="small muted grow">Rendered without scripts or network access.</span>
+        </div>
+        <iframe title="Rendered response" className="render" sandbox="" srcDoc={RENDER_CSP + html} data-testid="render-frame" />
+      </div>
+    );
+  }
   // Pretty-printing very large messages would freeze the page.
-  const pretty = mode === "pretty" && text.length <= PRETTY_MAX;
+  const pretty = (mode === "pretty" || mode === "render") && text.length <= PRETTY_MAX;
   const shown = mode === "hex" ? (hex ?? "Loading…") : pretty ? prettyMessage(text, decodedBody) : text;
   const count = q ? shown.split(new RegExp(escapeRe(q), "i")).length - 1 : 0;
   return (
     <div className="msgview" data-testid={testid}>
       <div className="msgbar">
-        {(["pretty", "raw", "hex"] as ViewMode[]).map((m) => (
+        {modes.map((m) => (
           <button key={m} className={`seg ${mode === m ? "on" : ""}`} onClick={() => choose(m)} aria-pressed={mode === m}>
             {m[0].toUpperCase() + m.slice(1)}
           </button>

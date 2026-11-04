@@ -257,6 +257,15 @@ export default function History() {
           .then(() => setNote("cURL command copied."))
           .catch((e) => setError(e.message)),
     },
+    ...(["python", "javascript", "powershell"] as const).map((lang) => ({
+      label: `Copy as ${lang === "python" ? "Python requests" : lang === "javascript" ? "JavaScript fetch" : "PowerShell"}`,
+      onClick: () =>
+        api
+          .get<{ code: string }>(`/exchanges/${r.id}/code?lang=${lang}`)
+          .then((c) => copyText(c.code))
+          .then(() => setNote("Code copied."))
+          .catch((e) => setError(e.message)),
+    })),
     {
       label: "Highlight",
       swatches: [null, ...HIGHLIGHTS].map((c) => ({ color: c, onClick: () => annotate(r, c, r.comment) })),

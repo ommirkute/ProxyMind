@@ -424,6 +424,21 @@ try {
   await page.locator('[data-testid="collab-interactions"] td', { hasText: "blind ssrf in avatar url" }).first().waitFor({ timeout: 10000 });
   check(true, "the callback shows up under the payload's note");
   await page.screenshot({ path: join(SHOTS, "5d-collaborator.png") });
+  await viaProxy(proxy, shop, "GET /search?q=render-check HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const htmlId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=render-check&limit=1")).json()).exchanges[0].id);
+  await open(`history/${htmlId}`);
+  await page.locator('[data-testid="response-view"] button', { hasText: "Render" }).click();
+  const renderFrame = page.getByTestId("render-frame");
+  check(await renderFrame.getAttribute("sandbox") === "" && (await renderFrame.getAttribute("srcdoc")).includes("default-src 'none'"), "HTML responses render sandboxed, without scripts or network");
+  await page.locator('[data-testid="response-view"] button', { hasText: "Pretty" }).click();
+  await page.getByTestId(`row-${htmlId}`).click({ button: "right" });
+  await page.getByText("Copy as Python requests").click();
+  await page.locator("text=Code copied.").first().waitFor();
+  check(true, "Copy as Python requests");
+  await open("rules");
+  await page.getByTestId("rules-preset").selectOption("unhide_fields");
+  check(await page.locator('[data-testid="rules"] tbody tr').count() >= 2, "a response-modification preset adds its rules");
+  await page.getByRole("button", { name: "Discard changes" }).click();
 
   console.log("Fuzzer");
   await page.goto(link.replace(/\/auth.*/, `/#/fuzzer/${orderId}`));

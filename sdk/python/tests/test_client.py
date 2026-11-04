@@ -150,6 +150,8 @@ class ClientTest(unittest.TestCase):
         self.assertTrue(self.pm.request_transform(post, op="convert_body", to="json").endswith('{"x":"1"}'))
         self.assertIn("hits", self.pm.search("coffee", part="response_body", invert=True))
         self.assertIn("hits", self.pm.search_ws("anything"))
+        self.assertIn("requests.request(", self.pm.code(ex, "python"))
+        self.assertTrue(any(p["id"] == "unhide_fields" for p in self.pm.match_replace_presets()))
 
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.

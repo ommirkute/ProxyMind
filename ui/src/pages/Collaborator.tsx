@@ -10,7 +10,8 @@ const time = (ms: number) => new Date(ms).toLocaleTimeString();
 
 /** Out-of-band payloads to paste by hand, and the callbacks they cause. */
 export default function Collaborator() {
-  const status = useLoad(() => api.get<Status>("/collaborator"), []);
+  const [seen, setSeen] = useState(0);
+  const status = useLoad(() => api.get<Status>("/collaborator"), [seen]);
   const s = status.data;
   const ready = !!(s?.public_url || s?.dns_domain);
   return (
@@ -23,8 +24,8 @@ export default function Collaborator() {
         </p>
         {s && (ready ? <ListenerInfo s={s} /> : <StartListener onStarted={status.reload} />)}
       </Panel>
-      {ready && <Payloads onChange={status.reload} />}
-      {ready && <Interactions />}
+      {ready && <Payloads onChange={status.reload} seen={seen} />}
+      {ready && <Interactions onCount={setSeen} />}
     </div>
   );
 }
@@ -69,8 +70,8 @@ function StartListener({ onStarted }: { onStarted: () => void }) {
   );
 }
 
-function Payloads({ onChange }: { onChange: () => void }) {
-  const list = useLoad(() => api.get<Payload[]>("/collaborator/payloads"), []);
+function Payloads({ onChange, seen }: { onChange: () => void; seen: number }) {
+  const list = useLoad(() => api.get<Payload[]>("/collaborator/payloads"), [seen]);
   const [note, setNote] = useState("");
   const [fresh, setFresh] = useState<Payload | null>(null);
   const action = useAction();
@@ -98,7 +99,7 @@ function Payloads({ onChange }: { onChange: () => void }) {
         </div>
       )}
       {list.data && list.data.length > 0 && (
-        <table className="table">
+        <table className="grid">
           <thead><tr><th>Payload</th><th>Note</th><th>Callbacks</th><th>Made</th></tr></thead>
           <tbody>
             {list.data.map((p) => (
@@ -118,7 +119,7 @@ function Payloads({ onChange }: { onChange: () => void }) {
   );
 }
 
-function Interactions() {
+function Interactions({ onCount }: { onCount: (n: number) => void }) {
   const [items, setItems] = useState<Interaction[]>([]);
   const [open, setOpen] = useState<Interaction | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -127,7 +128,7 @@ function Interactions() {
     const poll = () =>
       api
         .get<Interaction[]>("/collaborator/interactions?limit=200")
-        .then((v) => !stop && (setItems(v), setError(null)))
+        .then((v) => !stop && (setItems(v), setError(null), onCount(v.length)))
         .catch((e: Error) => !stop && setError(e.message));
     poll();
     const t = setInterval(poll, 2000);
@@ -135,7 +136,7 @@ function Interactions() {
       stop = true;
       clearInterval(t);
     };
-  }, []);
+  }, [onCount]);
   return (
     <Panel title="Interactions">
       <ErrorBox error={error} />
@@ -143,7 +144,7 @@ function Interactions() {
       {items.length === 0 ? (
         <Empty>No callbacks yet.</Empty>
       ) : (
-        <table className="table" data-testid="collab-interactions">
+        <table className="grid" data-testid="collab-interactions">
           <thead><tr><th>Time</th><th>Type</th><th>From</th><th>Request</th><th>Payload note</th></tr></thead>
           <tbody>
             {items.map((i) => (

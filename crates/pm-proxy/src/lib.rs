@@ -12,6 +12,7 @@
 mod h2_server;
 pub mod intercept;
 pub mod listeners;
+pub mod presets;
 pub mod rewrite;
 mod ws_relay;
 

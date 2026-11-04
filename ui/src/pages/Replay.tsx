@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, originOf, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
-import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav } from "../components";
+import { api, originOf, toast, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
+import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, copyText, useAction, useLoad, useNav } from "../components";
 import {
   cookies,
   decodeComponent,
@@ -322,6 +322,14 @@ export default function Replay() {
           onChange={(e) => {
             const v = e.target.value;
             if (!v) return;
+            if (v.startsWith("code:")) {
+              action.run(async () => {
+                const r = await api.post<{ code: string }>("/tools/code", { url: tab.url, raw: tab.raw, lang: v.slice(5) });
+                await copyText(r.code);
+                toast("Code copied");
+              });
+              return;
+            }
             const body = v === "method" ? { op: "change_method", raw: tab.raw } : { op: "convert_body", raw: tab.raw, to: v };
             action.run(async () => editRaw((await api.post<{ raw: string }>("/tools/request-transform", body)).raw));
           }}
@@ -331,6 +339,9 @@ export default function Replay() {
           <option value="url_encoded">Body as URL-encoded form</option>
           <option value="multipart">Body as multipart form</option>
           <option value="json">Body as JSON</option>
+          <option value="code:python" disabled={!tab.url}>Copy as Python requests</option>
+          <option value="code:javascript" disabled={!tab.url}>Copy as JavaScript fetch</option>
+          <option value="code:powershell" disabled={!tab.url}>Copy as PowerShell</option>
         </select>
         <button className="btn" onClick={() => setCurlOpen((o) => !o)} data-testid="paste-curl">Paste cURL…</button>
         <button className="btn" onClick={() => setInspector((i) => !i)} aria-pressed={inspector}>Inspector</button>

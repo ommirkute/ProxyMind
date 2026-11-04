@@ -99,7 +99,7 @@ function AnalyzeTarget({ filter }: { filter: object }) {
           <Counts title="Statuses" m={r.statuses} />
           <Counts title="Content types" m={r.content_types} />
           <h3>Parameters</h3>
-          <table className="table">
+          <table className="grid">
             <thead><tr><th>Name</th><th>Where</th><th>Requests</th><th>Values</th><th>Examples</th><th>Sent to</th></tr></thead>
             <tbody>
               {r.params.slice(0, 300).map((p) => (
@@ -130,7 +130,7 @@ function Comments({ filter }: { filter: object }) {
     <Panel title="Comments" actions={<button className="btn primary" onClick={run} disabled={action.busy} data-testid="engage-comments">Find comments</button>}>
       <ErrorBox error={action.error} />
       {r && (r.length === 0 ? <Empty>No comments in recorded HTML, JavaScript or CSS.</Empty> : (
-        <table className="table" data-testid="engage-comment-list">
+        <table className="grid" data-testid="engage-comment-list">
           <thead><tr><th>Kind</th><th>Comment</th><th>First seen</th><th>Pages</th></tr></thead>
           <tbody>
             {r.map((c, i) => (
@@ -156,7 +156,7 @@ function Scripts({ filter }: { filter: object }) {
     <Panel title="Scripts" actions={<button className="btn primary" onClick={run} disabled={action.busy} data-testid="engage-scripts">Find scripts</button>}>
       <ErrorBox error={action.error} />
       {r && (r.length === 0 ? <Empty>No scripts in recorded pages.</Empty> : (
-        <table className="table">
+        <table className="grid">
           <thead><tr><th>Kind</th><th>Script</th><th>First seen</th><th>Pages</th></tr></thead>
           <tbody>
             {r.map((s, i) => (

@@ -306,6 +306,16 @@ export class Client {
     return this.get("/collaborator/interactions", { token, limit });
   }
 
+  /** A recorded request as a Python, JavaScript or PowerShell snippet. */
+  async code(exchange_id: number, lang: "python" | "javascript" | "powershell" = "python"): Promise<string> {
+    return (await this.get<{ code: string }>(`/exchanges/${exchange_id}/code`, { lang })).code;
+  }
+
+  /** Ready-made response-modification rules to add to match and replace. */
+  matchReplacePresets(): Promise<Json[]> {
+    return this.get("/match-replace/presets");
+  }
+
   /** Rewrites request text: GET ⇄ POST, or the body as url_encoded, multipart or json. Sends nothing. */
   async requestTransform(raw: string, to?: "url_encoded" | "multipart" | "json"): Promise<string> {
     const body = to ? { op: "convert_body", raw, to } : { op: "change_method", raw };

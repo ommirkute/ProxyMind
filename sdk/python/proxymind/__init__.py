@@ -344,6 +344,14 @@ class Client:
         """A curl command that sends the same request as a recorded exchange."""
         return self._get(f"/exchanges/{exchange_id}/curl")["command"]
 
+    def code(self, exchange_id: int, lang: str = "python") -> str:
+        """A recorded request as a python, javascript or powershell snippet."""
+        return self._get(f"/exchanges/{exchange_id}/code", lang=lang)["code"]
+
+    def match_replace_presets(self) -> list:
+        """Ready-made response-modification rules (unhide fields, remove scripts…) to add to the rules."""
+        return self._get("/match-replace/presets")
+
     def curl_parse(self, command: str) -> dict:
         """Reads a curl command into {url, method, raw, warnings}, ready for replay(); sends nothing."""
         return self._post("/tools/curl", {"command": command})

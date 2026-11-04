@@ -117,6 +117,8 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   assert.ok(post.startsWith("POST /a ") && post.endsWith("x=1"));
   assert.ok((await pm.requestTransform(post, "json")).endsWith('{"x":"1"}'));
   assert.ok("hits" in (await pm.searchWs("anything")));
+  assert.ok((await pm.code(ex, "javascript")).includes("await fetch("));
+  assert.ok((await pm.matchReplacePresets()).some((p) => p.id === "remove_scripts"));
 });
 
 test("rules of engagement, discovery and GraphQL", { skip }, async () => {

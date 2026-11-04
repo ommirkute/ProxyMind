@@ -660,3 +660,4 @@ kbd {
 button.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
 button.link:hover { text-decoration: underline; }
 .search-hit { margin-bottom: 6px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; }
+iframe.render { width: 100%; min-height: 420px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }

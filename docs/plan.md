@@ -17,6 +17,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 **Done** (all with automated tests, CI on Linux/macOS/Windows):
 
+- Response-modification presets (unhide hidden fields, enable disabled fields, remove length limits, validation and scripts, drop security headers and cookie flags), Copy as Python/JavaScript/PowerShell, and a sandboxed Render view for HTML responses
 - Collaborator, engagement tools, global search, Organizer and request helpers: hand-placed out-of-band payloads with their callbacks (listener started from the UI); comments, scripts, references, target analysis, CSRF PoC and clickjacking pages from recorded traffic; one search over traffic (by message part, inverted, in scope), WebSocket messages, findings and scanner issues; an Organizer with statuses and notes; Replay's change method and body encoding
 - Proxy setup page (`/api/v1/setup`, `/api/v1/ca.pem`): proxy address, CA download with its SHA-256 fingerprint, per-OS and per-tool steps. Desktop app: project picker (recent projects, create a project from target URLs), Switch project and Trust the CA (per-user store) in the tray (ADR-0012)
 - Engagement page (`/api/v1/roe`, `proxymind roe use`): view the rules in force with a who-may-do-what table, edit and validate the YAML, save (humans only, audited with before/after BLAKE3 hashes); changes apply at once to the gate, rate limits and the proxy's scope checks, and other processes on the project (MCP servers, the desktop app) pick them up within two seconds

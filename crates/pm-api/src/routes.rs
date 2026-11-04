@@ -94,6 +94,9 @@ pub fn api() -> Router<AppState> {
             get(ui_get).put(ui_put).layer(axum::extract::DefaultBodyLimit::max(pm_service::UI_STATE_MAX + 1024)),
         )
         .route("/exchanges/{id}/curl", get(exchange_curl))
+        .route("/exchanges/{id}/code", get(exchange_code))
+        .route("/tools/code", post(tools_code))
+        .route("/match-replace/presets", get(rules_presets))
         .route(
             "/import/har",
             post(import_har).layer(axum::extract::DefaultBodyLimit::max(pm_service::MAX_IMPORT_BYTES + 1024)),
@@ -819,6 +822,27 @@ async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiRe
     ok(json!({ "command": st.service.exchange_curl(&st.actor, id)? }))
 }
 
+#[derive(serde::Deserialize)]
+struct CodeQuery {
+    lang: pm_service::pm_tools::codegen::Lang,
+}
+
+async fn exchange_code(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<CodeQuery>) -> ApiResult {
+    ok(json!({ "code": st.service.exchange_code(&st.actor, id, q.lang)? }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeBody {
+    url: String,
+    raw: String,
+    lang: pm_service::pm_tools::codegen::Lang,
+}
+
+async fn tools_code(State(st): State<AppState>, Json(b): Json<CodeBody>) -> ApiResult {
+    ok(json!({ "code": st.service.request_code(&b.url, &b.raw, b.lang)? }))
+}
+
 async fn import_har(State(st): State<AppState>, Json(r): Json<pm_service::ImportRequest>) -> ApiResult {
     ok(st.service.traffic_import_har(&st.actor, &r)?)
 }
@@ -1026,6 +1050,10 @@ async fn listeners_put(State(st): State<AppState>, Json(b): Json<ListenersBody>)
 #[derive(Deserialize)]
 struct RulesBody {
     rules: Vec<pm_service::pm_proxy::RewriteRule>,
+}
+
+async fn rules_presets(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.match_replace_presets())
 }
 
 async fn rules_get(State(st): State<AppState>) -> ApiResult {

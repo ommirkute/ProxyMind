@@ -44,7 +44,7 @@ export default function Plugins() {
                 <code>proxymind plugin add examples/plugins/debug-switch</code>.
               </Empty>
             ) : (
-              <table className="table" data-testid="plugin-table">
+              <table className="grid" data-testid="plugin-table">
                 <thead>
                   <tr><th>Plugin</th><th>Kind</th><th>Description</th><th>State</th></tr>
                 </thead>
@@ -133,7 +133,7 @@ function ActiveCheck({ plugins }: { plugins: PluginInfo[] }) {
           {r.issues.length === 0 ? (
             <Empty>The plugin reported nothing.</Empty>
           ) : (
-            <table className="table">
+            <table className="grid">
               <thead><tr><th>Severity</th><th>Issue</th><th>Evidence</th><th>Exchange</th></tr></thead>
               <tbody>
                 {r.issues.map((i, n) => (

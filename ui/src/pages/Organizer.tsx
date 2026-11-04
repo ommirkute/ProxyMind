@@ -44,7 +44,7 @@ export default function Organizer() {
         <ErrorBox error={error ?? list.error} />
         {list.data && items.length === 0 && <Empty>Nothing here yet.</Empty>}
         {items.length > 0 && (
-          <table className="table" data-testid="organizer-list">
+          <table className="grid" data-testid="organizer-list">
             <thead><tr><th>#</th><th>Request</th><th>Status</th><th>Note</th><th>Added</th><th /></tr></thead>
             <tbody>
               {items.map((i) => (

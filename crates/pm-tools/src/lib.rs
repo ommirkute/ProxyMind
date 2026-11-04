@@ -10,6 +10,7 @@
 //! - [`engage`]: engagement tools (comments, scripts, parameters, CSRF and clickjacking pages).
 
 pub mod codec;
+pub mod codegen;
 pub mod curl;
 pub mod engage;
 pub mod har;
