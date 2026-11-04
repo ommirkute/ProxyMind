@@ -66,3 +66,7 @@ PROXYMIND=$PWD/target/debug/proxymind bench/proxy/run.sh https-sse-streams   # o
 ```
 
 2026-11-04: 30/30 (7 of the first 18 cases passed before responses streamed).
+
+`bench/proxy/soak.sh [rounds] [juice-url]` is the real-browser check: Chromium loads a modern HTTPS site over HTTP/2 (120 images, 20 gzip scripts, server-sent events, a 20 MB fetch, a 1 MB upload, a slow request, a `wss://` echo), four tabs at a time, directly and then through ProxyMind, and prints both results plus the errors in history. `bench/proxy/load.py` is a load test (threads × keep-alive requests through the proxy).
+
+2026-11-04: every page completes through ProxyMind as it does directly, in the same time (77 s for 20 loads with 3,000 requests), with no errors in history; Juice Shop loads with its WebSocket; with response rules on (full buffering) pages complete too. Load: 6,000 requests from 20 clients, 0 errors, ~800 req/s over HTTP and ~400 req/s over HTTPS, memory flat (85.5 → 85.8 MB).

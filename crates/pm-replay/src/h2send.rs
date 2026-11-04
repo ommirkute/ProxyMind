@@ -66,7 +66,12 @@ impl Sender {
             let (parts, mut body) = resp.into_parts();
             let mut data = Vec::new();
             while let Some(chunk) = body.data().await {
-                let chunk = chunk.context("reading the HTTP/2 body")?;
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    // RST_STREAM NO_ERROR after the response: a normal end.
+                    Err(e) if e.reason() == Some(h2::Reason::NO_ERROR) => break,
+                    Err(e) => return Err(e).context("reading the HTTP/2 body"),
+                };
                 let _ = body.flow_control().release_capacity(chunk.len());
                 data.extend_from_slice(&chunk);
                 if data.len() > MAX_BODY {
@@ -168,6 +173,12 @@ impl StreamedResponse {
                     .map_err(|_| anyhow!("nothing arrived for {} s", idle.as_secs()))?;
                 match next {
                     None => {
+                        *done = true;
+                        Ok(None)
+                    }
+                    // A server may end a complete response with RST_STREAM
+                    // NO_ERROR (RFC 9113, 8.1): that's a normal end.
+                    Some(Err(e)) if e.reason() == Some(h2::Reason::NO_ERROR) => {
                         *done = true;
                         Ok(None)
                     }
