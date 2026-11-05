@@ -14,6 +14,9 @@ import {
   setHeader,
   setJsonParam,
   setQueryParam,
+  setAuthority,
+  setRequestLine,
+  toProtocol,
 } from "../http";
 
 interface RaceGroup {
@@ -425,7 +428,7 @@ export default function Replay() {
           {!t.race && !step && !t.outcome && <p className="muted">Nothing sent from this tab yet. Ctrl+Enter sends.</p>}
         </section>
 
-        {inspector && <Inspector raw={tab.raw} onChange={editRaw} />}
+        {inspector && <Inspector raw={tab.raw} onChange={editRaw} url={tab.url} />}
       </div>
     </div>
   );
@@ -450,8 +453,10 @@ function followTarget(url: string, raw: string, response: string | null | undefi
 }
 
 /** Parameters, cookies and headers of the request, editable in place. */
-function Inspector({ raw, onChange }: { raw: string; onChange: (raw: string) => void }) {
+function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string) => void; url: string }) {
   const p = parseRequest(raw);
+  const h2 = /^HTTP\/2(\.0)?$/i.test(p.version);
+  const host = p.headers.find((h) => h.name.toLowerCase() === "host")?.value ?? "";
   const q = queryParams(p);
   const form = formParams(p);
   const json = jsonParams(p);
@@ -482,7 +487,19 @@ function Inspector({ raw, onChange }: { raw: string; onChange: (raw: string) => 
   return (
     <section className="pane inspector" aria-label="Inspector">
       <h3 className="pane-title">Inspector</h3>
-      <div className="small mono" style={{ marginBottom: 6 }}>{p.method} {p.target.split("?")[0]}</div>
+      <div className="row small" style={{ marginBottom: 6 }}>
+        <select aria-label="Protocol" value={h2 ? "HTTP/2" : "HTTP/1.1"} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/2" | "HTTP/1.1"))}>
+          <option value="HTTP/1.1">HTTP/1.1</option>
+          <option value="HTTP/2">HTTP/2</option>
+        </select>
+        <span className="mono">{p.method} {p.target.split("?")[0]}</span>
+      </div>
+      {section(h2 ? "HTTP/2 pseudo-headers" : "Request line", [
+        { name: h2 ? ":method" : "method", value: p.method, set: (v: string) => onChange(setRequestLine(raw, { method: v })) },
+        { name: h2 ? ":path" : "path", value: p.target, set: (v: string) => onChange(setRequestLine(raw, { target: v })) },
+        ...(h2 ? [{ name: ":authority", value: host, set: (v: string) => onChange(setAuthority(raw, v)) }] : []),
+      ])}
+      {h2 && <div className="small muted">:scheme is {url.startsWith("http://") ? "http" : "https"} (from the target); :authority is the host header.</div>}
       {section("Query parameters", q.map((x, i) => ({ ...x, decoded: decodeComponent(x.value), set: (v: string) => onChange(setQueryParam(raw, i, v)) })))}
       {section("Body parameters", form.map((x, i) => ({ ...x, decoded: decodeComponent(x.value), set: (v: string) => onChange(setFormParam(raw, i, v)) })))}
       {section("JSON fields", json.map((x) => ({ ...x, set: (v: string) => onChange(setJsonParam(raw, x.name, v)) })))}

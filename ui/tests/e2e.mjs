@@ -347,6 +347,15 @@ try {
   await page.getByLabel("Cookies theme").fill("light");
   await page.getByLabel("Cookies theme").press("Enter");
   check(await page.getByLabel("Raw request").inputValue().then((v) => v.includes("Cookie: a=1; theme=light")), "Inspector edits a cookie");
+  await page.getByLabel("Protocol").selectOption("HTTP/2");
+  await page.getByLabel("HTTP/2 pseudo-headers :path").fill("/search?q=h2");
+  await page.getByLabel("HTTP/2 pseudo-headers :path").press("Enter");
+  await page.getByLabel("HTTP/2 pseudo-headers :authority").fill("other.test");
+  await page.getByLabel("HTTP/2 pseudo-headers :authority").press("Enter");
+  const h2raw = await page.getByLabel("Raw request").inputValue();
+  check(h2raw.startsWith("GET /search?q=h2 HTTP/2\n") && h2raw.includes("host: other.test") && h2raw.includes("cookie: a=1"),
+    "Inspector switches to HTTP/2 and edits :path and :authority");
+  await page.getByLabel("Protocol").selectOption("HTTP/1.1");
   await page.getByRole("button", { name: "New tab" }).click();
   check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
   await page.screenshot({ path: join(SHOTS, "5-replay.png") });
