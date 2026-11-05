@@ -145,6 +145,29 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "replay_group",
+            "Send 2 to 20 different requests to one server as a group: mode sequence sends them one after another \
+             (a multi-step flow), mode parallel sends them so they arrive at the same moment (a race across \
+             endpoints, e.g. apply a coupon while checking out). One approval covers the group; parallel groups \
+             need approval by default.",
+            json!({
+                "requests": {"type":"array","minItems":2,"maxItems":20,"items":{"type":"object","properties":{
+                    "url": {"type":"string","description":"scheme://host[:port]"},
+                    "exchange_id": {"type":"integer"},
+                    "raw": {"type":"string"},
+                    "name": {"type":"string"}
+                }}},
+                "mode": {"type":"string","enum":["sequence","parallel"]},
+                "parallel": {"type":"string","enum":["auto","single_packet","last_byte"]},
+                "stop_on_error": {"type":"boolean"},
+                "identity": {"type":"string"},
+                "fix_content_length": {"type":"boolean"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &["requests"],
+        ),
+        tool(
             "fuzzer_run",
             "Fuzz a request: mark positions in raw with §original§ (e.g. GET /api/orders/§1001§), give payload sets, \
              and ProxyMind sends the baseline plus one request per payload (one_at_a_time: one position at a time; \
@@ -833,6 +856,10 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
                 .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
                 .map(to_json)
                 .map_err(|e| e.to_string())
+        }
+        "replay_group" => {
+            let r: pm_service::GroupRequest = args(a)?;
+            service.replay_group(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;

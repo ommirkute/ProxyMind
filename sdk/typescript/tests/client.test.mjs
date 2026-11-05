@@ -118,6 +118,8 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   assert.ok((await pm.requestTransform(post, "json")).endsWith('{"x":"1"}'));
   assert.ok("hits" in (await pm.searchWs("anything")));
   assert.ok((await pm.code(ex, "javascript")).includes("await fetch("));
+  const one = { url, raw: "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n" };
+  assert.deepEqual((await pm.replayGroup([one, one])).results.map((r) => r.status), [200, 200]);
   assert.ok((await pm.matchReplacePresets()).some((p) => p.id === "remove_scripts"));
 });
 

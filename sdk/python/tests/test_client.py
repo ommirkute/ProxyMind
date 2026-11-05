@@ -151,6 +151,9 @@ class ClientTest(unittest.TestCase):
         self.assertIn("hits", self.pm.search("coffee", part="response_body", invert=True))
         self.assertIn("hits", self.pm.search_ws("anything"))
         self.assertIn("requests.request(", self.pm.code(ex, "python"))
+        me = {"url": self.url, "raw": "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n"}
+        group = self.pm.replay_group([me, me])
+        self.assertEqual([r["status"] for r in group["results"]], [200, 200])
         self.assertTrue(any(p["id"] == "unhide_fields" for p in self.pm.match_replace_presets()))
 
     def test_pending_approval_flow(self):

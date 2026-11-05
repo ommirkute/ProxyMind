@@ -105,6 +105,7 @@ pub fn api() -> Router<AppState> {
         .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
         .route("/race", post(race))
+        .route("/replay/group", post(replay_group))
         .route("/fuzzer", post(fuzzer))
         .route("/fuzzer/attacks", get(attacks_list).post(attack_start))
         .route("/fuzzer/attacks/{id}", get(attack_status))
@@ -949,6 +950,10 @@ async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query
 
 async fn attack_control(State(st): State<AppState>, Path((id, action)): Path<(String, String)>) -> ApiResult {
     ok(json!({ "status": st.service.fuzzer_control(&st.actor, &id, &action)? }))
+}
+
+async fn replay_group(State(st): State<AppState>, Json(r): Json<pm_service::GroupRequest>) -> ApiResult {
+    ok(st.service.replay_group(&st.actor, r).await?)
 }
 
 async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {

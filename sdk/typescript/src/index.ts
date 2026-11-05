@@ -368,6 +368,11 @@ export class Client {
     return this.act("/replay", opts);
   }
 
+  /** Send 2-20 requests to one server as a group: one after another, or at the same moment. */
+  replayGroup(requests: { url?: string; raw?: string; exchange_id?: number; name?: string }[], mode: "sequence" | "parallel" = "sequence", opts: Json = {}): Promise<Json> {
+    return this.act("/replay/group", { requests, mode, ...opts });
+  }
+
   /** Fuzz positions marked §like this§. payload_sets: [{ list: [...] }, { numbers: "1-10" }, { builtin: "sqli" }]. */
   fuzzer(raw: string, payload_sets: Json[], opts: Json = {}): Promise<Json> {
     return this.act("/fuzzer", { raw, payload_sets, ...opts });

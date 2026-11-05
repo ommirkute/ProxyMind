@@ -91,6 +91,7 @@ export default function Replay() {
   const [curlWarnings, setCurlWarnings] = useState<string[]>([]);
   const [raceCount, setRaceCount] = useState(10);
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
+  const [groupOpen, setGroupOpen] = useState(false);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
   const loaded = useRef(false);
@@ -344,6 +345,7 @@ export default function Replay() {
           <option value="code:powershell" disabled={!tab.url}>Copy as PowerShell</option>
         </select>
         <button className="btn" onClick={() => setCurlOpen((o) => !o)} data-testid="paste-curl">Paste cURL…</button>
+        <button className="btn" onClick={() => setGroupOpen((o) => !o)} aria-pressed={groupOpen} data-testid="group-open">Send group…</button>
         <button className="btn" onClick={() => setInspector((i) => !i)} aria-pressed={inspector}>Inspector</button>
       </div>
       {curlOpen && (
@@ -354,6 +356,7 @@ export default function Replay() {
         </div>
       )}
       {curlWarnings.length > 0 && <div className="notice small">Ignored: {curlWarnings.join("; ")}</div>}
+      {groupOpen && <GroupPanel tabs={state.tabs} current={tab} goApprovals={() => go("approvals")} />}
       <ErrorBox error={action.error} />
 
       <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
@@ -511,6 +514,87 @@ function RaceView({ race, goApprovals }: { race: RaceResult; goApprovals: () => 
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+type GroupResult =
+  | { status: "done"; mode: "sequence" | "parallel"; parallel?: "single_packet" | "last_byte"; results: { index: number; name?: string; exchange_id: number | null; status: number | null; elapsed_ms: number; error?: string }[] }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
+/** Several tabs sent together: one after another, or at the same moment (one server). */
+function GroupPanel({ tabs, current, goApprovals }: { tabs: RTab[]; current: RTab; goApprovals: () => void }) {
+  const sameServer = (t: RTab) => t.url.replace(/\/+$/, "") === current.url.replace(/\/+$/, "");
+  const [picked, setPicked] = useState<string[]>(() => tabs.filter(sameServer).map((t) => t.id));
+  const [mode, setMode] = useState<"sequence" | "parallel">("sequence");
+  const [stop, setStop] = useState(false);
+  const [approval, setApproval] = useState<string | undefined>();
+  const [result, setResult] = useState<GroupResult | null>(null);
+  const action = useAction();
+  const chosen = tabs.filter((t) => picked.includes(t.id));
+  const toggle = (id: string) => {
+    setApproval(undefined);
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  };
+  const send = () =>
+    action.run(async () => {
+      const r = await api.post<GroupResult>("/replay/group", {
+        requests: chosen.map((t) => ({ url: t.url, raw: t.raw, name: t.name })),
+        mode,
+        stop_on_error: stop,
+        identity: current.identity || undefined,
+        fix_content_length: current.fixCl,
+        approval_id: approval,
+      });
+      setResult(r);
+      setApproval(r.status === "pending_approval" ? r.approval_id : undefined);
+    });
+  return (
+    <div className="notice" data-testid="group-panel" style={{ marginBottom: 8 }}>
+      <div className="row small" style={{ flexWrap: "wrap" }}>
+        <strong>Send group</strong>
+        {tabs.map((t) => (
+          <label key={t.id} title={t.url} style={{ opacity: sameServer(t) ? 1 : 0.5 }}>
+            <input type="checkbox" aria-label={`Group tab ${t.name}`} checked={picked.includes(t.id)} onChange={() => toggle(t.id)} /> {t.name}
+          </label>
+        ))}
+      </div>
+      <div className="row small">
+        <select aria-label="Group mode" value={mode} onChange={(e) => { setMode(e.target.value as typeof mode); setApproval(undefined); }}>
+          <option value="sequence">one after another</option>
+          <option value="parallel">all at the same moment</option>
+        </select>
+        {mode === "sequence" && <label><input type="checkbox" checked={stop} onChange={(e) => setStop(e.target.checked)} /> stop at the first failure</label>}
+        <button className="btn primary" data-testid="group-send" disabled={chosen.length < 2 || action.busy} onClick={send}>
+          {approval ? "Send approved group" : `Send ${chosen.length} tabs`}
+        </button>
+        <span className="muted">All tabs in a group go to one server{current.url ? ` (${current.url})` : ""}, as this tab's identity.</span>
+      </div>
+      <ErrorBox error={action.error} />
+      {result?.status === "denied" && <div className="error">Denied by the rules of engagement: {result.reasons.join("; ")}</div>}
+      {result?.status === "pending_approval" && (
+        <div className="small">
+          {result.summary} needs approval ({result.reasons.join("; ")}). Approve <strong>{result.approval_id}</strong> on the{" "}
+          <a href="#" onClick={(e) => { e.preventDefault(); goApprovals(); }}>Approvals</a> page, then send again.
+        </div>
+      )}
+      {result?.status === "done" && (
+        <table className="grid" data-testid="group-result">
+          <thead><tr><th>Tab</th><th>Status</th><th>Time</th><th>Exchange</th></tr></thead>
+          <tbody>
+            {result.results.map((x) => (
+              <tr key={x.index}>
+                <td>{x.name ?? x.index + 1}</td>
+                <td>{x.error ? <span className="bad">{x.error}</span> : <StatusCode status={x.status} />}</td>
+                <td className="small muted">{x.elapsed_ms} ms</td>
+                <td><ExchangeLink id={x.exchange_id} /></td>
+              </tr>
+            ))}
+          </tbody>
+          {result.parallel && <caption className="small muted">sent {result.parallel === "single_packet" ? "in one HTTP/2 packet" : "with last-byte sync"}</caption>}
+        </table>
+      )}
     </div>
   );
 }

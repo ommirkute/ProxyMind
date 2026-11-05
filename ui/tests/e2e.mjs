@@ -675,6 +675,21 @@ try {
   const wins = Number((raceText.match(/(\d+) succeeded/) ?? [])[1] ?? 0);
   check(wins > 1, `racing 6 redemptions credits the card ${wins} times`);
   await page.screenshot({ path: join(SHOTS, "6g-race.png") });
+  // A group: the redemption (already used) then the profile, one after another, in two tabs.
+  await page.getByTitle("Duplicate this tab").click();
+  await page.getByLabel("Raw request").fill(`GET /api/me HTTP/1.1\nHost: 127.0.0.1:${shop}\nCookie: session=${session}\n\n`);
+  await page.getByTestId("group-open").click();
+  const boxes = page.locator('[data-testid="group-panel"] input[aria-label^="Group tab"]');
+  const nBoxes = await boxes.count();
+  for (let i = 0; i < nBoxes; i++) await boxes.nth(i).uncheck();
+  await boxes.nth(nBoxes - 2).check();
+  await boxes.nth(nBoxes - 1).check();
+  await page.getByTestId("group-send").click();
+  await page.waitForSelector('[data-testid="group-result"]');
+  const groupRows = await page.locator('[data-testid="group-result"] tbody tr').allTextContents();
+  check(groupRows.length === 2 && groupRows[0].includes("409") && groupRows[1].includes("200"),
+    `a group sends two tabs in order (${groupRows.join(" / ")})`);
+  await page.screenshot({ path: join(SHOTS, "6h-group.png") });
 
   console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",

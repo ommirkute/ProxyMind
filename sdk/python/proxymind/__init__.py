@@ -277,6 +277,11 @@ class Client:
         body = self._args(raw=raw, url=url, exchange_id=exchange_id, identity=identity, approval_id=approval_id, **extra)
         return self._check(self._post("/replay", body))
 
+    def replay_group(self, requests: list, mode: str = "sequence", **extra: Any) -> dict:
+        """Send 2-20 requests to one server as a group: mode "sequence" (one after another) or "parallel"
+        (at the same moment). requests: [{"url": ..., "raw": ..., "name": ...}]. Raises PendingApproval."""
+        return self._check(self._post("/replay/group", self._args(requests=requests, mode=mode, **extra)))
+
     def fuzzer(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
         """Fuzz positions marked §like this§. payload_sets: [{"list": [...]}, {"numbers": "1-10"}, {"builtin": "sqli"}]."""
         return self._check(self._post("/fuzzer", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
