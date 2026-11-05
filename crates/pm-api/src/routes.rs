@@ -159,6 +159,9 @@ pub fn api() -> Router<AppState> {
         .route("/plugins/check", post(plugin_check))
         .route("/plugins/{name}", axum::routing::put(plugin_set))
         .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
+        .route("/scan/custom-checks", get(custom_checks).post(custom_check_save))
+        .route("/scan/custom-checks/{id}", axum::routing::delete(custom_check_delete))
+        .route("/scan/custom", post(custom_scan))
         .route("/scan/profiles/{name}", axum::routing::delete(scan_profile_delete))
         .route("/scan/schedules", get(scan_schedules).post(scan_schedule_save))
         .route("/scan/schedules/{id}", axum::routing::delete(scan_schedule_delete))
@@ -543,6 +546,28 @@ async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
 
 async fn scan_profile_save(State(st): State<AppState>, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
     ok(st.service.scan_profile_save(&st.actor, p)?)
+}
+
+async fn custom_checks(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.custom_checks()?)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckYaml {
+    yaml: String,
+}
+
+async fn custom_check_save(State(st): State<AppState>, Json(b): Json<CheckYaml>) -> ApiResult {
+    ok(st.service.custom_check_save(&st.actor, &b.yaml)?)
+}
+
+async fn custom_check_delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.custom_check_delete(&st.actor, &id)? }))
+}
+
+async fn custom_scan(State(st): State<AppState>, Json(r): Json<pm_service::CustomScanRequest>) -> ApiResult {
+    ok(st.service.custom_scan(&st.actor, r).await?)
 }
 
 async fn scan_profile_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {

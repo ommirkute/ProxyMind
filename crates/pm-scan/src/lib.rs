@@ -9,6 +9,7 @@
 
 pub mod active;
 pub mod advanced;
+pub mod custom;
 pub mod library;
 pub mod oob;
 

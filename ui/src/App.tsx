@@ -30,6 +30,7 @@ import Collaborator from "./pages/Collaborator";
 import Engage from "./pages/Engage";
 import Search from "./pages/Search";
 import Organizer from "./pages/Organizer";
+import CustomChecks from "./pages/CustomChecks";
 
 interface Group {
   id: string;
@@ -69,7 +70,7 @@ const GROUPS: Group[] = [
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
   { id: "collaborator", label: "Collaborator", icon: "collab", section: "Testing", pages: [{ id: "collaborator", label: "Collaborator" }] },
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
-  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
+  { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "checks", label: "Custom checks" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
   { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
 ];
@@ -216,6 +217,7 @@ export default function App() {
     engage: Engage,
     search: Search,
     organizer: Organizer,
+    checks: CustomChecks,
   }[route.page];
 
   const group = groupOf(route.page);

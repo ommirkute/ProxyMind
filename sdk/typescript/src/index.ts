@@ -311,6 +311,20 @@ export class Client {
     return (await this.get<{ code: string }>(`/exchanges/${exchange_id}/code`, { lang })).code;
   }
 
+  /** Saved custom checks (YAML scan checks). */
+  customChecks(): Promise<Json[]> {
+    return this.get("/scan/custom-checks");
+  }
+
+  customCheckSave(yaml: string): Promise<Json> {
+    return this.post("/scan/custom-checks", { yaml });
+  }
+
+  /** Runs saved custom checks (default all) or one given as yaml on a recorded request. */
+  customScan(exchange_id: number, opts: { checks?: string[]; yaml?: string } & Json = {}): Promise<Json> {
+    return this.act("/scan/custom", { exchange_id, ...opts });
+  }
+
   /** Ready-made response-modification rules to add to match and replace. */
   matchReplacePresets(): Promise<Json[]> {
     return this.get("/match-replace/presets");

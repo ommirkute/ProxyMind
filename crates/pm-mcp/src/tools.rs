@@ -935,6 +935,11 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
             r.map(to_json).map_err(|e| e.to_string())
         }
         "scan_profiles" => service.scan_profiles().map(to_json).map_err(|e| e.to_string()),
+        "custom_checks" => service.custom_checks().map(to_json).map_err(|e| e.to_string()),
+        "custom_scan" => {
+            let r: pm_service::CustomScanRequest = args(a)?;
+            service.custom_scan(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
         "plugin_list" => Ok(to_json(service.plugin_list())),
         "collaborator_payload" => {
             #[derive(serde::Deserialize, Default)]

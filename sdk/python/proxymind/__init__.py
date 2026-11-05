@@ -353,6 +353,19 @@ class Client:
         """A recorded request as a python, javascript or powershell snippet."""
         return self._get(f"/exchanges/{exchange_id}/code", lang=lang)["code"]
 
+    def custom_checks(self) -> list:
+        """Saved custom checks (YAML scan checks)."""
+        return self._get("/scan/custom-checks")
+
+    def custom_check_save(self, yaml: str) -> dict:
+        """Saves (or replaces, by id) a custom check written in YAML."""
+        return self._post("/scan/custom-checks", {"yaml": yaml})
+
+    def custom_scan(self, exchange_id: int, checks: Optional[list] = None, yaml: Optional[str] = None, **extra: Any) -> dict:
+        """Runs saved custom checks (default all) or one given as yaml on a recorded request."""
+        body = self._args(exchange_id=exchange_id, checks=checks, yaml=yaml, **extra)
+        return self._check(self._post("/scan/custom", body))
+
     def match_replace_presets(self) -> list:
         """Ready-made response-modification rules (unhide fields, remove scripts…) to add to the rules."""
         return self._get("/match-replace/presets")

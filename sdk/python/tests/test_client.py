@@ -155,6 +155,8 @@ class ClientTest(unittest.TestCase):
         group = self.pm.replay_group([me, me])
         self.assertEqual([r["status"] for r in group["results"]], [200, 200])
         self.assertTrue(any(p["id"] == "unhide_fields" for p in self.pm.match_replace_presets()))
+        self.pm.custom_check_save("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n")
+        self.assertEqual(len(self.pm.custom_scan(ex, checks=["products-ok"])["findings"]), 1)
 
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.

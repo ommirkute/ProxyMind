@@ -121,6 +121,8 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   const one = { url, raw: "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n" };
   assert.deepEqual((await pm.replayGroup([one, one])).results.map((r) => r.status), [200, 200]);
   assert.ok((await pm.matchReplacePresets()).some((p) => p.id === "remove_scripts"));
+  await pm.customCheckSave("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n");
+  assert.equal((await pm.customScan(ex, { checks: ["products-ok"] })).findings.length, 1);
 });
 
 test("rules of engagement, discovery and GraphQL", { skip }, async () => {

@@ -932,6 +932,31 @@ try {
     check(/debug-switch\s+\S+\s+active\s+off/.test(pm("plugin", "list")), "turning a plugin off is saved in the user's registry");
   }
 
+  console.log("Custom checks");
+  await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const productsId = await page.evaluate(async () => {
+    const rows = (await (await fetch("/api/v1/exchanges?path=/api/products&limit=50")).json()).exchanges;
+    return rows.find((r) => r.path === "/api/products" && r.method === "GET").id;
+  });
+  await open(`checks/${productsId}`);
+  await page.getByLabel("Check YAML").fill(`id: debug-switch
+title: Hidden debug switch
+severity: high
+run: per_request
+request:
+  add_query: { debug: "1" }
+match:
+  status: [200]
+  body_contains: [db_password]
+  not_in_baseline: true
+`);
+  await page.getByTestId("check-save").click();
+  await page.locator("td", { hasText: "Hidden debug switch" }).first().waitFor();
+  await page.getByTestId("check-run").click();
+  await page.waitForSelector('[data-testid="check-result"]');
+  check(await page.getByTestId("check-result").textContent().then((t) => t.includes("1 hit")), "a saved YAML check finds the hidden debug switch");
+  await page.screenshot({ path: join(SHOTS, "7c-custom-checks.png"), fullPage: true });
+
   console.log("Engagement (rules of engagement)");
   await open("engagement");
   await page.waitForSelector('[data-testid="roe-summary"]');
