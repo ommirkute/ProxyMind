@@ -19,6 +19,7 @@ const TOOLS = [
   ["refs", "Find references"],
   ["csrf", "CSRF PoC"],
   ["clickjack", "Clickjacking"],
+  ["dom", "DOM test"],
 ] as const;
 type Tool = (typeof TOOLS)[number][0];
 
@@ -57,7 +58,7 @@ export default function Engage() {
             <label><input type="checkbox" checked={inScope} onChange={(e) => setInScope(e.target.checked)} /> in scope only</label>
           </div>
         )}
-        {["refs", "csrf", "clickjack"].includes(tool) && (
+        {["refs", "csrf", "clickjack", "dom"].includes(tool) && (
           <div className="row small">
             <span>Exchange</span>
             <input aria-label="Engage exchange" value={exchange} onChange={(e) => setExchange(e.target.value)} style={{ width: 90 }} />
@@ -72,6 +73,7 @@ export default function Engage() {
       {tool === "refs" && <References exchange={exchange} />}
       {tool === "csrf" && <CsrfPoc exchange={exchange} />}
       {tool === "clickjack" && <ClickjackTest exchange={exchange} />}
+      {tool === "dom" && <DomTest exchange={exchange} />}
     </div>
   );
 }
@@ -242,6 +244,56 @@ function ClickjackTest({ exchange }: { exchange: string }) {
           <CodeOut name={`clickjacking-${exchange}.html`} html={r.poc} />
           <p className="small muted">The test page frames the target under a decoy button; lower the opacity to see what a click would hit. Browsers also block framing with SameSite cookies, so test it logged in.</p>
         </>
+      )}
+    </Panel>
+  );
+}
+
+interface DomFlow { source: string; key?: string; sink: string; value: string; stack: string; exploitable: boolean }
+interface DomResult { url: string; flows: DomFlow[]; pollution: string[]; scripts: [string, boolean][]; notes: string[] }
+
+function DomTest({ exchange }: { exchange: string }) {
+  const [storage, setStorage] = useState(false);
+  const [pollution, setPollution] = useState(true);
+  const [r, setR] = useState<DomResult | null>(null);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<DomResult>("/dom/test", { exchange_id: Number(exchange), storage, pollution })));
+  return (
+    <Panel title="DOM sources and sinks" actions={<button className="btn primary" onClick={run} disabled={!exchange || action.busy} data-testid="engage-dom">{action.busy ? "Testing…" : "Test"}</button>}>
+      <div className="row small">
+        <label><input type="checkbox" checked={pollution} onChange={(e) => setPollution(e.target.checked)} /> try prototype pollution</label>
+        <label><input type="checkbox" checked={storage} onChange={(e) => setStorage(e.target.checked)} /> seed web storage reads</label>
+      </div>
+      <p className="small muted">
+        The recorded page runs offline with its recorded scripts (nothing is sent). Markers go into the URL query and fragment, window.name,
+        postMessage, query parameters read by name and, if chosen, web storage; any marker that reaches a dangerous sink is listed.
+      </p>
+      <ErrorBox error={action.error} />
+      {r && (
+        <div data-testid="engage-dom-result">
+          {r.notes.map((n) => <div key={n} className="notice small">{n}</div>)}
+          {r.pollution.length > 0 && (
+            <div className="error small" data-testid="engage-dom-pollution">Prototype pollution through the URL: {r.pollution.join(", ")}</div>
+          )}
+          {r.flows.length === 0 ? (
+            <Empty>No marker reached a dangerous sink.</Empty>
+          ) : (
+            <table className="grid">
+              <thead><tr><th>Source</th><th>Sink</th><th>Value</th><th>Where</th></tr></thead>
+              <tbody>
+                {r.flows.map((f, i) => (
+                  <tr key={i}>
+                    <td>{f.source}{f.key && <> <code>{f.key}</code></>}</td>
+                    <td><Chip value={f.sink} /> {f.exploitable && <Chip value="exploitable" />}</td>
+                    <td className="mono small" style={{ wordBreak: "break-all" }}>{f.value}</td>
+                    <td className="mono small muted" style={{ wordBreak: "break-all" }}>{f.stack}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="small muted">Scripts: {r.scripts.map(([u, used]) => `${u}${used ? "" : " (not recorded)"}`).join(", ") || "inline only"}</p>
+        </div>
       )}
     </Panel>
   );

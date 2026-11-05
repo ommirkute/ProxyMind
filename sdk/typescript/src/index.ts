@@ -311,6 +311,11 @@ export class Client {
     return (await this.get<{ code: string }>(`/exchanges/${exchange_id}/code`, { lang })).code;
   }
 
+  /** DOM sources reaching sinks on a recorded page (rendered offline; sends nothing). */
+  domTest(exchange_id: number, opts: { storage?: boolean; pollution?: boolean } = {}): Promise<Json> {
+    return this.post("/dom/test", { exchange_id, ...opts });
+  }
+
   /** Saved custom checks (YAML scan checks). */
   customChecks(): Promise<Json[]> {
     return this.get("/scan/custom-checks");

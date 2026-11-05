@@ -163,6 +163,7 @@ pub fn api() -> Router<AppState> {
         .route("/scan/custom-checks", get(custom_checks).post(custom_check_save))
         .route("/scan/custom-checks/{id}", axum::routing::delete(custom_check_delete))
         .route("/scan/custom", post(custom_scan))
+        .route("/dom/test", post(dom_test))
         .route("/scan/profiles/{name}", axum::routing::delete(scan_profile_delete))
         .route("/scan/schedules", get(scan_schedules).post(scan_schedule_save))
         .route("/scan/schedules/{id}", axum::routing::delete(scan_schedule_delete))
@@ -562,6 +563,10 @@ async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
 
 async fn scan_profile_save(State(st): State<AppState>, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
     ok(st.service.scan_profile_save(&st.actor, p)?)
+}
+
+async fn dom_test(State(st): State<AppState>, Json(r): Json<pm_service::DomTestRequest>) -> ApiResult {
+    ok(st.service.dom_test(&st.actor, r).await?)
 }
 
 async fn custom_checks(State(st): State<AppState>) -> ApiResult {

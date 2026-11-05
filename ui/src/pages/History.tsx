@@ -252,6 +252,7 @@ export default function History() {
     { label: "Generate CSRF PoC…", onClick: () => go("engage", `csrf:${r.id}`) },
     { label: "Find references", onClick: () => go("engage", `refs:${r.id}`) },
     { label: "Test clickjacking", onClick: () => go("engage", `clickjack:${r.id}`) },
+    { label: "Test DOM sources and sinks", onClick: () => go("engage", `dom:${r.id}`) },
     { label: "Copy URL", onClick: () => copyText(urlOf(r)).then(() => setNote("URL copied.")) },
     {
       label: "Copy as cURL",

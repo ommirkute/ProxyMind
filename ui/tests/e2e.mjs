@@ -982,6 +982,27 @@ match:
   check(await page.getByTestId("check-result").textContent().then((t) => t.includes("1 hit")), "a saved YAML check finds the hidden debug switch");
   await page.screenshot({ path: join(SHOTS, "7c-custom-checks.png"), fullPage: true });
 
+  console.log("DOM test");
+  await viaProxy(proxy, shop, "GET /welcome HTTP/1.1\r\nHost: shop\r\n\r\n");
+  await viaProxy(proxy, shop, "GET /static/welcome.js HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const welcomeId = await page.evaluate(async () => {
+    for (let i = 0; i < 50; i++) {
+      const rows = (await (await fetch("/api/v1/exchanges?path=/welcome&limit=20")).json()).exchanges;
+      const js = (await (await fetch("/api/v1/exchanges?path=/static/welcome.js&limit=1")).json()).exchanges;
+      const w = rows.find((r) => r.path === "/welcome");
+      if (w && js.length) return w.id;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  });
+  await open(`engage/dom:${welcomeId}`);
+  await page.getByTestId("engage-dom").click();
+  await page.waitForSelector('[data-testid="engage-dom-result"]', { timeout: 60000 });
+  const domText = await page.getByTestId("engage-dom-result").textContent();
+  check(domText.includes("innerHTML") && domText.includes("exploitable") && domText.includes("name"),
+    "the DOM test finds the name parameter reaching innerHTML");
+  await page.screenshot({ path: join(SHOTS, "7d-dom-test.png"), fullPage: true });
+
   console.log("Engagement (rules of engagement)");
   await open("engagement");
   await page.waitForSelector('[data-testid="roe-summary"]');

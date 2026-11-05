@@ -353,6 +353,10 @@ class Client:
         """A recorded request as a python, javascript or powershell snippet."""
         return self._get(f"/exchanges/{exchange_id}/code", lang=lang)["code"]
 
+    def dom_test(self, exchange_id: int, storage: bool = False, pollution: bool = True) -> dict:
+        """DOM sources reaching sinks on a recorded page (rendered offline; sends nothing)."""
+        return self._post("/dom/test", {"exchange_id": exchange_id, "storage": storage, "pollution": pollution})
+
     def custom_checks(self) -> list:
         """Saved custom checks (YAML scan checks)."""
         return self._get("/scan/custom-checks")

@@ -13,6 +13,7 @@ mod collaborator;
 mod crawl;
 mod custom_checks;
 mod discover;
+mod dom_test;
 mod engage;
 mod findings;
 mod fuzzer;
@@ -53,6 +54,7 @@ pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, Collaborato
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
+pub use dom_test::{DomTestRequest, DomTestResult};
 pub use engage::{EngageFilter, FoundComment, FoundScript, TargetAnalysis};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
