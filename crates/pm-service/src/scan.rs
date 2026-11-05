@@ -252,7 +252,8 @@ impl Plan {
             Plan::GraphQl(v) => v.len(),
             Plan::CachePoison(v) => v.len() * 2,
             Plan::CacheDeception(v, _) => v.len() * 2 + 1,
-            Plan::MassAssignment(_) => 1,
+            // The probe, then up to three read-backs.
+            Plan::MassAssignment(_) => 4,
             Plan::Proto(v) => v.len(),
             Plan::OAuth(v, s) => v.len() + usize::from(s.is_some()),
             Plan::Deser(v) => v.len(),
@@ -1393,10 +1394,61 @@ impl Service {
                         sent_count += 1;
                         let m_sent = send(r.clone()).await?;
                         let got = seen_of(m_sent.response.as_deref());
-                        let fields = pm_scan::advanced::mass_assigned(base, &got, &marker);
+                        let mut fields = pm_scan::advanced::mass_assigned(base, &got, &marker);
+                        let mut where_seen = "came back set";
+                        let mut finding_exchange = m_sent.exchange_id;
+                        // Not echoed: look for the new account where accounts are listed
+                        // with their privileges (recorded GETs on the same origin).
+                        if fields.is_empty() && ok(&got) {
+                            let account = pm_scan::advanced::probe_account_values(r, &marker);
+                            let reads: Vec<Vec<u8>> = if account.is_empty() {
+                                Vec::new()
+                            } else {
+                                let rows = self.store.lock().search_exchanges(&HistoryFilter {
+                                    host: Some(ex.summary.host.clone()),
+                                    method: Some("GET".into()),
+                                    limit: Some(500),
+                                    ..Default::default()
+                                })?;
+                                let mut out = Vec::new();
+                                for row in rows.iter().filter(|x| {
+                                    x.port == ex.summary.port
+                                        && x.scheme == ex.summary.scheme
+                                        && x.status.is_some_and(|c| (200..300).contains(&c))
+                                }) {
+                                    if out.len() >= 3 {
+                                        break;
+                                    }
+                                    let Some(e) = self.store.lock().get_exchange(row.id)? else { continue };
+                                    if pm_scan::advanced::lists_privileges(&seen_of(e.response.as_deref()).body) {
+                                        out.push(
+                                            self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes(),
+                                        );
+                                    }
+                                }
+                                out
+                            };
+                            for read in reads {
+                                if sent_count + 1 > limit {
+                                    break;
+                                }
+                                sent_count += 1;
+                                let back = send(read).await?;
+                                let found = pm_scan::advanced::assigned_in_listing(
+                                    &seen_of(back.response.as_deref()).body,
+                                    &account,
+                                );
+                                if !found.is_empty() {
+                                    fields = found;
+                                    where_seen = "are set on the new account in a later response";
+                                    finding_exchange = back.exchange_id;
+                                    break;
+                                }
+                            }
+                        }
                         if !fields.is_empty() {
                             let evidence = format!(
-                                "privileged fields added to the submission came back set: {}",
+                                "privileged fields added to the submission {where_seen}: {}",
                                 fields.join(", ")
                             );
                             issues.push(ActiveFinding {
@@ -1408,7 +1460,7 @@ impl Service {
                                     &fields.join(", "),
                                     evidence,
                                 ),
-                                exchange_id: m_sent.exchange_id,
+                                exchange_id: finding_exchange,
                             });
                         }
                     }

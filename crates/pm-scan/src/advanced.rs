@@ -399,6 +399,24 @@ fn is_account_field(k: &str) -> bool {
     )
 }
 
+/// A JSON sign-up with its account fields (username, email…) made unique,
+/// so it creates a new account instead of colliding with a real one.
+pub fn with_unique_account(raw: &str, marker: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    if !p.json {
+        return None;
+    }
+    let mut v: Value = serde_json::from_str(p.body).ok()?;
+    for (k, val) in v.as_object_mut()?.iter_mut() {
+        if let Value::String(s) = val
+            && is_account_field(k)
+        {
+            *s = unique_value(s, marker);
+        }
+    }
+    Some(rebuild(&p, p.target, &v.to_string()))
+}
+
 /// `value` made unique with the marker, keeping an email an email.
 fn unique_value(value: &str, marker: &str) -> String {
     match value.split_once('@').or_else(|| value.split_once("%40")) {
@@ -449,6 +467,85 @@ pub fn mass_assigned(base: &Seen, got: &Seen, marker: &str) -> Vec<String> {
         })
         .map(|(k, v)| format!("{k}={v}"))
         .collect()
+}
+
+/// The account values (username, email…) a probe from
+/// [`with_privileged_fields`] signed up with: string values holding `marker`.
+pub fn probe_account_values(probe: &[u8], marker: &str) -> Vec<String> {
+    let raw = String::from_utf8_lossy(probe);
+    let Some(p) = parse(&raw) else { return Vec::new() };
+    let mut out = Vec::new();
+    if p.json {
+        if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(p.body) {
+            for (k, v) in o {
+                if let Value::String(s) = v
+                    && is_account_field(&k)
+                    && s.contains(marker)
+                {
+                    out.push(s);
+                }
+            }
+        }
+    } else if p.form {
+        for kv in p.body.trim().split('&') {
+            if let Some((k, v)) = kv.split_once('=')
+                && is_account_field(k)
+                && v.contains(marker)
+            {
+                out.push(crate::active::percent_decode(v));
+            }
+        }
+    }
+    out
+}
+
+/// A response (e.g. a user list) showing the account we signed up with a
+/// privileged field set: the privileged `key=value` pairs found in the JSON
+/// object that holds one of `account` values.
+pub fn assigned_in_listing(body: &str, account: &[String]) -> Vec<String> {
+    fn walk(v: &Value, account: &[String], out: &mut Vec<String>) {
+        match v {
+            Value::Object(o) => {
+                let mine =
+                    o.values().any(|x| x.as_str().is_some_and(|s| account.iter().any(|a| a.eq_ignore_ascii_case(s))));
+                if mine {
+                    for (k, val) in PRIVILEGED_FIELDS {
+                        let hit = o.iter().any(|(ok, ov)| {
+                            ok.eq_ignore_ascii_case(k)
+                                && match ov {
+                                    Value::Bool(b) => b.to_string() == *val,
+                                    Value::String(s) => s.eq_ignore_ascii_case(val),
+                                    Value::Number(n) => *val == "true" && n.as_i64() == Some(1),
+                                    _ => false,
+                                }
+                        });
+                        if hit && !out.contains(&format!("{k}={val}")) {
+                            out.push(format!("{k}={val}"));
+                        }
+                    }
+                }
+                o.values().for_each(|x| walk(x, account, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, account, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if account.is_empty() {
+        return out;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        walk(&v, account, &mut out);
+    }
+    out
+}
+
+/// Whether a recorded response looks like it lists accounts with a
+/// privileged field (a place to look for an account we created).
+pub fn lists_privileges(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    PRIVILEGED_FIELDS.iter().any(|(k, _)| lower.contains(&format!("\"{}\"", k.to_ascii_lowercase())))
+        && USER_FIELDS.iter().any(|u| lower.contains(&format!("\"{u}\"")))
 }
 
 // ------------------------------------------------------------ logins --
@@ -1135,6 +1232,20 @@ mod tests {
             ["role=admin"]
         );
         assert!(mass_assigned(&base, &base.clone(), "M").is_empty());
+        // Read back: the new account shows up elsewhere with the privilege.
+        let probe = with_privileged_fields(
+            "POST /r HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"username\":\"u\",\"email\":\"u@x.test\"}",
+            "M",
+        )
+        .unwrap();
+        let account = probe_account_values(&probe, "M");
+        assert_eq!(account, ["uM@x.test", "uM"], "{account:?}");
+        let listing =
+            r#"{"users":[{"username":"name1","admin":false},{"username":"uM","email":"uM@x.test","admin":true}]}"#;
+        assert_eq!(assigned_in_listing(listing, &account), ["admin=true"]);
+        assert!(assigned_in_listing(r#"{"users":[{"username":"uM","admin":false}]}"#, &account).is_empty());
+        assert!(assigned_in_listing(r#"{"users":[{"username":"other","admin":true}]}"#, &account).is_empty());
+        assert!(lists_privileges(listing) && !lists_privileges(r#"{"books":[{"title":"x"}]}"#));
         let echo = seen(200, r#"{"prefs":{"role":"admin","pmM":"1"}}"#);
         assert!(mass_assigned(&base, &echo, "M").is_empty(), "an endpoint that keeps any field proves nothing");
 

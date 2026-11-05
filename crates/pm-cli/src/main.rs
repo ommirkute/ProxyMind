@@ -2358,6 +2358,9 @@ async fn run() -> Result<()> {
                     if let Some((url, ops, sent)) = &d.openapi {
                         out!("  API description {url}: {ops} operations, {sent} GET examples sent");
                     }
+                    for s in &d.signups {
+                        out!("  sign-up example sent: {s}");
+                    }
                     for s in d.skipped.iter().take(10) {
                         out!("  skipped {s}");
                     }

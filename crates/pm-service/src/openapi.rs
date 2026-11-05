@@ -143,6 +143,11 @@ impl Service {
                     skipped.push(format!("{} {}: out of scope", op.method, op.path));
                     continue;
                 }
+                // A GET can still change state (VAmPI's /createdb resets its database).
+                if crate::auto::changes_state(&op.path) {
+                    skipped.push(format!("{} {}: the path looks like it changes state", op.method, op.path));
+                    continue;
+                }
                 if Tier::for_http_request(&out.raw).0 > Tier::ActiveSafe {
                     skipped.push(format!("{} {}: the example payload is not safe to send", op.method, op.path));
                     continue;

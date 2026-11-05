@@ -205,6 +205,9 @@ fn absolute(u: &str, spec_url: Option<&str>) -> Option<String> {
         return matches!(x.scheme(), "http" | "https").then(|| u.trim_end_matches('/').to_string());
     }
     let base = url::Url::parse(spec_url?).ok()?;
+    // An empty or "." server means "where the document is": its folder, not
+    // the document's own URL (which resolving "" would give).
+    let u = if u.trim().is_empty() || u.trim() == "." { "./" } else { u };
     Some(base.join(u).ok()?.to_string().trim_end_matches('/').to_string())
 }
 
@@ -439,6 +442,17 @@ paths:
         let s = from_value(&doc, Some("http://127.0.0.1:8899/openapi.json")).unwrap();
         assert_eq!(s.base_url.as_deref(), Some("http://127.0.0.1:8899/api"));
         assert_eq!(s.operations[0].example_request, "GET /api/x HTTP/1.1\r\nHost: 127.0.0.1:8899\r\n\r\n");
+        // VAmPI's servers: [{"url": ""}] means the document's folder.
+        let empty: Value =
+            serde_json::from_str(r#"{"openapi":"3.0.0","info":{},"servers":[{"url":""}],"paths":{"/x":{"get":{}}}}"#)
+                .unwrap();
+        let s = from_value(&empty, Some("http://127.0.0.1:5002/openapi.json")).unwrap();
+        assert_eq!(s.base_url.as_deref(), Some("http://127.0.0.1:5002"));
+        assert!(
+            s.operations[0].example_request.starts_with("GET /x HTTP/1.1\r\n"),
+            "{}",
+            s.operations[0].example_request
+        );
         assert!(parse("{\"hello\":1}").is_err());
         assert!(parse("::: not yaml or json").is_err());
         let remote_ref = r##"{"openapi":"3.0.0","info":{},"paths":{"/x":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"http://evil/x.json"}}}}}}}}"##;

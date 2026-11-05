@@ -6,7 +6,10 @@
 //! quick first sweep for humans. Everything goes through the same gated
 //! service calls an agent would use.
 
-use pm_policy::Actor;
+use pm_policy::{Actor, Tier};
+use serde_json::json;
+
+use crate::Authorization;
 use serde::Serialize;
 
 use crate::{
@@ -126,6 +129,12 @@ fn is_login(template: &str) -> bool {
     ["login", "signin", "sign-in", "sign_in", "authenticate", "/auth/token", "/session"].iter().any(|w| t.contains(w))
 }
 
+/// Whether an operation creates an account (a sign-up).
+fn is_signup(method: &str, path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    method == "POST" && ["register", "signup", "sign-up", "sign_up", "/join", "/enroll"].iter().any(|w| p.contains(w))
+}
+
 /// Whether an operation changes a password: only the password-change check
 /// runs on it (any other probe could change the test user's password).
 fn is_password_change(template: &str) -> bool {
@@ -146,7 +155,7 @@ const SWEEP_MAX_OPERATIONS: usize = 40;
 const SWEEP_MAX_PLAIN: usize = 30;
 
 /// Whether a path's words suggest that requesting it changes state.
-fn changes_state(template: &str) -> bool {
+pub(crate) fn changes_state(template: &str) -> bool {
     const WORDS: &[&str] = &[
         "logout", "signout", "sign-out", "log-out", "createdb", "initdb", "reset", "delete", "remove", "destroy",
         "drop", "purge", "flush", "clear", "truncate", "shutdown", "restart", "reboot", "install", "setup", "seed",
@@ -165,6 +174,8 @@ pub struct DiscoverSweep {
     /// An API description found and imported: (url, operations, GET examples sent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openapi: Option<(String, usize, usize)>,
+    /// Sign-up examples from the description that were sent (so registration gets tested).
+    pub signups: Vec<String>,
     pub skipped: Vec<String>,
 }
 
@@ -258,8 +269,11 @@ impl Service {
                     )
                     .await;
                 match r {
-                    Ok(OpenApiImportResult::Imported { operations, sent, .. }) => {
+                    Ok(OpenApiImportResult::Imported { operations, sent, base_url, .. }) => {
                         sweep.openapi = Some((spec.url.clone(), operations.len(), sent.len()));
+                        if let Some(base) = base_url {
+                            self.send_signup_examples(actor, &base, &operations, &mut sweep).await?;
+                        }
                     }
                     Ok(other) => sweep.skipped.push(format!("{}: {other:?}", spec.url)),
                     // Not a spec after all (an HTML page, say): nothing to import.
@@ -268,6 +282,57 @@ impl Service {
             }
         }
         Ok(sweep)
+    }
+
+    /// Sends the description's sign-up examples (unauthenticated POSTs to
+    /// register/signup paths, at most two) once each, through the gate, so a
+    /// sign-up is in history for the sweep's submission checks (mass
+    /// assignment). Each creates one account.
+    async fn send_signup_examples(
+        &self,
+        actor: &Actor,
+        base: &str,
+        operations: &[pm_openapi::Operation],
+        sweep: &mut DiscoverSweep,
+    ) -> Result<()> {
+        let endpoint = crate::replay::parse_url_endpoint(base)?;
+        for op in operations.iter().filter(|o| !o.auth && is_signup(&o.method, &o.path)).take(2) {
+            // The description's sample values may be real users' names: make a new account.
+            let marker = format!("pm{}", &pm_oast::new_token()[..6]);
+            let Some(raw) = pm_scan::advanced::with_unique_account(&op.example_request, &marker) else {
+                sweep.skipped.push(format!("sign-up {}: not a JSON body", op.path));
+                continue;
+            };
+            let out = self.outgoing(endpoint.clone(), &raw, true)?;
+            let extra = json!({ "openapi_signup": op.path });
+            match self.gate_send_with(
+                actor,
+                "openapi_signup",
+                &out,
+                None,
+                true,
+                None,
+                Some(Tier::ActiveIntrusive),
+                extra,
+            )? {
+                Authorization::Allowed { .. } => {
+                    let (s, _) = self.send_as(actor, &out, None, true, "openapi").await?;
+                    sweep.signups.push(format!(
+                        "{} {} → {}",
+                        op.method,
+                        op.path,
+                        s.status.map_or("no answer".into(), |c| c.to_string())
+                    ));
+                }
+                Authorization::Denied { reasons } => {
+                    sweep.skipped.push(format!("sign-up {}: {}", op.path, reasons.join("; ")))
+                }
+                Authorization::PendingApproval { summary, .. } => {
+                    sweep.skipped.push(format!("sign-up {}: needs approval ({summary})", op.path));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Runs the active scanner once over each recorded GET operation that
