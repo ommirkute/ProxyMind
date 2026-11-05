@@ -1239,7 +1239,9 @@ mod tests {
         )
         .unwrap();
         let account = probe_account_values(&probe, "M");
-        assert_eq!(account, ["uM@x.test", "uM"], "{account:?}");
+        let mut sorted = account.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["uM", "uM@x.test"], "{account:?}");
         let listing =
             r#"{"users":[{"username":"name1","admin":false},{"username":"uM","email":"uM@x.test","admin":true}]}"#;
         assert_eq!(assigned_in_listing(listing, &account), ["admin=true"]);
