@@ -192,6 +192,9 @@ enum Command {
         /// IPv4 address A queries are answered with (default: the HTTP listener's address, or 127.0.0.1)
         #[arg(long)]
         dns_answer: Option<std::net::Ipv4Addr>,
+        /// Also take mail on this address (e.g. 0.0.0.0:25): mail to a payload address is an interaction
+        #[arg(long)]
+        smtp: Option<SocketAddr>,
     },
     /// Show the application model built from traffic.
     Model {
@@ -1497,7 +1500,7 @@ async fn run() -> Result<()> {
                 _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
             }
         }
-        Command::OastServer { listen, public_url, dns, domain, dns_answer } => {
+        Command::OastServer { listen, public_url, dns, domain, dns_answer, smtp } => {
             let service = Arc::new(open_service(&cli.project, None)?);
             start_oast(&service, *listen, public_url.clone()).await?;
             if let (Some(addr), Some(domain)) = (dns, domain) {
@@ -1514,6 +1517,18 @@ async fn run() -> Result<()> {
                     }
                 }));
                 eprintln!("OAST DNS on {addr} for *.{domain} (A → {ip}); delegate the domain here with an NS record");
+            }
+            if let Some(addr) = smtp {
+                let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding SMTP on {addr}"))?;
+                service.set_oast_smtp(&l.local_addr()?.to_string())?;
+                let s = service.clone();
+                let host = domain.clone().unwrap_or_else(|| "proxymind-oast".into());
+                tokio::spawn(pm_oast::smtp::serve(l, host, move |i| {
+                    if let Err(e) = s.record_oast(&i) {
+                        eprintln!("could not record OAST interaction: {e}");
+                    }
+                }));
+                eprintln!("OAST SMTP on {addr}: mail to a payload address is recorded");
             }
             tokio::signal::ctrl_c().await?;
         }

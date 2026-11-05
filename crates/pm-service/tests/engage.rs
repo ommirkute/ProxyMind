@@ -104,9 +104,28 @@ async fn collaborator_payloads_and_interactions() {
             assert_eq!((i.protocol.as_str(), i.method.as_str()), ("http", "GET"));
             assert_eq!(i.note.as_deref(), Some("ssrf in avatar url"));
             assert_eq!(s.collaborator_payloads(10).unwrap()[0].interactions, 1);
-            return;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("the callback was not recorded");
+    assert_eq!(s.collaborator_interactions(Some(&p.token), 10).unwrap().len(), 1, "the HTTP callback was recorded");
+
+    // Mail: agents can't open the SMTP port; payloads then carry an address.
+    assert!(s.collaborator_smtp(&agent, "127.0.0.1:0".parse().unwrap()).await.is_err());
+    let status = s.collaborator_smtp(&human(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let smtp = status.smtp.clone().unwrap();
+    let p = s.collaborator_payload(&agent, "password reset mail").unwrap();
+    let email = p.email.clone().unwrap();
+    assert!(email.starts_with(&p.token) && email.ends_with("@[127.0.0.1]"), "{email}");
+    let mut m = tokio::net::TcpStream::connect(&smtp).await.unwrap();
+    m.write_all(
+        format!("HELO shop\r\nMAIL FROM:<app@shop>\r\nRCPT TO:<{email}>\r\nDATA\r\nhi\r\n.\r\nQUIT\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut out = String::new();
+    let _ = m.read_to_string(&mut out).await;
+    let seen = s.collaborator_interactions(Some(&p.token), 10).unwrap();
+    assert_eq!(seen.first().map(|i| i.protocol.as_str()), Some("smtp"), "{out}");
+    assert_eq!(seen[0].note.as_deref(), Some("password reset mail"));
 }

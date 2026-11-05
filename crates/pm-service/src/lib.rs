@@ -155,6 +155,7 @@ pub struct Service {
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
     /// The Collaborator callback listener this process runs, if any.
     oast_listening: std::sync::OnceLock<std::net::SocketAddr>,
+    smtp_listening: std::sync::OnceLock<std::net::SocketAddr>,
     /// The user's home directory, whose plugin registry is read when used.
     plugin_home: std::sync::OnceLock<std::path::PathBuf>,
     /// Recent Fuzzer attacks (running ones keep going in the background).
@@ -199,6 +200,7 @@ impl Service {
             plugins: parking_lot::RwLock::new(Vec::new()),
             plugin_home: std::sync::OnceLock::new(),
             oast_listening: std::sync::OnceLock::new(),
+            smtp_listening: std::sync::OnceLock::new(),
             attacks: parking_lot::Mutex::new(Vec::new()),
             scan_tasks: parking_lot::Mutex::new(Vec::new()),
             proxy_info: std::sync::OnceLock::new(),

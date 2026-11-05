@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { api, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
 
-interface Status { public_url?: string; dns_domain?: string; listening?: string; payloads: number; interactions: number }
-interface Payload { token: string; note: string; created_ms: number; actor: string; http_url?: string; dns_name?: string; interactions: number }
+interface Status { public_url?: string; dns_domain?: string; listening?: string; smtp?: string; payloads: number; interactions: number }
+interface Payload { token: string; note: string; created_ms: number; actor: string; http_url?: string; dns_name?: string; email?: string; interactions: number }
 interface Interaction { id: number; token: string; protocol: string; remote: string; method: string; path: string; ts_ms: number; raw: string; note?: string }
 
 const time = (ms: number) => new Date(ms).toLocaleTimeString();
@@ -23,6 +23,7 @@ export default function Collaborator() {
           lookup), the callback shows up below: only the target could have known the token.
         </p>
         {s && (ready ? <ListenerInfo s={s} /> : <StartListener onStarted={status.reload} />)}
+        {s && ready && !s.smtp && <StartSmtp onStarted={status.reload} />}
       </Panel>
       {ready && <Payloads onChange={status.reload} seen={seen} />}
       {ready && <Interactions onCount={setSeen} />}
@@ -36,8 +37,22 @@ function ListenerInfo({ s }: { s: Status }) {
       <Chip value={s.listening ? "listening" : "external listener"} />
       {s.public_url && <span>HTTP callbacks to <code>{s.public_url}</code></span>}
       {s.dns_domain && <span>DNS: <code>*.{s.dns_domain}</code></span>}
+      {s.smtp && <span>mail to <code>{s.smtp}</code></span>}
       {s.listening && <span className="muted">(this process listens on {s.listening})</span>}
       <span className="muted">· {s.payloads} payload(s), {s.interactions} interaction(s)</span>
+    </div>
+  );
+}
+
+function StartSmtp({ onStarted }: { onStarted: () => void }) {
+  const [listen, setListen] = useState("0.0.0.0:2525");
+  const action = useAction();
+  return (
+    <div className="row small">
+      <span className="muted">Also catch mail (password resets, invitations):</span>
+      <input aria-label="SMTP listen" className="mono" value={listen} onChange={(e) => setListen(e.target.value)} style={{ width: 160 }} />
+      <button className="btn" disabled={action.busy} data-testid="smtp-start" onClick={() => action.run(async () => { await api.post("/collaborator/smtp", { listen }); onStarted(); })}>Start SMTP listener</button>
+      <ErrorBox error={action.error} />
     </div>
   );
 }
@@ -96,6 +111,7 @@ function Payloads({ onChange, seen }: { onChange: () => void; seen: number }) {
         <div className="notice small mono" data-testid="collab-payload">
           {fresh.http_url && <div>{fresh.http_url}</div>}
           {fresh.dns_name && <div>{fresh.dns_name}</div>}
+          {fresh.email && <div>{fresh.email}</div>}
         </div>
       )}
       {list.data && list.data.length > 0 && (

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, originOf, type ExchangeDetail, type IdentityInfo } from "../api";
+import { api, originOf, toast, type ExchangeDetail, type IdentityInfo } from "../api";
 import { ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav, usePref } from "../components";
 import { autoMark } from "../http";
 
@@ -323,6 +323,23 @@ export default function Fuzzer() {
             <button className="btn" onClick={mark}>Add §</button>
             <button className="btn" onClick={() => setCfg({ raw: cfg.raw.replace(/§/g, "") })}>Clear §</button>
             <button className="btn" onClick={() => setCfg({ raw: autoMark(cfg.raw) })} title="Mark query, form and JSON values and cookies" data-testid="auto-mark">Auto-mark</button>
+            <button
+              className="btn"
+              title="Insert a new Collaborator URL at the cursor"
+              onClick={() =>
+                api
+                  .post<{ http_url?: string; dns_name?: string; email?: string; token: string }>("/collaborator/payloads", { note: "Fuzzer request" })
+                  .then((p) => {
+                    const v = p.http_url ?? p.dns_name ?? p.email ?? p.token;
+                    const el = editor.current;
+                    const [a, b] = el ? [el.selectionStart, el.selectionEnd] : [cfg.raw.length, cfg.raw.length];
+                    setCfg({ raw: cfg.raw.slice(0, a) + v + cfg.raw.slice(b) });
+                  })
+                  .catch((e: Error) => toast(e.message, "bad"))
+              }
+            >
+              Insert Collaborator URL
+            </button>
             <span className="muted">{Number.isInteger(positions) ? `${positions} position(s) · ${MODE_HELP[cfg.mode]}` : "unbalanced § markers"}</span>
           </div>
         </section>

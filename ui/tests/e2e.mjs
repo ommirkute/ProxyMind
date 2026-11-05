@@ -442,6 +442,22 @@ try {
   await fetch(payloadUrl).catch(() => {});
   await page.locator('[data-testid="collab-interactions"] td', { hasText: "blind ssrf in avatar url" }).first().waitFor({ timeout: 10000 });
   check(true, "the callback shows up under the payload's note");
+  await page.getByTestId("smtp-start").click();
+  await page.locator('[data-testid="collab-status"]', { hasText: "mail to" }).waitFor();
+  await page.getByLabel("Payload note").fill("reset mail");
+  await page.getByTestId("collab-new").click();
+  await page.locator('[data-testid="collab-payload"]', { hasText: "@[127.0.0.1]" }).waitFor();
+  const mailTo = (await page.getByTestId("collab-payload").textContent()).match(/[0-9a-f]{20}@\[127\.0\.0\.1\]/)[0];
+  const smtpAddr = (await page.getByTestId("collab-status").textContent()).match(/mail to (127\.0\.0\.1:\d+)/)[1];
+  await new Promise((resolve) => {
+    const [h, p] = smtpAddr.split(":");
+    const sock = net.connect(Number(p), h, () => sock.write(`HELO t\r\nMAIL FROM:<a@b>\r\nRCPT TO:<${mailTo}>\r\nDATA\r\nhi\r\n.\r\nQUIT\r\n`));
+    sock.on("data", () => {});
+    sock.on("close", resolve);
+    sock.on("error", resolve);
+  });
+  await page.locator('[data-testid="collab-interactions"] td', { hasText: "reset mail" }).first().waitFor({ timeout: 10000 });
+  check(true, "mail to a payload address shows up as an interaction");
   await page.screenshot({ path: join(SHOTS, "5d-collaborator.png") });
   await viaProxy(proxy, shop, "GET /search?q=render-check HTTP/1.1\r\nHost: shop\r\n\r\n");
   const htmlId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=render-check&limit=1")).json()).exchanges[0].id);

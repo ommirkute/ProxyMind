@@ -145,6 +145,7 @@ pub fn api() -> Router<AppState> {
         .route("/scan/tasks/{id}/resume", post(scan_task_resume))
         .route("/collaborator", get(collaborator_status))
         .route("/collaborator/listener", post(collaborator_listen))
+        .route("/collaborator/smtp", post(collaborator_smtp))
         .route("/collaborator/payloads", get(collaborator_payloads).post(collaborator_payload))
         .route("/collaborator/interactions", get(collaborator_interactions))
         .route("/organizer", get(organizer_list).post(organizer_add))
@@ -418,6 +419,21 @@ async fn collaborator_status(State(st): State<AppState>) -> ApiResult {
 struct ListenBody {
     listen: String,
     public_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SmtpBody {
+    listen: String,
+}
+
+async fn collaborator_smtp(State(st): State<AppState>, Json(b): Json<SmtpBody>) -> ApiResult {
+    let addr = b
+        .listen
+        .trim()
+        .parse()
+        .map_err(|_| pm_service::ServiceError::Invalid(format!("listen on host:port, not {:?}", b.listen)))?;
+    ok(st.service.collaborator_smtp(&st.actor, addr).await?)
 }
 
 async fn collaborator_listen(State(st): State<AppState>, Json(b): Json<ListenBody>) -> ApiResult {

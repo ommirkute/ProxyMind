@@ -10,6 +10,7 @@
 //! delegated to it (`<token>.oast.example.com`).
 
 pub mod dns;
+pub mod smtp;
 
 use std::net::SocketAddr;
 

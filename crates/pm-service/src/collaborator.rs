@@ -18,6 +18,23 @@ use serde_json::{Value, json};
 use crate::{Result, Service, ServiceError};
 
 const MAX_PAYLOADS: u64 = 10_000;
+/// Project setting: where the SMTP listener takes mail (`host:port`).
+const SMTP_SETTING: &str = "oast_smtp";
+
+/// An address that reaches the SMTP listener with `token`: a host in the
+/// delegated DNS zone (mail servers find it by its A record), else the
+/// listener's own address.
+fn email_for(token: &str, dns_domain: Option<&str>, smtp: Option<&str>) -> Option<String> {
+    match (dns_domain, smtp) {
+        (Some(d), Some(_)) => Some(format!("pm@{token}.{d}")),
+        (None, Some(addr)) => {
+            let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+            let host = if host.parse::<std::net::IpAddr>().is_ok() { format!("[{host}]") } else { host.to_string() };
+            Some(format!("{token}@{host}"))
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CollaboratorStatus {
@@ -27,6 +44,8 @@ pub struct CollaboratorStatus {
     pub dns_domain: Option<String>,
     /// The address this process listens on, if it runs the listener.
     pub listening: Option<String>,
+    /// Where the SMTP listener takes mail (host:port), if one runs.
+    pub smtp: Option<String>,
     pub payloads: u64,
     pub interactions: u64,
 }
@@ -41,6 +60,8 @@ pub struct CollaboratorPayload {
     pub http_url: Option<String>,
     /// `<token>.<dns domain>` when a DNS zone is set.
     pub dns_name: Option<String>,
+    /// An email address carrying the token, when an SMTP listener is set up.
+    pub email: Option<String>,
     /// Interactions seen for this payload so far.
     pub interactions: u64,
 }
@@ -75,6 +96,44 @@ impl Service {
         Ok((st.get_setting(crate::proof::OAST_SETTING)?, st.get_setting(crate::proof::OAST_DNS_SETTING)?))
     }
 
+    fn smtp_setting(&self) -> Result<Option<String>> {
+        Ok(self.store.lock().get_setting(SMTP_SETTING)?)
+    }
+
+    /// Records where an SMTP listener takes mail (`host:port`), for payload addresses.
+    pub fn set_oast_smtp(&self, addr: &str) -> Result<()> {
+        Ok(self.store.lock().set_setting(SMTP_SETTING, addr)?)
+    }
+
+    /// Starts the SMTP listener in this process (once). People only: it opens a port.
+    pub async fn collaborator_smtp(self: &Arc<Self>, actor: &Actor, listen: SocketAddr) -> Result<CollaboratorStatus> {
+        if actor.kind != ActorKind::Human {
+            return Err(ServiceError::Invalid("only people can start the SMTP listener (it opens a port)".into()));
+        }
+        if self.smtp_listening.get().is_some() {
+            return Err(ServiceError::Invalid("the SMTP listener already runs in this process".into()));
+        }
+        let l = tokio::net::TcpListener::bind(listen)
+            .await
+            .map_err(|e| ServiceError::Invalid(format!("can't listen on {listen}: {e}")))?;
+        let bound = l.local_addr().map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let reach = match bound.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::from(([127, 0, 0, 1], bound.port())),
+            _ => bound,
+        };
+        self.set_oast_smtp(&reach.to_string())?;
+        let _ = self.smtp_listening.set(bound);
+        let me = self.clone();
+        let host = self.oast_settings()?.1.unwrap_or_else(|| "proxymind-oast".into());
+        tokio::spawn(pm_oast::smtp::serve(l, host, move |i| {
+            if let Err(e) = me.record_oast(&i) {
+                tracing::warn!("could not record a mail callback: {e}");
+            }
+        }));
+        self.audit(&actor.id(), "collaborator_smtp", json!({ "listen": bound.to_string() }), "allow")?;
+        self.collaborator_status()
+    }
+
     pub fn collaborator_status(&self) -> Result<CollaboratorStatus> {
         let (public_url, dns_domain) = self.oast_settings()?;
         let st = self.store.lock();
@@ -82,6 +141,7 @@ impl Service {
             public_url,
             dns_domain,
             listening: self.oast_listening.get().map(ToString::to_string),
+            smtp: st.get_setting(SMTP_SETTING)?,
             payloads: st.count_rows("oast_payloads", None)?,
             interactions: st.count_rows("oast_interactions", None)?,
         })
@@ -136,7 +196,8 @@ impl Service {
     /// Hands out a new payload. It sends nothing.
     pub fn collaborator_payload(&self, actor: &Actor, note: &str) -> Result<CollaboratorPayload> {
         let (public_url, dns_domain) = self.oast_settings()?;
-        if public_url.is_none() && dns_domain.is_none() {
+        let smtp = self.smtp_setting()?;
+        if public_url.is_none() && dns_domain.is_none() && smtp.is_none() {
             return Err(ServiceError::Invalid(
                 "no callback listener is set up: start one on the Collaborator page, or run `proxymind oast-server`"
                     .into(),
@@ -155,6 +216,7 @@ impl Service {
         self.store.lock().insert_row("oast_payloads", &row)?;
         self.audit(&actor.id(), "collaborator_payload", json!({ "token": token, "note": note }), "allow")?;
         Ok(CollaboratorPayload {
+            email: email_for(&token, dns_domain.as_deref(), smtp.as_deref()),
             http_url: public_url.map(|u| format!("{}/{token}", u.trim_end_matches('/'))),
             dns_name: dns_domain.map(|d| format!("{token}.{d}")),
             token,
@@ -168,12 +230,14 @@ impl Service {
     /// Recent payloads, newest first, with how many interactions each had.
     pub fn collaborator_payloads(&self, limit: usize) -> Result<Vec<CollaboratorPayload>> {
         let (public_url, dns_domain) = self.oast_settings()?;
+        let smtp = self.smtp_setting()?;
         let st = self.store.lock();
         let rows = st.rows("oast_payloads", None, limit.clamp(1, 1000))?;
         rows.iter()
             .map(|r| {
                 let token = s(r, "token");
                 Ok(CollaboratorPayload {
+                    email: email_for(&token, dns_domain.as_deref(), smtp.as_deref()),
                     http_url: public_url.as_ref().map(|u| format!("{}/{token}", u.trim_end_matches('/'))),
                     dns_name: dns_domain.as_ref().map(|d| format!("{token}.{d}")),
                     interactions: st.count_rows("oast_interactions", Some(("token", &json!(token))))?,

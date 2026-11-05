@@ -92,6 +92,7 @@ export default function Replay() {
   const [raceCount, setRaceCount] = useState(10);
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
   const [groupOpen, setGroupOpen] = useState(false);
+  const caret = useRef<[number, number] | null>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
   const loaded = useRef(false);
@@ -323,6 +324,16 @@ export default function Replay() {
           onChange={(e) => {
             const v = e.target.value;
             if (!v) return;
+            if (v.startsWith("oast:")) {
+              action.run(async () => {
+                const p = await api.post<{ http_url?: string; dns_name?: string; email?: string; token: string }>("/collaborator/payloads", { note: `Replay tab ${tab.name}` });
+                const value = (v === "oast:dns" ? p.dns_name : v === "oast:email" ? p.email : p.http_url) ?? p.http_url ?? p.dns_name ?? p.email ?? p.token;
+                const [a, b] = caret.current ?? [tab.raw.length, tab.raw.length];
+                editRaw(tab.raw.slice(0, a) + value + tab.raw.slice(b));
+                toast("Collaborator payload inserted");
+              });
+              return;
+            }
             if (v.startsWith("code:")) {
               action.run(async () => {
                 const r = await api.post<{ code: string }>("/tools/code", { url: tab.url, raw: tab.raw, lang: v.slice(5) });
@@ -340,6 +351,9 @@ export default function Replay() {
           <option value="url_encoded">Body as URL-encoded form</option>
           <option value="multipart">Body as multipart form</option>
           <option value="json">Body as JSON</option>
+          <option value="oast:http">Insert Collaborator URL</option>
+          <option value="oast:dns">Insert Collaborator DNS name</option>
+          <option value="oast:email">Insert Collaborator email</option>
           <option value="code:python" disabled={!tab.url}>Copy as Python requests</option>
           <option value="code:javascript" disabled={!tab.url}>Copy as JavaScript fetch</option>
           <option value="code:powershell" disabled={!tab.url}>Copy as PowerShell</option>
@@ -362,7 +376,7 @@ export default function Replay() {
       <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
         <section className="pane">
           <h3 className="pane-title">Request</h3>
-          <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} spellCheck={false} />
+          <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
           <div className="row small race-bar">
             <strong>Race</strong>
             <label>
