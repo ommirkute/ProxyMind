@@ -104,7 +104,11 @@ try {
   const consoleErrors = [];
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(`${m.text()}${m.location()?.url ? ` (${m.location().url})` : ""}`));
   const failedResponses = [];
-  page.on("response", (r) => r.status() >= 400 && failedResponses.push(`${r.status()} ${r.request().method()} ${r.url()}`));
+  page.on("response", async (r) => {
+    if (r.status() < 400) return;
+    const body = await r.text().catch(() => "");
+    failedResponses.push(`${r.status()} ${r.request().method()} ${r.url()} ${body.slice(0, 300)}`);
+  });
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
 
   console.log("History");
@@ -943,7 +947,9 @@ try {
   await page.screenshot({ path: join(SHOTS, "7a-builtin-browser.png") });
   const opened = page.waitForResponse((r) => r.url().endsWith("/api/v1/browser/open"));
   await page.getByTestId("setup-open-browser").click();
-  const launch = await (await opened).json();
+  const launchResponse = await opened;
+  const launch = await launchResponse.json();
+  if (!launchResponse.ok()) console.log(`  (the browser launch answered ${launchResponse.status()}: ${JSON.stringify(launch)})`);
   await page.getByTestId("toast").waitFor();
   const seenByProxy = await page.waitForFunction(async () => {
     const p = await (await fetch("/api/v1/exchanges?path=from-pm-browser&limit=5")).json();
