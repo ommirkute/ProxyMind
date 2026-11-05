@@ -951,6 +951,11 @@ try {
     await page.getByTestId("plugin-run").click();
     await page.waitForSelector('[data-testid="plugin-result"]', { timeout: 60000 });
     check(await page.getByTestId("plugin-result").textContent().then((t) => t.includes("Hidden debug switch")), "an active plugin finds the hidden debug switch");
+    pm("plugin", "add", new URL("../../examples/plugins/hosts-panel", import.meta.url).pathname);
+    await page.reload();
+    await page.getByTestId("panel-hosts-panel-hosts").click();
+    await page.waitForSelector('[data-testid="plugin-panel"] table');
+    check(await page.getByTestId("plugin-panel").textContent().then((t) => t.includes(`127.0.0.1:${shop}`)), "a plugin panel shows its table");
     await page.screenshot({ path: join(SHOTS, "6f-plugins.png"), fullPage: true });
     await page.getByTestId("plugin-toggle-debug-switch").click();
     await page.getByText("Off · turn on").waitFor();

@@ -10,7 +10,10 @@ interface PluginInfo {
   enabled: boolean;
   dir: string;
   max_requests?: number;
+  panels: [string, string][];
+  signature: { state: "unsigned" } | { state: "signed"; signer: string; key: string; trusted: boolean };
 }
+interface PanelData { title: string; text: string; columns: string[]; rows: string[][] }
 interface Sandbox { network_isolated: boolean; limits: boolean; summary: string }
 interface PluginsView { plugins: PluginInfo[]; sandbox: Sandbox; registry?: string }
 interface Probe { raw: string; note: string }
@@ -52,7 +55,14 @@ export default function Plugins() {
                   {data.plugins.map((p) => (
                     <tr key={p.name}>
                       <td><strong>{p.name}</strong> <span className="small muted">{p.version}</span><div className="small muted mono">{p.dir}</div></td>
-                      <td>{p.kinds.map((k) => <Chip key={k} value={k} />)}</td>
+                      <td>
+                        {p.kinds.map((k) => <Chip key={k} value={k} />)}{" "}
+                        {p.signature.state === "signed" ? (
+                          <span title={`key ${p.signature.key}`}><Chip value={p.signature.trusted ? `signed by ${p.signature.signer} (trusted)` : `signed by ${p.signature.signer}`} /></span>
+                        ) : (
+                          <span className="small muted">unsigned</span>
+                        )}
+                      </td>
                       <td className="small">{p.description}</td>
                       <td>
                         <button className="btn" disabled={toggle.busy} onClick={() => set(p.name, !p.enabled)} data-testid={`plugin-toggle-${p.name}`}>
@@ -72,6 +82,7 @@ export default function Plugins() {
           </>
         )}
       </Panel>
+      {data && <Panels plugins={data.plugins.filter((p) => p.enabled && p.panels.length > 0)} />}
       {data && <ActiveCheck plugins={data.plugins.filter((p) => p.enabled && p.kinds.includes("active"))} />}
     </div>
   );
@@ -149,6 +160,57 @@ function ActiveCheck({ plugins }: { plugins: PluginInfo[] }) {
           )}
           {r.notes.length > 0 && <ul className="small muted">{r.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
           <p className="small muted">Plugin issues are leads: confirm one with a proof before it becomes a finding.</p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** Views plugins add: their output shown as text and a table (never as markup). */
+function Panels({ plugins }: { plugins: PluginInfo[] }) {
+  const { go } = useNav();
+  const [shown, setShown] = useState<{ key: string; data: PanelData } | null>(null);
+  const action = useAction();
+  if (plugins.length === 0) return null;
+  const open = (plugin: string, id: string) =>
+    action.run(async () => {
+      const data = await api.get<PanelData>(`/plugins/${encodeURIComponent(plugin)}/panels/${encodeURIComponent(id)}`);
+      setShown({ key: `${plugin}/${id}`, data });
+    });
+  const idCol = shown?.data.columns.findIndex((c) => c.toLowerCase() === "exchange_id") ?? -1;
+  return (
+    <Panel title="Plugin panels">
+      <div className="row small">
+        {plugins.flatMap((p) =>
+          p.panels.map(([id, title]) => (
+            <button key={`${p.name}/${id}`} className={`btn ${shown?.key === `${p.name}/${id}` ? "primary" : ""}`} disabled={action.busy} onClick={() => open(p.name, id)} data-testid={`panel-${p.name}-${id}`}>
+              {title} <span className="muted">· {p.name}</span>
+            </button>
+          )),
+        )}
+      </div>
+      <ErrorBox error={action.error} />
+      {shown && (
+        <div data-testid="plugin-panel">
+          <h3>{shown.data.title}</h3>
+          {shown.data.text && <pre className="raw small">{unwrapUntrusted(shown.data.text)}</pre>}
+          {shown.data.rows.length > 0 && (
+            <table className="grid">
+              {shown.data.columns.length > 0 && <thead><tr>{shown.data.columns.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>}
+              <tbody>
+                {shown.data.rows.map((r, i) => (
+                  <tr key={i}>
+                    {r.map((c, j) => (
+                      <td key={j} className="small">
+                        {j === idCol && /^\d+$/.test(c) ? <a href="#" onClick={(e) => { e.preventDefault(); go("history", Number(c)); }}>#{c}</a> : c}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="small muted">From the plugin: shown as plain text.</p>
         </div>
       )}
     </Panel>

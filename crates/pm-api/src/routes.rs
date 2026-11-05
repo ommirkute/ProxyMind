@@ -159,6 +159,7 @@ pub fn api() -> Router<AppState> {
         .route("/plugins", get(plugins))
         .route("/plugins/check", post(plugin_check))
         .route("/plugins/{name}", axum::routing::put(plugin_set))
+        .route("/plugins/{name}/panels/{panel}", get(plugin_panel))
         .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
         .route("/scan/custom-checks", get(custom_checks).post(custom_check_save))
         .route("/scan/custom-checks/{id}", axum::routing::delete(custom_check_delete))
@@ -551,6 +552,19 @@ struct PluginSet {
 
 async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b): Json<PluginSet>) -> ApiResult {
     ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
+}
+
+#[derive(Deserialize)]
+struct PanelQuery {
+    limit: Option<usize>,
+}
+
+async fn plugin_panel(
+    State(st): State<AppState>,
+    Path((name, panel)): Path<(String, String)>,
+    Query(q): Query<PanelQuery>,
+) -> ApiResult {
+    ok(st.service.plugin_panel(&st.actor, &name, &panel, q.limit)?)
 }
 
 async fn plugin_check(State(st): State<AppState>, Json(r): Json<pm_service::PluginCheckRequest>) -> ApiResult {

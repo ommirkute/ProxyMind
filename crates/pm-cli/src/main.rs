@@ -557,9 +557,40 @@ enum FindingAction {
 enum PluginAction {
     /// Install the plugin in a directory (it must contain proxymind-plugin.yaml).
     /// Plugins run as you, with your permissions: install only code you trust.
-    Add { dir: PathBuf },
+    Add {
+        dir: PathBuf,
+        /// Refuse plugins that aren't signed by a key on your trusted list
+        #[arg(long)]
+        require_signed: bool,
+    },
     /// List installed plugins and what the sandbox can do on this machine.
     List,
+    /// Make a signing key for plugins you publish (keep the file private).
+    Keygen {
+        /// Where to write the private key (PKCS#8)
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign the plugin in a directory (writes proxymind-plugin.sig).
+    Sign {
+        dir: PathBuf,
+        /// Private key from `plugin keygen`
+        #[arg(long)]
+        key: PathBuf,
+        /// Your name, shown with the signature
+        #[arg(long)]
+        signer: String,
+    },
+    /// Trust a signer's public key (hex, from `plugin keygen`).
+    Trust {
+        key: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Stop trusting a key.
+    Untrust { key: String },
+    /// List trusted signer keys.
+    Trusted,
     /// Uninstall a plugin by name.
     Remove { name: String },
     /// Turn a plugin on (installed plugins start on).
@@ -1675,10 +1706,55 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let mut reg = pm_plugin::Registry::load(&home)?;
             match action {
-                PluginAction::Add { dir } => {
-                    let p = reg.add(dir)?.clone();
+                PluginAction::Keygen { out: path } => {
+                    anyhow::ensure!(!path.exists(), "{} exists: choose another file", path.display());
+                    let (private, public) = pm_plugin::sign::keygen()?;
+                    write_private(path, &private)?;
+                    out!("✓ private key written to {} (keep it secret)", path.display());
+                    out!("Public key (give this to people who install your plugins):\n{public}");
+                }
+                PluginAction::Sign { dir, key, signer } => {
+                    let private = std::fs::read(key).with_context(|| format!("reading {}", key.display()))?;
+                    let sig = pm_plugin::sign::sign(dir, &private, signer)?;
+                    out!("✓ signed {} as {} (key {})", dir.display(), sig.signer, sig.key);
+                }
+                PluginAction::Trust { key, name } => {
+                    let key = key.trim().to_ascii_lowercase();
+                    anyhow::ensure!(
+                        key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
+                        "a public key is 64 hex characters"
+                    );
+                    let mut keys = pm_plugin::sign::load_trusted(&home)?;
+                    keys.retain(|k| k.key != key);
+                    keys.push(pm_plugin::sign::TrustedKey { name: name.clone(), key });
+                    pm_plugin::sign::save_trusted(&home, &keys)?;
+                    out!("✓ trusting {name}");
+                }
+                PluginAction::Untrust { key } => {
+                    let mut keys = pm_plugin::sign::load_trusted(&home)?;
+                    let before = keys.len();
+                    keys.retain(|k| !k.key.eq_ignore_ascii_case(key.trim()));
+                    pm_plugin::sign::save_trusted(&home, &keys)?;
+                    out!("{}", if keys.len() < before { "✓ removed" } else { "no such key" });
+                }
+                PluginAction::Trusted => {
+                    for k in pm_plugin::sign::load_trusted(&home)? {
+                        out!("{:<20} {}", k.name, k.key);
+                    }
+                }
+                PluginAction::Add { dir, require_signed } => {
+                    let p = reg.add_checked(dir, *require_signed)?.clone();
                     reg.save()?;
                     out!("✓ installed {} {} from {}", p.manifest.name, p.manifest.version, p.dir.display());
+                    match &p.signature {
+                        pm_plugin::sign::Signature::Unsigned => out!("  Unsigned."),
+                        pm_plugin::sign::Signature::Signed { signer, trusted, .. } => {
+                            out!(
+                                "  Signed by {signer}{}",
+                                if *trusted { " (trusted key)" } else { " (key not on your trusted list)" }
+                            )
+                        }
+                    }
                     if p.manifest.passive.is_some() {
                         out!("  Passive: runs with the passive scan (`proxymind scan`, the Issues page).");
                     }
@@ -1693,11 +1769,16 @@ async fn run() -> Result<()> {
                     }
                     for p in &reg.plugins {
                         out!(
-                            "{:<20} {:<8} {:<15} {:<3} {}  ({})",
+                            "{:<20} {:<8} {:<15} {:<3} {:<9} {}  ({})",
                             p.manifest.name,
                             p.manifest.version,
                             p.manifest.kinds().join("+"),
                             if p.enabled { "on" } else { "off" },
+                            match &p.signature {
+                                pm_plugin::sign::Signature::Unsigned => "unsigned",
+                                pm_plugin::sign::Signature::Signed { trusted: true, .. } => "trusted",
+                                pm_plugin::sign::Signature::Signed { .. } => "signed",
+                            },
                             p.manifest.description,
                             p.dir.display()
                         );
@@ -2918,4 +2999,19 @@ fn attach_plugins(cli: &Cli, service: &pm_service::Service) {
         Ok(h) => service.attach_plugin_home(h),
         Err(e) => eprintln!("plugins not loaded: {e}"),
     }
+}
+
+/// Writes a secret file readable by the owner only (where the OS has modes).
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path).with_context(|| format!("creating {}", path.display()))?;
+    f.write_all(data)?;
+    Ok(())
 }

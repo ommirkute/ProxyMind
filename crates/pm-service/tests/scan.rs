@@ -71,7 +71,13 @@ fn plugins_add_issues_to_the_passive_scan() {
     let s = Service::new(store, Policy::new(Roe::parse(roe).unwrap())).unwrap();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/jwt-check");
     let manifest = pm_service::pm_plugin::load_manifest(&dir).unwrap();
-    s.set_plugins(vec![pm_service::pm_plugin::Installed { dir, manifest, enabled: true }]);
+    s.set_plugins(vec![pm_service::pm_plugin::Installed {
+        dir,
+        manifest,
+        enabled: true,
+        signature: Default::default(),
+        files: vec![],
+    }]);
     let human = Actor::parse("human:tester").unwrap();
     let issues = s.scan_passive(&human, &ScanFilter::default()).unwrap();
     let none = issues.iter().find(|i| i.check == "jwt-check/jwt_alg_none").expect("plugin issue");
@@ -90,7 +96,13 @@ fn plugins_add_issues_to_the_passive_scan() {
     )
     .unwrap();
     let manifest = pm_service::pm_plugin::load_manifest(&bad_dir).unwrap();
-    s.set_plugins(vec![pm_service::pm_plugin::Installed { dir: bad_dir.clone(), manifest, enabled: true }]);
+    s.set_plugins(vec![pm_service::pm_plugin::Installed {
+        dir: bad_dir.clone(),
+        manifest,
+        enabled: true,
+        signature: Default::default(),
+        files: vec![],
+    }]);
     let issues = s.scan_passive(&human, &ScanFilter::default()).unwrap();
     assert!(issues.iter().any(|i| i.check == "broken/plugin_error"));
     let _ = std::fs::remove_dir_all(&bad_dir);

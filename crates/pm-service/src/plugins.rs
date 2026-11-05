@@ -31,6 +31,10 @@ pub struct PluginInfo {
     /// Most requests one active check may send.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_requests: Option<usize>,
+    /// Panels the plugin adds: (id, title).
+    pub panels: Vec<(String, String)>,
+    /// Who signed it, as checked at install.
+    pub signature: pm_plugin::sign::Signature,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +127,8 @@ impl Service {
                 description: p.manifest.description,
                 enabled: p.enabled,
                 dir: p.dir.display().to_string(),
+                panels: p.manifest.panels.iter().map(|x| (x.id.clone(), x.title.clone())).collect(),
+                signature: p.signature,
             })
             .collect();
         PluginsView {
@@ -130,6 +136,53 @@ impl Service {
             sandbox: pm_plugin::sandbox::status(),
             registry: self.plugin_home.get().map(|h| h.join(pm_plugin::REGISTRY).display().to_string()),
         }
+    }
+
+    /// Runs a plugin's panel over the newest recorded exchanges (default
+    /// 500, max 5000). The plugin runs sandboxed and sends nothing; for
+    /// agents the output is redacted and marked untrusted.
+    pub fn plugin_panel(
+        &self,
+        actor: &Actor,
+        plugin: &str,
+        panel: &str,
+        limit: Option<usize>,
+    ) -> Result<pm_plugin::panel::PanelData> {
+        let p = self
+            .enabled_plugins()
+            .into_iter()
+            .find(|p| p.manifest.name == plugin)
+            .ok_or_else(|| ServiceError::NotFound(format!("enabled plugin {plugin}")))?;
+        let rows = self.store.lock().search_exchanges(&pm_store::HistoryFilter {
+            limit: Some(limit.unwrap_or(500).clamp(1, 5000)),
+            ..Default::default()
+        })?;
+        let mut lines = Vec::with_capacity(rows.len());
+        for s in rows {
+            let Some(ex) = self.store.lock().get_exchange(s.id)? else { continue };
+            lines.push(pm_plugin::ExchangeLine {
+                exchange_id: s.id,
+                scheme: s.scheme.clone(),
+                host: s.host.clone(),
+                port: s.port,
+                method: s.method.clone(),
+                path: s.path.clone(),
+                status: s.status,
+                request: pm_core::base64(&ex.request),
+                response: ex.response.as_deref().map(pm_core::base64),
+            });
+        }
+        let mut data =
+            pm_plugin::panel::run_panel(&p, panel, &lines).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        if let Some(r) = self.redactor_for(actor) {
+            data.text = pm_ai::wrap_untrusted(&r.redact(&data.text));
+            for row in &mut data.rows {
+                for c in row.iter_mut() {
+                    *c = r.redact(c);
+                }
+            }
+        }
+        Ok(data)
     }
 
     /// Turns a plugin on or off in the user's registry. Humans only.

@@ -24,7 +24,9 @@
 //! else must not decide what runs on your machine.
 
 pub mod active;
+pub mod panel;
 pub mod sandbox;
+pub mod sign;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -63,6 +65,9 @@ pub struct Manifest {
     pub passive: Option<Passive>,
     #[serde(default)]
     pub active: Option<active::Active>,
+    /// Views the plugin adds to the UI.
+    #[serde(default)]
+    pub panels: Vec<panel::Panel>,
 }
 
 impl Manifest {
@@ -74,6 +79,9 @@ impl Manifest {
         }
         if self.active.is_some() {
             k.push("active");
+        }
+        if !self.panels.is_empty() {
+            k.push("panels");
         }
         k
     }
@@ -97,6 +105,12 @@ pub struct Installed {
     pub manifest: Manifest,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Who signed the plugin, if anyone, as checked at install.
+    #[serde(default)]
+    pub signature: sign::Signature,
+    /// SHA-256 of each file at install; checked before every run.
+    #[serde(default)]
+    pub files: Vec<(String, String)>,
 }
 
 fn yes() -> bool {
@@ -120,9 +134,12 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
             m.name
         )));
     }
-    if m.passive.is_none() && m.active.is_none() {
-        return Err(PluginError::Invalid("the plugin declares nothing to run (add `passive:` or `active:`)".into()));
+    if m.passive.is_none() && m.active.is_none() && m.panels.is_empty() {
+        return Err(PluginError::Invalid(
+            "the plugin declares nothing to run (add `passive:`, `active:` or `panels:`)".into(),
+        ));
     }
+    panel::validate(&m.panels)?;
     if m.passive.as_ref().is_some_and(|p| p.command.is_empty()) {
         return Err(PluginError::Invalid("passive.command is empty".into()));
     }
@@ -165,11 +182,26 @@ impl Registry {
 
     /// Installs (or updates) the plugin in `dir`.
     pub fn add(&mut self, dir: &Path) -> Result<&Installed> {
+        self.add_checked(dir, false)
+    }
+
+    /// Installs the plugin in `dir`, checking its signature (a bad one is
+    /// refused; `require_trusted` also refuses unsigned plugins and keys
+    /// not on the user's trusted list) and recording its files' hashes.
+    pub fn add_checked(&mut self, dir: &Path, require_trusted: bool) -> Result<&Installed> {
         let dir = dir.canonicalize()?;
         let manifest = load_manifest(&dir)?;
+        let files = sign::file_hashes(&dir)?;
+        let home = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let signature = sign::verify(&dir, &files, &sign::load_trusted(&home)?)?;
+        if require_trusted && !matches!(signature, sign::Signature::Signed { trusted: true, .. }) {
+            return Err(PluginError::Invalid(
+                "the plugin isn't signed by a trusted key (see `proxymind plugin trust`)".into(),
+            ));
+        }
         let name = manifest.name.clone();
         self.plugins.retain(|p| p.manifest.name != manifest.name);
-        self.plugins.push(Installed { dir, manifest, enabled: true });
+        self.plugins.push(Installed { dir, manifest, enabled: true, signature, files });
         self.plugins.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
         self.plugins
             .iter()
@@ -286,13 +318,19 @@ pub fn run_passive(p: &Installed, exchanges: &[ExchangeLine]) -> Result<(Vec<Plu
     Ok(parse_issues(&p.manifest.name, &String::from_utf8_lossy(&out), &known))
 }
 
-fn run_err(p: &Installed, why: String) -> PluginError {
+pub(crate) fn run_err(p: &Installed, why: String) -> PluginError {
     PluginError::Run { name: p.manifest.name.clone(), why }
 }
 
 /// Runs one plugin command in the sandbox: writes `input` to its stdin and
 /// returns its stdout (at most [`MAX_OUTPUT`] bytes).
 pub(crate) fn run(p: &Installed, command: &[String], timeout_seconds: u64, input: Vec<u8>) -> Result<Vec<u8>> {
+    if let Some(f) = sign::changed(&p.dir, &p.files) {
+        return Err(run_err(
+            p,
+            format!("{f} changed since install: install the plugin again (`proxymind plugin add`)"),
+        ));
+    }
     let timeout = Duration::from_secs(timeout_seconds.clamp(1, 600));
     let mut cmd = sandbox::command(&p.dir, command, timeout).map_err(|why| run_err(p, why))?;
     let mut child = cmd
