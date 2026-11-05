@@ -80,7 +80,7 @@ async fn fuzzes_ids_as_an_identity_and_points_out_anomalies() {
     assert!(s.fuzzer_run(&agent, changed).await.is_err());
 
     let r = s.fuzzer_run(&human(), req).await.unwrap();
-    let FuzzerResult::Done { baseline, results, anomalies } = r else { panic!("{r:?}") };
+    let FuzzerResult::Done { baseline, results, anomalies, .. } = r else { panic!("{r:?}") };
     assert_eq!(baseline.status, Some(200), "bob's own order");
     let statuses: Vec<_> = results.iter().map(|r| r.status).collect();
     assert_eq!(statuses, vec![Some(200), Some(200), Some(404)], "VS-1: bob reads alice's orders");
@@ -227,4 +227,89 @@ async fn payloads_cannot_walk_out_of_scope() {
         assert!(ex.response.is_none(), "never sent");
         assert!(ex.summary.error.as_deref().unwrap_or_default().contains("out of scope"), "{:?}", ex.summary.error);
     }
+}
+
+/// A server where each response gives the token for the next request (like
+/// a per-request CSRF token): GET /step?t=N answers {"next":"tN+1"} until t5.
+async fn chain_server() -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut c, _)) = l.accept().await else { return };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = c.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let t: u32 =
+                    req.split("t=t").nth(1).and_then(|r| r.split(' ').next()).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let body = if req.contains("t=evil") {
+                    // A hostile response: its "next" value is destructive SQL.
+                    r#"{"next":"1;DROP%20TABLE%20users"}"#.to_string()
+                } else if t < 5 {
+                    format!("{{\"next\":\"t{}\"}}", t + 1)
+                } else {
+                    "{\"done\":true}".into()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = c.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn recursive_grep_takes_each_payload_from_the_last_response() {
+    use pm_service::pm_fuzz::{Extract, RecursiveGrep};
+    let port = chain_server().await;
+    let url = format!("http://127.0.0.1:{port}");
+    let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");
+    let s = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
+    let rec = |count| PayloadSet {
+        recursive: Some(RecursiveGrep {
+            first: "t1".into(),
+            extract: Extract { regex: Some(r#""next":"([^"]+)""#.into()), ..Default::default() },
+            count,
+        }),
+        ..Default::default()
+    };
+    let req = |count| FuzzerRequest {
+        url: Some(url.clone()),
+        raw: "GET /step?t=§t0§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+        payload_sets: vec![rec(count)],
+        ..Default::default()
+    };
+    let FuzzerResult::Done { results, note, .. } = s.fuzzer_run(&human(), req(10)).await.unwrap() else { panic!() };
+    let sent: Vec<_> = results.iter().map(|r| r.payloads[0].clone().unwrap()).collect();
+    assert_eq!(sent, ["t1", "t2", "t3", "t4", "t5"], "each payload came from the previous response");
+    assert!(note.unwrap().contains("no value"), "t5's response ends the chain");
+
+    let FuzzerResult::Done { results, note, .. } = s.fuzzer_run(&human(), req(3)).await.unwrap() else { panic!() };
+    assert_eq!(results.len(), 3);
+    assert!(note.is_none(), "stopped at the count: {note:?}");
+
+    // A value from a response can't raise the risk tier past what was approved.
+    let mut evil = req(5);
+    evil.payload_sets = vec![PayloadSet {
+        recursive: Some(RecursiveGrep {
+            first: "evil".into(),
+            extract: Extract { regex: Some(r#""next":"([^"]+)""#.into()), ..Default::default() },
+            count: 5,
+        }),
+        ..Default::default()
+    }];
+    let FuzzerResult::Done { results, note, .. } = s.fuzzer_run(&human(), evil).await.unwrap() else { panic!() };
+    assert_eq!(results.len(), 1, "the destructive payload is never sent");
+    assert!(note.unwrap().contains("higher risk tier"));
+
+    // Only with one position and on its own.
+    let mut two = req(3);
+    two.raw = "GET /step?t=§t0§&u=§x§ HTTP/1.1\r\nHost: x\r\n\r\n".into();
+    two.payload_sets.push(list(&["a"]));
+    assert!(s.fuzzer_run(&human(), two).await.is_err());
 }

@@ -2125,7 +2125,10 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             match (&r, *json) {
-                (pm_service::FuzzerResult::Done { baseline, results, anomalies }, false) => {
+                (pm_service::FuzzerResult::Done { baseline, results, anomalies, note }, false) => {
+                    if let Some(n) = note {
+                        out!("note: {n}");
+                    }
                     let line = |label: &str, r: &pm_service::FuzzerRow| -> Result<()> {
                         out!(
                             "{label:>5}  #{:<6} {:>5}  {:>7} B  {:>6} ms  {}{}",

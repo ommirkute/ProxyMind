@@ -31,6 +31,7 @@ interface AttackView {
   rows: Row[];
   anomalies: Anomaly[];
   error?: string;
+  note?: string;
 }
 interface AttackSummary {
   attack_id: string;
@@ -58,7 +59,7 @@ const MODE_HELP: Record<(typeof MODES)[number], string> = {
   paired: "set i in position i, advancing together",
   all_combinations: "every combination of the sets",
 };
-const TYPES = ["list", "numbers", "brute", "null", "case", "builtin"] as const;
+const TYPES = ["list", "numbers", "brute", "null", "case", "builtin", "recursive"] as const;
 type SetType = (typeof TYPES)[number];
 const TYPE_LABEL: Record<SetType, string> = {
   list: "Simple list",
@@ -67,6 +68,7 @@ const TYPE_LABEL: Record<SetType, string> = {
   null: "Null payloads",
   case: "Case variants",
   builtin: "Built-in list",
+  recursive: "Recursive grep",
 };
 const BUILTINS = ["ids", "sqli", "xss", "traversal", "ssti", "methods_override"];
 const RULES = ["prefix", "suffix", "replace", "url_encode", "url_encode_all", "base64", "hex", "lower", "upper", "reverse", "sha1", "sha256"] as const;
@@ -87,6 +89,9 @@ interface SetCfg {
   nulls: number;
   words: string;
   builtin: string;
+  recFirst: string;
+  recRegex: string;
+  recCount: number;
   rules: RuleCfg[];
   urlEncode: boolean;
 }
@@ -118,6 +123,9 @@ const newSet = (): SetCfg => ({
   nulls: 10,
   words: "",
   builtin: "ids",
+  recFirst: "",
+  recRegex: "",
+  recCount: 20,
   rules: [],
   urlEncode: false,
 });
@@ -154,6 +162,8 @@ function toPayloadSet(s: SetCfg) {
       return { ...base, case_variants: s.words.split("\n").map((w) => w.trim()).filter(Boolean) };
     case "builtin":
       return { ...base, builtin: s.builtin };
+    case "recursive":
+      return { recursive: { first: s.recFirst, extract: { regex: s.recRegex }, count: s.recCount } };
   }
 }
 
@@ -164,6 +174,8 @@ function setSize(s: SetCfg): number | null {
       return s.list.split("\n").filter((l) => l.length > 0).length;
     case "null":
       return s.nulls;
+    case "recursive":
+      return s.recCount;
     case "brute": {
       const n = new Set(s.charset).size;
       let t = 0;
@@ -352,6 +364,14 @@ export default function Fuzzer() {
           )}
           {cur.type === "null" && <label className="small">send <input aria-label="Null payload count" type="number" min={1} value={cur.nulls} onChange={(e) => updateSet({ nulls: Number(e.target.value) })} style={{ width: 80 }} /> times, unchanged</label>}
           {cur.type === "case" && <textarea aria-label="Words" className="mono" rows={5} placeholder="one word per line: as written, lower, UPPER and Capitalised" value={cur.words} onChange={(e) => updateSet({ words: e.target.value })} />}
+          {cur.type === "recursive" && (
+            <div className="small" style={{ display: "grid", gap: 6 }}>
+              <span className="muted">Each payload comes from the previous response (for example a token that changes on every request). Use one marked position; requests go one at a time.</span>
+              <input aria-label="First payload" className="mono" placeholder="first payload" value={cur.recFirst} onChange={(e) => updateSet({ recFirst: e.target.value })} />
+              <input aria-label="Next payload regex" className="mono" placeholder='regex for the next payload, e.g. "csrf":"([^"]+)"' value={cur.recRegex} onChange={(e) => updateSet({ recRegex: e.target.value })} />
+              <label>up to <input aria-label="Recursive count" type="number" min={1} max={1000} value={cur.recCount} onChange={(e) => updateSet({ recCount: Number(e.target.value) })} style={{ width: 80 }} /> requests</label>
+            </div>
+          )}
           {cur.type === "builtin" && (
             <select aria-label="Built-in list" value={cur.builtin} onChange={(e) => updateSet({ builtin: e.target.value })}>
               {BUILTINS.map((b) => <option key={b}>{b}</option>)}
@@ -484,6 +504,7 @@ function Results({
         <label className="small"><input type="checkbox" checked={onlyAnomalies} onChange={(e) => setOnlyAnomalies(e.target.checked)} /> only results that stand out ({view.anomalies.length})</label>
         <input aria-label="Hide statuses" className="small" placeholder="hide statuses, e.g. 404" value={hideStatus} onChange={(e) => setHideStatus(e.target.value)} style={{ width: 160 }} />
         {view.error && <span className="bad small">{view.error}</span>}
+        {view.note && <span className="small muted" data-testid="attack-note">{view.note}</span>}
       </div>
       <div className={`fuzzer-split ${sel ? "" : "single"}`}>
         <div className="fuzzer-table">

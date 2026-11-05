@@ -79,6 +79,9 @@ pub enum FuzzerResult {
         results: Vec<FuzzerRow>,
         /// Results that stand out, with why; `index` points into results.
         anomalies: Vec<pm_fuzz::Anomaly>,
+        /// Why the attack ended early, when it did without failing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     PendingApproval {
         approval_id: String,
@@ -129,6 +132,8 @@ pub struct AttackView {
     pub anomalies: Vec<pm_fuzz::Anomaly>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +152,8 @@ struct AttackState {
     baseline: Option<FuzzerRow>,
     rows: Vec<FuzzerRow>,
     error: Option<String>,
+    /// Why an attack ended early without failing (a recursive grep ran dry).
+    note: Option<String>,
 }
 
 pub(crate) struct Attack {
@@ -175,6 +182,23 @@ struct Prepared {
     extract: Vec<(Extract, Option<regex::Regex>)>,
     concurrency: usize,
     throttle_ms: u64,
+    /// Recursive grep: payloads come from each previous response.
+    recursive: Option<Recursive>,
+}
+
+struct Recursive {
+    template: Template,
+    rule: pm_fuzz::RecursiveGrep,
+    re: Option<regex::Regex>,
+    endpoint: Endpoint,
+    /// The approved tier: a payload from a response must not raise it.
+    tier: Tier,
+}
+
+impl Prepared {
+    fn total(&self) -> usize {
+        self.recursive.as_ref().map_or(self.planned.len(), |r| r.rule.count)
+    }
 }
 
 fn invalid(e: impl ToString) -> ServiceError {
@@ -191,9 +215,29 @@ impl Service {
         req: &FuzzerRequest,
     ) -> Result<std::result::Result<Prepared, FuzzerResult>> {
         let template = Template::parse(&req.raw).map_err(invalid)?;
-        let sets: Vec<Vec<String>> =
-            req.payload_sets.iter().map(PayloadSet::expand).collect::<std::result::Result<_, _>>().map_err(invalid)?;
-        let planned = pm_fuzz::plan(&template, req.mode, &sets).map_err(invalid)?;
+        let recursive_rule = req.payload_sets.iter().find_map(|s| s.recursive.clone());
+        let planned = match &recursive_rule {
+            Some(r) => {
+                if req.payload_sets.len() != 1 || template.positions() != 1 {
+                    return Err(invalid("a recursive grep needs one payload set and one marked position"));
+                }
+                if !(1..=pm_fuzz::MAX_RECURSIVE).contains(&r.count) {
+                    return Err(invalid(format!("count must be 1 to {}", pm_fuzz::MAX_RECURSIVE)));
+                }
+                // The first request is known now; later ones come from the responses.
+                vec![pm_fuzz::Planned { payloads: vec![Some(r.first.clone())], raw: template.fill(&[&r.first]) }]
+            }
+            None => {
+                let sets: Vec<Vec<String>> = req
+                    .payload_sets
+                    .iter()
+                    .map(PayloadSet::expand)
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(invalid)?;
+                pm_fuzz::plan(&template, req.mode, &sets).map_err(invalid)?
+            }
+        };
+        let recursive_re = recursive_rule.as_ref().map(|r| r.extract.compile().map_err(invalid)).transpose()?.flatten();
         let grep = Grep::new(&req.grep, req.grep_regex).map_err(invalid)?;
         let extract =
             req.extract.iter().map(|e| Ok((e.clone(), e.compile().map_err(invalid)?))).collect::<Result<Vec<_>>>()?;
@@ -224,9 +268,10 @@ impl Service {
         }
         let fix_cl = req.fix_content_length.unwrap_or(true);
         // The approval binds the whole attack, not just the baseline.
+        let total = recursive_rule.as_ref().map_or(outs.len(), |r| r.count);
         let extra = json!({
             "fuzzer": { "template": req.raw, "mode": req.mode, "payload_sets": req.payload_sets,
-                          "grep": req.grep, "requests": outs.len() }
+                          "grep": req.grep, "requests": total }
         });
         match self.gate_send_with(
             actor,
@@ -243,7 +288,7 @@ impl Service {
             Authorization::PendingApproval { approval_id, summary, reasons } => {
                 return Ok(Err(FuzzerResult::PendingApproval {
                     approval_id,
-                    summary: format!("fuzzer ({}, {} requests): {summary}", req.mode.label(), outs.len()),
+                    summary: format!("fuzzer ({}, {total} requests): {summary}", req.mode.label()),
                     reasons,
                 }));
             }
@@ -258,6 +303,7 @@ impl Service {
             extract,
             concurrency: req.concurrency.unwrap_or(1).clamp(1, 20),
             throttle_ms: req.throttle_ms.unwrap_or(0).min(60_000),
+            recursive: recursive_rule.map(|rule| Recursive { template, rule, re: recursive_re, endpoint, tier }),
         }))
     }
 
@@ -287,6 +333,7 @@ impl Service {
                 baseline: None,
                 rows: Vec::new(),
                 error: None,
+                note: None,
             }),
             paused: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
@@ -318,6 +365,10 @@ impl Service {
                 st.error = Some(e.to_string());
                 return;
             }
+        }
+        if let Some(r) = &p.recursive {
+            self.fuzzer_recursive(actor, &p, r, a).await;
+            return;
         }
         let jobs = p.planned.into_iter().enumerate().map(|(i, (plan, out))| {
             let send = &send;
@@ -356,13 +407,84 @@ impl Service {
         }
     }
 
+    /// Recursive grep: one request at a time, each payload taken from the
+    /// previous response. Stops when nothing is found, a value repeats
+    /// (a loop), or a payload would need more than the approved tier.
+    async fn fuzzer_recursive(&self, actor: &Actor, p: &Prepared, r: &Recursive, a: &Attack) {
+        let mut payload = r.rule.first.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut stop: Option<String> = None;
+        for i in 0..r.rule.count {
+            while a.paused.load(Ordering::Relaxed) && !a.cancelled.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            if a.cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            if p.throttle_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(p.throttle_ms)).await;
+            }
+            let mut out = match self.outgoing(r.endpoint.clone(), r.template.fill(&[&payload]).as_bytes(), true) {
+                Ok(o) => o,
+                Err(e) => {
+                    stop = Some(format!("request {}: {e}", i + 1));
+                    break;
+                }
+            };
+            out.hypothesis_id = p.baseline.hypothesis_id;
+            // Response content is untrusted: it can't take the attack past what was approved.
+            let (tier, why) = Tier::for_http_request(&out.raw);
+            if tier > r.tier {
+                stop = Some(format!(
+                    "stopped before request {}: the value from the last response would need a higher risk tier ({})",
+                    i + 1,
+                    why.join("; ")
+                ));
+                break;
+            }
+            let sent = match self.send_as(actor, &out, p.identity.as_deref(), p.fix_cl, "fuzzer").await {
+                Ok((s, _)) => s,
+                Err(e) => {
+                    let mut st = a.state.lock();
+                    st.status = AttackStatus::Failed;
+                    st.error = Some(e.to_string());
+                    return;
+                }
+            };
+            let next = r.rule.extract.find(r.re.as_ref(), &response_text(sent.response.as_deref()));
+            a.state.lock().rows.push(row(sent, Some(i), vec![Some(payload.clone())], &p.grep, &p.extract));
+            seen.insert(payload.clone());
+            match next {
+                Some(v) if v.is_empty() => {
+                    stop = Some(format!("response {} had an empty value: stopped", i + 1));
+                    break;
+                }
+                Some(v) if seen.contains(&v) => {
+                    stop = Some(format!("response {} repeated an earlier value: stopped", i + 1));
+                    break;
+                }
+                Some(v) => payload = v,
+                None if i + 1 < r.rule.count => {
+                    stop = Some(format!("response {} had no value for the next request: stopped", i + 1));
+                    break;
+                }
+                None => {}
+            }
+        }
+        let mut st = a.state.lock();
+        if matches!(st.status, AttackStatus::Running | AttackStatus::Paused) {
+            st.status = if a.cancelled.load(Ordering::Relaxed) { AttackStatus::Cancelled } else { AttackStatus::Done };
+        }
+        st.note = stop;
+    }
+
     /// Runs an attack to the end and returns every result.
     pub async fn fuzzer_run(&self, actor: &Actor, req: FuzzerRequest) -> Result<FuzzerResult> {
         let p = match self.fuzzer_prepare(actor, &req)? {
             Ok(p) => p,
             Err(outcome) => return Ok(outcome),
         };
-        let a = self.new_attack(actor, &req, p.planned.len());
+        let a = self.new_attack(actor, &req, p.total());
         self.fuzzer_execute(actor, p, &a).await;
         let st = a.state.lock();
         if let Some(e) = &st.error {
@@ -372,7 +494,7 @@ impl Service {
         results.sort_by_key(|r| r.index);
         let baseline = st.baseline.clone().ok_or_else(|| invalid("no baseline"))?;
         let anomalies = anomalies_of(Some(&baseline), &results);
-        Ok(FuzzerResult::Done { baseline, results, anomalies })
+        Ok(FuzzerResult::Done { baseline, results, anomalies, note: st.note.clone() })
     }
 
     /// Starts an attack in the background; poll it with `fuzzer_status`.
@@ -385,7 +507,7 @@ impl Service {
             Err(FuzzerResult::Denied { reasons }) => return Ok(FuzzerStart::Denied { reasons }),
             Err(FuzzerResult::Done { .. }) => unreachable!("prepare never runs the attack"),
         };
-        let total = p.planned.len();
+        let total = p.total();
         let a = self.new_attack(actor, &req, total);
         let (svc, actor2, a2) = (self.clone(), actor.clone(), a.clone());
         tokio::spawn(async move { svc.fuzzer_execute(&actor2, p, &a2).await });
@@ -424,6 +546,7 @@ impl Service {
             rows: st.rows.iter().skip(from).cloned().collect(),
             anomalies: anomalies_of(st.baseline.as_ref(), &st.rows),
             error: st.error.clone(),
+            note: st.note.clone(),
         })
     }
 
@@ -496,6 +619,19 @@ fn anomalies_of(baseline: Option<&FuzzerRow>, rows: &[FuzzerRow]) -> Vec<pm_fuzz
         .collect()
 }
 
+/// A response's head and decoded body, as text.
+fn response_text(response: Option<&[u8]>) -> String {
+    let Some(r) = response else { return String::new() };
+    let (head, body) = pm_http::split_message(r);
+    let decoded = match pm_http::parse_response_head(head) {
+        Ok(h) => pm_ai::body::decode(&h.headers, body).bytes,
+        Err(_) => body.to_vec(),
+    };
+    let mut t = String::from_utf8_lossy(head).into_owned();
+    t.push_str(&String::from_utf8_lossy(&decoded));
+    t
+}
+
 fn row(
     sent: crate::replay::Sent,
     index: Option<usize>,
@@ -503,20 +639,9 @@ fn row(
     grep: &Grep,
     extract: &[(Extract, Option<regex::Regex>)],
 ) -> FuzzerRow {
-    let (body, text) = match &sent.response {
-        Some(r) => {
-            let (head, body) = pm_http::split_message(r);
-            let decoded = match pm_http::parse_response_head(head) {
-                Ok(h) => pm_ai::body::decode(&h.headers, body).bytes,
-                Err(_) => body.to_vec(),
-            };
-            // Head and decoded body: extract rules may look at headers too.
-            let mut t = String::from_utf8_lossy(head).into_owned();
-            t.push_str(&String::from_utf8_lossy(&decoded));
-            (body.len(), t)
-        }
-        None => (0, String::new()),
-    };
+    // Head and decoded body: extract rules may look at headers too.
+    let text = response_text(sent.response.as_deref());
+    let body = sent.response.as_deref().map_or(0, |r| pm_http::split_message(r).1.len());
     let lower = text.to_lowercase();
     let matches = grep.matches(&text, &lower);
     let extracted = extract.iter().map(|(e, re)| e.find(re.as_ref(), &text)).collect();

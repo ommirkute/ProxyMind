@@ -111,7 +111,25 @@ pub struct PayloadSet {
     /// after the processing rules.
     #[serde(default)]
     pub url_encode: bool,
+    /// Recursive grep: each payload is taken from the previous response.
+    /// Only on its own, with one position; the attack runs one request at a time.
+    #[serde(default)]
+    pub recursive: Option<RecursiveGrep>,
 }
+
+/// Payloads that come from the responses: `first`, then whatever `extract`
+/// finds in each response, up to `count` requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecursiveGrep {
+    pub first: String,
+    pub extract: Extract,
+    /// Requests to send (1 to 1000).
+    pub count: usize,
+}
+
+/// Most requests a recursive grep sends.
+pub const MAX_RECURSIVE: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +266,11 @@ pub const BUILTINS: &[(&str, &[&str])] = &[
 impl PayloadSet {
     /// The payloads, expanded.
     pub fn expand(&self) -> Result<Vec<String>, FuzzError> {
+        if self.recursive.is_some() {
+            return Err(FuzzError::BadRule(
+                "a recursive grep set takes its payloads from the responses: use it alone, with one position".into(),
+            ));
+        }
         let mut out = self.list.clone();
         if let Some(r) = &self.numbers {
             out.extend(numbers(r)?);
