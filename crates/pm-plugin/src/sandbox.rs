@@ -140,6 +140,8 @@ pub fn command(dir: &Path, command: &[String], timeout: Duration) -> Result<Comm
 mod tests {
     use super::*;
 
+    // Only the Unix tests run commands.
+    #[cfg(unix)]
     fn run(cmd: &mut Command) -> (bool, String) {
         let out = cmd.stdin(Stdio::null()).output().unwrap();
         (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
