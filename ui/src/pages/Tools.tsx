@@ -9,6 +9,7 @@ interface Analysis {
   samples: number; unique: number; min_len: number; max_len: number; alphabet: string;
   estimated_bits: number; sample_limit_bits: number; constant_positions: number[]; sequential_step?: number;
   rating: string; notes: string[];
+  bit_tests?: { bits: number; bits_per_char: number; tests: { name: string; passed: boolean; detail: string }[] };
 }
 type SeqResult =
   | { status: "done"; requests: number; found: number; analysis: Analysis; exchange_ids: number[] }
@@ -123,6 +124,17 @@ function TokenAnalyzer() {
             <li>{r.analysis.unique} unique, length {r.analysis.min_len}–{r.analysis.max_len}, alphabet <code>{r.analysis.alphabet}</code></li>
             {r.analysis.notes.map((n) => <li key={n}>{n}</li>)}
           </ul>
+          {r.analysis.bit_tests && (
+            <table className="grid" data-testid="bit-tests">
+              <caption className="small muted">{r.analysis.bit_tests.bits} bits ({r.analysis.bit_tests.bits_per_char} per character)</caption>
+              <thead><tr><th>Test</th><th>Result</th><th>Detail</th></tr></thead>
+              <tbody>
+                {r.analysis.bit_tests.tests.map((t) => (
+                  <tr key={t.name}><td>{t.name}</td><td><Chip value={t.passed ? "pass" : "fail"} /></td><td className="small">{t.detail}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <div className="small muted">Requests: {r.exchange_ids.slice(0, 5).map((e) => <span key={e}><ExchangeLink id={e} /> </span>)}…</div>
         </div>
       )}
