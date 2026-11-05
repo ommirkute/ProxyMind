@@ -26,7 +26,7 @@ pub fn tokens_in(address: &str) -> Vec<String> {
 
 fn arg_after<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
     let upper = line.to_ascii_uppercase();
-    upper.starts_with(prefix).then(|| line[prefix.len()..].trim().split_whitespace().next().unwrap_or(""))
+    upper.starts_with(prefix).then(|| line[prefix.len()..].split_whitespace().next().unwrap_or(""))
 }
 
 /// Serves until the listener fails, calling `sink` once per token for every
