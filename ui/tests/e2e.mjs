@@ -195,6 +195,16 @@ try {
   // The browser logs the expected 400 for the mistyped query.
   for (let i = consoleErrors.length - 1; i >= errorsBefore; i--) if (consoleErrors[i].includes("400")) consoleErrors.splice(i, 1);
   check(true, "a mistyped field is reported");
+  // New traffic while the bad query is shown must not re-send it (live updates wait for a good query).
+  const errorsAfterTypo = consoleErrors.length;
+  const lastId = await page.evaluate(async () => (await (await fetch("/api/v1/status")).json()).counters?.last_exchange_id ?? 0);
+  await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+  await page.waitForFunction(
+    async (id) => ((await (await fetch("/api/v1/status")).json()).counters?.last_exchange_id ?? 0) > id,
+    lastId,
+  );
+  await sleep(2500);
+  check(consoleErrors.length === errorsAfterTypo, "live updates don't re-send a mistyped query");
   await page.getByLabel("Saved filters").selectOption("alice orders");
   await page.waitForFunction(() => document.querySelector('input[aria-label="Query"]').value.includes("alice@"));
   await page.waitForSelector('[data-testid="query-scanned"]');

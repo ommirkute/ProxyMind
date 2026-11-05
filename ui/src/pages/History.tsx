@@ -144,8 +144,11 @@ export default function History() {
     [filters],
   );
 
+  // Live updates wait until the current query has loaded (a mistyped one never does).
+  const [queryOk, setQueryOk] = useState(false);
   // (Re)load when filters change.
   useEffect(() => {
+    setQueryOk(false);
     const t = setTimeout(() => {
       api
         .get<ExchangePage>(`/exchanges${qs({ ...query, limit: 500 })}`)
@@ -154,6 +157,7 @@ export default function History() {
           setOlderFrom(p.next_before_id);
           setScanned(p.scanned);
           setError(null);
+          setQueryOk(true);
         })
         .catch((e) => setError(e.message));
     }, 200);
@@ -163,7 +167,7 @@ export default function History() {
   // Live: fetch newer rows when the server says there are some.
   const newest = rows.reduce((m, r) => Math.max(m, r.id), 0);
   useEffect(() => {
-    if (!counters || counters.last_exchange_id <= newest) return;
+    if (!queryOk || !counters || counters.last_exchange_id <= newest) return;
     api
       .get<ExchangePage>(`/exchanges${qs({ ...query, after_id: newest, limit: 500 })}`)
       .then((p) => {
@@ -183,7 +187,7 @@ export default function History() {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [counters?.last_exchange_id]);
+  }, [counters?.last_exchange_id, queryOk]);
 
   const loadOlder = () =>
     api
