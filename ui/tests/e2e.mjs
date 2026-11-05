@@ -16,6 +16,9 @@ const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", imp
 const SHOTS = process.env.SCREENSHOTS ?? join(tmpdir(), "proxymind-ui-shots");
 // ProxyMind's own browser window opens headless here (no display in CI).
 process.env.PROXYMIND_BROWSER_HEADLESS ??= "1";
+// CI runners (non-root Ubuntu) can't use Chromium's sandbox for Playwright's build: the built-in
+// browser window would abort. The test runs in a throwaway machine, so run it without the sandbox.
+process.env.PROXYMIND_CHROMIUM_NO_SANDBOX ??= "1";
 const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
 const project = join(dir, "ui.pmproj");
 const children = [];
@@ -949,7 +952,7 @@ try {
   await page.getByTestId("setup-open-browser").click();
   const launchResponse = await opened;
   const launch = await launchResponse.json();
-  if (!launchResponse.ok()) console.log(`  (the browser launch answered ${launchResponse.status()}: ${JSON.stringify(launch)})`);
+  check(launchResponse.ok(), `the built-in browser starts${launchResponse.ok() ? "" : ` (${JSON.stringify(launch)})`}`);
   await page.getByTestId("toast").waitFor();
   const seenByProxy = await page.waitForFunction(async () => {
     const p = await (await fetch("/api/v1/exchanges?path=from-pm-browser&limit=5")).json();

@@ -376,10 +376,16 @@ pub async fn open_window(chromium: &Path, opts: &WindowOptions) -> Result<Window
     if let Ok(Some(status)) = child.try_wait() {
         // Another window on the same profile hands the URL over and exits 0.
         if !status.success() {
-            return Err(Error::Launch {
-                path: chromium.display().to_string(),
-                reason: format!("exited with {status}"),
-            });
+            let mut reason = format!("exited with {status}");
+            if !no_sandbox && cfg!(target_os = "linux") {
+                // Recent Ubuntu blocks Chromium's sandbox for a browser without an
+                // AppArmor profile (Playwright's, a downloaded build): it aborts at once.
+                reason.push_str(&format!(
+                    ". Chromium's sandbox may be unavailable here: use Chrome or Chromium installed from your \
+                     distribution, or set {ENV_NO_SANDBOX}=1 to run it without the sandbox"
+                ));
+            }
+            return Err(Error::Launch { path: chromium.display().to_string(), reason });
         }
     }
     let pid = Some(child.id());
