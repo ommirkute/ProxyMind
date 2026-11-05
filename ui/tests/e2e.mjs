@@ -102,7 +102,9 @@ try {
   const browser = await chromium.launch({ executablePath: exe });
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const consoleErrors = [];
-  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(`${m.text()}${m.location()?.url ? ` (${m.location().url})` : ""}`));
+  const failedResponses = [];
+  page.on("response", (r) => r.status() >= 400 && failedResponses.push(`${r.status()} ${r.request().method()} ${r.url()}`));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
 
   console.log("History");
@@ -188,15 +190,15 @@ try {
   check(qRows.length > 0 && qRows.every((t) => t.includes("/api/orders/")), `a query filters by path and response text (${qRows.length} rows)`);
   page.once("dialog", (d) => d.accept("alice orders"));
   await page.getByTestId("save-filter").click();
-  const errorsBefore = consoleErrors.length;
   await page.getByLabel("Query", { exact: true }).fill("stauts:200");
   await page.getByLabel("Query", { exact: true }).press("Enter");
   await page.locator(".error", { hasText: "unknown field" }).waitFor();
-  // The browser logs the expected 400 for the mistyped query.
-  for (let i = consoleErrors.length - 1; i >= errorsBefore; i--) if (consoleErrors[i].includes("400")) consoleErrors.splice(i, 1);
+  // The browser logs the expected 400; it is matched by its URL at the end, whenever it arrives.
   check(true, "a mistyped field is reported");
   // New traffic while the bad query is shown must not re-send it (live updates wait for a good query).
-  const errorsAfterTypo = consoleErrors.length;
+  const typoErrors = () => consoleErrors.filter((e) => e.includes("q=stauts%3A200")).length;
+  await sleep(500);
+  const errorsAfterTypo = typoErrors();
   const lastId = await page.evaluate(async () => (await (await fetch("/api/v1/status")).json()).counters?.last_exchange_id ?? 0);
   await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
   await page.waitForFunction(
@@ -204,7 +206,7 @@ try {
     lastId,
   );
   await sleep(2500);
-  check(consoleErrors.length === errorsAfterTypo, "live updates don't re-send a mistyped query");
+  check(typoErrors() === errorsAfterTypo, "live updates don't re-send a mistyped query");
   await page.getByLabel("Saved filters").selectOption("alice orders");
   await page.waitForFunction(() => document.querySelector('input[aria-label="Query"]').value.includes("alice@"));
   await page.waitForSelector('[data-testid="query-scanned"]');
@@ -1087,7 +1089,9 @@ try {
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  check(consoleErrors.length === 0, `no console errors${consoleErrors.length ? ": " + consoleErrors.join(" | ") : ""}`);
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200"));
+  check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
+  if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();
 } catch (e) {
   console.error(e);
