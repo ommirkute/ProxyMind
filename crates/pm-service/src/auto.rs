@@ -92,9 +92,9 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("auth_bypass", "auth_bypass"),
     ("host_header", "host_header_injection"),
     ("cors", "cors"),
-    // A debug-like name (debug, test…) that changes the answer is an
-    // exposure; other names are a lead to look at (see `lead_class`).
-    ("hidden_params", "hidden_parameter"),
+    // Recorded only for a debug-like name (debug, test…) that changes the
+    // answer: an exposure (see `lead_class`).
+    ("hidden_params", "exposure"),
     // Issues the sql_error probes report for other query languages.
     ("nosql_error", "nosqli"),
     ("ldap_error", "ldap_injection"),
@@ -127,8 +127,11 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
 fn lead_class(issue: &pm_scan::active::ActiveIssue) -> Option<&'static str> {
     const DEBUG_NAMES: &[&str] = &["debug", "test", "dev", "verbose", "trace", "internal"];
     let (_, class) = SWEEP_CHECKS.iter().find(|(c, _)| *c == issue.check)?;
-    if issue.check == "hidden_params" && DEBUG_NAMES.iter().any(|n| issue.payload.eq_ignore_ascii_case(n)) {
-        return Some("exposure");
+    if issue.check == "hidden_params" {
+        // Other names (sort, callback, id…) are usually filters or echoes:
+        // worth a look by hand, not a finding.
+        let debug = DEBUG_NAMES.iter().any(|n| issue.payload.eq_ignore_ascii_case(n));
+        return (debug && !issue.evidence.contains("come back in the response")).then_some("exposure");
     }
     Some(class)
 }
