@@ -2367,6 +2367,15 @@ async fn run() -> Result<()> {
                     for s in &d.signups {
                         out!("  sign-up example sent: {s}");
                     }
+                    for s in &d.xml_examples {
+                        out!("  XML example sent: {s}");
+                    }
+                    if d.robots_found > 0 {
+                        out!("  {} page(s) found in folders robots.txt hides", d.robots_found);
+                    }
+                    for s in &d.versions {
+                        out!("  other API version answers: {s}");
+                    }
                     for s in d.skipped.iter().take(10) {
                         out!("  skipped {s}");
                     }

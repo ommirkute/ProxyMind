@@ -90,6 +90,11 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("crlf", "crlf"),
     ("nosql_operator", "nosqli"),
     ("auth_bypass", "auth_bypass"),
+    ("host_header", "host_header_injection"),
+    ("cors", "cors"),
+    // A debug-like name (debug, test…) that changes the answer is an
+    // exposure; other names are a lead to look at (see `lead_class`).
+    ("hidden_params", "hidden_parameter"),
     // Issues the sql_error probes report for other query languages.
     ("nosql_error", "nosqli"),
     ("ldap_error", "ldap_injection"),
@@ -118,13 +123,23 @@ const SWEEP_CHECKS: &[(&str, &str)] = &[
     ("password_change", "broken_authentication"),
 ];
 
+/// The finding class for a sweep issue, if the sweep records it.
+fn lead_class(issue: &pm_scan::active::ActiveIssue) -> Option<&'static str> {
+    const DEBUG_NAMES: &[&str] = &["debug", "test", "dev", "verbose", "trace", "internal"];
+    let (_, class) = SWEEP_CHECKS.iter().find(|(c, _)| *c == issue.check)?;
+    if issue.check == "hidden_params" && DEBUG_NAMES.iter().any(|n| issue.payload.eq_ignore_ascii_case(n)) {
+        return Some("exposure");
+    }
+    Some(class)
+}
+
 /// Checks run on recorded logins: injections (the login is re-sent with a
 /// payload, which changes nothing) and account enumeration.
 const LOGIN_CHECKS: &[&str] = &["sql_error", "sql_boolean", "nosql_operator", "user_enumeration"];
 const MAX_LOGINS: usize = 3;
 
 /// Whether an operation is a login.
-fn is_login(template: &str) -> bool {
+pub(crate) fn is_login(template: &str) -> bool {
     let t = template.to_ascii_lowercase();
     ["login", "signin", "sign-in", "sign_in", "authenticate", "/auth/token", "/session"].iter().any(|w| t.contains(w))
 }
@@ -145,7 +160,7 @@ fn is_password_change(template: &str) -> bool {
 /// Checks run on recorded submissions (POST, PUT, PATCH): these re-send the
 /// request, so they change state on the target like the original did.
 const SWEEP_SUBMIT_CHECKS: &[&str] =
-    &["stored_xss", "csrf", "jwt", "graphql", "mass_assignment", "proto_pollution", "deserialization"];
+    &["stored_xss", "csrf", "jwt", "graphql", "mass_assignment", "proto_pollution", "deserialization", "xxe_oob"];
 const SWEEP_MAX_SUBMITS: usize = 10;
 /// Of those, the ones that only make sense on submissions.
 const SUBMIT_ONLY: &[&str] = &["stored_xss", "csrf", "mass_assignment", "proto_pollution"];
@@ -176,6 +191,12 @@ pub struct DiscoverSweep {
     pub openapi: Option<(String, usize, usize)>,
     /// Sign-up examples from the description that were sent (so registration gets tested).
     pub signups: Vec<String>,
+    /// Pages found in folders robots.txt hides.
+    pub robots_found: usize,
+    /// Other API versions of known paths that answer (`POST /api/v2/login → 401`).
+    pub versions: Vec<String>,
+    /// XML upload examples from the description that were sent (for the XXE checks).
+    pub xml_examples: Vec<String>,
     pub skipped: Vec<String>,
 }
 
@@ -251,6 +272,9 @@ impl Service {
             }
             sweep.leads.extend(self.listed_files(actor, &found).await?);
             sweep.leads.extend(self.debug_endpoints(actor, &origin).await?);
+            let hidden = self.robots_discover(actor, &origin, &found).await?;
+            sweep.robots_found += hidden.len();
+            sweep.found += hidden.len();
             let spec = found.iter().find(|f| {
                 f.status == 200
                     && f.note == Some("API description")
@@ -273,6 +297,7 @@ impl Service {
                         sweep.openapi = Some((spec.url.clone(), operations.len(), sent.len()));
                         if let Some(base) = base_url {
                             self.send_signup_examples(actor, &base, &operations, &mut sweep).await?;
+                            sweep.xml_examples.extend(self.send_xml_examples(actor, &base, &operations).await?);
                         }
                     }
                     Ok(other) => sweep.skipped.push(format!("{}: {other:?}", spec.url)),
@@ -280,6 +305,7 @@ impl Service {
                     Err(e) => sweep.skipped.push(format!("{}: {e}", spec.url)),
                 }
             }
+            sweep.versions.extend(self.version_siblings(actor, &origin).await?);
         }
         Ok(sweep)
     }
@@ -541,16 +567,22 @@ impl Service {
         });
         let mut seen = std::collections::BTreeSet::new();
         let mut leads = Vec::new();
+        // A forwarded host the cache keeps is cache poisoning; the same
+        // reflection reported again as host header injection adds nothing.
+        let poisoned = issues.iter().any(|f| f.issue.check == "cache_poisoning");
         for f in issues {
-            let Some((_, class)) = SWEEP_CHECKS.iter().find(|(c, _)| *c == f.issue.check) else { continue };
-            if !seen.insert(*class) {
+            if poisoned && f.issue.check == "host_header" {
+                continue;
+            }
+            let Some(class) = lead_class(&f.issue) else { continue };
+            if !seen.insert(class) {
                 continue;
             }
             let finding = self.finding_create(
                 actor,
                 NewFinding {
                     title: format!("{} in {} ({})", f.issue.title, t.operation, f.issue.point),
-                    vuln_class: (*class).into(),
+                    vuln_class: class.into(),
                     severity: f.issue.severity.into(),
                     description: format!(
                         "The active scanner sent {:?} in {} and saw: {}. Found by an automatic scan; not proven \

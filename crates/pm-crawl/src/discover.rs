@@ -96,6 +96,76 @@ pub const BUILTIN_WORDS: &[&str] = &[
     "elmah.axd",
 ];
 
+/// Folders a robots.txt asks crawlers to stay out of (`Disallow: /admin/`),
+/// worth a look with content discovery. Only plain folders: patterns with
+/// `*` or `$` inside, the root and query strings are left out. At most 8.
+pub fn robots_dirs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let Some((key, value)) = line.split_once(':') else { continue };
+        if !key.trim().eq_ignore_ascii_case("disallow") {
+            continue;
+        }
+        let v = value.trim().trim_end_matches(['*', '$']);
+        let plain = v.starts_with('/') && v.len() > 1 && v.ends_with('/');
+        if plain && !v.contains(['*', '$', '?', '#']) && !v.contains("..") && !out.iter().any(|o| o == v) {
+            out.push(v.to_string());
+        }
+        if out.len() == 8 {
+            break;
+        }
+    }
+    out
+}
+
+/// Other API versions of known paths: when an app uses `/api/v3/…`, its
+/// `/api/login` may also answer as `/api/v1/login` or `/api/v2/login`
+/// (old versions often lack newer checks). Takes path templates and
+/// returns `(known, sibling)` pairs for templates without parameters, for
+/// versions 1 up to one past the highest seen (at most 5). At most 24.
+pub fn version_siblings(templates: &[String]) -> Vec<(String, String)> {
+    let is_version = |s: &str| s.len() >= 2 && s.starts_with('v') && s[1..].chars().all(|c| c.is_ascii_digit());
+    // Prefixes (the segments before a version) and the versions seen under each.
+    let mut prefixes: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>> = Default::default();
+    for t in templates {
+        let segs: Vec<&str> = t.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(k) = segs.iter().position(|s| is_version(s))
+            && let Ok(n) = segs[k][1..].parse::<u32>()
+        {
+            prefixes.entry(format!("/{}", segs[..k].join("/")).replace("//", "/")).or_default().insert(n);
+        }
+    }
+    let known: std::collections::BTreeSet<&str> = templates.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    for (prefix, versions) in &prefixes {
+        let top = versions.iter().max().copied().unwrap_or(1).saturating_add(1).min(5);
+        let base = if prefix == "/" { String::new() } else { prefix.clone() };
+        for t in templates.iter().filter(|t| !t.contains('{')) {
+            let Some(rest) = t.strip_prefix(&format!("{base}/")) else { continue };
+            // The path after the version (or after the prefix, unversioned).
+            let tail = match rest.split_once('/') {
+                Some((v, tail)) if is_version(v) => tail,
+                _ if is_version(rest) => continue,
+                _ => rest,
+            };
+            if tail.is_empty() {
+                continue;
+            }
+            for n in 1..=top {
+                let sibling = format!("{base}/v{n}/{tail}");
+                if !known.contains(sibling.as_str()) && !out.iter().any(|(_, s)| *s == sibling) {
+                    out.push((t.clone(), sibling));
+                }
+                if out.len() == 24 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Most candidates in one run.
 pub const MAX_CANDIDATES: usize = 5000;
 
@@ -307,5 +377,34 @@ mod tests {
         assert_eq!(interesting("/.git/config"), Some("source control metadata"));
         assert_eq!(interesting("/backup.zip"), Some("backup"));
         assert_eq!(interesting("/about"), None);
+    }
+
+    #[test]
+    fn robots_folders() {
+        let t = "User-agent: *\nDisallow: /api/admin/\nDisallow: /api/internal/ # keep out\nDisallow: /*.bak$\n\
+                 Disallow: /\nDisallow: /private\ndisallow: /old/*\nAllow: /public/\nDisallow: /api/admin/\n";
+        assert_eq!(robots_dirs(t), vec!["/api/admin/", "/api/internal/", "/old/"]);
+    }
+
+    #[test]
+    fn api_version_siblings() {
+        let t: Vec<String> =
+            ["/api/login", "/api/v3/profile", "/api/orders/{id}", "/api/v3"].iter().map(|s| s.to_string()).collect();
+        let s = version_siblings(&t);
+        let siblings: Vec<&str> = s.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(
+            siblings,
+            vec![
+                "/api/v1/login",
+                "/api/v2/login",
+                "/api/v3/login",
+                "/api/v4/login",
+                "/api/v1/profile",
+                "/api/v2/profile",
+                "/api/v4/profile"
+            ]
+        );
+        assert_eq!(s[1].0, "/api/login");
+        assert!(version_siblings(&["/api/login".to_string()]).is_empty());
     }
 }

@@ -1,6 +1,7 @@
 //! Write checks: the API description's state-changing operations on one
 //! user's objects, tried once as their owner (ReDoS on string fields) and
-//! once as another user (broken object-level authorization on writes).
+//! once as another user (broken object-level authorization on writes),
+//! and described one-time actions (redeem, claim, vote) raced.
 //! These change data and can slow the server, so one gate decision at the
 //! destructive tier covers the whole step: it needs a person's approval
 //! unless the rules of engagement allow destructive actions.
@@ -47,6 +48,24 @@ struct Target {
     attacker: Option<String>,
     /// A recorded read of the object (as its owner), to check a write took effect.
     read: Option<String>,
+}
+
+/// A described one-time action to race (see `race_targets`).
+struct RaceTarget {
+    path: String,
+    raw: String,
+    /// Uses the action up once, so there is a success to compare with.
+    first: String,
+    /// Races it while it is still unused for them.
+    second: String,
+}
+
+/// Whether a path names an action meant to happen once per user.
+fn one_time(path: &str) -> bool {
+    const WORDS: &[&str] =
+        &["redeem", "claim", "coupon", "voucher", "promo", "giftcard", "gift-card", "bonus", "reward", "vote"];
+    let p = path.to_ascii_lowercase();
+    WORDS.iter().any(|w| p.contains(w))
 }
 
 /// `raw`'s string fields made unique with `marker` (an email stays an email).
@@ -188,17 +207,23 @@ impl Service {
 
     /// Runs the write checks (see the module docs).
     pub async fn auto_write_checks(&self, actor: &Actor) -> Result<WriteSweep> {
-        let (targets, base, notes) = self.write_targets()?;
-        let mut sweep = WriteSweep { tried: targets.len(), notes, ..Default::default() };
-        let Some(first) = targets.first() else { return Ok(sweep) };
+        let (targets, base, mut notes) = self.write_targets()?;
+        let (races, race_notes) = self.race_targets()?;
+        notes.extend(race_notes);
+        let mut sweep = WriteSweep { tried: targets.len() + races.len(), notes, ..Default::default() };
+        let Some(first) = targets.first().map(|t| t.raw.clone()).or_else(|| races.first().map(|r| r.raw.clone()))
+        else {
+            return Ok(sweep);
+        };
         let Some(base) = base else {
             sweep.notes.push("the API description has no server URL".into());
             return Ok(sweep);
         };
         let endpoint = parse_url_endpoint(&base)?;
-        let first_out = self.outgoing(endpoint.clone(), first.raw.as_bytes(), true)?;
+        let first_out = self.outgoing(endpoint.clone(), first.as_bytes(), true)?;
         let extra = json!({
             "write_checks": targets.iter().map(|t| format!("{} {} ({})", t.method, t.template, t.object)).collect::<Vec<_>>(),
+            "race_checks": races.iter().map(|r| format!("POST {}", r.path)).collect::<Vec<_>>(),
         });
         match self.gate_send_with(
             actor,
@@ -232,7 +257,83 @@ impl Service {
                 sweep.leads.push(lead);
             }
         }
+        for r in &races {
+            self.race_probe(actor, &endpoint, r, &mut sweep).await?;
+        }
         Ok(sweep)
+    }
+
+    /// Described one-time actions (redeem a gift card, claim a bonus, vote):
+    /// POSTs without path parameters whose name says so. Each needs two
+    /// test users: the first uses the action up once, the second races it.
+    fn race_targets(&self) -> Result<(Vec<RaceTarget>, Vec<String>)> {
+        let spec = self.openapi_get()?;
+        #[derive(serde::Deserialize)]
+        struct Op {
+            method: String,
+            path: String,
+            example_request: String,
+        }
+        let ops: Vec<Op> = serde_json::from_value(spec["operations"].clone()).unwrap_or_default();
+        let ids = self.identity_list()?;
+        let users: Vec<String> =
+            ids.iter().filter(|i| !i.role.to_ascii_lowercase().contains("admin")).map(|i| i.name.clone()).collect();
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        for op in ops.iter().filter(|o| o.method == "POST" && !o.path.contains('{') && one_time(&o.path)).take(3) {
+            let [first, second, ..] = users.as_slice() else {
+                notes.push(format!("race check on POST {}: needs two test users", op.path));
+                break;
+            };
+            out.push(RaceTarget {
+                path: op.path.clone(),
+                raw: op.example_request.clone(),
+                first: first.clone(),
+                second: second.clone(),
+            });
+        }
+        Ok((out, notes))
+    }
+
+    /// Sends a one-time action once as the first user (the success to compare
+    /// with), then has the active scanner race it as the second user: several
+    /// copies succeeding at once, and a later single copy refused, is a race.
+    async fn race_probe(
+        &self,
+        actor: &Actor,
+        endpoint: &pm_replay::Endpoint,
+        r: &RaceTarget,
+        sweep: &mut WriteSweep,
+    ) -> Result<()> {
+        let out = self.outgoing(endpoint.clone(), r.raw.as_bytes(), true)?;
+        let (sent, _) = self.send_as(actor, &out, Some(&r.first), true, "scan").await?;
+        sweep.requests += 1;
+        if !sent.status.is_some_and(|s| (200..300).contains(&s)) {
+            sweep.notes.push(format!("race check on POST {}: {} got no success to compare with", r.path, r.first));
+            return Ok(());
+        }
+        let req = crate::ActiveScanRequest {
+            exchange_id: sent.exchange_id,
+            checks: vec!["race_condition".into()],
+            max_requests: Some(20),
+            identity: Some(r.second.clone()),
+            ..Default::default()
+        };
+        match self.scan_active(actor, req).await? {
+            crate::ActiveScanResult::Done { requests, issues, .. } => {
+                sweep.requests += requests;
+                let t = crate::auto::ScanTarget {
+                    operation: format!("POST {}", r.path),
+                    exchange_id: sent.exchange_id,
+                    checks: vec!["race_condition".into()],
+                    submission: true,
+                    fixed: true,
+                };
+                sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
+            }
+            other => sweep.notes.push(format!("race check on POST {}: {other:?}", r.path)),
+        }
+        Ok(())
     }
 
     async fn timed(&self, actor: &Actor, out: &Outgoing, identity: &str) -> Result<(crate::replay::Sent, u64)> {

@@ -883,7 +883,13 @@ impl Service {
             if !timing_ok && plans.iter().any(|p| matches!(p, Plan::Time(..))) {
                 notes.push(format!("time-based checks skipped: the baseline is slow ({base_ms:?} ms)"));
             }
-            plans.sort_by_key(|p| matches!(p, Plan::Time(..)));
+            // The broad hidden-parameter guess goes after the targeted checks
+            // (it can use many requests), and delays go last.
+            plans.sort_by_key(|p| match p {
+                Plan::Time(..) => 2,
+                Plan::Params(_) => 1,
+                _ => 0,
+            });
             let denied = base_seen.status.is_some_and(|s| s == 401 || s == 403);
             'plans: for plan in &plans {
                 match plan {

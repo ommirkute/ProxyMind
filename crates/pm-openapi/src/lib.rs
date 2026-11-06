@@ -119,6 +119,7 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
             let mut params: Vec<Param> = Vec::new();
             let mut body: Option<Value> = None;
             let mut form = false;
+            let mut raw_body: Option<(String, String)> = None;
             for p in raw_params {
                 let p = resolve(doc, &p, 0);
                 let location = p.get("in").and_then(Value::as_str).unwrap_or("").to_string();
@@ -151,6 +152,14 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
                             .cloned()
                             .unwrap_or_else(|| example(doc, j.1.get("schema").unwrap_or(&Value::Null), 0)),
                     );
+                } else if let Some((ct, x)) = content.as_object().and_then(|c| {
+                    c.iter().find(|(k, _)| {
+                        k.contains("xml") && k.bytes().all(|b| b.is_ascii_alphanumeric() || b"/+.-".contains(&b))
+                    })
+                }) {
+                    // An XML body: its example as written (there is no schema-based XML example).
+                    let text = x.get("example").and_then(Value::as_str).unwrap_or("<?xml version=\"1.0\"?><root/>");
+                    raw_body = Some((ct.clone(), text.to_string()));
                 } else if let Some(f) = content.get("application/x-www-form-urlencoded") {
                     form = true;
                     if let Some(props) = resolve(doc, f.get("schema").unwrap_or(&Value::Null), 0)
@@ -180,7 +189,12 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
                 .chars()
                 .take(200)
                 .collect();
-            let example_request = request(method, &prefix, path, &params, body.as_ref(), form, host.as_deref());
+            let mut example_request = request(method, &prefix, path, &params, body.as_ref(), form, host.as_deref());
+            if let Some((ct, text)) = raw_body.filter(|_| body.is_none() && !form)
+                && let Some(head) = example_request.strip_suffix("\r\n")
+            {
+                example_request = format!("{head}Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n{text}", text.len());
+            }
             operations.push(Operation {
                 method: method.to_ascii_uppercase(),
                 path: path.clone(),
@@ -490,5 +504,14 @@ paths:
         let head = pm_http::parse_request_head(r.as_bytes()).unwrap();
         assert!(head.target.contains("%0D%0AX-Injected:"), "{r:?}");
         assert!(!r.contains("\r\nX-Injected") && !r.contains("\r\nX-Bad") && !r.contains("Bad: Name"), "{r:?}");
+    }
+
+    #[test]
+    fn xml_bodies_keep_their_example() {
+        let doc = r#"{"openapi":"3.0.0","info":{},"paths":{"/import":{"post":{"requestBody":{"content":
+            {"application/xml":{"example":"<items><item>Tea</item></items>"}}}}}}}"#;
+        let op = &parse(doc).unwrap().operations[0];
+        assert!(op.example_request.contains("Content-Type: application/xml\r\nContent-Length: 31\r\n\r\n<items>"));
+        assert!(op.example_request.ends_with("</items>"));
     }
 }

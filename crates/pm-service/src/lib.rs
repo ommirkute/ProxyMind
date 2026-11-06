@@ -19,6 +19,7 @@ mod findings;
 mod fuzzer;
 mod graphql;
 mod group;
+mod hidden_paths;
 mod history;
 mod identity;
 mod intercept;
