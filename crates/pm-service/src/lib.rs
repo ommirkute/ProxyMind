@@ -43,6 +43,7 @@ mod search;
 mod session;
 mod tools;
 mod traffic;
+mod write_checks;
 mod ws;
 mod ws_replay;
 
@@ -96,6 +97,7 @@ pub use session::{
 };
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
+pub use write_checks::WriteSweep;
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 

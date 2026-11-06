@@ -516,6 +516,11 @@ enum BenchAction {
         /// Skip the active-scanner sweep
         #[arg(long)]
         no_scan: bool,
+        /// Also run the write checks last: the API description's write operations on a
+        /// test user's object, as the owner (ReDoS) and as another user (authorization).
+        /// They change data and can slow the server; destructive tier (approval).
+        #[arg(long)]
+        write_checks: bool,
         #[arg(long)]
         json: bool,
     },
@@ -2336,17 +2341,18 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, json } } => {
+        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, write_checks, json } } => {
             let service = open_service(&cli.project, None)?;
             let me = human_actor(None)?;
             let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
             let r = service.auto_access_control(&me).await?;
             let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
+            let writes = if *write_checks { Some(service.auto_write_checks(&me).await?) } else { None };
             if *json {
                 out!(
                     "{}",
                     serde_json::to_string_pretty(
-                        &serde_json::json!({ "discover": disc, "access_control": r, "scan": sweep })
+                        &serde_json::json!({ "discover": disc, "access_control": r, "scan": sweep, "writes": writes })
                     )?
                 );
             } else {
@@ -2391,6 +2397,18 @@ async fn run() -> Result<()> {
                     }
                     for s in sw.skipped.iter().take(10) {
                         out!("  skipped {s}");
+                    }
+                }
+                if let Some(w) = &writes {
+                    out!("write checks: {} operations, {} requests, {} leads", w.tried, w.requests, w.leads.len());
+                    if let Some(p) = &w.pending_approval {
+                        out!("  needs approval: {p}");
+                    }
+                    for l in &w.leads {
+                        out!("  ? suspected {} {} (finding #{})", l.check, l.operation, l.finding_id);
+                    }
+                    for n in &w.notes {
+                        out!("  {n}");
                     }
                 }
             }
