@@ -1,0 +1,51 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Found a security problem in ProxyMind itself?** Don't open an issue: use
+        [private vulnerability reporting](https://github.com/ommirkute/ProxyMind/security/advisories/new) instead.
+        Please remove tokens, cookies and client data from anything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `proxymind ui`
+        2. Open …
+        3. See …
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `proxymind --version`.
+      placeholder: proxymind 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS (Apple silicon), macOS (Intel), Linux, Docker, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How do you run it?
+      options: [Command line / web UI, Desktop app, Docker, Built from source]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Terminal output, browser console errors or screenshots (redacted).
+      render: shell

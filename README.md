@@ -47,7 +47,9 @@ Grab the latest build from the **[Releases page](https://github.com/ommirkute/Pr
 |---|---|---|
 | 🪟 **Windows** (x64) | `proxymind-…-x86_64-pc-windows-msvc.zip` → `proxymind.exe` | `.msi` or `-setup.exe` |
 | 🍎 **macOS** (Apple silicon) | `proxymind-…-aarch64-apple-darwin.tar.gz` | `.dmg` |
+| 🍎 **macOS** (Intel) | `proxymind-…-x86_64-apple-darwin.tar.gz` | |
 | 🐧 **Linux** (x64) | `proxymind-…-x86_64-unknown-linux-gnu.tar.gz` | `.AppImage`, `.deb`, `.rpm` |
+| 🐧 **Linux** (ARM64) | `proxymind-…-aarch64-unknown-linux-gnu.tar.gz` | |
 | 🐳 **Docker** | `docker pull ghcr.io/ommirkute/proxymind` | |
 
 Every release comes with `SHA256SUMS`, an SBOM and signed build provenance ([how to verify](docs/releasing.md#verifying-a-download)).

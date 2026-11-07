@@ -1,5 +1,7 @@
 # Workflow actions are pinned to commit SHAs (a moved tag can't change what
-# runs). Dependabot proposes updates to those pins once a week.
+# runs). Dependabot proposes updates to those pins once a week, and to Rust
+# and npm dependencies once a month, grouped so each area is one pull request.
+# Security updates come as soon as an advisory is published.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -8,4 +10,32 @@ updates:
       interval: weekly
     groups:
       actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      rust:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /desktop
+    schedule:
+      interval: monthly
+    groups:
+      desktop:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: monthly
+    groups:
+      ui:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /sdk/typescript
+    schedule:
+      interval: monthly
+    groups:
+      sdk-typescript:
         patterns: ["*"]
