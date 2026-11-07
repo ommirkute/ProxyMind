@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-pm-core = { version = "0.0.1", path = "../pm-core" }
+pm-core = { version = "0.1.0", path = "../pm-core" }
 regex = "1.13.1"
 ring = "0.17.14"
 serde = { version = "1.0.229", features = ["derive"] }
