@@ -8,7 +8,7 @@
 
 `.github/workflows/release.yml` then:
 
-- builds `proxymind` with the web UI embedded for Linux (x86_64), macOS (Apple silicon) and Windows (x86_64), packaged with the README, licence and examples;
+- builds `proxymind` with the web UI embedded for Linux (x86_64 and ARM64), macOS (Apple silicon and Intel) and Windows (x86_64), packaged with the README, licence and examples;
 - writes `SHA256SUMS` and an SPDX SBOM of the Rust and npm dependencies;
 - signs build provenance for every file and the SBOM with GitHub artifact attestations (Sigstore, keyless);
 - publishes a GitHub release (marked pre-release for `v0.x`);
