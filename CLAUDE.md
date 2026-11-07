@@ -13,7 +13,7 @@ cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 ```
 
-Run all four before pushing; CI runs the same checks on Linux, macOS and Windows.
+Run all four before pushing. CI runs the same checks: on Linux for pull requests, and on Linux, macOS and Windows for main and manual runs (Actions minutes are limited; see `docs/handoff.md`).
 
 ## Rules
 

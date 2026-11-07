@@ -1,13 +1,17 @@
 name: CI
 
-# Pushes run on Linux only to save Actions minutes (macOS bills 10x and
-# Windows 2x on private repositories). Pull requests and manual runs
-# (Actions → CI → Run workflow) cover all three OSes.
+# Sized to stay within a private repository's Actions minutes (macOS bills
+# 10x and Windows 2x):
+# - Pull requests run once per push, on Linux only. Their branches don't
+#   also run on push, which used to start a second run for every commit.
+# - Pushes to main and manual runs (Actions → CI → Run workflow, on any
+#   branch) cover all three OSes; run one on a PR's branch before merging.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
   workflow_dispatch:
 
 # A newer push to the same branch cancels the older run.
@@ -29,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -87,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - if: runner.os == 'Linux'

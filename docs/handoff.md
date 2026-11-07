@@ -176,7 +176,7 @@ TypeScript: `sdk/typescript` (no runtime dependencies): `npm ci && npm run build
 `sdk/python` (Apache-2.0, no dependencies). Tests start a real `proxymind ui` and VulnShop: `PROXYMIND=target/debug/proxymind python3 -m unittest discover -s sdk/python/tests` (also in the CI `ui` job). Add a method to both SDKs when you add an API route.
 
 ### Releases, container, fuzzing
-**Actions minutes are limited** (2,000 per month on the owner's plan). Pushes run CI on Linux only, docs-only pushes are skipped, and a newer push cancels the older run; pull requests and manual runs cover macOS and Windows. Nightly is manual only. Batch several features per push.
+**Actions minutes are limited** (2,000 per month on the owner's plan; macOS bills 10x, Windows 2x). In November 2026 they ran out: every job then fails in about 2 seconds with no runner (`runner_id: 0`, no logs) until the month resets or the owner raises the spending limit (Settings → Billing). So pull requests now run CI once per push, on Linux only (their branches no longer also run on push); pushes to main and manual runs (Actions → CI → Run workflow) cover macOS and Windows: run one on a PR's branch before merging. Docs-only changes are skipped, a newer push cancels the older run, and Nightly is manual only. Batch several features per push.
 
 See `docs/releasing.md`: tag `v*` → `.github/workflows/release.yml` (binaries, checksums, SBOM, attestations, GHCR image). `.github/workflows/nightly.yml` fuzzes parsers (`fuzz/`, needs nightly + cargo-fuzz) and builds the image. In the sandbox, `dockerd` can be started by hand and builds work with `--secret id=extra_ca,src=/root/.ccr/ca-bundle.crt` and the proxy as build args.
 
