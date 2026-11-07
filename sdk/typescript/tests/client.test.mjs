@@ -71,6 +71,10 @@ test("scans, tools and errors", { skip }, async () => {
   const ex = await get("/greet?name=ann");
   assert.ok((await pm.scanActive(ex)).issues.some((i) => i.check === "ssti"));
   assert.equal((await pm.decode("JTNDc2NyaXB0JTNF")).at(-1).output, "<script>");
+  const plugins = await pm.plugins();
+  assert.deepEqual(plugins.plugins, []);
+  assert.ok(typeof plugins.sandbox.summary === "string");
+  await assert.rejects(pm.pluginCheck("missing", ex), (e) => e instanceof ApiError && e.status === 404);
   await assert.rejects(pm.exchange(999999), (e) => e instanceof ApiError && e.status === 404);
   await assert.rejects(pm.replay({ url: "http://example.org", raw: "GET / HTTP/1.1\r\nHost: example.org\r\n\r\n" }), Denied);
 });
@@ -103,6 +107,22 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   assert.equal((await pm.history({ source: "import", path: "/ts-copied" })).length, 1);
   assert.ok((await pm.search("coffee", { part: "response" })).hits.length > 0);
   assert.ok((await pm.siteMap()).some((s) => s.origin === url));
+  const item = await pm.organizerAdd(ex, "ts note");
+  await pm.organizerUpdate(item.id, { status: "postponed" });
+  assert.deepEqual((await pm.organizer("postponed")).map((i) => i.id), [item.id]);
+  await pm.organizerDelete(item.id);
+  assert.ok((await pm.engageAnalyze({ in_scope: false })).requests > 0);
+  assert.ok("framable" in (await pm.clickjacking(ex)));
+  const post = await pm.requestTransform("GET /a?x=1 HTTP/1.1\r\nHost: h\r\n\r\n");
+  assert.ok(post.startsWith("POST /a ") && post.endsWith("x=1"));
+  assert.ok((await pm.requestTransform(post, "json")).endsWith('{"x":"1"}'));
+  assert.ok("hits" in (await pm.searchWs("anything")));
+  assert.ok((await pm.code(ex, "javascript")).includes("await fetch("));
+  const one = { url, raw: "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n" };
+  assert.deepEqual((await pm.replayGroup([one, one])).results.map((r) => r.status), [200, 200]);
+  assert.ok((await pm.matchReplacePresets()).some((p) => p.id === "remove_scripts"));
+  await pm.customCheckSave("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n");
+  assert.equal((await pm.customScan(ex, { checks: ["products-ok"] })).findings.length, 1);
 });
 
 test("rules of engagement, discovery and GraphQL", { skip }, async () => {

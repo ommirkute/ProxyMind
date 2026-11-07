@@ -223,6 +223,28 @@ CREATE TABLE scan_schedules (
 ALTER TABLE findings ADD COLUMN retest TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN duplicates INTEGER NOT NULL DEFAULT 0;
 "#,
+    r#"
+-- Collaborator payloads: tokens handed out for out-of-band tests, so
+-- interactions can be shown under the payload that caused them.
+CREATE TABLE oast_payloads (
+    id         INTEGER PRIMARY KEY,
+    token      TEXT NOT NULL UNIQUE,
+    note       TEXT NOT NULL DEFAULT '',
+    actor      TEXT NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+-- Organizer: exchanges kept aside for later, with a status and a note.
+CREATE TABLE organizer (
+    id          INTEGER PRIMARY KEY,
+    exchange_id INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'new',
+    note        TEXT NOT NULL DEFAULT '',
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL,
+    updated_ms  INTEGER NOT NULL
+);
+CREATE INDEX organizer_exchange ON organizer(exchange_id);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -479,6 +501,16 @@ fn highlight_of(tags: &str) -> Option<String> {
     v.iter().find_map(|t| t.strip_prefix("highlight:").map(str::to_string))
 }
 
+/// Creates a new, empty file only its owner can read (on Unix), for copies
+/// of project data. Fails if the file exists.
+pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         // A sealed project (pm-vault) must be unlocked first.
@@ -491,6 +523,11 @@ impl Store {
                 path.display(),
                 path.display()
             );
+        }
+        // A project holds traffic and credentials: a new one is readable by
+        // its owner only (SQLite gives the -wal and -shm files the same mode).
+        if !path.exists() {
+            let _ = create_private(path);
         }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
@@ -991,6 +1028,8 @@ impl Store {
     /// to `path`, which must not exist yet.
     pub fn snapshot_to(&self, path: &Path) -> Result<()> {
         let p = path.to_str().context("snapshot path is not valid UTF-8")?;
+        // VACUUM INTO accepts an empty file: make it owner-only first.
+        create_private(path).with_context(|| format!("creating {}", path.display()))?;
         self.conn.execute("VACUUM INTO ?1", [p])?;
         Ok(())
     }
@@ -1090,6 +1129,16 @@ impl Store {
             params![r.id, r.data, r.enabled, r.next_run_ms],
         )?;
         Ok(r.id)
+    }
+
+    /// Moves a due schedule's next run from `due` to `next`, only if no one
+    /// else did first. Two processes on one project tick the same
+    /// schedules; the one whose claim succeeds starts the run.
+    pub fn claim_schedule(&mut self, id: i64, due: i64, next: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE scan_schedules SET next_run_ms = ?3 WHERE id = ?1 AND next_run_ms = ?2 AND enabled",
+            params![id, due, next],
+        )? == 1)
     }
 
     pub fn list_schedules(&self) -> Result<Vec<ScheduleRow>> {
@@ -1244,6 +1293,8 @@ impl Store {
                 "updated_ms",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
+            "oast_payloads" => &["token", "note", "actor", "created_ms"],
+            "organizer" => &["exchange_id", "status", "note", "actor", "created_ms", "updated_ms"],
             _ => return None,
         })
     }
@@ -1297,6 +1348,25 @@ impl Store {
     }
 
     /// Rows of a table, optionally where `column = value`, newest first.
+    /// How many rows a table has (matching `filter`, if given).
+    pub fn count_rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>) -> Result<u64> {
+        let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        let n: i64 = match filter {
+            Some((col, v)) => {
+                if col != "id" && !cols.contains(&col) {
+                    anyhow::bail!("unknown column {col} for {table}");
+                }
+                self.conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+                    [Self::to_sql(v)],
+                    |r| r.get(0),
+                )?
+            }
+            None => self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?,
+        };
+        Ok(n.max(0) as u64)
+    }
+
     pub fn rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>, limit: usize) -> Result<Vec<Row>> {
         let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
         let mut all: Vec<&str> = vec!["id"];
@@ -1331,6 +1401,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Deletes one row of an engagement table. Returns false if there was none.
+    pub fn delete_row(&mut self, table: &str, id: i64) -> Result<bool> {
+        Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
+        Ok(self.conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])? == 1)
+    }
+
     pub fn row(&self, table: &str, id: i64) -> Result<Option<Row>> {
         Ok(self.rows(table, Some(("id", &serde_json::json!(id))), 1)?.into_iter().next())
     }
@@ -1343,6 +1419,36 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_projects_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pm-store-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.pmproj");
+        let _ = std::fs::remove_file(&path);
+        let mut s = Store::open(&path).unwrap();
+        s.set_setting("x", "y").unwrap();
+        for f in ["p.pmproj", "p.pmproj-wal"] {
+            let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{f} is {mode:o}");
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_due_schedule_is_claimed_once() {
+        let mut s = Store::open_in_memory().unwrap();
+        let row =
+            ScheduleRow { id: 0, created_by: "human:t".into(), data: "{}".into(), enabled: true, next_run_ms: 100 };
+        let id = s.save_schedule(&row).unwrap();
+        assert!(s.claim_schedule(id, 100, 200).unwrap());
+        assert!(!s.claim_schedule(id, 100, 200).unwrap(), "a second process sees it taken");
+        s.save_schedule(&ScheduleRow { id, enabled: false, next_run_ms: 300, ..row }).unwrap();
+        assert!(!s.claim_schedule(id, 300, 400).unwrap(), "disabled");
+    }
 
     fn sample(path: &str, body: &[u8]) -> NewExchange {
         NewExchange {

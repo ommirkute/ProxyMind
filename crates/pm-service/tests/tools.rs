@@ -1,9 +1,9 @@
-//! Decoder, Comparer and Sequencer through the service.
+//! Codec, Diff and Token analyzer through the service.
 
 use pm_demo::VulnShop;
 use pm_service::pm_policy::{Actor, Policy, Roe};
 use pm_service::pm_store::Store;
-use pm_service::{DecodeRequest, ReplayRequest, ReplayResult, SequencerRequest, SequencerResult, Service};
+use pm_service::{DecodeRequest, ReplayRequest, ReplayResult, Service, TokenAnalyzerRequest, TokenAnalyzerResult};
 
 async fn setup() -> (Service, String) {
     let addr = VulnShop::start_local().await.unwrap();
@@ -28,10 +28,10 @@ async fn send(s: &Service, url: &str, raw: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn sequencer_finds_the_counter_and_hides_tokens() {
+async fn token_analyzer_finds_the_counter_and_hides_tokens() {
     let (s, url) = setup().await;
     let reset = send(&s, &url, "POST /api/password/reset HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n").await;
-    let req = SequencerRequest {
+    let req = TokenAnalyzerRequest {
         exchange_id: reset,
         locator: "json:/debug_code".into(),
         samples: Some(20),
@@ -39,20 +39,32 @@ async fn sequencer_finds_the_counter_and_hides_tokens() {
     };
     // POSTs repeated many times are intrusive: agents need approval.
     let agent = Actor::parse("agent:test").unwrap();
-    assert!(matches!(s.sequencer_run(&agent, req.clone()).await.unwrap(), SequencerResult::PendingApproval { .. }));
-    let SequencerResult::Done { found, analysis, .. } = s.sequencer_run(&human(), req).await.unwrap() else { panic!() };
+    assert!(matches!(
+        s.token_analyzer_run(&agent, req.clone()).await.unwrap(),
+        TokenAnalyzerResult::PendingApproval { .. }
+    ));
+    let TokenAnalyzerResult::Done { found, analysis, .. } = s.token_analyzer_run(&human(), req).await.unwrap() else {
+        panic!()
+    };
     assert_eq!(found, 20);
     assert_eq!((analysis.rating, analysis.sequential_step), ("poor", Some(1)));
     let json = serde_json::to_string(&analysis).unwrap();
     assert!(!json.contains("400"), "statistics only, no tokens: {json}");
 
-    let bad =
-        SequencerRequest { exchange_id: reset, locator: "cookie:nope".into(), samples: Some(10), ..Default::default() };
-    assert!(s.sequencer_run(&human(), bad).await.is_err(), "token not found");
+    let bad = TokenAnalyzerRequest {
+        exchange_id: reset,
+        locator: "cookie:nope".into(),
+        samples: Some(10),
+        ..Default::default()
+    };
+    assert!(s.token_analyzer_run(&human(), bad).await.is_err(), "token not found");
     assert!(
-        s.sequencer_run(&human(), SequencerRequest { exchange_id: reset, locator: "x".into(), ..Default::default() })
-            .await
-            .is_err()
+        s.token_analyzer_run(
+            &human(),
+            TokenAnalyzerRequest { exchange_id: reset, locator: "x".into(), ..Default::default() }
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -74,5 +86,5 @@ async fn compare_and_decode() {
         .unwrap();
     assert_eq!(d["steps"][1]["output"], "YSUyMGI=");
     assert!(s.decode(&DecodeRequest { input: "x".into(), ops: vec!["nope".into()] }).is_err());
-    assert_eq!(s.sequencer_analyze(&["1".into(), "2".into(), "3".into()]).unwrap().sequential_step, Some(1));
+    assert_eq!(s.token_analyzer_analyze(&["1".into(), "2".into(), "3".into()]).unwrap().sequential_step, Some(1));
 }

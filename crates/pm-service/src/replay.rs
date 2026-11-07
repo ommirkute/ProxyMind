@@ -1,4 +1,4 @@
-//! Sending requests (Repeater-style replays) through the policy gate, as
+//! Sending requests (replays) through the policy gate, as
 //! recorded or as any test identity.
 
 use std::time::{Duration, Instant};
@@ -228,10 +228,11 @@ impl Service {
         if !payload_reasons.is_empty() {
             summary.push_str(&format!(" [payload: {}]", payload_reasons.join("; ")));
         }
-        let action = ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
+        let request =
+            ActionRequest { actor: actor.clone(), action: action.into(), tier, target: Some(target), summary };
         match approval_id {
-            Some(id) => self.run_approved(id, &params),
-            None => self.authorize(action, &params),
+            Some(id) => self.run_approved(actor, action, id, &params),
+            None => self.authorize(request, &params),
         }
     }
 
@@ -269,13 +270,25 @@ impl Service {
         fix_cl: bool,
         source: &str,
     ) -> Result<Sent> {
-        let _permit = self.acquire_slot(&out.endpoint.host).await?;
+        // The gate checked one request of a batch (a scan, an attack, a macro):
+        // every request generated from it must still be in scope on its own,
+        // since payloads can change the path (`../admin`, an excluded page).
+        let in_scope = Target::from_parts(&out.endpoint.scheme, &out.endpoint.host, out.endpoint.port, &out.path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| self.policy.scope_check(&t));
+        let _permit = match in_scope {
+            Ok(()) => Some(self.acquire_slot(&out.endpoint.host).await?),
+            Err(_) => None,
+        };
         if fix_cl {
             wire = pm_http::fix_content_length(&wire);
         }
         let check = |ips: &[std::net::IpAddr]| self.policy.check_resolved(ips);
         let started = Instant::now();
-        let result = self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await;
+        let result = match &in_scope {
+            Ok(()) => self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await,
+            Err(why) => Err(anyhow::anyhow!("refused before sending: out of scope ({why})")),
+        };
         let mut record = NewExchange {
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
@@ -300,6 +313,8 @@ impl Service {
                 }
                 record.status = Some(resp.head.status);
                 record.response = Some(resp.raw);
+                // Kept with the response: what arrived is still worth seeing.
+                record.error = resp.cut_short;
                 (Some(resp.head.status), None, resp.elapsed.as_millis() as u64)
             }
             Err(e) => {

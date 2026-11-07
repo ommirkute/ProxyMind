@@ -265,6 +265,9 @@ pub fn risky(u: &Url) -> Option<&'static str> {
     WORDS.iter().find(|(w, _)| s.contains(w)).map(|(_, why)| *why)
 }
 
+/// The most distinct URLs a crawl keeps track of.
+pub const MAX_KNOWN_URLS: usize = 100_000;
+
 /// Breadth-first frontier with de-duplication and limits.
 #[derive(Debug)]
 pub struct Frontier {
@@ -301,7 +304,8 @@ impl Frontier {
             }
             None => strip(&u),
         };
-        if depth > self.max_depth || !self.seen.insert(u.to_string()) {
+        // Link farms and calendar-style traps can offer endless new URLs.
+        if depth > self.max_depth || self.seen.len() >= MAX_KNOWN_URLS || !self.seen.insert(u.to_string()) {
             return false;
         }
         self.queue.push_back((u, depth));

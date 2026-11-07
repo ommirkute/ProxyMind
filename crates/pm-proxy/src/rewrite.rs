@@ -139,6 +139,12 @@ impl Rewriter {
         *self.scope.write() = Some(f);
     }
 
+    /// Whether any enabled rule edits responses (they must then be read
+    /// whole before the browser gets them).
+    pub fn has_response_rules(&self) -> bool {
+        self.rules.read().iter().any(|c| c.rule.enabled && !c.rule.part.is_request())
+    }
+
     /// Applies request rules; `None` when nothing changed.
     pub fn apply_request(&self, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Vec<u8>> {
         self.apply(true, scheme, host, port, path, raw)

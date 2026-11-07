@@ -6,7 +6,7 @@
 #   cd ui && npm ci && npm run build && cd ../desktop && cargo run
 [package]
 name = "proxymind-desktop"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.88"
@@ -20,7 +20,6 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 axum = "0.8.9"
 pm-api = { path = "../crates/pm-api" }
-pm-plugin = { path = "../crates/pm-plugin" }
 pm-proxy = { path = "../crates/pm-proxy" }
 pm-service = { path = "../crates/pm-service" }
 pm-store = { path = "../crates/pm-store" }

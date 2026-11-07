@@ -170,6 +170,10 @@ async fn proves_real_access_control_bugs_and_rejects_traps() {
     assert!(s.finding_update(&agent(), upd("proven")).is_err());
     assert!(s.finding_update(&agent(), upd("confirmed")).is_err());
     assert_eq!(s.finding_update(&human(), upd("confirmed")).unwrap()["status"], "confirmed");
+    // Once a person confirmed it, an agent can't reopen or reword it.
+    assert!(s.finding_update(&agent(), upd("suspected")).is_err());
+    let reword = pm_service::FindingUpdate { status: None, description: Some("nothing here".into()), ..upd("x") };
+    assert!(s.finding_update(&agent(), reword).is_err());
 
     let cov = s.coverage(false).unwrap();
     let cell = cov.cells.iter().find(|c| c.operation == op && c.vuln_class == "idor").unwrap();

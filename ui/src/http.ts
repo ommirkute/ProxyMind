@@ -1,4 +1,4 @@
-// Reading and editing raw HTTP requests as text (Repeater, Intruder).
+// Reading and editing raw HTTP requests as text (Replay, Fuzzer).
 // Lines may end in \n or \r\n; edits keep the request's own line endings.
 
 export interface Param {
@@ -139,6 +139,39 @@ export function setCookie(raw: string, name: string, value: string): string {
   });
 }
 
+/** Replaces parts of the request line (method, target, version). */
+export function setRequestLine(raw: string, change: { method?: string; target?: string; version?: string }): string {
+  const p = parseRequest(raw);
+  const clean = (v: string | undefined, fallback: string) => (v === undefined ? fallback : v.replace(/[\s]/g, "") || fallback);
+  return buildRequest({ ...p, method: clean(change.method, p.method), target: clean(change.target, p.target), version: clean(change.version, p.version) });
+}
+
+/** Headers HTTP/2 doesn't allow (RFC 9113 8.2.2): dropped when switching to HTTP/2. */
+const CONNECTION_SPECIFIC = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"];
+
+/** The request written for another protocol: HTTP/2 (lower-case names, no connection headers) or HTTP/1.1. */
+export function toProtocol(raw: string, version: "HTTP/2" | "HTTP/1.1"): string {
+  const p = parseRequest(raw);
+  if (version === "HTTP/2") {
+    const headers = p.headers
+      .filter((h) => !CONNECTION_SPECIFIC.includes(h.name.toLowerCase()))
+      .map((h) => ({ ...h, name: h.name.toLowerCase() }));
+    return buildRequest({ ...p, version, headers });
+  }
+  const headers = p.headers.map((h) => (h.name === "host" ? { ...h, name: "Host" } : h));
+  return buildRequest({ ...p, version, headers });
+}
+
+/** Sets the Host header (HTTP/2's :authority), adding it when missing. */
+export function setAuthority(raw: string, value: string): string {
+  const p = parseRequest(raw);
+  const i = p.headers.findIndex((h) => h.name.toLowerCase() === "host");
+  const headers = p.headers.slice();
+  if (i >= 0) headers[i] = { ...headers[i], value };
+  else headers.unshift({ name: p.version.startsWith("HTTP/2") ? "host" : "Host", value });
+  return buildRequest({ ...p, headers });
+}
+
 export function setHeader(raw: string, index: number, value: string): string {
   const p = parseRequest(raw);
   if (!p.headers[index]) return raw;
@@ -158,7 +191,7 @@ export function redirectOf(resp: string | null | undefined): string | null {
 
 /**
  * Marks the values of query and form parameters, top-level JSON strings
- * and numbers, and cookies with § (Burp's "Auto §"). Existing markers are
+ * and numbers, and cookies with § ("Auto-mark"). Existing markers are
  * removed first.
  */
 export function autoMark(raw: string): string {

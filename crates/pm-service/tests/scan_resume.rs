@@ -188,3 +188,38 @@ async fn profiles_and_schedules() {
     assert!(s.schedule_delete(&human(), sched.id).unwrap());
     assert!(s.schedule_list().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn two_processes_fire_a_schedule_once() {
+    let addr = VulnShop::start_local().await.unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+    let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");
+    let dir = std::env::temp_dir().join(format!("pm-sched-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("p.pmproj");
+    let _ = std::fs::remove_file(&path);
+    let (a, b) = (service(&path, &roe), service(&path, &roe));
+    let sched = a
+        .schedule_save(
+            &human(),
+            ScanSchedule {
+                name: "hourly".into(),
+                every: Every::Hourly,
+                request: ScanTaskRequest {
+                    url: format!("{url}/"),
+                    crawl: Some(false),
+                    checks: vec!["reflected_input".into()],
+                    ..Default::default()
+                },
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut started = a.schedule_tick(sched.next_run_ms).unwrap();
+    started.extend(b.schedule_tick(sched.next_run_ms).unwrap());
+    assert_eq!(started.len(), 1, "{started:?}");
+    let owner = if a.scan_task_status(&human(), &started[0]).is_ok() { &a } else { &b };
+    wait(owner, &started[0], |v| !v.status.running()).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

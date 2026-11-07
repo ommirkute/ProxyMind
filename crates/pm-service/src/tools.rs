@@ -1,4 +1,4 @@
-//! Decoder, Comparer and Sequencer.
+//! Codec (encode/decode), Diff and Token analyzer.
 
 use pm_policy::{Actor, ActorKind, Tier};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct DecodeRequest {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SequencerRequest {
+pub struct TokenAnalyzerRequest {
     /// The request that issues a token (e.g. a login or a page setting a cookie).
     pub exchange_id: i64,
     /// Where the token is: cookie:<name>, header:<name>, json:/pointer or between:<start>|<end>.
@@ -29,12 +29,12 @@ pub struct SequencerRequest {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum SequencerResult {
+pub enum TokenAnalyzerResult {
     /// Statistics only: the tokens themselves are live secrets and aren't returned.
     Done {
         requests: usize,
         found: usize,
-        analysis: pm_tools::sequencer::Analysis,
+        analysis: pm_tools::token_analyzer::Analysis,
         exchange_ids: Vec<i64>,
     },
     PendingApproval {
@@ -59,7 +59,31 @@ fn text_of(raw: &[u8], max: usize) -> String {
     t[..cut].to_string()
 }
 
+/// A change to a request in the Replay editor (nothing is sent).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RequestTransform {
+    /// GET ⇄ POST, moving the parameters between query and body.
+    ChangeMethod { raw: String },
+    /// Re-encode the body's parameters.
+    ConvertBody { raw: String, to: pm_tools::reqedit::BodyEncoding },
+}
+
 impl Service {
+    /// Rewrites a request's text (method or body encoding); nothing is sent.
+    pub fn request_transform(&self, t: &RequestTransform) -> Result<Value> {
+        let (RequestTransform::ChangeMethod { raw } | RequestTransform::ConvertBody { raw, .. }) = t;
+        if raw.len() > pm_tools::codec::MAX_OUTPUT {
+            return Err(ServiceError::Invalid("request larger than 4 MB".into()));
+        }
+        let out = match t {
+            RequestTransform::ChangeMethod { raw } => pm_tools::reqedit::change_method(raw),
+            RequestTransform::ConvertBody { raw, to } => pm_tools::reqedit::convert_body(raw, *to),
+        }
+        .map_err(ServiceError::Invalid)?;
+        Ok(json!({ "raw": out }))
+    }
+
     /// Encodes/decodes locally (nothing is sent).
     pub fn decode(&self, req: &DecodeRequest) -> Result<Value> {
         if req.input.len() > pm_tools::codec::MAX_OUTPUT {
@@ -108,15 +132,15 @@ impl Service {
     }
 
     /// Analyses pasted tokens (nothing is sent).
-    pub fn sequencer_analyze(&self, tokens: &[String]) -> Result<pm_tools::sequencer::Analysis> {
+    pub fn token_analyzer_analyze(&self, tokens: &[String]) -> Result<pm_tools::token_analyzer::Analysis> {
         if tokens.len() < 2 || tokens.len() > 100_000 {
             return Err(ServiceError::Invalid("give 2 to 100000 tokens".into()));
         }
-        Ok(pm_tools::sequencer::analyze(tokens))
+        Ok(pm_tools::token_analyzer::analyze(tokens))
     }
 
     /// Re-sends a token-issuing request and analyses the tokens it returns.
-    pub async fn sequencer_run(&self, actor: &Actor, req: SequencerRequest) -> Result<SequencerResult> {
+    pub async fn token_analyzer_run(&self, actor: &Actor, req: TokenAnalyzerRequest) -> Result<TokenAnalyzerResult> {
         let samples = req.samples.unwrap_or(100).clamp(10, 500);
         if !["cookie:", "header:", "json:", "between:"].iter().any(|p| req.locator.starts_with(p)) {
             return Err(ServiceError::Invalid(
@@ -133,10 +157,10 @@ impl Service {
         let out = self.outgoing(endpoint, raw.as_bytes(), true)?;
         // Many copies of a state-changing request (a login) is intrusive.
         let tier = Tier::for_http_request(&out.raw).0.max(Tier::ActiveSafe);
-        let extra = json!({ "sequencer": { "samples": samples, "locator": req.locator } });
+        let extra = json!({ "token_analyzer": { "samples": samples, "locator": req.locator } });
         match self.gate_send_with(
             actor,
-            "sequencer_run",
+            "token_analyzer_run",
             &out,
             req.identity.as_deref(),
             true,
@@ -145,11 +169,11 @@ impl Service {
             extra,
         )? {
             Authorization::Allowed { .. } => {}
-            Authorization::Denied { reasons } => return Ok(SequencerResult::Denied { reasons }),
+            Authorization::Denied { reasons } => return Ok(TokenAnalyzerResult::Denied { reasons }),
             Authorization::PendingApproval { approval_id, summary, reasons } => {
-                return Ok(SequencerResult::PendingApproval {
+                return Ok(TokenAnalyzerResult::PendingApproval {
                     approval_id,
-                    summary: format!("sequencer ×{samples}: {summary}"),
+                    summary: format!("token analyzer ×{samples}: {summary}"),
                     reasons,
                 });
             }
@@ -157,12 +181,12 @@ impl Service {
         let mut tokens = Vec::new();
         let mut ids = Vec::new();
         for _ in 0..samples {
-            let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "sequencer").await?;
+            let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "token_analyzer").await?;
             ids.push(sent.exchange_id);
             if let Some(t) = sent
                 .response
                 .as_deref()
-                .and_then(|r| pm_tools::sequencer::extract(&String::from_utf8_lossy(r), &req.locator))
+                .and_then(|r| pm_tools::token_analyzer::extract(&String::from_utf8_lossy(r), &req.locator))
             {
                 tokens.push(t);
             }
@@ -173,10 +197,10 @@ impl Service {
                 tokens.len()
             )));
         }
-        Ok(SequencerResult::Done {
+        Ok(TokenAnalyzerResult::Done {
             requests: samples,
             found: tokens.len(),
-            analysis: pm_tools::sequencer::analyze(&tokens),
+            analysis: pm_tools::token_analyzer::analyze(&tokens),
             exchange_ids: ids,
         })
     }

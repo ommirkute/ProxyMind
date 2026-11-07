@@ -1,0 +1,11 @@
+# An active-check plugin for ProxyMind: install with
+#   proxymind plugin add examples/plugins/debug-switch
+# then run it on a recorded GET from the Plugins page, or
+#   proxymind plugin check debug-switch --exchange <id>
+name: debug-switch
+version: 0.1.0
+description: Tries hidden debug switches (?debug=1, ?test=1, ...) on a GET and reports ones that make the response reveal more.
+active:
+  command: ["python3", "check.py"]
+  timeout_seconds: 30
+  max_requests: 8

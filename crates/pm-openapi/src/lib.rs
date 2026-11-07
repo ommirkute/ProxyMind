@@ -119,6 +119,7 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
             let mut params: Vec<Param> = Vec::new();
             let mut body: Option<Value> = None;
             let mut form = false;
+            let mut raw_body: Option<(String, String)> = None;
             for p in raw_params {
                 let p = resolve(doc, &p, 0);
                 let location = p.get("in").and_then(Value::as_str).unwrap_or("").to_string();
@@ -151,6 +152,14 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
                             .cloned()
                             .unwrap_or_else(|| example(doc, j.1.get("schema").unwrap_or(&Value::Null), 0)),
                     );
+                } else if let Some((ct, x)) = content.as_object().and_then(|c| {
+                    c.iter().find(|(k, _)| {
+                        k.contains("xml") && k.bytes().all(|b| b.is_ascii_alphanumeric() || b"/+.-".contains(&b))
+                    })
+                }) {
+                    // An XML body: its example as written (there is no schema-based XML example).
+                    let text = x.get("example").and_then(Value::as_str).unwrap_or("<?xml version=\"1.0\"?><root/>");
+                    raw_body = Some((ct.clone(), text.to_string()));
                 } else if let Some(f) = content.get("application/x-www-form-urlencoded") {
                     form = true;
                     if let Some(props) = resolve(doc, f.get("schema").unwrap_or(&Value::Null), 0)
@@ -180,7 +189,12 @@ pub fn from_value(doc: &Value, spec_url: Option<&str>) -> Result<Spec, SpecError
                 .chars()
                 .take(200)
                 .collect();
-            let example_request = request(method, &prefix, path, &params, body.as_ref(), form, host.as_deref());
+            let mut example_request = request(method, &prefix, path, &params, body.as_ref(), form, host.as_deref());
+            if let Some((ct, text)) = raw_body.filter(|_| body.is_none() && !form)
+                && let Some(head) = example_request.strip_suffix("\r\n")
+            {
+                example_request = format!("{head}Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n{text}", text.len());
+            }
             operations.push(Operation {
                 method: method.to_ascii_uppercase(),
                 path: path.clone(),
@@ -205,6 +219,9 @@ fn absolute(u: &str, spec_url: Option<&str>) -> Option<String> {
         return matches!(x.scheme(), "http" | "https").then(|| u.trim_end_matches('/').to_string());
     }
     let base = url::Url::parse(spec_url?).ok()?;
+    // An empty or "." server means "where the document is": its folder, not
+    // the document's own URL (which resolving "" would give).
+    let u = if u.trim().is_empty() || u.trim() == "." { "./" } else { u };
     Some(base.join(u).ok()?.to_string().trim_end_matches('/').to_string())
 }
 
@@ -323,10 +340,19 @@ fn request(
         target.push('?');
         target.push_str(&query.join("&"));
     }
-    let mut req =
-        format!("{} {target} HTTP/1.1\r\nHost: {}\r\n", method.to_ascii_uppercase(), host.unwrap_or("example.invalid"));
-    for p in params.iter().filter(|p| p.location == "header" && p.required) {
-        req.push_str(&format!("{}: {}\r\n", p.name, p.example.replace(['\r', '\n'], "")));
+    // The spec may come from the target: nothing in it may break a line.
+    let target: String = target
+        .bytes()
+        .map(|b| if b.is_ascii_graphic() { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    let host = host
+        .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._:[]".contains(&b)))
+        .unwrap_or("example.invalid");
+    let mut req = format!("{} {target} HTTP/1.1\r\nHost: {host}\r\n", method.to_ascii_uppercase());
+    let token =
+        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+    for p in params.iter().filter(|p| p.location == "header" && p.required && token(&p.name)) {
+        req.push_str(&format!("{}: {}\r\n", p.name, p.example.replace(['\r', '\n', '\0'], "")));
     }
     let body_text = if form {
         Some((
@@ -430,6 +456,17 @@ paths:
         let s = from_value(&doc, Some("http://127.0.0.1:8899/openapi.json")).unwrap();
         assert_eq!(s.base_url.as_deref(), Some("http://127.0.0.1:8899/api"));
         assert_eq!(s.operations[0].example_request, "GET /api/x HTTP/1.1\r\nHost: 127.0.0.1:8899\r\n\r\n");
+        // VAmPI's servers: [{"url": ""}] means the document's folder.
+        let empty: Value =
+            serde_json::from_str(r#"{"openapi":"3.0.0","info":{},"servers":[{"url":""}],"paths":{"/x":{"get":{}}}}"#)
+                .unwrap();
+        let s = from_value(&empty, Some("http://127.0.0.1:5002/openapi.json")).unwrap();
+        assert_eq!(s.base_url.as_deref(), Some("http://127.0.0.1:5002"));
+        assert!(
+            s.operations[0].example_request.starts_with("GET /x HTTP/1.1\r\n"),
+            "{}",
+            s.operations[0].example_request
+        );
         assert!(parse("{\"hello\":1}").is_err());
         assert!(parse("::: not yaml or json").is_err());
         let remote_ref = r##"{"openapi":"3.0.0","info":{},"paths":{"/x":{"post":{"requestBody":{"content":{"application/json":{"schema":{"$ref":"http://evil/x.json"}}}}}}}}"##;
@@ -437,5 +474,44 @@ paths:
             parse(remote_ref).unwrap().operations[0].example_request.ends_with("\r\n\r\nnull"),
             "remote refs are not fetched"
         );
+    }
+
+    #[test]
+    fn yaml_alias_bombs_are_refused() {
+        let mut doc = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+        for i in 1..12 {
+            let p = i - 1;
+            doc.push_str(&format!(
+                "a{i}: &a{i} [*a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}, *a{p}]\n"
+            ));
+        }
+        doc.push_str("openapi: 3.0.0\npaths: {}\n");
+        let started = std::time::Instant::now();
+        assert!(parse(&doc).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn hostile_specs_cannot_break_the_request() {
+        let spec = r#"{"openapi":"3.0.0","servers":[{"url":"http://api.test/v1 x\r\nEvil: 1"}],
+            "paths":{"/a b\r\nX-Injected: 1\r\n\r\nGET /other":{"get":{"parameters":[
+              {"name":"X-Ok","in":"header","required":true,"example":"v\r\nX-Bad: 1"},
+              {"name":"Bad: Name","in":"header","required":true}]}}}}"#;
+        let s = parse(spec).unwrap();
+        let r = &s.operations[0].example_request;
+        let end = pm_http::find_head_end(r.as_bytes()).unwrap().unwrap();
+        assert_eq!(end, r.len(), "one request only: {r:?}");
+        let head = pm_http::parse_request_head(r.as_bytes()).unwrap();
+        assert!(head.target.contains("%0D%0AX-Injected:"), "{r:?}");
+        assert!(!r.contains("\r\nX-Injected") && !r.contains("\r\nX-Bad") && !r.contains("Bad: Name"), "{r:?}");
+    }
+
+    #[test]
+    fn xml_bodies_keep_their_example() {
+        let doc = r#"{"openapi":"3.0.0","info":{},"paths":{"/import":{"post":{"requestBody":{"content":
+            {"application/xml":{"example":"<items><item>Tea</item></items>"}}}}}}}"#;
+        let op = &parse(doc).unwrap().operations[0];
+        assert!(op.example_request.contains("Content-Type: application/xml\r\nContent-Length: 31\r\n\r\n<items>"));
+        assert!(op.example_request.ends_with("</items>"));
     }
 }

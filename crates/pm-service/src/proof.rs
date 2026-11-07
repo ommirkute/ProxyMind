@@ -129,7 +129,7 @@ impl Service {
             format!(" [payload: {}]", payload_reasons.join("; "))
         };
         match approval {
-            Some(id) => self.run_approved(id, params),
+            Some(id) => self.run_approved(actor, action, id, params),
             None => self.authorize(
                 ActionRequest {
                     actor: actor.clone(),
@@ -665,7 +665,17 @@ pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Doc
     })
 }
 
+/// At most this many callbacks are kept per token, and in all: anyone who
+/// can reach the OAST listener can send made-up ones.
+const OAST_PER_TOKEN: u64 = 20;
+const OAST_TOTAL: u64 = 100_000;
+
 pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<()> {
+    if store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? >= OAST_PER_TOKEN
+        || store.count_rows("oast_interactions", None)? >= OAST_TOTAL
+    {
+        return Ok(());
+    }
     let mut row = serde_json::Map::new();
     for (k, v) in [
         ("token", json!(i.token)),
@@ -734,5 +744,26 @@ mod tests {
         assert_eq!((d.status, d.body.as_slice()), (200, &b"hello"[..]));
         let h2 = b"HTTP/2 200\r\ncontent-type: text/html\r\n\r\n<p>x</p>";
         assert_eq!(recorded_document("http://x/", h2).unwrap().body, b"<p>x</p>");
+    }
+
+    #[test]
+    fn oast_callbacks_are_capped_per_token() {
+        let mut store = pm_store::Store::open_in_memory().unwrap();
+        let hit = |token: &str| pm_oast::Interaction {
+            token: token.into(),
+            protocol: "http".into(),
+            remote: "203.0.113.9:1".into(),
+            method: "GET".into(),
+            path: format!("/{token}"),
+            ts_ms: 1,
+            raw: String::new(),
+        };
+        let (a, b) = (pm_oast::new_token(), pm_oast::new_token());
+        for _ in 0..(OAST_PER_TOKEN + 5) {
+            record_oast_in(&mut store, &hit(&a)).unwrap();
+        }
+        record_oast_in(&mut store, &hit(&b)).unwrap();
+        let count = |t: &str| store.count_rows("oast_interactions", Some(("token", &json!(t)))).unwrap();
+        assert_eq!((count(&a), count(&b)), (OAST_PER_TOKEN, 1));
     }
 }

@@ -4,14 +4,19 @@
 //! - [`search`] and [`sitemap`]: matching text in history, and history as a tree.
 //! - [`codec`]: encode, decode and hash, one step or a chain, and a
 //!   "smart decode" that peels common layers.
-//! - [`linediff`]: a line diff for the comparer.
-//! - [`sequencer`]: how random a sample of tokens looks.
+//! - [`linediff`]: a line diff for the Diff tool.
+//! - [`token_analyzer`]: how random a sample of tokens looks.
+//! - [`reqedit`]: change a request's method or body encoding, keeping its parameters.
+//! - [`engage`]: engagement tools (comments, scripts, parameters, CSRF and clickjacking pages).
 
 pub mod codec;
+pub mod codegen;
 pub mod curl;
+pub mod engage;
 pub mod har;
 pub mod hql;
 pub mod linediff;
+pub mod reqedit;
 pub mod search;
-pub mod sequencer;
 pub mod sitemap;
+pub mod token_analyzer;

@@ -41,6 +41,7 @@ const blank = (): Rule => ({
 
 export default function Rules() {
   const saved = useLoad(() => api.get<{ rules: Rule[] }>("/match-replace"), []);
+  const presets = useLoad(() => api.get<{ id: string; title: string; description: string; rules: Rule[] }[]>("/match-replace/presets"), []);
   const [draft, setDraft] = useState<Rule[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const action = useAction();
@@ -65,6 +66,21 @@ export default function Rules() {
         title="Match and replace"
         actions={
           <>
+            <select
+              aria-label="Add a preset"
+              data-testid="rules-preset"
+              value=""
+              onChange={(e) => {
+                const p = presets.data?.find((x) => x.id === e.target.value);
+                if (!p) return;
+                const same = (a: Rule, b: Rule) => a.part === b.part && a.match === b.match && a.replace === b.replace;
+                setDraft([...rules, ...p.rules.filter((r) => !rules.some((x) => same(x, r)))]);
+                setNotice(`Added “${p.title}”. ${p.description} Save to apply.`);
+              }}
+            >
+              <option value="">Add a preset…</option>
+              {presets.data?.map((p) => <option key={p.id} value={p.id} title={p.description}>{p.title}</option>)}
+            </select>
             <button className="btn" onClick={() => setDraft([...rules, blank()])}>Add rule</button>
             <button className="btn primary" data-testid="rules-save" disabled={!draft || action.busy} onClick={save}>
               Save

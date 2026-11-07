@@ -129,13 +129,26 @@ pub struct Validity {
     pub contains: String,
 }
 
+/// A tool (exchange source) name, lowercased, with the names used before
+/// the 2026-10-28 rename mapped to the current ones.
+fn canonical_tool(name: &str) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    match n.as_str() {
+        "repeater" => "replay".into(),
+        "intruder" => "fuzzer".into(),
+        "sequencer" => "token_analyzer".into(),
+        _ => n,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionRule {
     pub name: String,
     pub enabled: bool,
-    /// Tools (exchange sources) covered: replay, intruder, scan, crawl,
-    /// discover, sequencer, proof, authz, graphql, openapi. Empty: all.
+    /// Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
+    /// discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    /// Older names (repeater, intruder, sequencer) still match.
     pub tools: Vec<String>,
     /// Host patterns (`api.example.com`, `*.example.com`). Empty: all.
     pub hosts: Vec<String>,
@@ -167,7 +180,7 @@ impl Default for SessionRule {
 impl SessionRule {
     fn covers(&self, source: &str, host: &str) -> bool {
         self.enabled
-            && (self.tools.is_empty() || self.tools.iter().any(|t| t.eq_ignore_ascii_case(source)))
+            && (self.tools.is_empty() || self.tools.iter().any(|t| canonical_tool(t) == canonical_tool(source)))
             && (self.hosts.is_empty() || self.hosts.iter().any(|h| host_matches(h, host)))
     }
 }
@@ -297,7 +310,18 @@ impl Jar {
                 None => (host.clone(), true),
             };
             self.cookies.retain(|c| !(c.domain == domain && c.name == name));
-            if !expired && !value.is_empty() {
+            // Targets choose what they set: keep the jar (and the Cookie
+            // headers built from it) bounded, like browsers do.
+            let too_big = name.len() + value.len() > 4096;
+            if !expired && !value.is_empty() && !too_big {
+                if self.cookies.iter().filter(|c| c.domain == domain).count() >= 180
+                    && let Some(i) = self.cookies.iter().position(|c| c.domain == domain)
+                {
+                    self.cookies.remove(i); // the oldest for this domain
+                }
+                if self.cookies.len() >= 3000 {
+                    self.cookies.remove(0);
+                }
                 self.cookies.push(JarCookie { domain, host_only, name, value });
             }
         }
@@ -387,8 +411,19 @@ fn header_name(line: &[u8]) -> Option<&[u8]> {
     Some(line[..c].trim_ascii())
 }
 
+/// Whether a value can go into a header line as is. Values extracted from
+/// responses are target content: a line break would add headers or a whole
+/// second request.
+pub(crate) fn header_safe(s: &str) -> bool {
+    !s.contains(['\r', '\n', '\0'])
+}
+
 /// Sets a header: replaces the first one with that name, or adds it.
+/// Names or values with line breaks are refused (the request is unchanged).
 pub fn set_header(raw: &[u8], name: &str, value: &str) -> Vec<u8> {
+    if !header_safe(name) || !header_safe(value) || name.contains(':') {
+        return raw.to_vec();
+    }
     let Some((mut lines, eol, body)) = split_lines(raw) else { return raw.to_vec() };
     let line = format!("{name}: {value}").into_bytes();
     match lines.iter().skip(1).position(|l| header_name(l).is_some_and(|n| n.eq_ignore_ascii_case(name.as_bytes()))) {
@@ -421,7 +456,7 @@ pub fn set_cookies(raw: &[u8], cookies: &[(String, String)]) -> Vec<u8> {
             (k.trim().to_string(), v.trim().to_string())
         })
         .collect();
-    for (k, v) in cookies {
+    for (k, v) in cookies.iter().filter(|(k, v)| header_safe(k) && header_safe(v) && !k.contains([';', '='])) {
         match pairs.iter_mut().find(|(n, _)| n == k) {
             Some(p) => p.1.clone_from(v),
             None => pairs.push((k.clone(), v.clone())),
@@ -730,7 +765,7 @@ impl Service {
             local.absorb(&endpoint.host, &resp);
             let mut st = self.session.lock();
             for x in &step.extract {
-                if let Some(v) = extract(x, &resp) {
+                if let Some(v) = extract(x, &resp).filter(|v| header_safe(v)) {
                     st.vars.insert(x.name.clone(), v.clone());
                     run.variables.insert(x.name.clone(), v);
                 }
@@ -861,6 +896,29 @@ Set-Cookie: evil=3; Domain=other.test\r\n\r\n",
         assert!(jar.for_host("other.test").is_empty(), "cookies for other sites are ignored");
         jar.absorb("app.shop.test", b"HTTP/1.1 200 OK\r\nSet-Cookie: sid=; Max-Age=0\r\n\r\n");
         assert_eq!(jar.for_host("app.shop.test"), vec![("wide".into(), "2".into())]);
+    }
+
+    #[test]
+    fn the_jar_is_bounded() {
+        let mut jar = Jar::default();
+        let mut resp = String::from("HTTP/1.1 200 OK\r\n");
+        for i in 0..400 {
+            resp.push_str(&format!("Set-Cookie: c{i}=v\r\n"));
+        }
+        resp.push_str(&format!("Set-Cookie: big={}\r\n\r\n", "x".repeat(5000)));
+        jar.absorb("shop.test", resp.as_bytes());
+        let sent = jar.for_host("shop.test");
+        assert_eq!(sent.len(), 180);
+        assert_eq!(sent.last().unwrap().0, "c399", "the newest are kept");
+    }
+
+    #[test]
+    fn extracted_line_breaks_never_reach_the_request() {
+        let raw = b"GET / HTTP/1.1\r\nHost: shop\r\n\r\n";
+        assert_eq!(set_header(raw, "X-Csrf", "t\r\n\r\nDELETE /x HTTP/1.1"), raw.to_vec());
+        assert_eq!(set_header(raw, "X-Csrf", "tok"), b"GET / HTTP/1.1\r\nHost: shop\r\nX-Csrf: tok\r\n\r\n".to_vec());
+        let jar = vec![("a".to_string(), "1\r\nX: y".to_string()), ("b".to_string(), "2".to_string())];
+        assert_eq!(set_cookies(raw, &jar), b"GET / HTTP/1.1\r\nHost: shop\r\nCookie: b=2\r\n\r\n".to_vec());
     }
 
     #[test]

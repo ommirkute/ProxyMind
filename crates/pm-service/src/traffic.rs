@@ -32,7 +32,7 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
-/// A request read from a cURL command, ready for Repeater.
+/// A request read from a cURL command, ready for Replay.
 #[derive(Debug, Clone, Serialize)]
 pub struct CurlParsed {
     /// Where to send it (scheme://host[:port]).
@@ -163,7 +163,30 @@ impl Service {
         curl::to_curl(&url, &raw).map_err(ServiceError::Invalid)
     }
 
-    /// Reads a curl command into a request for Repeater. Sends nothing.
+    /// A recorded request as a Python, JavaScript or PowerShell snippet
+    /// (secrets replaced for agents). Sends nothing.
+    pub fn exchange_code(&self, actor: &Actor, id: i64, lang: pm_tools::codegen::Lang) -> Result<String> {
+        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let s = &ex.summary;
+        let url = pm_core::url(&s.scheme, &s.host, s.port, &s.path);
+        let raw = match self.redactor_for(actor) {
+            Some(r) => r.redact(&String::from_utf8_lossy(&ex.request)).into_bytes(),
+            None => ex.request,
+        };
+        pm_tools::codegen::to_code(lang, &url, &raw).map_err(ServiceError::Invalid)
+    }
+
+    /// Request text (as in Replay) as a snippet. Sends nothing.
+    pub fn request_code(&self, url: &str, raw: &str, lang: pm_tools::codegen::Lang) -> Result<String> {
+        if raw.len() > 10 * 1024 * 1024 {
+            return Err(ServiceError::Invalid("request larger than 10 MB".into()));
+        }
+        // The Replay editor may use bare LF line endings.
+        let raw = if raw.contains("\r\n") { raw.to_string() } else { raw.replace('\n', "\r\n") };
+        pm_tools::codegen::to_code(lang, url, raw.as_bytes()).map_err(ServiceError::Invalid)
+    }
+
+    /// Reads a curl command into a request for Replay. Sends nothing.
     pub fn curl_parse(&self, command: &str) -> Result<CurlParsed> {
         if command.len() > 10 * 1024 * 1024 {
             return Err(ServiceError::Invalid("command larger than 10 MB".into()));

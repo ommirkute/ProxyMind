@@ -14,5 +14,8 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde-saphyr = "1.1.0"
 url = "2.5.8"
 
+[dev-dependencies]
+pm-http = { path = "../pm-http" }
+
 [lints]
 workspace = true

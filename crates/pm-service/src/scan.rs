@@ -66,7 +66,7 @@ impl Service {
         let mut groups: BTreeMap<(String, String, String, String), ScanIssue> = BTreeMap::new();
         let mut lines: Vec<pm_plugin::ExchangeLine> = Vec::new();
         let mut where_of: std::collections::HashMap<i64, (String, String)> = std::collections::HashMap::new();
-        let plugins = self.plugins.read().clone();
+        let plugins = self.enabled_plugins();
         for s in summaries {
             let Some(ex) = self.store.lock().get_exchange(s.id)? else { continue };
             let Some(resp) = ex.response.as_deref() else { continue };
@@ -230,6 +230,10 @@ enum Plan {
     Upload(Vec<(pm_scan::advanced::UploadKind, Vec<u8>)>),
     /// Copies sent at once (run before the baseline, which would use up a one-time action).
     Race(usize),
+    /// A login with a wrong password (twice) and an unknown account.
+    UserEnum(pm_scan::advanced::EnumProbes),
+    /// A password change without the current password (request, field removed).
+    PasswordChange(Vec<u8>, String),
 }
 
 impl Plan {
@@ -248,13 +252,16 @@ impl Plan {
             Plan::GraphQl(v) => v.len(),
             Plan::CachePoison(v) => v.len() * 2,
             Plan::CacheDeception(v, _) => v.len() * 2 + 1,
-            Plan::MassAssignment(_) => 1,
+            // The probe, then up to three read-backs.
+            Plan::MassAssignment(_) => 4,
             Plan::Proto(v) => v.len(),
             Plan::OAuth(v, s) => v.len() + usize::from(s.is_some()),
             Plan::Deser(v) => v.len(),
             Plan::Smuggling(_) => 5,
             Plan::Upload(v) => v.len() * 5,
             Plan::Race(n) => *n,
+            Plan::UserEnum(_) => 3,
+            Plan::PasswordChange(..) => 1,
         }
     }
 
@@ -284,6 +291,8 @@ impl Plan {
             Plan::Smuggling(p) => vec![p.te_cl.clone(), p.cl_te.clone()],
             Plan::Upload(v) => v.iter().map(|(_, r)| r.clone()).collect(),
             Plan::Race(_) => vec![raw.as_bytes().to_vec()],
+            Plan::UserEnum(p) => vec![p.wrong_password.clone(), p.unknown_user.clone()],
+            Plan::PasswordChange(r, _) => vec![r.clone()],
         }
     }
 }
@@ -593,6 +602,17 @@ impl Service {
             {
                 plans.push(Plan::MassAssignment(r));
             }
+            if want("user_enumeration")
+                && !get
+                && let Some(p) = adv::enum_probes(&raw, &marker)
+            {
+                plans.push(Plan::UserEnum(p));
+            }
+            if want("password_change")
+                && let Some((r, field)) = adv::without_current_password(&raw)
+            {
+                plans.push(Plan::PasswordChange(r, field));
+            }
             if want("oauth") {
                 let v = adv::oauth_probes(&raw, &marker);
                 if !v.is_empty() {
@@ -863,7 +883,13 @@ impl Service {
             if !timing_ok && plans.iter().any(|p| matches!(p, Plan::Time(..))) {
                 notes.push(format!("time-based checks skipped: the baseline is slow ({base_ms:?} ms)"));
             }
-            plans.sort_by_key(|p| matches!(p, Plan::Time(..)));
+            // The broad hidden-parameter guess goes after the targeted checks
+            // (it can use many requests), and delays go last.
+            plans.sort_by_key(|p| match p {
+                Plan::Time(..) => 2,
+                Plan::Params(_) => 1,
+                _ => 0,
+            });
             let denied = base_seen.status.is_some_and(|s| s == 401 || s == 403);
             'plans: for plan in &plans {
                 match plan {
@@ -1363,16 +1389,72 @@ impl Service {
                         }
                     }
                     Plan::MassAssignment(r) => {
-                        if !base_seen.status.is_some_and(|s| (200..300).contains(&s)) || sent_count + 1 > limit {
+                        // A sign-up re-sent as is fails ("already taken"): compare
+                        // with the recorded success instead.
+                        let ok = |s: &pm_scan::active::Seen| s.status.is_some_and(|x| (200..300).contains(&x));
+                        let recorded = seen_of(ex.response.as_deref());
+                        let base = if ok(&base_seen) { &base_seen } else { &recorded };
+                        if !ok(base) || sent_count + 1 > limit {
                             continue;
                         }
                         sent_count += 1;
                         let m_sent = send(r.clone()).await?;
                         let got = seen_of(m_sent.response.as_deref());
-                        let fields = pm_scan::advanced::mass_assigned(&base_seen, &got, &marker);
+                        let mut fields = pm_scan::advanced::mass_assigned(base, &got, &marker);
+                        let mut where_seen = "came back set";
+                        let mut finding_exchange = m_sent.exchange_id;
+                        // Not echoed: look for the new account where accounts are listed
+                        // with their privileges (recorded GETs on the same origin).
+                        if fields.is_empty() && ok(&got) {
+                            let account = pm_scan::advanced::probe_account_values(r, &marker);
+                            let reads: Vec<Vec<u8>> = if account.is_empty() {
+                                Vec::new()
+                            } else {
+                                let rows = self.store.lock().search_exchanges(&HistoryFilter {
+                                    host: Some(ex.summary.host.clone()),
+                                    method: Some("GET".into()),
+                                    limit: Some(500),
+                                    ..Default::default()
+                                })?;
+                                let mut out = Vec::new();
+                                for row in rows.iter().filter(|x| {
+                                    x.port == ex.summary.port
+                                        && x.scheme == ex.summary.scheme
+                                        && x.status.is_some_and(|c| (200..300).contains(&c))
+                                }) {
+                                    if out.len() >= 3 {
+                                        break;
+                                    }
+                                    let Some(e) = self.store.lock().get_exchange(row.id)? else { continue };
+                                    if pm_scan::advanced::lists_privileges(&seen_of(e.response.as_deref()).body) {
+                                        out.push(
+                                            self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes(),
+                                        );
+                                    }
+                                }
+                                out
+                            };
+                            for read in reads {
+                                if sent_count + 1 > limit {
+                                    break;
+                                }
+                                sent_count += 1;
+                                let back = send(read).await?;
+                                let found = pm_scan::advanced::assigned_in_listing(
+                                    &seen_of(back.response.as_deref()).body,
+                                    &account,
+                                );
+                                if !found.is_empty() {
+                                    fields = found;
+                                    where_seen = "are set on the new account in a later response";
+                                    finding_exchange = back.exchange_id;
+                                    break;
+                                }
+                            }
+                        }
                         if !fields.is_empty() {
                             let evidence = format!(
-                                "privileged fields added to the submission came back set: {}",
+                                "privileged fields added to the submission {where_seen}: {}",
                                 fields.join(", ")
                             );
                             issues.push(ActiveFinding {
@@ -1384,11 +1466,68 @@ impl Service {
                                     &fields.join(", "),
                                     evidence,
                                 ),
-                                exchange_id: m_sent.exchange_id,
+                                exchange_id: finding_exchange,
                             });
                         }
                     }
                     Plan::Race(_) => {} // ran before the baseline
+                    Plan::UserEnum(p) => {
+                        if sent_count + 3 > limit {
+                            continue;
+                        }
+                        sent_count += 3;
+                        let w = send(p.wrong_password.clone()).await?;
+                        let a = send(p.wrong_password.clone()).await?;
+                        let u = send(p.unknown_user.clone()).await?;
+                        let (ws, as_, us) = (
+                            seen_of(w.response.as_deref()),
+                            seen_of(a.response.as_deref()),
+                            seen_of(u.response.as_deref()),
+                        );
+                        if let Some(evidence) = pm_scan::advanced::enumerates(p, &ws, &as_, &us) {
+                            issues.push(ActiveFinding {
+                                issue: adv_issue(
+                                    "user_enumeration",
+                                    "Login reveals which accounts exist",
+                                    "medium",
+                                    "login",
+                                    "unknown account vs wrong password",
+                                    evidence,
+                                ),
+                                exchange_id: u.exchange_id,
+                            });
+                        }
+                    }
+                    Plan::PasswordChange(r, field) => {
+                        let recorded = seen_of(ex.response.as_deref());
+                        let ok = |s: &pm_scan::active::Seen| s.status.is_some_and(|x| (200..300).contains(&x));
+                        if !ok(&recorded) || sent_count + 1 > limit {
+                            continue;
+                        }
+                        sent_count += 1;
+                        let p_sent = send(r.clone()).await?;
+                        let got = seen_of(p_sent.response.as_deref());
+                        let refused = ["incorrect", "wrong", "invalid", "required", "missing", "not match"]
+                            .iter()
+                            .any(|w| got.body.to_ascii_lowercase().contains(w));
+                        if ok(&got) && got.status == recorded.status && !refused {
+                            issues.push(ActiveFinding {
+                                issue: adv_issue(
+                                    "password_change",
+                                    "Password change doesn't check the current password",
+                                    "high",
+                                    &format!("parameter {field}"),
+                                    &format!("{field} removed"),
+                                    format!(
+                                        "without {field} the password change still succeeds (status {}): a stolen \
+                                         session or a CSRF can take over the account",
+                                        got.status.unwrap_or(0)
+                                    ),
+                                ),
+                                exchange_id: p_sent.exchange_id,
+                            });
+                        }
+                    }
                     Plan::OAuth(tricks, no_state) => {
                         use pm_scan::advanced as adv;
                         for (trick, r) in tricks {
@@ -1646,18 +1785,16 @@ impl Service {
         }
         // 5. Callbacks: wait out the rest of the window, then match tokens.
         if !oob_sent.is_empty() {
-            let tokens: std::collections::HashSet<&str> = oob_sent.iter().map(|(p, _)| p.token.as_str()).collect();
-            let hits = loop {
-                let rows = self.store.lock().rows("oast_interactions", None, 5000)?;
-                let hits: Vec<_> = rows
-                    .into_iter()
-                    .filter(|r| r.get("token").and_then(|t| t.as_str()).is_some_and(|t| tokens.contains(t)))
-                    .collect();
-                if std::time::Instant::now() >= oob_deadline {
-                    break hits;
+            let tokens: std::collections::BTreeSet<&str> = oob_sent.iter().map(|(p, _)| p.token.as_str()).collect();
+            tokio::time::sleep_until(oob_deadline.into()).await;
+            // Looked up by token: unrelated callbacks can't push these out of view.
+            let mut hits = Vec::new();
+            {
+                let store = self.store.lock();
+                for t in tokens {
+                    hits.extend(store.rows("oast_interactions", Some(("token", &serde_json::json!(t))), 20)?);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            };
+            }
             for (p, exchange_id) in &oob_sent {
                 let mine: Vec<_> =
                     hits.iter().filter(|h| h.get("token").and_then(|t| t.as_str()) == Some(p.token.as_str())).collect();

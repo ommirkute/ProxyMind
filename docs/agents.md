@@ -89,9 +89,16 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
 | `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
+| `plugin_list` | The user's plugins (passive and/or active, on or off) and what the plugin sandbox does on this machine |
+| `plugin_check` | Run an active-check plugin on one recorded exchange: its proposed requests (that exchange's host only) go through the gate as one batch, at least intrusive, so you usually get `pending_approval` listing the exact requests; retry with `approval_id`. Returns the plugin's issues (leads) and the exchanges sent |
 | `scan_issues` | Passive scan of recorded traffic (sends nothing): security headers, cookies, CORS, version disclosure, database errors, secrets, directory listings, plus installed passive-check plugins (`<plugin>/<check>`); grouped, most severe first. Leads to test, not findings |
 | `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
-| `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies; secrets are replaced before matching, snippets are untrusted |
+| `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies (a part such as `response_body` or `request_headers`, `invert`, `in_scope`); secrets are replaced before matching, snippets are untrusted |
+| `ws_grep` | Find text in recorded WebSocket messages (direction, scope, inverted); snippets are untrusted |
+| `engage_comments` / `engage_scripts` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, the target's URLs and parameters, what links to a page |
+| `engage_csrf_poc` / `engage_clickjacking` | A CSRF proof page for a recorded request; whether a page can be framed, with a test page |
+| `collaborator_payload` / `collaborator_interactions` | Out-of-band payloads to place by hand, and the callbacks they caused (untrusted) |
+| `organizer_add` / `organizer_list` / `organizer_update` | Keep exchanges aside with a status and a note, for people or agents to come back to |
 | `site_map` | Recorded traffic as a tree per origin with counts, methods, statuses and in-scope flags |
 | `graphql_import` | Read a GraphQL schema (introspection JSON, a recorded introspection response, or `fetch: true` through the gate) into queries, mutations and subscriptions with example documents, variables and requests for `replay_send` |
 | `discover_content` | Forced browsing: GET common hidden paths (or your words, with extensions) under a folder, in scope only, skipping log-out/delete-looking paths; soft 404s are learned and filtered; one approval per run |
@@ -99,9 +106,12 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `curl_parse` | Read a curl command into a raw request and url for `replay_send`; nothing is sent, unsupported options come back as warnings |
 | `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |
 | `compare_exchanges` | Semantic response similarity and line diffs of two recorded exchanges |
-| `sequencer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
+| `token_analyzer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
 | `crawl` | Discover pages from a URL: GET only, in scope only, skips links that log out or delete, reads robots.txt and sitemaps; pages feed history and the app model; forms are listed, never submitted |
-| `intruder_run` | Fuzz a request: positions marked `§like this§`, payload sets (lists, number ranges, built-in lists), four attack modes; returns per-request status/length/time/grep/reflection and the anomalies. One approval covers the whole attack |
+| `fuzzer_run` | Fuzz a request: positions marked `§like this§`, payload sets (lists, number ranges, built-in lists), four attack modes; returns per-request status/length/time/grep/reflection and the anomalies. One approval covers the whole attack |
+| `dom_test` | DOM XSS on a recorded page's own scripts, offline: which source (URL, fragment, window.name, postMessage, parameters, storage) reaches which sink, plus prototype pollution through the URL |
+| `custom_checks` / `custom_scan` | List the project's YAML scan checks, and run them (or a check you write) on a recorded request; one approval covers the run |
+| `replay_group` | Send 2–20 different requests to one server, in sequence (a multi-step flow) or at the same moment (a race across endpoints); one approval covers the group |
 | `race_send` | Race-condition test: send copies of a request so they arrive together (HTTP/2 single-packet or last-byte sync); responses grouped |
 | `ws_send` | Open a new WebSocket like a recorded one, send messages and get every message both ways (sending needs approval by default) |
 | `replay_send` | Send a request (new, resent or edited) through the policy gate. Write `HTTP/2` in the request line to send it over HTTP/2 |

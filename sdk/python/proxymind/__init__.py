@@ -153,6 +153,71 @@ class Client:
         return self._post("/search", self._args(query=query, regex=regex, case_sensitive=case_sensitive, part=part,
                                                **filters))
 
+    def search_ws(self, query: str, **opts: Any) -> dict:
+        """Finds text in recorded WebSocket messages. Options: regex, case_sensitive, invert, host,
+        direction (client/server/both), in_scope, before_id, limit. Returns {hits, scanned, next_before_id}."""
+        return self._post("/search/ws", self._args(query=query, **opts))
+
+    # ----------------------------------------------------------- organizer --
+
+    def organizer(self, status: Optional[str] = None) -> list:
+        """Exchanges kept aside, newest first. status: new, in_progress, postponed, done or ignored."""
+        return self._get("/organizer", status=status)
+
+    def organizer_add(self, exchange_id: int, note: str = "") -> dict:
+        return self._post("/organizer", {"exchange_id": exchange_id, "note": note})
+
+    def organizer_update(self, item_id: int, status: Optional[str] = None, note: Optional[str] = None) -> dict:
+        return self.request("PATCH", f"/organizer/{item_id}", body=self._args(status=status, note=note))
+
+    def organizer_delete(self, item_id: int) -> dict:
+        return self.request("DELETE", f"/organizer/{item_id}")
+
+    # ---------------------------------------------- engagement tools (read) --
+
+    def engage_comments(self, **filters: Any) -> list:
+        """Comments in recorded HTML/JS/CSS. Filters: host, in_scope, max_scan. Sends nothing."""
+        return self._post("/engage/comments", self._args(**filters))
+
+    def engage_scripts(self, **filters: Any) -> list:
+        return self._post("/engage/scripts", self._args(**filters))
+
+    def engage_analyze(self, **filters: Any) -> dict:
+        """URLs, methods, statuses, content types and every parameter seen."""
+        return self._post("/engage/analyze", self._args(**filters))
+
+    def engage_references(self, exchange_id: int) -> list:
+        """Recorded responses that link to this exchange's page."""
+        return self._post("/engage/references", {"exchange_id": exchange_id})
+
+    def csrf_poc(self, exchange_id: int, technique: str = "auto", auto_submit: bool = False) -> str:
+        """An HTML page that submits the recorded request cross-site. technique: auto, form, multipart,
+        text_plain or fetch."""
+        body = {"exchange_id": exchange_id, "technique": technique, "auto_submit": auto_submit}
+        return self._post("/engage/csrf", body)["html"]
+
+    def clickjacking(self, exchange_id: int) -> dict:
+        """{framable, reasons, poc} for a recorded page."""
+        return self._post("/engage/clickjacking", {"exchange_id": exchange_id})
+
+    # -------------------------------------------------------- collaborator --
+
+    def collaborator(self) -> dict:
+        return self._get("/collaborator")
+
+    def collaborator_payload(self, note: str = "") -> dict:
+        """A new out-of-band payload {token, http_url, dns_name}; a listener must be set up."""
+        return self._post("/collaborator/payloads", {"note": note})
+
+    def collaborator_interactions(self, token: Optional[str] = None, limit: int = 100) -> list:
+        """Callbacks seen (untrusted network content), newest first."""
+        return self._get("/collaborator/interactions", token=token, limit=limit)
+
+    def request_transform(self, raw: str, op: str = "change_method", to: Optional[str] = None) -> str:
+        """Rewrites request text: op change_method (GET <-> POST) or convert_body with to=url_encoded,
+        multipart or json. Sends nothing."""
+        return self._post("/tools/request-transform", self._args(op=op, raw=raw, to=to))["raw"]
+
     def site_map(self, host: Optional[str] = None) -> list:
         """Recorded traffic as a tree per origin."""
         return self._get("/sitemap", host=host)
@@ -212,9 +277,14 @@ class Client:
         body = self._args(raw=raw, url=url, exchange_id=exchange_id, identity=identity, approval_id=approval_id, **extra)
         return self._check(self._post("/replay", body))
 
-    def intruder(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
+    def replay_group(self, requests: list, mode: str = "sequence", **extra: Any) -> dict:
+        """Send 2-20 requests to one server as a group: mode "sequence" (one after another) or "parallel"
+        (at the same moment). requests: [{"url": ..., "raw": ..., "name": ...}]. Raises PendingApproval."""
+        return self._check(self._post("/replay/group", self._args(requests=requests, mode=mode, **extra)))
+
+    def fuzzer(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
         """Fuzz positions marked §like this§. payload_sets: [{"list": [...]}, {"numbers": "1-10"}, {"builtin": "sqli"}]."""
-        return self._check(self._post("/intruder", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
+        return self._check(self._post("/fuzzer", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
 
     def crawl(self, url: str, **extra: Any) -> dict:
         return self._check(self._post("/crawl", self._args(url=url, **extra)))
@@ -223,6 +293,17 @@ class Client:
                  **extra: Any) -> dict:
         """Looks for hidden files and folders under url (GET only; built-in list unless words are given)."""
         return self._check(self._post("/discover", self._args(url=url, words=words, extensions=extensions, **extra)))
+
+    def plugins(self) -> dict:
+        """Installed plugins (per user) and what the plugin sandbox does here: {plugins, sandbox, registry}."""
+        return self._get("/plugins")
+
+    def plugin_check(self, plugin: str, exchange_id: int, identity: Optional[str] = None,
+                     approval_id: Optional[str] = None) -> dict:
+        """Runs an active-check plugin on a recorded exchange; its requests go through the policy gate.
+        Returns {issues, exchange_ids, notes}; raises PendingApproval or Denied otherwise."""
+        return self._check(self._post("/plugins/check", self._args(
+            plugin=plugin, exchange_id=exchange_id, identity=identity, approval_id=approval_id)))
 
     def scan_active(self, exchange_id: int, checks: Optional[list] = None, **extra: Any) -> dict:
         return self._check(self._post("/scan/active", self._args(exchange_id=exchange_id, checks=checks, **extra)))
@@ -253,8 +334,8 @@ class Client:
     def compare(self, a: int, b: int) -> dict:
         return self._post("/tools/compare", {"a": a, "b": b})
 
-    def sequencer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
-        return self._check(self._post("/tools/sequencer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
+    def token_analyzer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
+        return self._check(self._post("/tools/token-analyzer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
 
     def import_har(self, har: str) -> dict:
         """Adds a HAR file's exchanges (text) to history; sends nothing. Returns {imported, exchange_ids, skipped}."""
@@ -267,6 +348,31 @@ class Client:
     def curl(self, exchange_id: int) -> str:
         """A curl command that sends the same request as a recorded exchange."""
         return self._get(f"/exchanges/{exchange_id}/curl")["command"]
+
+    def code(self, exchange_id: int, lang: str = "python") -> str:
+        """A recorded request as a python, javascript or powershell snippet."""
+        return self._get(f"/exchanges/{exchange_id}/code", lang=lang)["code"]
+
+    def dom_test(self, exchange_id: int, storage: bool = False, pollution: bool = True) -> dict:
+        """DOM sources reaching sinks on a recorded page (rendered offline; sends nothing)."""
+        return self._post("/dom/test", {"exchange_id": exchange_id, "storage": storage, "pollution": pollution})
+
+    def custom_checks(self) -> list:
+        """Saved custom checks (YAML scan checks)."""
+        return self._get("/scan/custom-checks")
+
+    def custom_check_save(self, yaml: str) -> dict:
+        """Saves (or replaces, by id) a custom check written in YAML."""
+        return self._post("/scan/custom-checks", {"yaml": yaml})
+
+    def custom_scan(self, exchange_id: int, checks: Optional[list] = None, yaml: Optional[str] = None, **extra: Any) -> dict:
+        """Runs saved custom checks (default all) or one given as yaml on a recorded request."""
+        body = self._args(exchange_id=exchange_id, checks=checks, yaml=yaml, **extra)
+        return self._check(self._post("/scan/custom", body))
+
+    def match_replace_presets(self) -> list:
+        """Ready-made response-modification rules (unhide fields, remove scripts…) to add to the rules."""
+        return self._get("/match-replace/presets")
 
     def curl_parse(self, command: str) -> dict:
         """Reads a curl command into {url, method, raw, warnings}, ready for replay(); sends nothing."""

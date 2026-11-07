@@ -349,6 +349,14 @@ pub fn with_privileged_fields(raw: &str, marker: &str) -> Option<Vec<u8>> {
     if p.json {
         let mut v: Value = serde_json::from_str(p.body).ok()?;
         let o = v.as_object_mut()?;
+        // A sign-up re-sent as is fails on "already taken": make it a new account.
+        for (k, val) in o.iter_mut() {
+            if let Value::String(s) = val
+                && is_account_field(k)
+            {
+                *s = unique_value(s, marker);
+            }
+        }
         for (k, val) in PRIVILEGED_FIELDS {
             if !o.contains_key(*k) {
                 let x = if *val == "true" { Value::Bool(true) } else { Value::String((*val).into()) };
@@ -358,6 +366,17 @@ pub fn with_privileged_fields(raw: &str, marker: &str) -> Option<Vec<u8>> {
         o.insert(control, Value::String("1".into()));
         Some(rebuild(&p, p.target, &v.to_string()))
     } else if p.form {
+        let body: String = p
+            .body
+            .trim()
+            .split('&')
+            .map(|kv| match kv.split_once('=') {
+                Some((k, v)) if is_account_field(k) => format!("{k}={}", unique_value(v, marker)),
+                _ => kv.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let p = crate::active::Parsed { body: &body, ..p };
         let mut extra: Vec<String> = PRIVILEGED_FIELDS
             .iter()
             .filter(|(k, _)| !p.body.split('&').any(|kv| kv.split('=').next() == Some(*k)))
@@ -369,6 +388,43 @@ pub fn with_privileged_fields(raw: &str, marker: &str) -> Option<Vec<u8>> {
         Some(rebuild(&p, p.target, &format!("{body}{sep}{}", extra.join("&"))))
     } else {
         None
+    }
+}
+
+/// Fields that name an account and must be unique (email, username…).
+fn is_account_field(k: &str) -> bool {
+    matches!(
+        k.to_ascii_lowercase().replace(['_', '-'], "").as_str(),
+        "email" | "mail" | "emailaddress" | "username" | "user" | "login" | "loginname" | "name" | "nickname"
+    )
+}
+
+/// A JSON sign-up with its account fields (username, email…) made unique,
+/// so it creates a new account instead of colliding with a real one.
+pub fn with_unique_account(raw: &str, marker: &str) -> Option<Vec<u8>> {
+    let p = parse(raw)?;
+    if !p.json {
+        return None;
+    }
+    let mut v: Value = serde_json::from_str(p.body).ok()?;
+    for (k, val) in v.as_object_mut()?.iter_mut() {
+        if let Value::String(s) = val
+            && is_account_field(k)
+        {
+            *s = unique_value(s, marker);
+        }
+    }
+    Some(rebuild(&p, p.target, &v.to_string()))
+}
+
+/// `value` made unique with the marker, keeping an email an email.
+fn unique_value(value: &str, marker: &str) -> String {
+    match value.split_once('@').or_else(|| value.split_once("%40")) {
+        Some((local, domain)) => {
+            let at = if value.contains('@') { "@" } else { "%40" };
+            format!("{local}{marker}{at}{domain}")
+        }
+        None => format!("{value}{marker}"),
     }
 }
 
@@ -411,6 +467,315 @@ pub fn mass_assigned(base: &Seen, got: &Seen, marker: &str) -> Vec<String> {
         })
         .map(|(k, v)| format!("{k}={v}"))
         .collect()
+}
+
+/// The account values (username, email…) a probe from
+/// [`with_privileged_fields`] signed up with: string values holding `marker`.
+pub fn probe_account_values(probe: &[u8], marker: &str) -> Vec<String> {
+    let raw = String::from_utf8_lossy(probe);
+    let Some(p) = parse(&raw) else { return Vec::new() };
+    let mut out = Vec::new();
+    if p.json {
+        if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(p.body) {
+            for (k, v) in o {
+                if let Value::String(s) = v
+                    && is_account_field(&k)
+                    && s.contains(marker)
+                {
+                    out.push(s);
+                }
+            }
+        }
+    } else if p.form {
+        for kv in p.body.trim().split('&') {
+            if let Some((k, v)) = kv.split_once('=')
+                && is_account_field(k)
+                && v.contains(marker)
+            {
+                out.push(crate::active::percent_decode(v));
+            }
+        }
+    }
+    out
+}
+
+/// A response (e.g. a user list) showing the account we signed up with a
+/// privileged field set: the privileged `key=value` pairs found in the JSON
+/// object that holds one of `account` values.
+pub fn assigned_in_listing(body: &str, account: &[String]) -> Vec<String> {
+    fn walk(v: &Value, account: &[String], out: &mut Vec<String>) {
+        match v {
+            Value::Object(o) => {
+                let mine =
+                    o.values().any(|x| x.as_str().is_some_and(|s| account.iter().any(|a| a.eq_ignore_ascii_case(s))));
+                if mine {
+                    for (k, val) in PRIVILEGED_FIELDS {
+                        let hit = o.iter().any(|(ok, ov)| {
+                            ok.eq_ignore_ascii_case(k)
+                                && match ov {
+                                    Value::Bool(b) => b.to_string() == *val,
+                                    Value::String(s) => s.eq_ignore_ascii_case(val),
+                                    Value::Number(n) => *val == "true" && n.as_i64() == Some(1),
+                                    _ => false,
+                                }
+                        });
+                        if hit && !out.contains(&format!("{k}={val}")) {
+                            out.push(format!("{k}={val}"));
+                        }
+                    }
+                }
+                o.values().for_each(|x| walk(x, account, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, account, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if account.is_empty() {
+        return out;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        walk(&v, account, &mut out);
+    }
+    out
+}
+
+/// Whether a recorded response looks like it lists accounts with a
+/// privileged field (a place to look for an account we created).
+pub fn lists_privileges(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    PRIVILEGED_FIELDS.iter().any(|(k, _)| lower.contains(&format!("\"{}\"", k.to_ascii_lowercase())))
+        && USER_FIELDS.iter().any(|u| lower.contains(&format!("\"{u}\"")))
+}
+
+// ------------------------------------------------------------ logins --
+
+const USER_FIELDS: &[&str] = &["username", "user", "email", "login", "user_name", "username_or_email", "mail"];
+const PASSWORD_FIELDS: &[&str] = &["password", "pass", "passwd", "pwd"];
+
+/// Requests for telling whether a login reveals which accounts exist: the
+/// recorded user with a wrong password (twice: the second is a control for
+/// noise) and an account that doesn't exist with the same wrong password.
+#[derive(Debug, Clone)]
+pub struct EnumProbes {
+    pub wrong_password: Vec<u8>,
+    pub unknown_user: Vec<u8>,
+    /// The recorded user and the made-up one (removed before comparing).
+    pub user: String,
+    pub fake_user: String,
+}
+
+fn field_of<'a>(keys: impl Iterator<Item = &'a str>, wanted: &[&str]) -> Option<&'a str> {
+    keys.into_iter().find(|k| wanted.iter().any(|w| k.eq_ignore_ascii_case(w)))
+}
+
+/// Probes for a login submission (JSON or form with a user and a password
+/// field); None for anything else.
+pub fn enum_probes(raw: &str, marker: &str) -> Option<EnumProbes> {
+    let p = parse(raw)?;
+    let wrong = format!("Pm{marker}-Wrong-1");
+    if p.json {
+        let v: Value = serde_json::from_str(p.body).ok()?;
+        let o = v.as_object()?;
+        let uk = field_of(o.keys().map(String::as_str), USER_FIELDS)?.to_string();
+        let pk = field_of(o.keys().map(String::as_str), PASSWORD_FIELDS)?.to_string();
+        let user = o.get(&uk)?.as_str()?.to_string();
+        o.get(&pk)?.as_str()?;
+        let fake = if user.contains('@') { format!("pm{marker}@example.invalid") } else { format!("pm{marker}nouser") };
+        let with = |u: &str| {
+            let mut x = v.clone();
+            x[&uk] = Value::String(u.into());
+            x[&pk] = Value::String(wrong.clone());
+            rebuild(&p, p.target, &x.to_string())
+        };
+        return Some(EnumProbes { wrong_password: with(&user), unknown_user: with(&fake), user, fake_user: fake });
+    }
+    if p.form {
+        let pairs: Vec<(&str, &str)> = p.body.trim().split('&').filter_map(|kv| kv.split_once('=')).collect();
+        let uk = field_of(pairs.iter().map(|(k, _)| *k), USER_FIELDS)?;
+        let pk = field_of(pairs.iter().map(|(k, _)| *k), PASSWORD_FIELDS)?;
+        let user = pairs.iter().find(|(k, _)| *k == uk)?.1.to_string();
+        let fake = if user.contains('@') || user.contains("%40") {
+            format!("pm{marker}%40example.invalid")
+        } else {
+            format!("pm{marker}nouser")
+        };
+        let with = |u: &str| {
+            let body: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    if *k == uk {
+                        format!("{k}={u}")
+                    } else if *k == pk {
+                        format!("{k}={wrong}")
+                    } else {
+                        format!("{k}={v}")
+                    }
+                })
+                .collect();
+            rebuild(&p, p.target, &body.join("&"))
+        };
+        let user_shown = user.replace("%40", "@");
+        let fake_shown = fake.replace("%40", "@");
+        return Some(EnumProbes {
+            wrong_password: with(&user),
+            unknown_user: with(&fake),
+            user: user_shown,
+            fake_user: fake_shown,
+        });
+    }
+    None
+}
+
+fn without_names(s: &Seen, names: &[&str]) -> String {
+    let mut b = s.body.clone();
+    for n in names.iter().filter(|n| !n.is_empty()) {
+        b = b.replace(n, "<user>");
+    }
+    b
+}
+
+/// What gives away that an account exists, if anything: a different status
+/// or message for an unknown account than for a wrong password (the wrong
+/// password sent twice must answer the same, or the page is too noisy).
+pub fn enumerates(probes: &EnumProbes, wrong: &Seen, again: &Seen, unknown: &Seen) -> Option<String> {
+    let names = [probes.user.as_str(), probes.fake_user.as_str()];
+    let (w, a, u) = (without_names(wrong, &names), without_names(again, &names), without_names(unknown, &names));
+    if wrong.status.is_some_and(|s| (200..300).contains(&s)) && w.contains("token") {
+        return None; // the "wrong" password worked: not a login we understand
+    }
+    if wrong.status != again.status || w != a {
+        return None;
+    }
+    let clip = |s: &str| s.chars().take(120).collect::<String>();
+    if wrong.status != unknown.status {
+        return Some(format!(
+            "a wrong password gets status {}, an unknown account gets {}",
+            wrong.status.unwrap_or(0),
+            unknown.status.unwrap_or(0)
+        ));
+    }
+    (w != u).then(|| format!("a wrong password answers {:?}; an unknown account answers {:?}", clip(&w), clip(&u)))
+}
+
+/// A password change that asks for the current password, without it:
+/// (the request without the field, the field's name). The new password
+/// stays the one recorded, so re-sending it changes nothing.
+pub fn without_current_password(raw: &str) -> Option<(Vec<u8>, String)> {
+    const CURRENT: &[&str] =
+        &["current", "currentpassword", "current_password", "oldpassword", "old_password", "old", "oldpass"];
+    let is_current = |k: &str| CURRENT.iter().any(|c| k.eq_ignore_ascii_case(c));
+    let p = parse(raw)?;
+    let lower = p.target.to_ascii_lowercase();
+    // Query string (Juice Shop's GET /rest/user/change-password?current=…&new=…).
+    if let Some((path, q)) = p.target.split_once('?')
+        && lower.contains("password")
+    {
+        let parts: Vec<&str> = q.split('&').collect();
+        let name = parts.iter().filter_map(|kv| kv.split('=').next()).find(|k| is_current(k))?.to_string();
+        let rest: Vec<&str> = parts.into_iter().filter(|kv| kv.split('=').next() != Some(name.as_str())).collect();
+        let target = if rest.is_empty() { path.to_string() } else { format!("{path}?{}", rest.join("&")) };
+        return Some((rebuild(&p, &target, p.body), name));
+    }
+    if p.json {
+        let mut v: Value = serde_json::from_str(p.body).ok()?;
+        let o = v.as_object_mut()?;
+        let has_new = o.keys().any(|k| {
+            let k = k.to_ascii_lowercase();
+            k.contains("new") || k.contains("repeat") || k.contains("confirm")
+        });
+        let name = o.keys().find(|k| is_current(k)).cloned()?;
+        if !has_new {
+            return None;
+        }
+        o.remove(&name);
+        return Some((rebuild(&p, p.target, &v.to_string()), name));
+    }
+    None
+}
+
+// ---------------------------------------------------------- exposure --
+
+/// Keys in a JSON response that hold credentials (with a non-empty value).
+pub fn credential_keys(body: &str) -> Vec<String> {
+    const KEYS: &[&str] = &[
+        "password",
+        "passwd",
+        "pwd",
+        "password_hash",
+        "passwordhash",
+        "hash",
+        "secret",
+        "api_key",
+        "apikey",
+        "private_key",
+        "totp_secret",
+        "totpsecret",
+    ];
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(o) => {
+                for (k, x) in o {
+                    let filled = matches!(x, Value::String(s) if s.len() >= 3);
+                    if filled && KEYS.contains(&k.to_ascii_lowercase().as_str()) && !out.contains(k) {
+                        out.push(k.clone());
+                    }
+                    walk(x, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        walk(&v, &mut out);
+    }
+    out
+}
+
+/// Email addresses in a text, lower-cased.
+pub fn emails(text: &str) -> std::collections::BTreeSet<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+").expect("valid regex")
+    });
+    re.find_iter(text).map(|m| m.as_str().to_ascii_lowercase()).collect()
+}
+
+/// Files a directory listing links to that look confidential (documents,
+/// backups, key stores, configuration, compiled code): names, not folders.
+pub fn sensitive_listed_files(html: &str) -> Vec<String> {
+    const EXT: &[&str] = &[
+        ".md", ".bak", ".old", ".kdbx", ".key", ".pem", ".sql", ".db", ".sqlite", ".yml", ".yaml", ".env", ".log",
+        ".pyc", ".zip", ".tar", ".gz", ".7z", ".csv", ".xlsx", ".docx", ".pdf", ".conf", ".ini", ".json", ".txt",
+    ];
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r#"(?i)href\s*=\s*["']([^"'?#]+)["']"#).expect("valid regex"));
+    let mut out: Vec<String> = Vec::new();
+    for c in re.captures_iter(html) {
+        let href = c[1].to_string();
+        let name = href.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+        if name.is_empty() || href.starts_with("http") || href.starts_with("//") || href.contains("..") {
+            continue;
+        }
+        if EXT.iter().any(|e| name.ends_with(e)) && !out.contains(&href) {
+            out.push(href);
+        }
+    }
+    // The most telling first: key stores and backups, then documents.
+    let rank = |h: &String| {
+        let n = h.to_ascii_lowercase();
+        if [".kdbx", ".key", ".pem", ".bak", ".sql", ".env", ".db"].iter().any(|e| n.ends_with(e)) {
+            0
+        } else if n.ends_with(".md") || n.ends_with(".pdf") || n.ends_with(".docx") {
+            1
+        } else {
+            2
+        }
+    };
+    out.sort_by_key(rank);
+    out
 }
 
 // ------------------------------------------------- prototype pollution --
@@ -852,17 +1217,37 @@ mod tests {
     fn mass_assignment_and_prototype_pollution() {
         let json = "POST /r HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{\"username\":\"u\"}";
         let r = String::from_utf8(with_privileged_fields(json, "M").unwrap()).unwrap();
-        assert!(r.contains("\"role\":\"admin\"") && r.contains("\"isAdmin\":true") && r.contains("\"username\":\"u\""));
+        assert!(r.contains("\"role\":\"admin\"") && r.contains("\"isAdmin\":true"));
+        assert!(r.contains("\"username\":\"uM\""), "a new account each time: {r}");
         assert!(r.contains("\"pmM\":\"1\""));
         let form = "POST /r HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nusername=u&role=user";
         let r = String::from_utf8(with_privileged_fields(form, "M").unwrap()).unwrap();
-        assert!(r.ends_with("username=u&role=user&isAdmin=true&is_admin=true&admin=true&verified=true&pmM=1"), "{r}");
+        assert!(r.ends_with("username=uM&role=user&isAdmin=true&is_admin=true&admin=true&verified=true&pmM=1"), "{r}");
+        let signup = "POST /api/Users HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"email\":\"a@b.test\",\"password\":\"p\"}";
+        let r = String::from_utf8(with_privileged_fields(signup, "M").unwrap()).unwrap();
+        assert!(r.contains("\"email\":\"aM@b.test\"") && r.contains("\"password\":\"p\""), "{r}");
         let base = seen(201, r#"{"user":{"username":"u","role":"user"}}"#);
         assert_eq!(
             mass_assigned(&base, &seen(201, r#"{"user":{"username":"u","role":"admin"}}"#), "M"),
             ["role=admin"]
         );
         assert!(mass_assigned(&base, &base.clone(), "M").is_empty());
+        // Read back: the new account shows up elsewhere with the privilege.
+        let probe = with_privileged_fields(
+            "POST /r HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"username\":\"u\",\"email\":\"u@x.test\"}",
+            "M",
+        )
+        .unwrap();
+        let account = probe_account_values(&probe, "M");
+        let mut sorted = account.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["uM", "uM@x.test"], "{account:?}");
+        let listing =
+            r#"{"users":[{"username":"name1","admin":false},{"username":"uM","email":"uM@x.test","admin":true}]}"#;
+        assert_eq!(assigned_in_listing(listing, &account), ["admin=true"]);
+        assert!(assigned_in_listing(r#"{"users":[{"username":"uM","admin":false}]}"#, &account).is_empty());
+        assert!(assigned_in_listing(r#"{"users":[{"username":"other","admin":true}]}"#, &account).is_empty());
+        assert!(lists_privileges(listing) && !lists_privileges(r#"{"books":[{"title":"x"}]}"#));
         let echo = seen(200, r#"{"prefs":{"role":"admin","pmM":"1"}}"#);
         assert!(mass_assigned(&base, &echo, "M").is_empty(), "an endpoint that keeps any field proves nothing");
 
@@ -969,5 +1354,53 @@ mod tests {
         assert!(
             upload_probes("POST /x HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{}", "U").is_empty()
         );
+    }
+
+    #[test]
+    fn login_enumeration_probes_and_verdict() {
+        let login = "POST /users/v1/login HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"username\":\"name1\",\"password\":\"pass1\"}";
+        let p = enum_probes(login, "K").unwrap();
+        let w = String::from_utf8_lossy(&p.wrong_password).to_string();
+        let u = String::from_utf8_lossy(&p.unknown_user).to_string();
+        assert!(w.contains("\"username\":\"name1\"") && w.contains("PmK-Wrong-1") && !w.contains("pass1"), "{w}");
+        assert!(u.contains("\"username\":\"pmKnouser\""), "{u}");
+        let wrong = seen(401, r#"{"message":"Password is not correct for the given username."}"#);
+        let unknown = seen(401, r#"{"message":"Username does not exist"}"#);
+        assert!(enumerates(&p, &wrong, &wrong.clone(), &unknown).is_some());
+        // Same message for both: nothing given away (the echoed name doesn't count).
+        let a = seen(401, r#"{"error":"Invalid login for name1"}"#);
+        let b = seen(401, r#"{"error":"Invalid login for pmKnouser"}"#);
+        assert!(enumerates(&p, &a, &a.clone(), &b).is_none());
+        // Noisy pages (the same wrong password answers differently) prove nothing.
+        assert!(enumerates(&p, &wrong, &seen(401, "{\"t\":2}"), &unknown).is_none());
+        let form = "POST /login HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nemail=a%40b.test&password=x";
+        let f = enum_probes(form, "K").unwrap();
+        assert!(String::from_utf8_lossy(&f.unknown_user).contains("email=pmK%40example.invalid"));
+        assert_eq!(f.user, "a@b.test");
+        assert!(enum_probes("POST /x HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"q\":1}", "K").is_none());
+    }
+
+    #[test]
+    fn password_change_without_current() {
+        let get = "GET /rest/user/change-password?current=old&new=n1&repeat=n1 HTTP/1.1\r\nHost: x\r\n\r\n";
+        let (r, f) = without_current_password(get).unwrap();
+        assert_eq!(f, "current");
+        assert!(String::from_utf8_lossy(&r).starts_with("GET /rest/user/change-password?new=n1&repeat=n1 HTTP/1.1"));
+        let json = "PUT /me/password HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"oldPassword\":\"a\",\"newPassword\":\"b\"}";
+        let (r, f) = without_current_password(json).unwrap();
+        assert_eq!(f, "oldPassword");
+        assert!(!String::from_utf8_lossy(&r).contains("oldPassword"));
+        assert!(without_current_password("GET /search?current=1 HTTP/1.1\r\n\r\n").is_none(), "not a password change");
+    }
+
+    #[test]
+    fn exposure_helpers() {
+        let debug = r#"{"users":[{"username":"name1","password":"pass1","admin":false}]}"#;
+        assert_eq!(credential_keys(debug), vec!["password"]);
+        assert!(credential_keys(r#"{"users":[{"username":"name1","password":""}]}"#).is_empty());
+        let listing = r#"<a href="/ftp/quarantine">quarantine</a><a href="/ftp/legal.md">legal.md</a>
+            <a href="/ftp/incident-support.kdbx">x</a><a href="https://other/x.md">y</a><a href="/ftp/eastere.gg">z</a>"#;
+        assert_eq!(sensitive_listed_files(listing), vec!["/ftp/incident-support.kdbx", "/ftp/legal.md"]);
+        assert_eq!(emails("a: Bob@Shop.test, b: x@y").into_iter().collect::<Vec<_>>(), vec!["bob@shop.test"]);
     }
 }

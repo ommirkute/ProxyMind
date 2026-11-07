@@ -1,22 +1,28 @@
 //! The intercepting proxy.
 //!
-//! HTTP/1.1, CONNECT with TLS interception, WebSocket upgrade pass-through,
-//! match-and-replace rules, an intercept queue, and recording of every
-//! exchange. One upstream connection per request; pooling and HTTP/2 come next.
+//! HTTP/1.1 and HTTP/2 to browsers, CONNECT with TLS interception,
+//! WebSocket relaying, match-and-replace rules, an intercept queue, and
+//! recording of every exchange.
+//!
+//! Responses stream to the browser as they arrive (server-sent events,
+//! long downloads, long polling) unless something needs the whole message
+//! first: a response rule or the intercept queue. History keeps the first
+//! [`RECORD_CAP`] bytes of a response.
 
 mod h2_server;
 pub mod intercept;
 pub mod listeners;
+pub mod presets;
 pub mod rewrite;
 mod ws_relay;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use pm_core::now_ms;
-use pm_http::RequestHead;
+use pm_http::{BodyKind, RequestHead, ResponseHead};
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
 use intercept::{Decision, Kind};
@@ -29,6 +35,16 @@ pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
+/// How long the proxy waits for a response head (long polling can be slow).
+pub(crate) const HEAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a streaming response may go quiet.
+pub(crate) const BODY_IDLE: Duration = Duration::from_secs(300);
+/// Bytes of a response kept in history; the rest still reaches the browser.
+pub const RECORD_CAP: usize = 64 << 20;
+
+/// Records waiting for the writer thread at most.
+const RECORD_QUEUE: usize = 4096;
+
 enum Record {
     Exchange(Box<NewExchange>, Option<u64>),
     Ws(u64, NewWsMessage),
@@ -39,10 +55,11 @@ enum Record {
 pub type RecordFilter = Arc<dyn Fn(&NewExchange) -> bool + Send + Sync>;
 
 /// Sends finished exchanges to a dedicated writer thread, so the proxy
-/// never waits on the database.
+/// doesn't wait on the database. The queue is bounded: if the disk falls
+/// far behind, the proxy waits rather than holding traffic in memory.
 #[derive(Clone)]
 pub struct Recorder {
-    tx: std::sync::mpsc::Sender<Record>,
+    tx: std::sync::mpsc::SyncSender<Record>,
     next_key: Arc<std::sync::atomic::AtomicU64>,
     filter: Arc<parking_lot::RwLock<Option<RecordFilter>>>,
 }
@@ -50,7 +67,7 @@ pub struct Recorder {
 impl Recorder {
     /// Starts the writer thread. It runs until every `Recorder` is dropped.
     pub fn spawn(mut store: Store) -> (Self, std::thread::JoinHandle<()>) {
-        let (tx, rx) = std::sync::mpsc::channel::<Record>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Record>(RECORD_QUEUE);
         let handle = std::thread::spawn(move || {
             // Upgraded exchanges by key, so their WebSocket messages can be
             // linked to the row id. Records arrive in order on one thread.
@@ -187,7 +204,7 @@ impl Proxy {
         verify_upstream: bool,
         hooks: Hooks,
     ) -> Result<Arc<Self>> {
-        let mut sender = Sender::new(verify_upstream)?;
+        let mut sender = Sender::new(verify_upstream)?.with_timeouts(Duration::from_secs(15), HEAD_TIMEOUT);
         if let Some(n) = &hooks.network {
             sender = sender.with_network(n.clone());
         }
@@ -417,7 +434,18 @@ impl Proxy {
                     target.scheme = "https".into();
                 }
             }
-            let body = client.read_body(head.body_kind()?).await?;
+            // A client that asked to wait for 100 Continue would wait for
+            // the full body to reach the server first; answer it ourselves.
+            let kind = head.body_kind()?;
+            if head.version == "HTTP/1.1"
+                && kind != BodyKind::None
+                && pm_http::header(&head.headers, "expect")
+                    .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"100-continue"))
+            {
+                client.io.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+                client.io.flush().await?;
+            }
+            let body = client.read_body(kind).await?;
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
@@ -460,10 +488,9 @@ impl Proxy {
             let ep = Endpoint::new(&target.scheme, &target.host, target.port);
             let guard = self.loop_guard(&ctx.me, &target.host, target.port);
             let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
-            let result = self.sender.send(&ep, &request, &method, check).await;
             let mut record = NewExchange {
                 ts_ms: now_ms(),
-                duration_ms: Some(started.elapsed().as_millis() as i64),
+                duration_ms: None,
                 source: "proxy".into(),
                 actor_id: "human:local".into(),
                 scheme: target.scheme.clone(),
@@ -479,6 +506,84 @@ impl Proxy {
                 hypothesis_id: None,
             };
 
+            let buffered = pm_http::h2text::is_http2_request(&record.request)
+                || self.buffers_response(&target.scheme, &target.host, target.port, &path);
+            if !buffered {
+                let start =
+                    match self.sender.send_start_pooled(&ep, &record.request, &method, check, HEAD_TIMEOUT).await {
+                        Ok(start) => start,
+                        Err(e) => return self.bad_gateway(client, &target.host, target.port, record, started, e).await,
+                    };
+                if let Some(sent) = &start.sent {
+                    record.request.clone_from(sent);
+                }
+                record.status = Some(start.head.status);
+                client.io.write_all(&start.raw_head).await?;
+                if start.head.status == 101 {
+                    client.io.flush().await?;
+                    record.duration_ms = Some(started.elapsed().as_millis() as i64);
+                    record.response = Some(start.raw_head);
+                    return self.finish_upgrade(client, start.conn, &start.head, record, ws_hold).await;
+                }
+                let server_close = start.head.wants_close();
+                let (mut up, mut body) = (start.conn, start.body);
+                let mut capture = start.raw_head;
+                let (mut client_gone, mut failed, mut truncated) = (false, false, false);
+                loop {
+                    let piece = match up.body_chunk(&mut body, BODY_IDLE).await {
+                        Ok(Some(p)) => p,
+                        Ok(None) => break,
+                        Err(e) => {
+                            record.error = Some(format!("{e:#}"));
+                            failed = true;
+                            break;
+                        }
+                    };
+                    let room = RECORD_CAP.saturating_sub(capture.len());
+                    truncated |= piece.len() > room;
+                    capture.extend_from_slice(&piece[..piece.len().min(room)]);
+                    if client.io.write_all(&piece).await.is_err() || client.io.flush().await.is_err() {
+                        client_gone = true;
+                        break;
+                    }
+                }
+                if record.error.is_none() {
+                    record.error = body.cut_short.clone();
+                }
+                if truncated {
+                    let note = format!(
+                        "history keeps the first {} MB of this response ({} body bytes in all)",
+                        RECORD_CAP >> 20,
+                        body.read
+                    );
+                    record.error = Some(record.error.map_or(note.clone(), |e| format!("{e}; {note}")));
+                }
+                if client_gone && record.error.is_none() {
+                    record.error = Some(format!("the browser closed the connection after {} body bytes", body.read));
+                }
+                record.duration_ms = Some(started.elapsed().as_millis() as i64);
+                record.response = Some(capture);
+                self.recorder.record(record);
+                // A complete response leaves the server connection reusable.
+                if !client_gone && !failed && !server_close && body.is_complete() && body.kind() != BodyKind::UntilClose
+                {
+                    self.sender.release(&ep, up);
+                }
+                let close = client_gone
+                    || failed
+                    || head.wants_close()
+                    || body.kind() == BodyKind::UntilClose
+                    || body.cut_short.is_some()
+                    || server_close;
+                if close {
+                    let _ = client.io.shutdown().await;
+                    return Ok(());
+                }
+                continue;
+            }
+
+            let result = self.sender.send(&ep, &record.request, &method, check).await;
+            record.duration_ms = Some(started.elapsed().as_millis() as i64);
             match result {
                 Ok(resp) => {
                     if let Some(sent) = &resp.sent {
@@ -514,30 +619,10 @@ impl Proxy {
                         || resp.head.wants_close()
                         || matches!(resp.conn, AfterResponse::ClosedAfterBody);
                     record.status = Some(resp.head.status);
-                    let is_ws = pm_http::header(&resp.head.headers, "upgrade")
-                        .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"));
-                    let deflate = ws_relay::Deflate::from_response(&resp.head.headers);
+                    record.error = resp.cut_short.clone();
                     record.response = Some(resp.raw);
-
-                    if let AfterResponse::Upgraded(mut up) = resp.conn {
-                        if is_ws {
-                            // Relay byte for byte and log each message.
-                            let key = self.recorder.record_upgrade(record);
-                            let recorder = self.recorder.clone();
-                            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, ws_hold, recorder, key)
-                                .await;
-                            return Ok(());
-                        }
-                        // Another protocol switch: pass bytes both ways.
-                        self.recorder.record(record);
-                        if !up.buf.is_empty() {
-                            client.io.write_all(&up.buf).await?;
-                        }
-                        if !client.buf.is_empty() {
-                            up.io.write_all(&client.buf).await?;
-                        }
-                        let _ = tokio::io::copy_bidirectional(&mut client.io, &mut up.io).await;
-                        return Ok(());
+                    if let AfterResponse::Upgraded(up) = resp.conn {
+                        return self.finish_upgrade(client, up, &resp.head, record, ws_hold).await;
                     }
                     self.recorder.record(record);
                     if close {
@@ -545,21 +630,70 @@ impl Proxy {
                         return Ok(());
                     }
                 }
-                Err(e) => {
-                    let msg = format!("ProxyMind could not reach {}:{}: {e:#}", target.host, target.port);
-                    tracing::warn!("{msg}");
-                    let resp = format!(
-                        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
-                        msg.len()
-                    );
-                    let _ = client.io.write_all(resp.as_bytes()).await;
-                    let _ = client.io.shutdown().await;
-                    record.error = Some(format!("{e:#}"));
-                    self.recorder.record(record);
-                    return Ok(());
-                }
+                Err(e) => return self.bad_gateway(client, &target.host, target.port, record, started, e).await,
             }
         }
+    }
+
+    /// Whether a response must be read whole before the browser gets it:
+    /// a response rule may change it, or the intercept queue holds it.
+    pub(crate) fn buffers_response(&self, scheme: &str, host: &str, port: u16, path: &str) -> bool {
+        self.hooks.rewrite.as_ref().is_some_and(|r| r.has_response_rules())
+            || self.hooks.intercept.as_ref().is_some_and(|q| q.wants(Kind::Response, scheme, host, port, path))
+    }
+
+    /// Tells the browser the target couldn't be reached, and records why.
+    async fn bad_gateway<S: Io + 'static>(
+        &self,
+        mut client: Conn<S>,
+        host: &str,
+        port: u16,
+        mut record: NewExchange,
+        started: Instant,
+        e: anyhow::Error,
+    ) -> Result<()> {
+        let msg = format!("ProxyMind could not reach {host}:{port}: {e:#}");
+        tracing::warn!("{msg}");
+        let resp = format!(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+            msg.len()
+        );
+        let _ = client.io.write_all(resp.as_bytes()).await;
+        let _ = client.io.shutdown().await;
+        record.duration_ms = Some(started.elapsed().as_millis() as i64);
+        record.error = Some(format!("{e:#}"));
+        self.recorder.record(record);
+        Ok(())
+    }
+
+    /// After `101 Switching Protocols`: relay WebSocket messages (logging
+    /// each one), or pass any other protocol through byte for byte.
+    async fn finish_upgrade<S: Io + 'static>(
+        &self,
+        mut client: Conn<S>,
+        mut up: Conn<Box<dyn Io>>,
+        head: &ResponseHead,
+        record: NewExchange,
+        ws_hold: Option<ws_relay::WsHold>,
+    ) -> Result<()> {
+        let is_ws = pm_http::header(&head.headers, "upgrade")
+            .is_some_and(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"));
+        if is_ws {
+            let deflate = ws_relay::Deflate::from_response(&head.headers);
+            let key = self.recorder.record_upgrade(record);
+            let recorder = self.recorder.clone();
+            ws_relay::relay(client.io, client.buf, up.io, up.buf, deflate, ws_hold, recorder, key).await;
+            return Ok(());
+        }
+        self.recorder.record(record);
+        if !up.buf.is_empty() {
+            client.io.write_all(&up.buf).await?;
+        }
+        if !client.buf.is_empty() {
+            up.io.write_all(&client.buf).await?;
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client.io, &mut up.io).await;
+        Ok(())
     }
 }
 

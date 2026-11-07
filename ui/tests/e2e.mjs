@@ -16,6 +16,9 @@ const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", imp
 const SHOTS = process.env.SCREENSHOTS ?? join(tmpdir(), "proxymind-ui-shots");
 // ProxyMind's own browser window opens headless here (no display in CI).
 process.env.PROXYMIND_BROWSER_HEADLESS ??= "1";
+// CI runners (non-root Ubuntu) can't use Chromium's sandbox for Playwright's build: the built-in
+// browser window would abort. The test runs in a throwaway machine, so run it without the sandbox.
+process.env.PROXYMIND_CHROMIUM_NO_SANDBOX ??= "1";
 const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
 const project = join(dir, "ui.pmproj");
 const children = [];
@@ -102,7 +105,13 @@ try {
   const browser = await chromium.launch({ executablePath: exe });
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const consoleErrors = [];
-  page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(`${m.text()}${m.location()?.url ? ` (${m.location().url})` : ""}`));
+  const failedResponses = [];
+  page.on("response", async (r) => {
+    if (r.status() < 400) return;
+    const body = await r.text().catch(() => "");
+    failedResponses.push(`${r.status()} ${r.request().method()} ${r.url()} ${body.slice(0, 300)}`);
+  });
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
 
   console.log("History");
@@ -143,10 +152,10 @@ try {
   await page.screenshot({ path: join(SHOTS, "0-history-dark.png") });
   await page.getByRole("button", { name: /^Theme:/ }).click();
   await page.keyboard.press("Control+k");
-  await page.getByLabel("Go to", { exact: true }).fill("repeat");
+  await page.getByLabel("Go to", { exact: true }).fill("replay");
   await page.screenshot({ path: join(SHOTS, "0-palette.png") });
   await page.keyboard.press("Enter");
-  check(await page.evaluate(() => location.hash) === "#/repeater", "the command palette jumps to a page");
+  check(await page.evaluate(() => location.hash) === "#/replay", "the command palette jumps to a page");
 
   console.log("Proxy: top tabs, HTTP history tools");
   await page.getByTestId("tab-dashboard").click();
@@ -188,13 +197,23 @@ try {
   check(qRows.length > 0 && qRows.every((t) => t.includes("/api/orders/")), `a query filters by path and response text (${qRows.length} rows)`);
   page.once("dialog", (d) => d.accept("alice orders"));
   await page.getByTestId("save-filter").click();
-  const errorsBefore = consoleErrors.length;
   await page.getByLabel("Query", { exact: true }).fill("stauts:200");
   await page.getByLabel("Query", { exact: true }).press("Enter");
   await page.locator(".error", { hasText: "unknown field" }).waitFor();
-  // The browser logs the expected 400 for the mistyped query.
-  for (let i = consoleErrors.length - 1; i >= errorsBefore; i--) if (consoleErrors[i].includes("400")) consoleErrors.splice(i, 1);
+  // The browser logs the expected 400; it is matched by its URL at the end, whenever it arrives.
   check(true, "a mistyped field is reported");
+  // New traffic while the bad query is shown must not re-send it (live updates wait for a good query).
+  const typoErrors = () => consoleErrors.filter((e) => e.includes("q=stauts%3A200")).length;
+  await sleep(500);
+  const errorsAfterTypo = typoErrors();
+  const lastId = await page.evaluate(async () => (await (await fetch("/api/v1/status")).json()).counters?.last_exchange_id ?? 0);
+  await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+  await page.waitForFunction(
+    async (id) => ((await (await fetch("/api/v1/status")).json()).counters?.last_exchange_id ?? 0) > id,
+    lastId,
+  );
+  await sleep(2500);
+  check(typoErrors() === errorsAfterTypo, "live updates don't re-send a mistyped query");
   await page.getByLabel("Saved filters").selectOption("alice orders");
   await page.waitForFunction(() => document.querySelector('input[aria-label="Query"]').value.includes("alice@"));
   await page.waitForSelector('[data-testid="query-scanned"]');
@@ -303,10 +322,10 @@ try {
     "a headless browser runs the reflected payload");
   await page.screenshot({ path: join(SHOTS, "4b-xss-proof.png") });
 
-  console.log("Repeater");
-  await page.goto(link.replace(/\/auth.*/, `/#/repeater/${orderId}`));
+  console.log("Replay");
+  await page.goto(link.replace(/\/auth.*/, `/#/replay/${orderId}`));
   await page.locator(".rtab.active", { hasText: `#${orderId}` }).waitFor();
-  check(await page.evaluate(() => location.hash) === "#/repeater", "a request sent from History opens in its own tab");
+  check(await page.evaluate(() => location.hash) === "#/replay", "a request sent from History opens in its own tab");
   await page.getByLabel("Send as").selectOption("anonymous");
   await page.getByTestId("send").click();
   await page.waitForSelector('[data-testid="replay-result"]');
@@ -328,13 +347,22 @@ try {
   await page.getByLabel("Cookies theme").fill("light");
   await page.getByLabel("Cookies theme").press("Enter");
   check(await page.getByLabel("Raw request").inputValue().then((v) => v.includes("Cookie: a=1; theme=light")), "Inspector edits a cookie");
+  await page.getByLabel("Protocol").selectOption("HTTP/2");
+  await page.getByLabel("HTTP/2 pseudo-headers :path").fill("/search?q=h2");
+  await page.getByLabel("HTTP/2 pseudo-headers :path").press("Enter");
+  await page.getByLabel("HTTP/2 pseudo-headers :authority").fill("other.test");
+  await page.getByLabel("HTTP/2 pseudo-headers :authority").press("Enter");
+  const h2raw = await page.getByLabel("Raw request").inputValue();
+  check(h2raw.startsWith("GET /search?q=h2 HTTP/2\n") && h2raw.includes("host: other.test") && h2raw.includes("cookie: a=1"),
+    "Inspector switches to HTTP/2 and edits :path and :authority");
+  await page.getByLabel("Protocol").selectOption("HTTP/1.1");
   await page.getByRole("button", { name: "New tab" }).click();
   check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
-  await page.screenshot({ path: join(SHOTS, "5-repeater.png") });
+  await page.screenshot({ path: join(SHOTS, "5-replay.png") });
   await sleep(900); // saved after a short pause
   await page.reload();
   await page.locator(".rtab", { hasText: `#${orderId}` }).waitFor();
-  check(true, "Repeater tabs survive a reload (saved in the project)");
+  check(true, "Replay tabs survive a reload (saved in the project)");
 
   console.log("cURL and HAR");
   await page.goto(link.replace(/\/auth.*/, `/#/history/${orderId}`));
@@ -342,7 +370,7 @@ try {
   await page.waitForSelector('[data-testid="curl-command"]');
   const curlCmd = await page.getByTestId("curl-command").textContent();
   check(curlCmd.startsWith("curl ") && curlCmd.includes("/api/orders/"), "copy as cURL");
-  await page.goto(link.replace(/\/auth.*/, "/#/repeater"));
+  await page.goto(link.replace(/\/auth.*/, "/#/replay"));
   await page.getByTestId("paste-curl").click();
   await page.getByLabel("cURL command").fill(curlCmd);
   await page.getByTestId("parse-curl").click();
@@ -373,26 +401,109 @@ try {
   check(await page.locator('[data-testid="search-hit"] mark').first().textContent() === "alice@", "the match is highlighted");
   await page.screenshot({ path: join(SHOTS, "5c-sitemap.png") });
 
-  console.log("Intruder");
-  await page.goto(link.replace(/\/auth.*/, `/#/intruder/${orderId}`));
+  console.log("Global search, Organizer, engagement tools, Collaborator");
+  await open("search");
+  await page.getByLabel("Global search").fill("alice@");
+  await page.getByLabel("Search in").selectOption("response_body");
+  await page.getByTestId("global-search").click();
+  await page.locator('[data-testid="search-hit"]').first().waitFor();
+  check(await page.locator('[data-testid="search-hit"] mark').first().textContent() === "alice@", "global search finds text in response bodies");
+  await page.getByLabel("Search in").selectOption("request_headers");
+  await page.getByTestId("global-search").click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="search-hit"]').length === 0);
+  check(true, "searching only request headers leaves out response matches");
+  await page.getByLabel("Search in").selectOption("both");
+  await open("history");
+  await page.getByTestId(`row-${orderId}`).click({ button: "right" });
+  await page.getByText("Send to Organizer").click();
+  await open("organizer");
+  await page.locator('[data-testid="organizer-item"]').first().waitFor();
+  await page.locator('[aria-label^="Status of"]').first().selectOption("in_progress");
+  await page.getByLabel("Organizer status").selectOption("in_progress");
+  await page.locator('[data-testid="organizer-item"]').first().waitFor();
+  check(true, "an exchange sent to the Organizer gets a status");
+  await page.getByLabel("Organizer status").selectOption("");
+  await page.goto(link.replace(/\/auth.*/, `/#/engage/clickjack:${orderId}`));
+  await page.getByTestId("engage-clickjack").click();
+  await page.waitForSelector('[data-testid="engage-clickjack-verdict"]');
+  check(await page.getByTestId("engage-code").inputValue().then((v) => v.includes("<iframe")), "clickjacking check builds a test page");
+  await page.getByTestId("engage-tab-analyze").click();
+  await page.getByLabel("in scope only").uncheck();
+  await page.getByTestId("engage-analyze").click();
+  await page.waitForSelector('[data-testid="engage-analysis"]');
+  check(await page.getByTestId("engage-analysis").textContent().then((t) => /\d+ requests/.test(t)), "analyze target summarises recorded traffic");
+  await open("replay");
+  await page.getByLabel("Raw request").fill("GET /search?q=a+b HTTP/1.1\nHost: shop\n\n");
+  await page.getByTestId("request-transform").selectOption("method");
+  await page.waitForFunction(() => document.querySelector('[aria-label="Raw request"]').value.startsWith("POST /search "));
+  await page.getByTestId("request-transform").selectOption("json");
+  await page.waitForFunction(() => document.querySelector('[aria-label="Raw request"]').value.endsWith('{"q":"a b"}'));
+  check(true, "Replay changes the method and the body encoding");
+  await open("collaborator");
+  await page.getByLabel("Collaborator listen").fill("127.0.0.1:0");
+  await page.getByTestId("collab-start").click();
+  await page.waitForSelector('[data-testid="collab-status"]');
+  await page.getByLabel("Payload note").fill("blind ssrf in avatar url");
+  await page.getByTestId("collab-new").click();
+  await page.waitForSelector('[data-testid="collab-payload"]');
+  const payloadUrl = (await page.getByTestId("collab-payload").textContent()).trim();
+  check(payloadUrl.startsWith("http://127.0.0.1:"), `a payload URL is handed out (${payloadUrl})`);
+  await fetch(payloadUrl).catch(() => {});
+  await page.locator('[data-testid="collab-interactions"] td', { hasText: "blind ssrf in avatar url" }).first().waitFor({ timeout: 10000 });
+  check(true, "the callback shows up under the payload's note");
+  await page.getByTestId("smtp-start").click();
+  await page.locator('[data-testid="collab-status"]', { hasText: "mail to" }).waitFor();
+  await page.getByLabel("Payload note").fill("reset mail");
+  await page.getByTestId("collab-new").click();
+  await page.locator('[data-testid="collab-payload"]', { hasText: "@[127.0.0.1]" }).waitFor();
+  const mailTo = (await page.getByTestId("collab-payload").textContent()).match(/[0-9a-f]{20}@\[127\.0\.0\.1\]/)[0];
+  const smtpAddr = (await page.getByTestId("collab-status").textContent()).match(/mail to (127\.0\.0\.1:\d+)/)[1];
+  await new Promise((resolve) => {
+    const [h, p] = smtpAddr.split(":");
+    const sock = net.connect(Number(p), h, () => sock.write(`HELO t\r\nMAIL FROM:<a@b>\r\nRCPT TO:<${mailTo}>\r\nDATA\r\nhi\r\n.\r\nQUIT\r\n`));
+    sock.on("data", () => {});
+    sock.on("close", resolve);
+    sock.on("error", resolve);
+  });
+  await page.locator('[data-testid="collab-interactions"] td', { hasText: "reset mail" }).first().waitFor({ timeout: 10000 });
+  check(true, "mail to a payload address shows up as an interaction");
+  await page.screenshot({ path: join(SHOTS, "5d-collaborator.png") });
+  await viaProxy(proxy, shop, "GET /search?q=render-check HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const htmlId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=render-check&limit=1")).json()).exchanges[0].id);
+  await open(`history/${htmlId}`);
+  await page.locator('[data-testid="response-view"] button', { hasText: "Render" }).click();
+  const renderFrame = page.getByTestId("render-frame");
+  check(await renderFrame.getAttribute("sandbox") === "" && (await renderFrame.getAttribute("srcdoc")).includes("default-src 'none'"), "HTML responses render sandboxed, without scripts or network");
+  await page.locator('[data-testid="response-view"] button', { hasText: "Pretty" }).click();
+  await page.getByTestId(`row-${htmlId}`).click({ button: "right" });
+  await page.getByText("Copy as Python requests").click();
+  await page.locator("text=Code copied.").first().waitFor();
+  check(true, "Copy as Python requests");
+  await open("rules");
+  await page.getByTestId("rules-preset").selectOption("unhide_fields");
+  check(await page.locator('[data-testid="rules"] tbody tr').count() >= 2, "a response-modification preset adds its rules");
+  await page.getByRole("button", { name: "Discard changes" }).click();
+
+  console.log("Fuzzer");
+  await page.goto(link.replace(/\/auth.*/, `/#/fuzzer/${orderId}`));
   await page.waitForFunction(() => document.querySelector('textarea[aria-label="Request"]')?.value.includes("/api/orders"));
   await page.getByLabel("Request").fill("GET /api/orders?id=1&q=x HTTP/1.1\nHost: shop\nCookie: s=abc\n\n");
   await page.getByTestId("auto-mark").click();
-  check((await page.getByLabel("Request").inputValue()).includes("?id=§1§&q=§x§") && (await page.getByLabel("Request").inputValue()).includes("s=§abc§"), "Auto § marks query values and cookies");
+  check((await page.getByLabel("Request").inputValue()).includes("?id=§1§&q=§x§") && (await page.getByLabel("Request").inputValue()).includes("s=§abc§"), "Auto-mark marks query values and cookies");
   await page.getByLabel("Request").fill("GET /api/orders/§2001§ HTTP/1.1\nHost: shop\n\n");
-  await page.getByLabel("Mode").selectOption("sniper");
+  await page.getByLabel("Mode").selectOption("one_at_a_time");
   await page.getByLabel("Send as").selectOption("bob");
   await page.getByLabel("Payload type").selectOption("list");
   await page.getByLabel("Payloads", { exact: true }).fill("1001\n1002\n9999");
   await page.getByLabel("Grep").fill("alice@");
   await page.getByRole("button", { name: "Add extract" }).click();
   await page.getByLabel("Extract 1 regex").fill("([a-z]+@[a-z.]+)");
-  await page.getByTestId("intruder-run").click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="intruder-summary"]')?.textContent?.includes("· done ·"));
-  check(await page.getByTestId("intruder-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
+  await page.getByTestId("fuzzer-run").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"));
+  check(await page.getByTestId("fuzzer-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
   check((await page.getByTestId("extract-cell").allTextContents()).some((t) => t.startsWith("alice@")), "an extract column shows alice's email");
   check((await page.getByTestId("anomaly").count()) === 3, "alice's orders (grep) and the 404 stand out");
-  await page.screenshot({ path: join(SHOTS, "5b-intruder.png") });
+  await page.screenshot({ path: join(SHOTS, "5b-fuzzer.png") });
 
   console.log("Approvals (an agent asks over MCP)");
   const mcp = start(["mcp", "--actor", "agent:claude"]);
@@ -576,8 +687,8 @@ try {
   await page.getByTestId("intercept-toggle").click();
   await page.waitForSelector("text=Intercept is OFF");
 
-  console.log("Race condition (Repeater races VulnShop's one-time gift card)");
-  await open("repeater");
+  console.log("Race condition (Replay races VulnShop's one-time gift card)");
+  await open("replay");
   await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
   const card = '{"code":"WELCOME10"}';
   await page.getByLabel("Raw request").fill(
@@ -589,6 +700,21 @@ try {
   const wins = Number((raceText.match(/(\d+) succeeded/) ?? [])[1] ?? 0);
   check(wins > 1, `racing 6 redemptions credits the card ${wins} times`);
   await page.screenshot({ path: join(SHOTS, "6g-race.png") });
+  // A group: the redemption (already used) then the profile, one after another, in two tabs.
+  await page.getByTitle("Duplicate this tab").click();
+  await page.getByLabel("Raw request").fill(`GET /api/me HTTP/1.1\nHost: 127.0.0.1:${shop}\nCookie: session=${session}\n\n`);
+  await page.getByTestId("group-open").click();
+  const boxes = page.locator('[data-testid="group-panel"] input[aria-label^="Group tab"]');
+  const nBoxes = await boxes.count();
+  for (let i = 0; i < nBoxes; i++) await boxes.nth(i).uncheck();
+  await boxes.nth(nBoxes - 2).check();
+  await boxes.nth(nBoxes - 1).check();
+  await page.getByTestId("group-send").click();
+  await page.waitForSelector('[data-testid="group-result"]');
+  const groupRows = await page.locator('[data-testid="group-result"] tbody tr').allTextContents();
+  check(groupRows.length === 2 && groupRows[0].includes("409") && groupRows[1].includes("200"),
+    `a group sends two tabs in order (${groupRows.join(" / ")})`);
+  await page.screenshot({ path: join(SHOTS, "6h-group.png") });
 
   console.log("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
@@ -743,9 +869,9 @@ try {
   await page.waitForSelector('[data-testid="graphql-summary"]');
   check(await page.getByTestId("graphql-summary").textContent().then((t) => t.startsWith("3 operations")), "introspection lists 3 operations");
   await page.screenshot({ path: join(SHOTS, "7b-graphql.png"), fullPage: true });
-  await page.getByTestId("graphql-repeater-invoice").click();
+  await page.getByTestId("graphql-replay-invoice").click();
   await page.waitForFunction(() => document.querySelector("textarea")?.value.includes("query Invoice"));
-  check(true, "an example opens in Repeater");
+  check(true, "an example opens in Replay");
   await open("model");
 
   console.log("Passive issues");
@@ -777,7 +903,7 @@ try {
 
   console.log("Tools");
   await open("tools");
-  await page.getByLabel("Decoder input").fill("JTNDc2NyaXB0JTNF");
+  await page.getByLabel("Codec input").fill("JTNDc2NyaXB0JTNF");
   await page.getByTestId("decode").click();
   await page.waitForSelector('[data-testid="decode-step"]');
   check(await page.getByTestId("decode-step").last().textContent() === "<script>", "smart decode peels base64 then URL encoding");
@@ -794,10 +920,93 @@ try {
   await page.getByLabel("Token exchange").fill(String(resetId));
   await page.getByLabel("Samples").fill("20");
   await page.getByLabel("Token locator").fill("json:/debug_code");
-  await page.getByTestId("sequencer").click();
-  await page.waitForSelector('[data-testid="sequencer-result"]', { timeout: 60000 });
-  check(await page.getByTestId("sequencer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "sequencer spots the counter");
+  await page.getByTestId("token-analyzer").click();
+  await page.waitForSelector('[data-testid="token-analyzer-result"]', { timeout: 60000 });
+  check(await page.getByTestId("token-analyzer-result").textContent().then((t) => t.includes("poor") && t.includes("increasing by 1")), "token analyzer spots the counter");
   await page.screenshot({ path: join(SHOTS, "6e-tools.png"), fullPage: true });
+
+  console.log("Plugins");
+  let python = false;
+  try {
+    execFileSync("python3", ["--version"]);
+    python = true;
+  } catch {
+    console.log("  (python3 not found: skipping the active plugin)");
+  }
+  if (python) {
+    pm("plugin", "add", new URL("../../examples/plugins/debug-switch", import.meta.url).pathname);
+    await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+    const productsId = await page.evaluate(async () => {
+      for (let i = 0; i < 50; i++) {
+        const rows = (await (await fetch("/api/v1/exchanges?path=/api/products&limit=20")).json()).exchanges;
+        const row = rows.find((r) => r.path === "/api/products");
+        if (row) return row.id;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return null;
+    });
+    await open(`plugins/${productsId}`);
+    await page.waitForSelector('[data-testid="plugin-table"]');
+    check(await page.getByTestId("plugin-sandbox").textContent().then((t) => t.startsWith("Sandbox:")), "the plugin sandbox status is shown");
+    await page.getByTestId("plugin-run").click();
+    await page.waitForSelector('[data-testid="plugin-result"]', { timeout: 60000 });
+    check(await page.getByTestId("plugin-result").textContent().then((t) => t.includes("Hidden debug switch")), "an active plugin finds the hidden debug switch");
+    pm("plugin", "add", new URL("../../examples/plugins/hosts-panel", import.meta.url).pathname);
+    await page.reload();
+    await page.getByTestId("panel-hosts-panel-hosts").click();
+    await page.waitForSelector('[data-testid="plugin-panel"] table');
+    check(await page.getByTestId("plugin-panel").textContent().then((t) => t.includes(`127.0.0.1:${shop}`)), "a plugin panel shows its table");
+    await page.screenshot({ path: join(SHOTS, "6f-plugins.png"), fullPage: true });
+    await page.getByTestId("plugin-toggle-debug-switch").click();
+    await page.getByText("Off · turn on").waitFor();
+    check(/debug-switch\s+\S+\s+active\s+off/.test(pm("plugin", "list")), "turning a plugin off is saved in the user's registry");
+  }
+
+  console.log("Custom checks");
+  await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const productsId = await page.evaluate(async () => {
+    const rows = (await (await fetch("/api/v1/exchanges?path=/api/products&limit=50")).json()).exchanges;
+    return rows.find((r) => r.path === "/api/products" && r.method === "GET").id;
+  });
+  await open(`checks/${productsId}`);
+  await page.getByLabel("Check YAML").fill(`id: debug-switch
+title: Hidden debug switch
+severity: high
+run: per_request
+request:
+  add_query: { debug: "1" }
+match:
+  status: [200]
+  body_contains: [db_password]
+  not_in_baseline: true
+`);
+  await page.getByTestId("check-save").click();
+  await page.locator("td", { hasText: "Hidden debug switch" }).first().waitFor();
+  await page.getByTestId("check-run").click();
+  await page.waitForSelector('[data-testid="check-result"]');
+  check(await page.getByTestId("check-result").textContent().then((t) => t.includes("1 hit")), "a saved YAML check finds the hidden debug switch");
+  await page.screenshot({ path: join(SHOTS, "7c-custom-checks.png"), fullPage: true });
+
+  console.log("DOM test");
+  await viaProxy(proxy, shop, "GET /welcome HTTP/1.1\r\nHost: shop\r\n\r\n");
+  await viaProxy(proxy, shop, "GET /static/welcome.js HTTP/1.1\r\nHost: shop\r\n\r\n");
+  const welcomeId = await page.evaluate(async () => {
+    for (let i = 0; i < 50; i++) {
+      const rows = (await (await fetch("/api/v1/exchanges?path=/welcome&limit=20")).json()).exchanges;
+      const js = (await (await fetch("/api/v1/exchanges?path=/static/welcome.js&limit=1")).json()).exchanges;
+      const w = rows.find((r) => r.path === "/welcome");
+      if (w && js.length) return w.id;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  });
+  await open(`engage/dom:${welcomeId}`);
+  await page.getByTestId("engage-dom").click();
+  await page.waitForSelector('[data-testid="engage-dom-result"]', { timeout: 60000 });
+  const domText = await page.getByTestId("engage-dom-result").textContent();
+  check(domText.includes("innerHTML") && domText.includes("exploitable") && domText.includes("name"),
+    "the DOM test finds the name parameter reaching innerHTML");
+  await page.screenshot({ path: join(SHOTS, "7d-dom-test.png"), fullPage: true });
 
   console.log("Engagement (rules of engagement)");
   await open("engagement");
@@ -832,7 +1041,9 @@ try {
   await page.screenshot({ path: join(SHOTS, "7a-builtin-browser.png") });
   const opened = page.waitForResponse((r) => r.url().endsWith("/api/v1/browser/open"));
   await page.getByTestId("setup-open-browser").click();
-  const launch = await (await opened).json();
+  const launchResponse = await opened;
+  const launch = await launchResponse.json();
+  check(launchResponse.ok(), `the built-in browser starts${launchResponse.ok() ? "" : ` (${JSON.stringify(launch)})`}`);
   await page.getByTestId("toast").waitFor();
   const seenByProxy = await page.waitForFunction(async () => {
     const p = await (await fetch("/api/v1/exchanges?path=from-pm-browser&limit=5")).json();
@@ -978,7 +1189,9 @@ try {
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  check(consoleErrors.length === 0, `no console errors${consoleErrors.length ? ": " + consoleErrors.join(" | ") : ""}`);
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200"));
+  check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
+  if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();
 } catch (e) {
   console.error(e);

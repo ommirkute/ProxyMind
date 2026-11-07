@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, originOf, type ExchangeDetail, type IdentityInfo } from "../api";
+import { api, originOf, toast, type ExchangeDetail, type IdentityInfo } from "../api";
 import { ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav, usePref } from "../components";
 import { autoMark } from "../http";
 
@@ -31,6 +31,7 @@ interface AttackView {
   rows: Row[];
   anomalies: Anomaly[];
   error?: string;
+  note?: string;
 }
 interface AttackSummary {
   attack_id: string;
@@ -45,14 +46,20 @@ type Start =
   | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
   | { status: "denied"; reasons: string[] };
 
-const MODES = ["sniper", "battering_ram", "pitchfork", "cluster_bomb"] as const;
-const MODE_HELP: Record<(typeof MODES)[number], string> = {
-  sniper: "one position at a time, one payload set",
-  battering_ram: "the same payload in every position",
-  pitchfork: "set i in position i, advancing together",
-  cluster_bomb: "every combination of the sets",
+const MODES = ["one_at_a_time", "same_everywhere", "paired", "all_combinations"] as const;
+const MODE_LABEL: Record<(typeof MODES)[number], string> = {
+  one_at_a_time: "One at a time",
+  same_everywhere: "Same everywhere",
+  paired: "Paired",
+  all_combinations: "All combinations",
 };
-const TYPES = ["list", "numbers", "brute", "null", "case", "builtin"] as const;
+const MODE_HELP: Record<(typeof MODES)[number], string> = {
+  one_at_a_time: "one position at a time, one payload set",
+  same_everywhere: "the same payload in every position",
+  paired: "set i in position i, advancing together",
+  all_combinations: "every combination of the sets",
+};
+const TYPES = ["list", "numbers", "brute", "null", "case", "builtin", "recursive"] as const;
 type SetType = (typeof TYPES)[number];
 const TYPE_LABEL: Record<SetType, string> = {
   list: "Simple list",
@@ -61,6 +68,7 @@ const TYPE_LABEL: Record<SetType, string> = {
   null: "Null payloads",
   case: "Case variants",
   builtin: "Built-in list",
+  recursive: "Recursive grep",
 };
 const BUILTINS = ["ids", "sqli", "xss", "traversal", "ssti", "methods_override"];
 const RULES = ["prefix", "suffix", "replace", "url_encode", "url_encode_all", "base64", "hex", "lower", "upper", "reverse", "sha1", "sha256"] as const;
@@ -81,6 +89,9 @@ interface SetCfg {
   nulls: number;
   words: string;
   builtin: string;
+  recFirst: string;
+  recRegex: string;
+  recCount: number;
   rules: RuleCfg[];
   urlEncode: boolean;
 }
@@ -112,6 +123,9 @@ const newSet = (): SetCfg => ({
   nulls: 10,
   words: "",
   builtin: "ids",
+  recFirst: "",
+  recRegex: "",
+  recCount: 20,
   rules: [],
   urlEncode: false,
 });
@@ -119,7 +133,7 @@ const newSet = (): SetCfg => ({
 const INITIAL: Config = {
   url: "",
   raw: "GET /api/items/§1§ HTTP/1.1\nHost: example.com\n\n",
-  mode: "sniper",
+  mode: "one_at_a_time",
   identity: "",
   sets: [newSet()],
   grep: "",
@@ -148,6 +162,8 @@ function toPayloadSet(s: SetCfg) {
       return { ...base, case_variants: s.words.split("\n").map((w) => w.trim()).filter(Boolean) };
     case "builtin":
       return { ...base, builtin: s.builtin };
+    case "recursive":
+      return { recursive: { first: s.recFirst, extract: { regex: s.recRegex }, count: s.recCount } };
   }
 }
 
@@ -158,6 +174,8 @@ function setSize(s: SetCfg): number | null {
       return s.list.split("\n").filter((l) => l.length > 0).length;
     case "null":
       return s.nulls;
+    case "recursive":
+      return s.recCount;
     case "brute": {
       const n = new Set(s.charset).size;
       let t = 0;
@@ -173,9 +191,9 @@ function setSize(s: SetCfg): number | null {
   }
 }
 
-export default function Intruder() {
+export default function Fuzzer() {
   const { arg, go } = useNav();
-  const [cfg, setCfgRaw] = usePref<Config>("pm.intruder", INITIAL);
+  const [cfg, setCfgRaw] = usePref<Config>("pm.fuzzer", INITIAL);
   const setCfg = (p: Partial<Config>) => setCfgRaw({ ...cfg, ...p });
   const [active, setActive] = useState(0);
   const [approval, setApproval] = useState<string | null>(null);
@@ -184,7 +202,7 @@ export default function Intruder() {
   const [view, setView] = useState<AttackView | null>(null);
   const [sel, setSel] = useState<Row | null>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
-  const attacks = useLoad(() => api.get<AttackSummary[]>("/intruder/attacks"), [attackId, view?.status]);
+  const attacks = useLoad(() => api.get<AttackSummary[]>("/fuzzer/attacks"), [attackId, view?.status]);
   const action = useAction();
   const editor = useRef<HTMLTextAreaElement>(null);
 
@@ -198,7 +216,7 @@ export default function Intruder() {
   }, [arg]);
 
   const positions = (cfg.raw.match(/§/g)?.length ?? 0) / 2;
-  const setsNeeded = cfg.mode === "pitchfork" || cfg.mode === "cluster_bomb" ? Math.max(1, Math.floor(positions)) : 1;
+  const setsNeeded = cfg.mode === "paired" || cfg.mode === "all_combinations" ? Math.max(1, Math.floor(positions)) : 1;
   const sets = Array.from({ length: setsNeeded }, (_, i) => cfg.sets[i] ?? newSet());
   const cur = sets[Math.min(active, sets.length - 1)];
   const updateSet = (patch: Partial<SetCfg>) =>
@@ -209,13 +227,13 @@ export default function Intruder() {
     if (sizes.some((s) => s === null) || !Number.isInteger(positions)) return null;
     const n = sizes as number[];
     switch (cfg.mode) {
-      case "sniper":
+      case "one_at_a_time":
         return positions * n[0];
-      case "battering_ram":
+      case "same_everywhere":
         return n[0];
-      case "pitchfork":
+      case "paired":
         return Math.min(...n);
-      case "cluster_bomb":
+      case "all_combinations":
         return n.reduce((a, b) => a * b, 1);
     }
   }, [sets, positions, cfg.mode]);
@@ -230,7 +248,7 @@ export default function Intruder() {
 
   const start = () =>
     action.run(async () => {
-      const r = await api.post<Start>("/intruder/attacks", {
+      const r = await api.post<Start>("/fuzzer/attacks", {
         url: cfg.url,
         raw: cfg.raw,
         mode: cfg.mode,
@@ -261,7 +279,7 @@ export default function Intruder() {
     let have = 0;
     const tick = async () => {
       try {
-        const v = await api.get<AttackView>(`/intruder/attacks/${attackId}?from=${have}`);
+        const v = await api.get<AttackView>(`/fuzzer/attacks/${attackId}?from=${have}`);
         if (stop) return;
         have += v.rows.length;
         setView((old) => (old && old.attack_id === v.attack_id ? { ...v, rows: [...old.rows, ...v.rows] } : v));
@@ -280,20 +298,20 @@ export default function Intruder() {
   const control = (what: "pause" | "resume" | "cancel") =>
     attackId &&
     action.run(async () => {
-      const r = await api.post<{ status: AttackStatus }>(`/intruder/attacks/${attackId}/${what}`);
+      const r = await api.post<{ status: AttackStatus }>(`/fuzzer/attacks/${attackId}/${what}`);
       setView((v) => (v ? { ...v, status: r.status } : v));
       if (what === "resume") setAttackId((id) => id); // polling continues on its own
     });
 
   return (
-    <div className="content intruder">
-      <div className="intruder-config">
+    <div className="content fuzzer">
+      <div className="fuzzer-config">
         <section className="pane">
           <h3 className="pane-title">1 · Positions</h3>
           <div className="row">
             <input aria-label="Target" className="grow mono" placeholder="http://host:port" value={cfg.url} onChange={(e) => setCfg({ url: e.target.value })} />
             <select aria-label="Mode" value={cfg.mode} onChange={(e) => setCfg({ mode: e.target.value as Config["mode"] })} title={MODE_HELP[cfg.mode]}>
-              {MODES.map((m) => <option key={m} value={m}>{m.replace("_", " ")}</option>)}
+              {MODES.map((m) => <option key={m} value={m}>{MODE_LABEL[m]}</option>)}
             </select>
             <select aria-label="Send as" value={cfg.identity} onChange={(e) => setCfg({ identity: e.target.value })}>
               <option value="">as recorded</option>
@@ -304,7 +322,24 @@ export default function Intruder() {
           <div className="row small">
             <button className="btn" onClick={mark}>Add §</button>
             <button className="btn" onClick={() => setCfg({ raw: cfg.raw.replace(/§/g, "") })}>Clear §</button>
-            <button className="btn" onClick={() => setCfg({ raw: autoMark(cfg.raw) })} title="Mark query, form and JSON values and cookies" data-testid="auto-mark">Auto §</button>
+            <button className="btn" onClick={() => setCfg({ raw: autoMark(cfg.raw) })} title="Mark query, form and JSON values and cookies" data-testid="auto-mark">Auto-mark</button>
+            <button
+              className="btn"
+              title="Insert a new Collaborator URL at the cursor"
+              onClick={() =>
+                api
+                  .post<{ http_url?: string; dns_name?: string; email?: string; token: string }>("/collaborator/payloads", { note: "Fuzzer request" })
+                  .then((p) => {
+                    const v = p.http_url ?? p.dns_name ?? p.email ?? p.token;
+                    const el = editor.current;
+                    const [a, b] = el ? [el.selectionStart, el.selectionEnd] : [cfg.raw.length, cfg.raw.length];
+                    setCfg({ raw: cfg.raw.slice(0, a) + v + cfg.raw.slice(b) });
+                  })
+                  .catch((e: Error) => toast(e.message, "bad"))
+              }
+            >
+              Insert Collaborator URL
+            </button>
             <span className="muted">{Number.isInteger(positions) ? `${positions} position(s) · ${MODE_HELP[cfg.mode]}` : "unbalanced § markers"}</span>
           </div>
         </section>
@@ -346,6 +381,14 @@ export default function Intruder() {
           )}
           {cur.type === "null" && <label className="small">send <input aria-label="Null payload count" type="number" min={1} value={cur.nulls} onChange={(e) => updateSet({ nulls: Number(e.target.value) })} style={{ width: 80 }} /> times, unchanged</label>}
           {cur.type === "case" && <textarea aria-label="Words" className="mono" rows={5} placeholder="one word per line: as written, lower, UPPER and Capitalised" value={cur.words} onChange={(e) => updateSet({ words: e.target.value })} />}
+          {cur.type === "recursive" && (
+            <div className="small" style={{ display: "grid", gap: 6 }}>
+              <span className="muted">Each payload comes from the previous response (for example a token that changes on every request). Use one marked position; requests go one at a time.</span>
+              <input aria-label="First payload" className="mono" placeholder="first payload" value={cur.recFirst} onChange={(e) => updateSet({ recFirst: e.target.value })} />
+              <input aria-label="Next payload regex" className="mono" placeholder='regex for the next payload, e.g. "csrf":"([^"]+)"' value={cur.recRegex} onChange={(e) => updateSet({ recRegex: e.target.value })} />
+              <label>up to <input aria-label="Recursive count" type="number" min={1} max={1000} value={cur.recCount} onChange={(e) => updateSet({ recCount: Number(e.target.value) })} style={{ width: 80 }} /> requests</label>
+            </div>
+          )}
           {cur.type === "builtin" && (
             <select aria-label="Built-in list" value={cur.builtin} onChange={(e) => updateSet({ builtin: e.target.value })}>
               {BUILTINS.map((b) => <option key={b}>{b}</option>)}
@@ -398,7 +441,7 @@ export default function Intruder() {
             <label>delay <input aria-label="Throttle" type="number" min={0} step={50} value={cfg.throttle} onChange={(e) => setCfg({ throttle: Number(e.target.value) })} style={{ width: 75 }} /> ms</label>
           </div>
           <p className="small muted">The rules of engagement's rate limits apply on top. One approval covers the whole attack.</p>
-          <button className="btn primary" disabled={action.busy || !cfg.url || !Number.isInteger(positions) || positions < 1} onClick={start} data-testid="intruder-run">
+          <button className="btn primary" disabled={action.busy || !cfg.url || !Number.isInteger(positions) || positions < 1} onClick={start} data-testid="fuzzer-run">
             {approval ? "Start approved attack" : `Start attack${total != null ? ` (${total})` : ""}`}
           </button>
           <ErrorBox error={action.error} />
@@ -466,9 +509,9 @@ function Results({
   const running = view.status === "running" || view.status === "paused";
 
   return (
-    <div className="intruder-results">
+    <div className="fuzzer-results">
       <div className="row" style={{ marginBottom: 6 }}>
-        <strong data-testid="intruder-summary">
+        <strong data-testid="fuzzer-summary">
           {view.total} requests · {view.status} · {view.done}/{view.total}
         </strong>
         <div className="bar grow" style={{ maxWidth: 300 }}><div style={{ width: `${(100 * view.done) / Math.max(1, view.total)}%` }} /></div>
@@ -478,9 +521,10 @@ function Results({
         <label className="small"><input type="checkbox" checked={onlyAnomalies} onChange={(e) => setOnlyAnomalies(e.target.checked)} /> only results that stand out ({view.anomalies.length})</label>
         <input aria-label="Hide statuses" className="small" placeholder="hide statuses, e.g. 404" value={hideStatus} onChange={(e) => setHideStatus(e.target.value)} style={{ width: 160 }} />
         {view.error && <span className="bad small">{view.error}</span>}
+        {view.note && <span className="small muted" data-testid="attack-note">{view.note}</span>}
       </div>
-      <div className={`intruder-split ${sel ? "" : "single"}`}>
-        <div className="intruder-table">
+      <div className={`fuzzer-split ${sel ? "" : "single"}`}>
+        <div className="fuzzer-table">
           <table className="grid">
             <thead>
               <tr>
@@ -531,7 +575,7 @@ function Results({
           <div className="pane">
             <div className="row small">
               <span>exchange <ExchangeLink id={sel.exchange_id} /></span>
-              <button className="btn" onClick={() => go("repeater", sel.exchange_id)}>Send to Repeater</button>
+              <button className="btn" onClick={() => go("replay", sel.exchange_id)}>Send to Replay</button>
               <button className="btn" onClick={() => setSel(null)}>Close</button>
             </div>
             <div className="tabs" role="tablist">

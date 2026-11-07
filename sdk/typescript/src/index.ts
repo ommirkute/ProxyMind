@@ -229,8 +229,116 @@ export class Client {
   }
 
   /** Text (or a regex) in recorded requests and responses, bodies decoded. */
-  search(query: string, opts: { regex?: boolean; case_sensitive?: boolean; part?: "request" | "response" | "both" } & Query = {}): Promise<Json> {
+  search(
+    query: string,
+    opts: {
+      regex?: boolean;
+      case_sensitive?: boolean;
+      invert?: boolean;
+      in_scope?: boolean;
+      part?:
+        | "both" | "request" | "response" | "headers" | "bodies"
+        | "request_headers" | "request_body" | "response_headers" | "response_body";
+    } & Query = {},
+  ): Promise<Json> {
     return this.post("/search", strip({ query, ...opts }));
+  }
+
+  /** Text (or a regex) in recorded WebSocket messages. */
+  searchWs(query: string, opts: { regex?: boolean; case_sensitive?: boolean; invert?: boolean; direction?: "client" | "server" | "both" } & Query = {}): Promise<Json> {
+    return this.post("/search/ws", strip({ query, ...opts }));
+  }
+
+  /** Exchanges kept aside, newest first. */
+  organizer(status?: "new" | "in_progress" | "postponed" | "done" | "ignored"): Promise<Json[]> {
+    return this.get("/organizer", { status });
+  }
+
+  organizerAdd(exchange_id: number, note = ""): Promise<Json> {
+    return this.post("/organizer", { exchange_id, note });
+  }
+
+  organizerUpdate(id: number, change: { status?: string; note?: string }): Promise<Json> {
+    return this.request("PATCH", `/organizer/${id}`, strip(change));
+  }
+
+  organizerDelete(id: number): Promise<Json> {
+    return this.request("DELETE", `/organizer/${id}`);
+  }
+
+  /** Engagement tools over recorded traffic (they send nothing). */
+  engageComments(filter: { host?: string; in_scope?: boolean; max_scan?: number } = {}): Promise<Json[]> {
+    return this.post("/engage/comments", strip(filter));
+  }
+
+  engageScripts(filter: { host?: string; in_scope?: boolean; max_scan?: number } = {}): Promise<Json[]> {
+    return this.post("/engage/scripts", strip(filter));
+  }
+
+  engageAnalyze(filter: { host?: string; in_scope?: boolean; max_scan?: number } = {}): Promise<Json> {
+    return this.post("/engage/analyze", strip(filter));
+  }
+
+  engageReferences(exchange_id: number): Promise<Json[]> {
+    return this.post("/engage/references", { exchange_id });
+  }
+
+  /** An HTML page that submits the recorded request from another site. */
+  async csrfPoc(exchange_id: number, technique: "auto" | "form" | "multipart" | "text_plain" | "fetch" = "auto", auto_submit = false): Promise<string> {
+    return (await this.post<{ html: string }>("/engage/csrf", { exchange_id, technique, auto_submit })).html;
+  }
+
+  clickjacking(exchange_id: number): Promise<Json> {
+    return this.post("/engage/clickjacking", { exchange_id });
+  }
+
+  collaborator(): Promise<Json> {
+    return this.get("/collaborator");
+  }
+
+  /** A new out-of-band payload; a callback listener must be set up. */
+  collaboratorPayload(note = ""): Promise<Json> {
+    return this.post("/collaborator/payloads", { note });
+  }
+
+  /** Callbacks seen (untrusted network content), newest first. */
+  collaboratorInteractions(token?: string, limit = 100): Promise<Json[]> {
+    return this.get("/collaborator/interactions", { token, limit });
+  }
+
+  /** A recorded request as a Python, JavaScript or PowerShell snippet. */
+  async code(exchange_id: number, lang: "python" | "javascript" | "powershell" = "python"): Promise<string> {
+    return (await this.get<{ code: string }>(`/exchanges/${exchange_id}/code`, { lang })).code;
+  }
+
+  /** DOM sources reaching sinks on a recorded page (rendered offline; sends nothing). */
+  domTest(exchange_id: number, opts: { storage?: boolean; pollution?: boolean } = {}): Promise<Json> {
+    return this.post("/dom/test", { exchange_id, ...opts });
+  }
+
+  /** Saved custom checks (YAML scan checks). */
+  customChecks(): Promise<Json[]> {
+    return this.get("/scan/custom-checks");
+  }
+
+  customCheckSave(yaml: string): Promise<Json> {
+    return this.post("/scan/custom-checks", { yaml });
+  }
+
+  /** Runs saved custom checks (default all) or one given as yaml on a recorded request. */
+  customScan(exchange_id: number, opts: { checks?: string[]; yaml?: string } & Json = {}): Promise<Json> {
+    return this.act("/scan/custom", { exchange_id, ...opts });
+  }
+
+  /** Ready-made response-modification rules to add to match and replace. */
+  matchReplacePresets(): Promise<Json[]> {
+    return this.get("/match-replace/presets");
+  }
+
+  /** Rewrites request text: GET ⇄ POST, or the body as url_encoded, multipart or json. Sends nothing. */
+  async requestTransform(raw: string, to?: "url_encoded" | "multipart" | "json"): Promise<string> {
+    const body = to ? { op: "convert_body", raw, to } : { op: "change_method", raw };
+    return (await this.post<{ raw: string }>("/tools/request-transform", body)).raw;
   }
 
   /** Recorded traffic as a tree per origin. */
@@ -279,9 +387,14 @@ export class Client {
     return this.act("/replay", opts);
   }
 
+  /** Send 2-20 requests to one server as a group: one after another, or at the same moment. */
+  replayGroup(requests: { url?: string; raw?: string; exchange_id?: number; name?: string }[], mode: "sequence" | "parallel" = "sequence", opts: Json = {}): Promise<Json> {
+    return this.act("/replay/group", { requests, mode, ...opts });
+  }
+
   /** Fuzz positions marked §like this§. payload_sets: [{ list: [...] }, { numbers: "1-10" }, { builtin: "sqli" }]. */
-  intruder(raw: string, payload_sets: Json[], opts: Json = {}): Promise<Json> {
-    return this.act("/intruder", { raw, payload_sets, ...opts });
+  fuzzer(raw: string, payload_sets: Json[], opts: Json = {}): Promise<Json> {
+    return this.act("/fuzzer", { raw, payload_sets, ...opts });
   }
 
   crawl(url: string, opts: Json = {}): Promise<Json> {
@@ -291,6 +404,16 @@ export class Client {
   /** Looks for hidden files and folders under url (GET only; built-in list unless words are given). */
   discover(url: string, opts: { words?: string[]; extensions?: string[] } & Json = {}): Promise<Json> {
     return this.act("/discover", { url, ...opts });
+  }
+
+  /** Installed plugins (per user) and what the plugin sandbox does here. */
+  plugins(): Promise<Json> {
+    return this.get("/plugins");
+  }
+
+  /** Runs an active-check plugin on a recorded exchange; its requests go through the policy gate. */
+  pluginCheck(plugin: string, exchange_id: number, opts: { identity?: string; approval_id?: string } = {}): Promise<Json> {
+    return this.act("/plugins/check", { plugin, exchange_id, ...opts });
   }
 
   scanActive(exchange_id: number, opts: { checks?: string[] } & Json = {}): Promise<Json> {
@@ -328,8 +451,8 @@ export class Client {
     return this.post("/tools/compare", { a, b });
   }
 
-  sequencer(exchange_id: number, locator: string, samples = 100, opts: Json = {}): Promise<Json> {
-    return this.act("/tools/sequencer", { exchange_id, locator, samples, ...opts });
+  tokenAnalyzer(exchange_id: number, locator: string, samples = 100, opts: Json = {}): Promise<Json> {
+    return this.act("/tools/token-analyzer", { exchange_id, locator, samples, ...opts });
   }
 
   /** Adds a HAR file's exchanges to history; sends nothing. */

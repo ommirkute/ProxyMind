@@ -38,13 +38,16 @@ Finished on 2026-10-24: integration test (`crates/pm-service/tests/login_record.
 
 ## 2. Task 44: scan profiles, scheduling and resume — done
 
-Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC; a lock so two processes on one project can't both fire a schedule.
+Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC.
 
 ## 3. Task 45: issue library and report templates — done
 
 Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, findings filled in from it, duplicate merging, fixed / accepted-risk statuses, retest, executive / technical / compliance templates plus saved MiniJinja templates, HTML / Markdown / PDF output, API/CLI/MCP, and the UI report builder and Issue library page. See the handoff section "Issue library, finding workflow and report templates". Left for later: a Word (.docx) export; per-finding comments and assignment (belongs with team use).
 
-## 4. Task 46: plugin platform (about one to two sessions)
+## 4. Task 46: plugin platform — part 1 done (2026-11-03)
+
+Done: active-check plugins through the gate, the sandbox (clean env; Linux: no network, resource limits), the Plugins page, API/CLI/MCP/SDK (see the handoff, ADR-0015). A Python helper (`proxymind.plugin`) exists. Still open from the list below: UI panels, a WASM runtime, signed manifests, a TypeScript helper.
+
 
 - Plugins today are passive checks over a process protocol (`crates/pm-plugin`; see `docs/adr`). Extend the protocol:
   - `active_check`: a plugin returns probes, and the service sends them through the policy gate (tiers apply).
@@ -67,7 +70,7 @@ Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, fi
 
 ## Small follow-ups noticed
 
-- The Juice Shop browser crawl visited only about 6 pages before the hash-route fix. Re-run `bench/run.sh juice-shop` and record the page count and score. The last scores were VulnShop 24/38, VAmPI 3/8 and Juice Shop 4/9, with 0 false positives.
+- The Juice Shop browser crawl visited only about 6 pages before the hash-route fix. Re-run `bench/run.sh juice-shop` and record the page count and score. Scores on 2026-10-26: VulnShop 25/38, VAmPI 5/8, Juice Shop 9/9, 0 false positives (see bench/README.md).
 - Chromium still makes two Google calls that we cannot block (documented in handoff).
 - On November 1, re-run CI on the latest commit of the branch.
 

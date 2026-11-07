@@ -1,5 +1,5 @@
 # Network settings:  proxymind network set examples/network.yaml
-# They apply to the proxy, Repeater, agents and proofs, and running
+# They apply to the proxy, Replay, agents and proofs, and running
 # processes pick up changes within seconds.
 
 # Send traffic through an upstream proxy (omit for direct connections).

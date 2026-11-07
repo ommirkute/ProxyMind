@@ -17,4 +17,6 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0011](0011-xss-proofs-offline-browser.md) | XSS proofs render the recorded response in an offline headless browser | Accepted |
 | [0012](0012-desktop-shell.md) | The desktop app runs the local stack in-process and shows the web UI | Accepted |
 | [0013](0013-sealed-projects.md) | Projects are encrypted at rest by sealing, before transparent encryption | Accepted |
-| [0014](0014-plugins.md) | Plugins act through the gate or analyse recordings, and are installed per user | Accepted |
+| [0014](0014-plugins.md) | Plugins act through the gate or analyse recordings, and are installed per user | Extended by 0015 |
+| [0015](0015-active-plugins-and-sandbox.md) | Active-check plugins propose requests that ProxyMind sends; plugin processes run sandboxed | Extended by 0016 |
+| [0016](0016-signed-plugins-and-panels.md) | Signed plugins, install-time integrity checks, and data-only plugin panels; no WASM runtime yet | Accepted |

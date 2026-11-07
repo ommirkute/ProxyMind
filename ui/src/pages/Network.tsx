@@ -64,7 +64,7 @@ export default function Network() {
       const r = await api.put<NetConfig>("/network", { ...cfg, tls_passthrough: cfg.tls_passthrough.filter(Boolean) });
       saved.setData(r);
       setDraft(null);
-      setNotice("Saved. The proxy, Repeater and agents use these settings from now on.");
+      setNotice("Saved. The proxy, Replay and agents use these settings from now on.");
     });
 
   return (
@@ -166,7 +166,7 @@ export default function Network() {
       >
         <p className="small muted" style={{ marginTop: 0 }}>
           Connect to a fixed address instead of what DNS says, like a hosts file (<code>*.example.com</code> works).
-          TLS still uses the name. Applies to the proxy, Repeater, Intruder, scans and agents; with an HTTP upstream
+          TLS still uses the name. Applies to the proxy, Replay, Fuzzer, scans and agents; with an HTTP upstream
           proxy, plain-HTTP requests are resolved by that proxy.
         </p>
         {cfg.hosts.length > 0 && (

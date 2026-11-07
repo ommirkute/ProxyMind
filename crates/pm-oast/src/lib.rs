@@ -10,6 +10,7 @@
 //! delegated to it (`<token>.oast.example.com`).
 
 pub mod dns;
+pub mod smtp;
 
 use std::net::SocketAddr;
 
@@ -31,19 +32,18 @@ pub struct Interaction {
 
 /// A fresh token: 20 lowercase hex characters (safe in URLs and DNS labels).
 pub fn new_token() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut x =
-        (pm_core::now_ms() as u64) ^ (u64::from(std::process::id()) << 32) ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    // splitmix64 finaliser, twice, for 128 bits of spread.
-    let mut mix = || {
-        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = x;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    };
-    format!("{:016x}{:04x}", mix(), mix() & 0xffff)
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 10];
+    if SystemRandom::new().fill(&mut b).is_err() {
+        // No system randomness (never seen in practice): tokens must still be
+        // unique, though not secret.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let x = (pm_core::now_ms() as u64) ^ (u64::from(std::process::id()) << 32) ^ n.rotate_left(17);
+        b[..8].copy_from_slice(&x.to_be_bytes());
+        b[8..].copy_from_slice(&(n as u16).to_be_bytes());
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Whether `s` looks like a token from [`new_token`].
@@ -74,8 +74,11 @@ where
         tokio::spawn(async move {
             let mut buf = vec![0u8; 8192];
             let mut len = 0;
+            // One deadline for the whole head, so a slow sender can't hold
+            // the connection open a byte at a time.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
             while len < buf.len() {
-                let read = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf[len..])).await;
+                let read = tokio::time::timeout_at(deadline, s.read(&mut buf[len..])).await;
                 match read {
                     Ok(Ok(0)) | Err(_) | Ok(Err(_)) => break,
                     Ok(Ok(n)) => len += n,

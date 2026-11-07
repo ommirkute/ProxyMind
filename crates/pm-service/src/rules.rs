@@ -46,6 +46,11 @@ impl Service {
         Ok(())
     }
 
+    /// Ready-made response-modification rules to add (nothing changes until added).
+    pub fn match_replace_presets(&self) -> Vec<pm_proxy::presets::Preset> {
+        pm_proxy::presets::presets()
+    }
+
     pub fn match_replace_rules(&self) -> Result<Vec<Rule>> {
         load_rules(&self.store.lock())
     }

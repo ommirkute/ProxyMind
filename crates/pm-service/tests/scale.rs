@@ -23,7 +23,7 @@ fn exchange(i: usize) -> NewExchange {
     NewExchange {
         ts_ms: 1_700_000_000_000 + i as i64,
         duration_ms: Some((i % 900) as i64),
-        source: if i.is_multiple_of(10) { "intruder".into() } else { "proxy".into() },
+        source: if i.is_multiple_of(10) { "fuzzer".into() } else { "proxy".into() },
         actor_id: "human:local".into(),
         scheme: "https".into(),
         host: host.into(),

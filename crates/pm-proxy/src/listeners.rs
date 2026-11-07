@@ -185,7 +185,22 @@ impl Listeners {
 fn bind(addr: &str) -> Result<tokio::net::TcpListener> {
     let l = std::net::TcpListener::bind(addr).map_err(|e| anyhow::anyhow!("cannot listen on {addr}: {e}"))?;
     l.set_nonblocking(true)?;
+    if let Ok(a) = l.local_addr() {
+        warn_if_exposed(a);
+    }
     Ok(tokio::net::TcpListener::from_std(l)?)
+}
+
+/// A proxy reachable from other machines lets them use it, including to
+/// reach services on this one. That can be intended; say so either way.
+pub fn warn_if_exposed(addr: std::net::SocketAddr) {
+    if !addr.ip().is_loopback() {
+        tracing::warn!(%addr, "the proxy listens beyond this machine: anyone who can reach it can send traffic through it");
+        eprintln!(
+            "warning: the proxy on {addr} is reachable from other machines; anyone who can reach it can send traffic \
+             through it (and to services on this machine)"
+        );
+    }
 }
 
 #[cfg(test)]

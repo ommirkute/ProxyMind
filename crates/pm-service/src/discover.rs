@@ -200,11 +200,21 @@ impl Service {
             if missing {
                 continue;
             }
+            // The app model leaves out discovery's 4xx answers (most are
+            // misses); a refused page that exists is worth testing (auth
+            // bypass), so it is recorded once more as a hit.
+            let mut exchange_id = sent.exchange_id;
+            if matches!(status, 401 | 403) {
+                let out =
+                    self.outgoing(crate::replay::parse_url_endpoint(u.as_str())?, get_request(&u).as_bytes(), false)?;
+                tried += 1;
+                exchange_id = self.send_as(actor, &out, identity, false, "discover_hit").await?.0.exchange_id;
+            }
             found.push(Found {
                 url: u.to_string(),
                 status,
                 length: body.len(),
-                exchange_id: sent.exchange_id,
+                exchange_id,
                 location,
                 note: discover::interesting(u.path()),
             });

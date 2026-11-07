@@ -1,0 +1,7 @@
+name: hosts-panel
+version: 0.1.0
+description: A panel listing recorded requests per host, with error counts and an example exchange.
+panels:
+  - id: hosts
+    title: Requests per host
+    command: ["python3", "./panel.py"]

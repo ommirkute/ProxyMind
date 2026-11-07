@@ -59,6 +59,26 @@ async fn imports_a_recorded_spec_and_sends_safe_examples() {
     let model = serde_json::to_string(&s.model_get(&Default::default()).unwrap()).unwrap();
     assert!(model.contains("/api/reviews"), "{model}");
 
+    // A GET that changes state (like VAmPI's /createdb) isn't sent, and an
+    // empty server URL means the document's folder (not /openapi.json/...).
+    let spec = r#"{"openapi":"3.0.0","info":{},"servers":[{"url":""}],"paths":{"/createdb":{"get":{}},"/api/products":{"get":{}}}}"#
+        .to_string();
+    let r = s
+        .openapi_import(
+            &human,
+            OpenApiImportRequest {
+                spec: Some(spec),
+                base_url: Some(url.clone()),
+                send_examples: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let OpenApiImportResult::Imported { sent, skipped, .. } = r else { panic!() };
+    assert_eq!(sent.iter().map(|x| x.path.as_str()).collect::<Vec<_>>(), ["/api/products"]);
+    assert!(skipped.iter().any(|x| x.contains("/createdb")), "{skipped:?}");
+
     // Agents sending examples need approval only if the ROE asks; bad input is refused.
     assert!(s.openapi_import(&human, OpenApiImportRequest::default()).await.is_err());
     let bad = OpenApiImportRequest { spec: Some("{\"hello\":1}".into()), ..Default::default() };

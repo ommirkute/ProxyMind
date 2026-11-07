@@ -1,4 +1,4 @@
-//! Encoders, decoders and hashes for the Decoder tool.
+//! Encoders, decoders and hashes for the Codec tool.
 
 use std::io::Read;
 

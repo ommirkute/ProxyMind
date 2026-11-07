@@ -8,7 +8,7 @@ use pm_service::pm_fuzz::PayloadSet;
 use pm_service::pm_policy::{Actor, Policy, Roe};
 use pm_service::pm_store::Store;
 use pm_service::{
-    ExtractKind, Extraction, IntruderRequest, IntruderResult, Macro, MacroStep, ReplayRequest, ReplayResult, RunWhen,
+    ExtractKind, Extraction, FuzzerRequest, FuzzerResult, Macro, MacroStep, ReplayRequest, ReplayResult, RunWhen,
     Service, SessionConfig, SessionRule, SetValue, SetWhere,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -152,7 +152,7 @@ fn config(url: &str) -> SessionConfig {
                 use_cookie_jar: false,
                 macro_name: "csrf".into(),
                 run: RunWhen::Always,
-                tools: vec!["replay".into(), "intruder".into()],
+                tools: vec!["replay".into(), "fuzzer".into()],
                 set: vec![SetValue { location: SetWhere::Param, name: "csrf".into(), value: "{{csrf}}".into() }],
                 ..Default::default()
             },
@@ -236,16 +236,16 @@ async fn concurrent_requests_share_one_login() {
     assert_eq!(all, (Some(200), Some(200), Some(200), Some(200), Some(200), Some(200)));
     assert_eq!(app.logins.load(Ordering::SeqCst), 1, "one login for six requests that found the session gone");
 
-    // Intruder gets the same treatment.
+    // Fuzzer gets the same treatment.
     app.sessions.lock().clear();
-    let req = IntruderRequest {
+    let req = FuzzerRequest {
         url: Some(url.clone()),
         raw: "GET /form?n=§1§ HTTP/1.1\r\nHost: bank\r\n\r\n".into(),
         payload_sets: vec![PayloadSet { list: (1..=8).map(|i| i.to_string()).collect(), ..Default::default() }],
         concurrency: Some(8),
         ..Default::default()
     };
-    let IntruderResult::Done { results, .. } = s.intruder_run(&human(), req).await.unwrap() else { panic!() };
+    let FuzzerResult::Done { results, .. } = s.fuzzer_run(&human(), req).await.unwrap() else { panic!() };
     assert!(results.iter().all(|r| r.status == Some(200)));
     assert_eq!(app.logins.load(Ordering::SeqCst), 2);
 }

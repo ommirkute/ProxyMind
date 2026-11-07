@@ -9,18 +9,27 @@ mod assistant;
 mod authz;
 mod auto;
 mod browser;
+mod collaborator;
 mod crawl;
+mod custom_checks;
 mod discover;
+mod dom_test;
+mod engage;
 mod findings;
+mod fuzzer;
 mod graphql;
+mod graphql_authz;
+mod group;
+mod hidden_paths;
 mod history;
 mod identity;
 mod intercept;
-mod intruder;
 mod login_record;
 mod model;
 mod network;
 mod openapi;
+mod organizer;
+mod plugins;
 mod proof;
 mod race;
 mod replay;
@@ -36,6 +45,7 @@ mod search;
 mod session;
 mod tools;
 mod traffic;
+mod write_checks;
 mod ws;
 mod ws_replay;
 
@@ -43,16 +53,19 @@ pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
+pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorStatus};
 pub use crawl::{CrawlRequest, CrawlResult};
+pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
+pub use dom_test::{DomTestRequest, DomTestResult};
+pub use engage::{EngageFilter, FoundComment, FoundScript, TargetAnalysis};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
+pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
+pub use group::{GroupItem, GroupItemResult, GroupMode, GroupRequest, GroupResult, MAX_GROUP};
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
-pub use intruder::{
-    AttackStatus, AttackSummary, AttackView, IntruderRequest, IntruderResult, IntruderRow, IntruderStart,
-};
 pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
@@ -60,6 +73,8 @@ pub use network::{
     load_network, sync_listeners, sync_network, watch_project,
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
+pub use organizer::{ORGANIZER_STATUSES, OrganizerItem, OrganizerUpdate};
+pub use plugins::{PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
@@ -75,13 +90,16 @@ pub use scan::{ActiveFinding, ActiveScanRequest, ActiveScanResult, ScanFilter, S
 pub use scan_profile::{PROFILES_SETTING, ScanProfile, builtin_profiles};
 pub use scan_schedule::{Every, ScanSchedule, next_run_after};
 pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
-pub use search::{MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView};
+pub use search::{
+    MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView, WsSearchHit, WsSearchRequest, WsSearchResult,
+};
 pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
-pub use tools::{DecodeRequest, SequencerRequest, SequencerResult};
+pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
+pub use write_checks::WriteSweep;
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
@@ -141,8 +159,13 @@ pub struct Service {
     roe_text: parking_lot::Mutex<Option<String>>,
     /// Passive-check plugins the user installed (never from the project).
     plugins: parking_lot::RwLock<Vec<pm_plugin::Installed>>,
-    /// Recent Intruder attacks (running ones keep going in the background).
-    attacks: parking_lot::Mutex<Vec<std::sync::Arc<intruder::Attack>>>,
+    /// The Collaborator callback listener this process runs, if any.
+    oast_listening: std::sync::OnceLock<std::net::SocketAddr>,
+    smtp_listening: std::sync::OnceLock<std::net::SocketAddr>,
+    /// The user's home directory, whose plugin registry is read when used.
+    plugin_home: std::sync::OnceLock<std::path::PathBuf>,
+    /// Recent Fuzzer attacks (running ones keep going in the background).
+    attacks: parking_lot::Mutex<Vec<std::sync::Arc<fuzzer::Attack>>>,
     /// This process's proxy, for the built-in browser.
     proxy_info: std::sync::OnceLock<browser::ProxyInfo>,
     /// Recent crawl-and-audit tasks.
@@ -181,6 +204,9 @@ impl Service {
             rewriter: std::sync::OnceLock::new(),
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
+            plugin_home: std::sync::OnceLock::new(),
+            oast_listening: std::sync::OnceLock::new(),
+            smtp_listening: std::sync::OnceLock::new(),
             attacks: parking_lot::Mutex::new(Vec::new()),
             scan_tasks: parking_lot::Mutex::new(Vec::new()),
             proxy_info: std::sync::OnceLock::new(),
@@ -208,6 +234,30 @@ impl Service {
 
     fn redactor_for(&self, actor: &Actor) -> Option<&Redactor> {
         self.redacts_for(actor).then_some(&self.redactor)
+    }
+
+    /// A stored result (finding, proof) as `actor` may see it: for agents,
+    /// secrets in every string are replaced by placeholders and evidence
+    /// fields are tagged as untrusted target content.
+    pub fn json_for(&self, actor: &Actor, mut v: serde_json::Value) -> serde_json::Value {
+        fn walk(v: &mut serde_json::Value, r: Option<&Redactor>, wrap: bool, key: &str) {
+            match v {
+                serde_json::Value::String(s) => {
+                    if let Some(r) = r {
+                        *s = r.redact(s);
+                    }
+                    if wrap && key == "evidence" && !s.is_empty() && !s.starts_with("<untrusted_target_content>") {
+                        *s = pm_ai::wrap_untrusted(s);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, r, wrap, key)),
+                serde_json::Value::Object(o) => o.iter_mut().for_each(|(k, x)| walk(x, r, wrap, k)),
+                _ => {}
+            }
+        }
+        let wrap = actor.kind == pm_policy::ActorKind::Agent;
+        walk(&mut v, self.redactor_for(actor), wrap, "");
+        v
     }
 
     pub fn policy(&self) -> &Policy {
@@ -359,21 +409,42 @@ scope:
         let params = json!({"raw": "POST /x HTTP/1.1"});
         let auth = s.authorize(req("agent:a", Tier::ActiveIntrusive, "https://app.example.com/x"), &params).unwrap();
         let Authorization::PendingApproval { approval_id, .. } = auth else { panic!("expected pending: {auth:?}") };
+        let agent_a = Actor::parse("agent:a").unwrap();
 
         // Not approved yet.
-        assert!(s.run_approved(&approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &params).is_err());
         // Agents can't approve.
         assert!(s.decide_approval(&approval_id, &Actor::parse("agent:a").unwrap(), true).is_err());
         s.decide_approval(&approval_id, &Actor::parse("human:alice").unwrap(), true).unwrap();
+        // Another actor, or another action, can't use it.
+        assert!(s.run_approved(&Actor::parse("agent:b").unwrap(), "replay_send", &approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "race_send", &approval_id, &params).is_err());
         // Changed parameters are not covered by the approval.
-        assert!(s.run_approved(&approval_id, &json!({"raw": "DELETE /x HTTP/1.1"})).is_err());
-        assert!(matches!(s.run_approved(&approval_id, &params).unwrap(), Authorization::Allowed { .. }));
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &json!({"raw": "DELETE /x HTTP/1.1"})).is_err());
+        assert!(matches!(
+            s.run_approved(&agent_a, "replay_send", &approval_id, &params).unwrap(),
+            Authorization::Allowed { .. }
+        ));
         // Single use.
-        assert!(s.run_approved(&approval_id, &params).is_err());
+        assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &params).is_err());
 
         let store = s.store.lock();
-        // authorize, run(not approved), decide(rejected), decide(approved), run(mismatch), run(ok), run(used)
-        assert_eq!(verify_audit(&store).unwrap(), 7);
+        // authorize, run(not approved), decide(rejected), decide(approved), run(other actor), run(other action),
+        // run(mismatch), run(ok), run(used)
+        assert_eq!(verify_audit(&store).unwrap(), 9);
+    }
+
+    #[test]
+    fn agent_results_are_redacted_and_tagged() {
+        let s = service();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";
+        let v = json!({ "evidence": format!("token {jwt}"), "proofs": [{ "note": jwt }], "id": 3 });
+        let agent = s.json_for(&Actor::parse("agent:a").unwrap(), v.clone());
+        let text = agent.to_string();
+        assert!(!text.contains(jwt), "{text}");
+        assert!(agent["evidence"].as_str().unwrap().starts_with("<untrusted_target_content>"));
+        assert_eq!(s.json_for(&Actor::parse("agent:a").unwrap(), agent.clone()), agent, "applied once");
+        assert_eq!(s.json_for(&Actor::parse("human:h").unwrap(), v.clone()), v);
     }
 
     #[test]
@@ -422,7 +493,10 @@ scope:
         assert_eq!(cli.approvals(Some("pending"), 10).unwrap()[0].id, approval_id);
         cli.decide_approval(&approval_id, &Actor::parse("human:omkar").unwrap(), true).unwrap();
         assert!(cli.decide_approval(&approval_id, &Actor::parse("human:other").unwrap(), false).is_err());
-        assert!(matches!(mcp.run_approved(&approval_id, &params).unwrap(), Authorization::Allowed { .. }));
+        assert!(matches!(
+            mcp.run_approved(&Actor::parse("agent:a").unwrap(), "replay_send", &approval_id, &params).unwrap(),
+            Authorization::Allowed { .. }
+        ));
         assert_eq!(cli.approval(&approval_id).unwrap().unwrap().status, "used");
         drop((mcp, cli));
         for ext in ["", "-wal", "-shm"] {

@@ -304,13 +304,13 @@ function GraphQlPanel() {
       setApproval(r.status === "pending_approval" ? r.approval_id : null);
       setResult(r);
     });
-  const toRepeater = (o: GqlOperation, endpoint: string) => {
+  const toReplay = (o: GqlOperation, endpoint: string) => {
     try {
-      sessionStorage.setItem("pm_repeater_draft", JSON.stringify({ url: new URL(endpoint).origin, raw: o.example_request }));
+      sessionStorage.setItem("pm_replay_draft", JSON.stringify({ url: new URL(endpoint).origin, raw: o.example_request }));
     } catch {
-      /* storage blocked: Repeater opens empty */
+      /* storage blocked: Replay opens empty */
     }
-    go("repeater");
+    go("replay");
   };
   return (
     <Panel title="GraphQL" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import GraphQL schema…"}</button>}>
@@ -344,7 +344,7 @@ function GraphQlPanel() {
                       <td className="mono muted">{o.returns}</td>
                       <td>
                         {o.example_request && result.url && (
-                          <button className="btn" data-testid={`graphql-repeater-${o.name}`} onClick={() => toRepeater(o, result.url!)}>Repeater</button>
+                          <button className="btn" data-testid={`graphql-replay-${o.name}`} onClick={() => toReplay(o, result.url!)}>Replay</button>
                         )}
                       </td>
                     </tr>

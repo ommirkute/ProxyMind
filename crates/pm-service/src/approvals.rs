@@ -7,11 +7,17 @@ use serde_json::{Value, json};
 
 use crate::{Authorization, Result, Service, ServiceError};
 
+/// An unguessable id (OS randomness, mixed with time and a counter in case
+/// randomness is unavailable).
 fn new_id() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let seed = format!("{}:{}:{n}", now_ms(), std::process::id());
-    format!("apr_{}", &pm_policy::audit::content_hash(seed.as_bytes())[..12])
+    let mut r = [0u8; 16];
+    let _ = SystemRandom::new().fill(&mut r);
+    let mut seed = format!("{}:{}:{n}:", now_ms(), std::process::id()).into_bytes();
+    seed.extend_from_slice(&r);
+    format!("apr_{}", &pm_policy::audit::content_hash(&seed)[..24])
 }
 
 fn tier_name(t: Tier) -> String {
@@ -71,8 +77,27 @@ impl Service {
 
     /// Runs a previously approved action. The approval is used up, and scope
     /// and time windows are checked again because they may have changed.
-    /// The parameters must match the approved ones exactly.
-    pub fn run_approved(&self, approval_id: &str, params: &Value) -> Result<Authorization> {
+    /// Only the actor who asked can use it, for the same action, and the
+    /// parameters must match the approved ones exactly.
+    pub fn run_approved(
+        &self,
+        actor: &Actor,
+        action: &str,
+        approval_id: &str,
+        params: &Value,
+    ) -> Result<Authorization> {
+        if let Some(row) = self.approval(approval_id)?
+            && (row.actor != actor.id() || row.action != action)
+        {
+            let detail = json!({ "approval_id": approval_id, "action": action, "approved_for": row.actor });
+            self.audit(&actor.id(), "run_approved", detail, "rejected:other-actor-or-action")?;
+            return Err(ServiceError::Approval(format!(
+                "approval {approval_id} was given to {} for {}, not to {} for {action}",
+                row.actor,
+                row.action,
+                actor.id()
+            )));
+        }
         let hash = pm_policy::params_hash(params);
         let consumed =
             self.store.lock().transition_approval(approval_id, "approved", "used", None, Some(&hash), now_ms())?;

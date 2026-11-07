@@ -5,7 +5,8 @@
 //!
 //! The ticker (`Service::run_scheduler`) runs in processes that stay up: the
 //! web UI server and the desktop app. `schedule_tick` takes the time, so
-//! tests can drive it.
+//! tests can drive it. When several processes have the project open, each
+//! run is claimed in the database first, so it starts once.
 
 use std::sync::Arc;
 
@@ -216,7 +217,11 @@ impl Service {
             if !s.enabled || s.next_run_ms > now_ms {
                 continue;
             }
-            s.next_run_ms = next_run_after(&s.every, now_ms);
+            let next = next_run_after(&s.every, now_ms);
+            if !self.store.lock().claim_schedule(s.id, s.next_run_ms, next)? {
+                continue; // another process got there first
+            }
+            s.next_run_ms = next;
             if s.last_task.as_deref().is_some_and(|t| self.scan_task_running(t)) {
                 s.last_error = Some("skipped a run: the previous one was still going".into());
             } else if let Ok(v) = self.fire(&mut s, now_ms) {

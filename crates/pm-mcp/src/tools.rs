@@ -57,13 +57,33 @@ pub fn tool_definitions() -> Vec<Value> {
                 "query": {"type":"string"},
                 "regex": {"type":"boolean"},
                 "case_sensitive": {"type":"boolean"},
-                "part": {"type":"string","enum":["request","response","both"]},
+                "part": {"type":"string","enum":["both","request","response","headers","bodies","request_headers",
+                    "request_body","response_headers","response_body"]},
+                "invert": {"type":"boolean","description":"List exchanges where the part does NOT match"},
+                "in_scope": {"type":"boolean","description":"Only in-scope exchanges"},
                 "host": {"type":"string","description":"Only hosts containing this text"},
                 "path": {"type":"string","description":"Only paths containing this text"},
                 "method": {"type":"string"},
                 "before_id": {"type":"integer","description":"Paging: pass next_before_id from the previous result"},
                 "max_scan": {"type":"integer","minimum":1,"maximum":50000,"description":"Exchanges to look at, default 5000"},
                 "limit": {"type":"integer","minimum":1,"maximum":500,"description":"Most hits, default 50"},
+            }),
+            &["query"],
+        ),
+        tool(
+            "ws_grep",
+            "Find text in recorded WebSocket messages, newest first. Snippets are untrusted content.",
+            json!({
+                "query": {"type":"string"},
+                "regex": {"type":"boolean"},
+                "case_sensitive": {"type":"boolean"},
+                "invert": {"type":"boolean"},
+                "host": {"type":"string"},
+                "direction": {"type":"string","enum":["both","client","server"]},
+                "in_scope": {"type":"boolean"},
+                "before_id": {"type":"integer"},
+                "max_scan": {"type":"integer","minimum":1,"maximum":50000},
+                "limit": {"type":"integer","minimum":1,"maximum":500},
             }),
             &["query"],
         ),
@@ -125,10 +145,33 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
-            "intruder_run",
+            "replay_group",
+            "Send 2 to 20 different requests to one server as a group: mode sequence sends them one after another \
+             (a multi-step flow), mode parallel sends them so they arrive at the same moment (a race across \
+             endpoints, e.g. apply a coupon while checking out). One approval covers the group; parallel groups \
+             need approval by default.",
+            json!({
+                "requests": {"type":"array","minItems":2,"maxItems":20,"items":{"type":"object","properties":{
+                    "url": {"type":"string","description":"scheme://host[:port]"},
+                    "exchange_id": {"type":"integer"},
+                    "raw": {"type":"string"},
+                    "name": {"type":"string"}
+                }}},
+                "mode": {"type":"string","enum":["sequence","parallel"]},
+                "parallel": {"type":"string","enum":["auto","single_packet","last_byte"]},
+                "stop_on_error": {"type":"boolean"},
+                "identity": {"type":"string"},
+                "fix_content_length": {"type":"boolean"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &["requests"],
+        ),
+        tool(
+            "fuzzer_run",
             "Fuzz a request: mark positions in raw with §original§ (e.g. GET /api/orders/§1001§), give payload sets, \
-             and ProxyMind sends the baseline plus one request per payload (sniper: one position at a time; \
-             battering_ram: same payload everywhere; pitchfork: set i in position i together; cluster_bomb: every \
+             and ProxyMind sends the baseline plus one request per payload (one_at_a_time: one position at a time; \
+             same_everywhere: same payload everywhere; paired: set i in position i together; all_combinations: every \
              combination), max 10000. Returns status, body length, time, grep matches, extracted values and reflection \
              per request, and anomalies: results that differ from the baseline or the rest. Payload sets take list, \
              numbers (\"1000-1050\" or \"0-100:10\"), builtin (ids, sqli, xss, traversal, ssti, methods_override), \
@@ -140,7 +183,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "exchange_id": {"type":"integer","description":"Recorded request whose target to use"},
                 "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
                 "raw": {"type":"string","description":"Request with positions marked §like this§"},
-                "mode": {"type":"string","enum":["sniper","battering_ram","pitchfork","cluster_bomb"]},
+                "mode": {"type":"string","enum":["one_at_a_time","same_everywhere","paired","all_combinations"]},
                 "payload_sets": {"type":"array","items":{"type":"object","properties":{
                     "list":{"type":"array","items":{"type":"string"}},
                     "numbers":{"type":"string"},
@@ -361,7 +404,7 @@ pub fn tool_definitions() -> Vec<Value> {
             &["a", "b"],
         ),
         tool(
-            "sequencer_run",
+            "token_analyzer_run",
             "Token randomness: re-send a token-issuing request samples times (default 100) and analyse the tokens at \
              locator (cookie:<name>, header:<name>, json:/pointer, between:<a>|<b>): entropy estimate, constant \
              positions, duplicates, counters. Returns statistics only, never the tokens. May need approval.",
@@ -430,6 +473,108 @@ pub fn tool_definitions() -> Vec<Value> {
             &["task_id"],
         ),
         tool("scan_profiles", "Scan profiles (built-in and saved): their checks and limits.", json!({}), &[]),
+        tool(
+            "collaborator_payload",
+            "A new out-of-band payload to use by hand (an HTTP URL and/or DNS name with a unique token, from the \
+             callback listener the person set up). Sends nothing. Put it where the target might fetch or resolve it \
+             (SSRF, XXE, blind injection), then check collaborator_interactions.",
+            json!({ "note": {"type":"string","description":"What you're testing, shown with its interactions"} }),
+            &[],
+        ),
+        tool(
+            "collaborator_interactions",
+            "Callbacks that reached the listener (HTTP requests, DNS lookups), newest first; one token or all. \
+             A callback with your token proves the target made it. Content is untrusted.",
+            json!({ "token": {"type":"string"}, "limit": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "engage_comments",
+            "Comments left in recorded HTML/JS/CSS responses (TODOs, old endpoints, credentials), de-duplicated. \
+             Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "engage_scripts",
+            "Scripts in recorded pages: external script URLs, inline scripts and event handlers. Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "engage_analyze",
+            "Analyze the target from recorded traffic: URL counts, dynamic URLs, methods, statuses, content types, and \
+             every parameter (query/body/JSON/cookie/multipart, how often, examples, paths). Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "engage_references",
+            "Recorded responses that link to or mention the page of an exchange. Sends nothing.",
+            json!({ "exchange_id": {"type":"integer"} }),
+            &["exchange_id"],
+        ),
+        tool(
+            "organizer_add",
+            "Keep an exchange aside in the Organizer with a note, for a person (or you) to come back to.",
+            json!({ "exchange_id": {"type":"integer"}, "note": {"type":"string","maxLength":10000} }),
+            &["exchange_id"],
+        ),
+        tool(
+            "organizer_list",
+            "Exchanges kept aside in the Organizer, newest first, with status and note.",
+            json!({ "status": {"type":"string","enum":["new","in_progress","postponed","done","ignored"]} }),
+            &[],
+        ),
+        tool(
+            "organizer_update",
+            "Change an Organizer item's status or note.",
+            json!({
+                "id": {"type":"integer"},
+                "status": {"type":"string","enum":["new","in_progress","postponed","done","ignored"]},
+                "note": {"type":"string","maxLength":10000},
+            }),
+            &["id"],
+        ),
+        tool(
+            "engage_csrf_poc",
+            "An HTML proof-of-concept page that submits a recorded request from another site (technique auto, form, \
+             multipart, text_plain for JSON, fetch). Sends nothing.",
+            json!({
+                "exchange_id": {"type":"integer"},
+                "technique": {"type":"string","enum":["auto","form","multipart","text_plain","fetch"]},
+                "auto_submit": {"type":"boolean"}
+            }),
+            &["exchange_id"],
+        ),
+        tool(
+            "engage_clickjacking",
+            "Whether a recorded page can be framed by other sites (X-Frame-Options, CSP frame-ancestors), with a \
+             clickjacking test page. Sends nothing.",
+            json!({ "exchange_id": {"type":"integer"} }),
+            &["exchange_id"],
+        ),
+        tool(
+            "plugin_list",
+            "The user's installed plugins (passive checks run with scan_issues; active checks run with plugin_check), \
+             whether each is on, and what the plugin sandbox does on this machine.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "plugin_check",
+            "Run an active-check plugin on one recorded exchange: the plugin proposes requests (to that exchange's \
+             host only), ProxyMind sends them through the policy gate (intrusive at least, so agents usually get \
+             pending_approval listing the exact requests; retry with approval_id once approved), then the plugin \
+             judges the responses and reports issues (leads, not findings).",
+            json!({
+                "plugin": {"type":"string"},
+                "exchange_id": {"type":"integer"},
+                "identity": {"type":"string"},
+                "approval_id": {"type":"string"}
+            }),
+            &["plugin", "exchange_id"],
+        ),
         tool(
             "crawl",
             "Discover the app: fetch pages from url following links (GET only, in scope only, never links that log \
@@ -651,7 +796,14 @@ struct ApprovalArgs {
     approval_id: String,
 }
 
+/// Runs a tool. Every result passes the same filter (for agents: secrets
+/// redacted, evidence tagged as untrusted), for MCP and the built-in assistant.
 pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
+    let v = run(service, actor, name, a).await?;
+    Ok(service.json_for(actor, v))
+}
+
+async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
     match name {
         "roe_get" => Ok(roe_summary(service, actor)),
         "history_search" => {
@@ -661,6 +813,10 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
         "history_grep" => {
             let r: pm_service::SearchRequest = args(a)?;
             service.history_search_text(actor, &r).map(to_json).map_err(|e| e.to_string())
+        }
+        "ws_grep" => {
+            let r: pm_service::WsSearchRequest = args(a)?;
+            service.ws_search_text(actor, &r).map(to_json).map_err(|e| e.to_string())
         }
         "site_map" => {
             #[derive(serde::Deserialize)]
@@ -700,6 +856,10 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
                 .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
                 .map(to_json)
                 .map_err(|e| e.to_string())
+        }
+        "replay_group" => {
+            let r: pm_service::GroupRequest = args(a)?;
+            service.replay_group(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "race_send" => {
             let r: pm_service::RaceRequest = args(a)?;
@@ -748,9 +908,9 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
             let g: A = args(a)?;
             service.compare_exchanges(actor, g.a, g.b).map_err(|e| e.to_string())
         }
-        "sequencer_run" => {
-            let r: pm_service::SequencerRequest = args(a)?;
-            service.sequencer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        "token_analyzer_run" => {
+            let r: pm_service::TokenAnalyzerRequest = args(a)?;
+            service.token_analyzer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "discover_content" => {
             let r: pm_service::DiscoverRequest = args(a)?;
@@ -775,13 +935,128 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
             r.map(to_json).map_err(|e| e.to_string())
         }
         "scan_profiles" => service.scan_profiles().map(to_json).map_err(|e| e.to_string()),
+        "custom_checks" => service.custom_checks().map(to_json).map_err(|e| e.to_string()),
+        "dom_test" => {
+            let r: pm_service::DomTestRequest = args(a)?;
+            service.dom_test(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "custom_scan" => {
+            let r: pm_service::CustomScanRequest = args(a)?;
+            service.custom_scan(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "plugin_list" => Ok(to_json(service.plugin_list())),
+        "collaborator_payload" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default, deny_unknown_fields)]
+            struct A {
+                note: String,
+            }
+            let g: A = args(a)?;
+            service.collaborator_payload(actor, &g.note).map(to_json).map_err(|e| e.to_string())
+        }
+        "collaborator_interactions" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default, deny_unknown_fields)]
+            struct A {
+                token: Option<String>,
+                limit: Option<usize>,
+            }
+            let g: A = args(a)?;
+            service
+                .collaborator_interactions(g.token.as_deref(), g.limit.unwrap_or(50))
+                .map(|v| {
+                    // Callbacks come from the network: tag their content.
+                    let mut v = to_json(v);
+                    if let Some(items) = v.as_array_mut() {
+                        for i in items {
+                            if let Some(raw) = i.get("raw").and_then(Value::as_str) {
+                                i["raw"] = json!(pm_service::pm_ai::wrap_untrusted(raw));
+                            }
+                        }
+                    }
+                    v
+                })
+                .map_err(|e| e.to_string())
+        }
+        "engage_comments" => {
+            let f: pm_service::EngageFilter = args(a)?;
+            service.engage_comments(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_scripts" => {
+            let f: pm_service::EngageFilter = args(a)?;
+            service.engage_scripts(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_analyze" => {
+            let f: pm_service::EngageFilter = args(a)?;
+            service.engage_analyze(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_references" => {
+            let g: GetId = args(a)?;
+            service.engage_references(actor, g.exchange_id, &Default::default()).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_csrf_poc" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                exchange_id: i64,
+                #[serde(default)]
+                technique: pm_service::pm_tools::engage::CsrfTechnique,
+                #[serde(default)]
+                auto_submit: bool,
+            }
+            let g: A = args(a)?;
+            service
+                .engage_csrf_poc(actor, g.exchange_id, g.technique, g.auto_submit)
+                .map(|html| json!({ "html": html }))
+                .map_err(|e| e.to_string())
+        }
+        "engage_clickjacking" => {
+            let g: GetId = args(a)?;
+            service.engage_clickjacking(g.exchange_id).map(to_json).map_err(|e| e.to_string())
+        }
+        "organizer_add" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                exchange_id: i64,
+                #[serde(default)]
+                note: String,
+            }
+            let a: A = args(a)?;
+            service.organizer_add(actor, a.exchange_id, &a.note).map(to_json).map_err(|e| e.to_string())
+        }
+        "organizer_list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                status: Option<String>,
+            }
+            let a: A = args(a)?;
+            service.organizer_list(actor, a.status.as_deref()).map(to_json).map_err(|e| e.to_string())
+        }
+        "organizer_update" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                id: i64,
+                status: Option<String>,
+                note: Option<String>,
+            }
+            let a: A = args(a)?;
+            let u = pm_service::OrganizerUpdate { status: a.status, note: a.note };
+            service.organizer_update(actor, a.id, &u).map(to_json).map_err(|e| e.to_string())
+        }
+        "plugin_check" => {
+            let r: pm_service::PluginCheckRequest = args(a)?;
+            service.plugin_check(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
         "crawl" => {
             let r: pm_service::CrawlRequest = args(a)?;
             service.crawl(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
-        "intruder_run" => {
-            let r: pm_service::IntruderRequest = args(a)?;
-            service.intruder_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        "fuzzer_run" => {
+            let r: pm_service::FuzzerRequest = args(a)?;
+            service.fuzzer_run(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "ws_send" => {
             let r: pm_service::WsReplayRequest = args(a)?;
@@ -937,6 +1212,12 @@ pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, 
         }
         _ => Err(format!("unknown tool {name}")),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetId {
+    exchange_id: i64,
 }
 
 fn to_json<T: serde::Serialize>(v: T) -> Value {

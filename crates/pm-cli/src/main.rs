@@ -82,9 +82,16 @@ enum Command {
         regex: bool,
         #[arg(long)]
         case_sensitive: bool,
-        /// request, response or both
+        /// both, request, response, headers, bodies, request_headers, request_body, response_headers or
+        /// response_body
         #[arg(long, default_value = "both")]
         part: String,
+        /// List exchanges that do NOT match
+        #[arg(long)]
+        invert: bool,
+        /// Only in-scope exchanges
+        #[arg(long)]
+        in_scope: bool,
         /// Only hosts containing this text
         #[arg(long)]
         host: Option<String>,
@@ -185,6 +192,9 @@ enum Command {
         /// IPv4 address A queries are answered with (default: the HTTP listener's address, or 127.0.0.1)
         #[arg(long)]
         dns_answer: Option<std::net::Ipv4Addr>,
+        /// Also take mail on this address (e.g. 0.0.0.0:25): mail to a payload address is an interaction
+        #[arg(long)]
+        smtp: Option<SocketAddr>,
     },
     /// Show the application model built from traffic.
     Model {
@@ -317,7 +327,7 @@ enum Command {
     /// Compare two recorded exchanges.
     Compare { a: i64, b: i64 },
     /// Token randomness: re-send a token-issuing request and analyse the tokens.
-    Sequencer {
+    TokenAnalyzer {
         exchange_id: i64,
         /// cookie:<name>, header:<name>, json:/pointer or between:<a>|<b>
         #[arg(long)]
@@ -376,7 +386,7 @@ enum Command {
         action: ProjectAction,
     },
     /// Fuzz a request: payloads in positions marked §like this§, anomalies pointed out.
-    Intruder {
+    Fuzzer {
         /// Target as scheme://host[:port] (or use --exchange)
         #[arg(long, required_unless_present = "exchange")]
         url: Option<String>,
@@ -386,8 +396,8 @@ enum Command {
         /// File with the raw request, positions marked §like this§
         #[arg(long)]
         raw_file: PathBuf,
-        /// sniper, battering_ram, pitchfork or cluster_bomb
-        #[arg(long, default_value = "sniper")]
+        /// one_at_a_time, same_everywhere, paired or all_combinations
+        #[arg(long, default_value = "one_at_a_time")]
         mode: String,
         /// A payload file (one payload per line); repeat for one set per position
         #[arg(long = "payloads")]
@@ -506,6 +516,11 @@ enum BenchAction {
         /// Skip the active-scanner sweep
         #[arg(long)]
         no_scan: bool,
+        /// Also run the write checks last: the API description's write operations on a
+        /// test user's object, as the owner (ReDoS) and as another user (authorization).
+        /// They change data and can slow the server; destructive tier (approval).
+        #[arg(long)]
+        write_checks: bool,
         #[arg(long)]
         json: bool,
     },
@@ -547,11 +562,59 @@ enum FindingAction {
 enum PluginAction {
     /// Install the plugin in a directory (it must contain proxymind-plugin.yaml).
     /// Plugins run as you, with your permissions: install only code you trust.
-    Add { dir: PathBuf },
-    /// List installed plugins.
+    Add {
+        dir: PathBuf,
+        /// Refuse plugins that aren't signed by a key on your trusted list
+        #[arg(long)]
+        require_signed: bool,
+    },
+    /// List installed plugins and what the sandbox can do on this machine.
     List,
+    /// Make a signing key for plugins you publish (keep the file private).
+    Keygen {
+        /// Where to write the private key (PKCS#8)
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign the plugin in a directory (writes proxymind-plugin.sig).
+    Sign {
+        dir: PathBuf,
+        /// Private key from `plugin keygen`
+        #[arg(long)]
+        key: PathBuf,
+        /// Your name, shown with the signature
+        #[arg(long)]
+        signer: String,
+    },
+    /// Trust a signer's public key (hex, from `plugin keygen`).
+    Trust {
+        key: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Stop trusting a key.
+    Untrust { key: String },
+    /// List trusted signer keys.
+    Trusted,
     /// Uninstall a plugin by name.
     Remove { name: String },
+    /// Turn a plugin on (installed plugins start on).
+    Enable { name: String },
+    /// Turn a plugin off without uninstalling it.
+    Disable { name: String },
+    /// Run an active-check plugin on a recorded exchange (its requests go
+    /// through the policy gate).
+    Check {
+        name: String,
+        /// The recorded exchange to check.
+        #[arg(long)]
+        exchange: i64,
+        /// Send the plugin's requests as this identity.
+        #[arg(long)]
+        identity: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -908,8 +971,14 @@ enum RoeAction {
 
 #[derive(Subcommand)]
 enum AuditAction {
-    /// Check that no audit record was changed, removed or reordered.
-    Verify,
+    /// Check that no audit record was changed, removed or reordered. Prints
+    /// the head hash: note it (e.g. in the report) and pass it to --anchor
+    /// later to also detect records cut off the end.
+    Verify {
+        /// A head hash printed by an earlier verify (a prefix of 12+ hex digits).
+        #[arg(long)]
+        anchor: Option<String>,
+    },
     /// List audit records, newest first.
     List {
         #[arg(long, short = 'n', default_value_t = 25)]
@@ -1128,6 +1197,7 @@ async fn run() -> Result<()> {
             let extra = pm_proxy::Listeners::new(proxy.clone(), Some(*listen));
             pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra))?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
+            pm_proxy::listeners::warn_if_exposed(*listen);
             eprintln!("ProxyMind listening on http://{listen}");
             eprintln!("Project: {}", cli.project.display());
             eprintln!("CA certificate (install in your browser): {}", ca.ca_cert_path().display());
@@ -1149,7 +1219,7 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Search { query, regex, case_sensitive, part, host, limit, json } => {
+        Command::Search { query, regex, case_sensitive, part, invert, in_scope, host, limit, json } => {
             let service = open_service(&cli.project, None)?;
             let r = service.history_search_text(
                 &human_actor(None)?,
@@ -1158,8 +1228,14 @@ async fn run() -> Result<()> {
                     regex: *regex,
                     case_sensitive: *case_sensitive,
                     part: Some(part.clone()),
+                    invert: *invert,
                     max_scan: Some(pm_service::MAX_SCAN),
-                    filter: pm_store::HistoryFilter { host: host.clone(), limit: Some(*limit), ..Default::default() },
+                    filter: pm_store::HistoryFilter {
+                        host: host.clone(),
+                        limit: Some(*limit),
+                        in_scope: in_scope.then_some(true),
+                        ..Default::default()
+                    },
                 },
             )?;
             if *json {
@@ -1386,7 +1462,7 @@ async fn run() -> Result<()> {
             let actor = Actor::parse(actor)?;
             anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
             let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
@@ -1404,7 +1480,7 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             let me = human_actor(actor.as_deref())?;
             let mut setup = pm_api::ProxySetup::default();
             if !*no_proxy {
@@ -1428,6 +1504,7 @@ async fn run() -> Result<()> {
                 pm_service::watch_project(&cli.project, Some(rewriter), service.network().clone(), Some(extra))?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
+                pm_proxy::listeners::warn_if_exposed(*proxy);
                 tokio::spawn(p.run(l));
                 eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
                 service.attach_proxy_info(pm_service::ProxyInfo {
@@ -1459,7 +1536,7 @@ async fn run() -> Result<()> {
                 _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
             }
         }
-        Command::OastServer { listen, public_url, dns, domain, dns_answer } => {
+        Command::OastServer { listen, public_url, dns, domain, dns_answer, smtp } => {
             let service = Arc::new(open_service(&cli.project, None)?);
             start_oast(&service, *listen, public_url.clone()).await?;
             if let (Some(addr), Some(domain)) = (dns, domain) {
@@ -1476,6 +1553,18 @@ async fn run() -> Result<()> {
                     }
                 }));
                 eprintln!("OAST DNS on {addr} for *.{domain} (A → {ip}); delegate the domain here with an NS record");
+            }
+            if let Some(addr) = smtp {
+                let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding SMTP on {addr}"))?;
+                service.set_oast_smtp(&l.local_addr()?.to_string())?;
+                let s = service.clone();
+                let host = domain.clone().unwrap_or_else(|| "proxymind-oast".into());
+                tokio::spawn(pm_oast::smtp::serve(l, host, move |i| {
+                    if let Err(e) = s.record_oast(&i) {
+                        eprintln!("could not record OAST interaction: {e}");
+                    }
+                }));
+                eprintln!("OAST SMTP on {addr}: mail to a payload address is recorded");
             }
             tokio::signal::ctrl_c().await?;
         }
@@ -1594,7 +1683,7 @@ async fn run() -> Result<()> {
         }
         Command::Scan { host, min_severity, json } => {
             let service = open_service(&cli.project, None)?;
-            service.set_plugins(user_plugins(&cli));
+            attach_plugins(&cli, &service);
             let issues = service.scan_passive(
                 &human_actor(None)?,
                 &pm_service::ScanFilter { host: host.clone(), min_severity: min_severity.clone(), limit: None },
@@ -1622,13 +1711,62 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let mut reg = pm_plugin::Registry::load(&home)?;
             match action {
-                PluginAction::Add { dir } => {
-                    let p = reg.add(dir)?.clone();
+                PluginAction::Keygen { out: path } => {
+                    anyhow::ensure!(!path.exists(), "{} exists: choose another file", path.display());
+                    let (private, public) = pm_plugin::sign::keygen()?;
+                    write_private(path, &private)?;
+                    out!("✓ private key written to {} (keep it secret)", path.display());
+                    out!("Public key (give this to people who install your plugins):\n{public}");
+                }
+                PluginAction::Sign { dir, key, signer } => {
+                    let private = std::fs::read(key).with_context(|| format!("reading {}", key.display()))?;
+                    let sig = pm_plugin::sign::sign(dir, &private, signer)?;
+                    out!("✓ signed {} as {} (key {})", dir.display(), sig.signer, sig.key);
+                }
+                PluginAction::Trust { key, name } => {
+                    let key = key.trim().to_ascii_lowercase();
+                    anyhow::ensure!(
+                        key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
+                        "a public key is 64 hex characters"
+                    );
+                    let mut keys = pm_plugin::sign::load_trusted(&home)?;
+                    keys.retain(|k| k.key != key);
+                    keys.push(pm_plugin::sign::TrustedKey { name: name.clone(), key });
+                    pm_plugin::sign::save_trusted(&home, &keys)?;
+                    out!("✓ trusting {name}");
+                }
+                PluginAction::Untrust { key } => {
+                    let mut keys = pm_plugin::sign::load_trusted(&home)?;
+                    let before = keys.len();
+                    keys.retain(|k| !k.key.eq_ignore_ascii_case(key.trim()));
+                    pm_plugin::sign::save_trusted(&home, &keys)?;
+                    out!("{}", if keys.len() < before { "✓ removed" } else { "no such key" });
+                }
+                PluginAction::Trusted => {
+                    for k in pm_plugin::sign::load_trusted(&home)? {
+                        out!("{:<20} {}", k.name, k.key);
+                    }
+                }
+                PluginAction::Add { dir, require_signed } => {
+                    let p = reg.add_checked(dir, *require_signed)?.clone();
                     reg.save()?;
                     out!("✓ installed {} {} from {}", p.manifest.name, p.manifest.version, p.dir.display());
-                    out!(
-                        "  It runs with the passive scan (`proxymind scan`, the Issues page). It runs as you: install only code you trust."
-                    );
+                    match &p.signature {
+                        pm_plugin::sign::Signature::Unsigned => out!("  Unsigned."),
+                        pm_plugin::sign::Signature::Signed { signer, trusted, .. } => {
+                            out!(
+                                "  Signed by {signer}{}",
+                                if *trusted { " (trusted key)" } else { " (key not on your trusted list)" }
+                            )
+                        }
+                    }
+                    if p.manifest.passive.is_some() {
+                        out!("  Passive: runs with the passive scan (`proxymind scan`, the Issues page).");
+                    }
+                    if p.manifest.active.is_some() {
+                        out!("  Active: run it on a recorded request (`proxymind plugin check`, the Plugins page).");
+                    }
+                    out!("  Sandbox: {}. Install only code you trust.", pm_plugin::sandbox::status().summary);
                 }
                 PluginAction::List => {
                     if reg.plugins.is_empty() {
@@ -1636,12 +1774,67 @@ async fn run() -> Result<()> {
                     }
                     for p in &reg.plugins {
                         out!(
-                            "{:<20} {:<8} {}  ({})",
+                            "{:<20} {:<8} {:<15} {:<3} {:<9} {}  ({})",
                             p.manifest.name,
                             p.manifest.version,
+                            p.manifest.kinds().join("+"),
+                            if p.enabled { "on" } else { "off" },
+                            match &p.signature {
+                                pm_plugin::sign::Signature::Unsigned => "unsigned",
+                                pm_plugin::sign::Signature::Signed { trusted: true, .. } => "trusted",
+                                pm_plugin::sign::Signature::Signed { .. } => "signed",
+                            },
                             p.manifest.description,
                             p.dir.display()
                         );
+                    }
+                    out!("Sandbox: {}", pm_plugin::sandbox::status().summary);
+                }
+                PluginAction::Enable { name } | PluginAction::Disable { name } => {
+                    let on = matches!(action, PluginAction::Enable { .. });
+                    anyhow::ensure!(reg.set_enabled(name, on), "no plugin named {name}");
+                    reg.save()?;
+                    out!("✓ {name} is {}", if on { "on" } else { "off" });
+                }
+                PluginAction::Check { name, exchange, identity, json } => {
+                    let service = open_service(&cli.project, None)?;
+                    service.attach_plugin_home(home.clone());
+                    let req = pm_service::PluginCheckRequest {
+                        plugin: name.clone(),
+                        exchange_id: *exchange,
+                        identity: identity.clone(),
+                        approval_id: None,
+                    };
+                    let r = service.plugin_check(&human_actor(None)?, req).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&r)?);
+                    } else {
+                        match r {
+                            pm_service::PluginCheckResult::Done { issues, exchange_ids, notes } => {
+                                out!("Sent {} request(s): exchanges {:?}", exchange_ids.len(), exchange_ids);
+                                for i in &issues {
+                                    out!(
+                                        "  [{}] {} — {} (exchange {})",
+                                        i.severity,
+                                        i.title,
+                                        i.evidence,
+                                        i.exchange_id
+                                    );
+                                }
+                                if issues.is_empty() {
+                                    out!("  no issues");
+                                }
+                                for n in notes {
+                                    out!("  note: {n}");
+                                }
+                            }
+                            pm_service::PluginCheckResult::Denied { reasons } => {
+                                anyhow::bail!("denied: {}", reasons.join("; "))
+                            }
+                            pm_service::PluginCheckResult::PendingApproval { summary, .. } => {
+                                out!("Needs approval: {summary}")
+                            }
+                        }
                     }
                 }
                 PluginAction::Remove { name } => {
@@ -1870,12 +2063,12 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Sequencer { exchange_id, locator, samples, identity } => {
+        Command::TokenAnalyzer { exchange_id, locator, samples, identity } => {
             let service = open_service(&cli.project, None)?;
             let r = service
-                .sequencer_run(
+                .token_analyzer_run(
                     &human_actor(None)?,
-                    pm_service::SequencerRequest {
+                    pm_service::TokenAnalyzerRequest {
                         exchange_id: *exchange_id,
                         locator: locator.clone(),
                         samples: Some(*samples),
@@ -1983,7 +2176,7 @@ async fn run() -> Result<()> {
                 _ => out!("{}", serde_json::to_string_pretty(&r)?),
             }
         }
-        Command::Intruder {
+        Command::Fuzzer {
             url,
             exchange,
             raw_file,
@@ -1997,8 +2190,9 @@ async fn run() -> Result<()> {
             json,
         } => {
             let service = open_service(&cli.project, None)?;
-            let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode))
-                .map_err(|_| anyhow::anyhow!("mode must be sniper, battering_ram, pitchfork or cluster_bomb"))?;
+            let mode: pm_service::pm_fuzz::Mode = serde_json::from_value(serde_json::json!(mode)).map_err(|_| {
+                anyhow::anyhow!("mode must be one_at_a_time, same_everywhere, paired or all_combinations")
+            })?;
             let set =
                 |list: Vec<String>, numbers: Option<String>, builtin: Option<String>| pm_service::pm_fuzz::PayloadSet {
                     list,
@@ -2017,9 +2211,9 @@ async fn run() -> Result<()> {
             }
             anyhow::ensure!(!sets.is_empty(), "give payloads with --payloads, --numbers or --builtin");
             let r = service
-                .intruder_run(
+                .fuzzer_run(
                     &human_actor(None)?,
-                    pm_service::IntruderRequest {
+                    pm_service::FuzzerRequest {
                         url: url.clone(),
                         exchange_id: *exchange,
                         raw: std::fs::read_to_string(raw_file)?,
@@ -2032,8 +2226,11 @@ async fn run() -> Result<()> {
                 )
                 .await?;
             match (&r, *json) {
-                (pm_service::IntruderResult::Done { baseline, results, anomalies }, false) => {
-                    let line = |label: &str, r: &pm_service::IntruderRow| -> Result<()> {
+                (pm_service::FuzzerResult::Done { baseline, results, anomalies, note }, false) => {
+                    if let Some(n) = note {
+                        out!("note: {n}");
+                    }
+                    let line = |label: &str, r: &pm_service::FuzzerRow| -> Result<()> {
                         out!(
                             "{label:>5}  #{:<6} {:>5}  {:>7} B  {:>6} ms  {}{}",
                             r.exchange_id,
@@ -2144,17 +2341,20 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, json } } => {
+        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, write_checks, json } } => {
             let service = open_service(&cli.project, None)?;
             let me = human_actor(None)?;
             let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
             let r = service.auto_access_control(&me).await?;
+            let graphql = service.graphql_object_access(&me).await?;
             let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
+            let writes = if *write_checks { Some(service.auto_write_checks(&me).await?) } else { None };
             if *json {
                 out!(
                     "{}",
                     serde_json::to_string_pretty(
-                        &serde_json::json!({ "discover": disc, "access_control": r, "scan": sweep })
+                        &serde_json::json!({ "discover": disc, "access_control": r, "graphql": graphql, "scan": sweep,
+                            "writes": writes })
                     )?
                 );
             } else {
@@ -2166,11 +2366,29 @@ async fn run() -> Result<()> {
                     if let Some((url, ops, sent)) = &d.openapi {
                         out!("  API description {url}: {ops} operations, {sent} GET examples sent");
                     }
+                    for s in &d.signups {
+                        out!("  sign-up example sent: {s}");
+                    }
+                    for s in &d.xml_examples {
+                        out!("  XML example sent: {s}");
+                    }
+                    if d.robots_found > 0 {
+                        out!("  {} page(s) found in folders robots.txt hides", d.robots_found);
+                    }
+                    for s in &d.versions {
+                        out!("  other API version answers: {s}");
+                    }
                     for s in d.skipped.iter().take(10) {
                         out!("  skipped {s}");
                     }
                 }
                 out!("{} candidates, {} checked, {} leaks", r.candidates, r.checks, r.leaks);
+                for l in &r.exposures {
+                    out!("  ? suspected exposure {}: {} (finding #{})", l.operation, l.evidence, l.finding_id);
+                }
+                for l in &graphql {
+                    out!("  ? suspected idor {}: {} (finding #{})", l.operation, l.evidence, l.finding_id);
+                }
                 for p in &r.results {
                     out!(
                         "  {} {}: {} reads {}'s data (finding #{})",
@@ -2193,6 +2411,18 @@ async fn run() -> Result<()> {
                     }
                     for s in sw.skipped.iter().take(10) {
                         out!("  skipped {s}");
+                    }
+                }
+                if let Some(w) = &writes {
+                    out!("write checks: {} operations, {} requests, {} leads", w.tried, w.requests, w.leads.len());
+                    if let Some(p) = &w.pending_approval {
+                        out!("  needs approval: {p}");
+                    }
+                    for l in &w.leads {
+                        out!("  ? suspected {} {} (finding #{})", l.check, l.operation, l.finding_id);
+                    }
+                    for n in &w.notes {
+                        out!("  {n}");
                     }
                 }
             }
@@ -2649,10 +2879,21 @@ async fn run() -> Result<()> {
             eprintln!("Users: alice/alice123, bob/bob123, admin/admin123. Log in with POST /api/login.");
             pm_demo::VulnShop::new().serve(l).await;
         }
-        Command::Audit { action: AuditAction::Verify } => {
+        Command::Audit { action: AuditAction::Verify { anchor } } => {
             let store = Store::open(&cli.project)?;
             let n = pm_service::verify_audit(&store)?;
-            out!("✓ audit log intact: {n} records, chain verified");
+            let records = store.audit_records()?;
+            let hex = |h: &[u8]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            if let Some(a) = anchor {
+                let a = a.trim().to_ascii_lowercase();
+                anyhow::ensure!(a.len() >= 12 && a.chars().all(|c| c.is_ascii_hexdigit()), "give 12+ hex digits");
+                let Some(at) = records.iter().position(|r| hex(&r.hash).starts_with(&a)) else {
+                    anyhow::bail!("anchor {a} is not in the audit log: records were removed from the end");
+                };
+                out!("✓ anchor found at record {} of {n}", at + 1);
+            }
+            let head = records.last().map(|r| hex(&r.hash)).unwrap_or_default();
+            out!("✓ audit log intact: {n} records, chain verified (head {})", &head[..head.len().min(24)]);
         }
         Command::Audit { action: AuditAction::List { limit, json } } => {
             let store = Store::open(&cli.project)?;
@@ -2768,7 +3009,7 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
             let tmp = temp_beside(&out, "partial");
             let opened = (|| -> Result<u64> {
                 let mut input = std::io::BufReader::new(std::fs::File::open(file)?);
-                let mut output = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+                let mut output = std::io::BufWriter::new(pm_store::create_private(&tmp)?);
                 Ok(pm_vault::open(&mut input, &mut output, &pass)?)
             })();
             match opened {
@@ -2786,16 +3027,26 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
     Ok(())
 }
 
-/// The user's enabled passive-check plugins; problems are reported, not fatal.
-fn user_plugins(cli: &Cli) -> Vec<pm_plugin::Installed> {
-    match home_dir(cli)
-        .map_err(|e| e.to_string())
-        .and_then(|h| pm_plugin::Registry::load(&h).map_err(|e| e.to_string()))
-    {
-        Ok(r) => r.enabled(),
-        Err(e) => {
-            eprintln!("plugins not loaded: {e}");
-            Vec::new()
-        }
+/// Points the service at the user's plugin registry (read when used, so
+/// changes apply without a restart); problems are reported, not fatal.
+fn attach_plugins(cli: &Cli, service: &pm_service::Service) {
+    match home_dir(cli) {
+        Ok(h) => service.attach_plugin_home(h),
+        Err(e) => eprintln!("plugins not loaded: {e}"),
     }
+}
+
+/// Writes a secret file readable by the owner only (where the OS has modes).
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path).with_context(|| format!("creating {}", path.display()))?;
+    f.write_all(data)?;
+    Ok(())
 }

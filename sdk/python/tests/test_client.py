@@ -84,6 +84,12 @@ class ClientTest(unittest.TestCase):
         self.assertIn("ssti", checks)
         self.assertEqual(self.pm.decode("JTNDc2NyaXB0JTNF")[-1]["output"], "<script>")
         self.assertIsInstance(self.pm.issues(), list)
+        plugins = self.pm.plugins()
+        self.assertEqual(plugins["plugins"], [])
+        self.assertIn("summary", plugins["sandbox"])
+        with self.assertRaises(ApiError) as nope:
+            self.pm.plugin_check("missing", ex)
+        self.assertEqual(nope.exception.status, 404)
         with self.assertRaises(ApiError) as e:
             self.pm.exchange(999999)
         self.assertEqual(e.exception.status, 404)
@@ -127,6 +133,30 @@ class ClientTest(unittest.TestCase):
         self.assertTrue(hits and hits[0]["part"] == "response")
         origins = [s["origin"] for s in self.pm.site_map()]
         self.assertIn(self.url, origins)
+
+    def test_organizer_engagement_tools_and_request_helpers(self):
+        self.get("/")
+        ex = self.get("/api/products")
+        item = self.pm.organizer_add(ex, "look at this")
+        self.pm.organizer_update(item["id"], status="done")
+        self.assertEqual([i["id"] for i in self.pm.organizer(status="done")], [item["id"]])
+        self.pm.organizer_delete(item["id"])
+        self.assertEqual(self.pm.organizer(status="done"), [])
+        self.assertTrue(self.pm.engage_analyze(in_scope=False)["requests"] > 0)
+        self.assertIn("framable", self.pm.clickjacking(ex))
+        self.assertIn("<form", self.pm.csrf_poc(ex, technique="form"))
+        post = self.pm.request_transform("GET /a?x=1 HTTP/1.1\r\nHost: h\r\n\r\n")
+        self.assertTrue(post.startswith("POST /a ") and post.endswith("x=1"))
+        self.assertTrue(self.pm.request_transform(post, op="convert_body", to="json").endswith('{"x":"1"}'))
+        self.assertIn("hits", self.pm.search("coffee", part="response_body", invert=True))
+        self.assertIn("hits", self.pm.search_ws("anything"))
+        self.assertIn("requests.request(", self.pm.code(ex, "python"))
+        me = {"url": self.url, "raw": "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n"}
+        group = self.pm.replay_group([me, me])
+        self.assertEqual([r["status"] for r in group["results"]], [200, 200])
+        self.assertTrue(any(p["id"] == "unhide_fields" for p in self.pm.match_replace_presets()))
+        self.pm.custom_check_save("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n")
+        self.assertEqual(len(self.pm.custom_scan(ex, checks=["products-ok"])["findings"]), 1)
 
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.

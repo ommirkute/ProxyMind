@@ -9,6 +9,7 @@ interface Analysis {
   samples: number; unique: number; min_len: number; max_len: number; alphabet: string;
   estimated_bits: number; sample_limit_bits: number; constant_positions: number[]; sequential_step?: number;
   rating: string; notes: string[];
+  bit_tests?: { bits: number; bits_per_char: number; tests: { name: string; passed: boolean; detail: string }[] };
 }
 type SeqResult =
   | { status: "done"; requests: number; found: number; analysis: Analysis; exchange_ids: number[] }
@@ -20,22 +21,22 @@ const OPS = ["base64_decode", "base64_encode", "base64url_decode", "url_decode",
 export default function Tools() {
   return (
     <div className="content">
-      <Decoder />
-      <Comparer />
-      <Sequencer />
+      <Codec />
+      <Diff />
+      <TokenAnalyzer />
     </div>
   );
 }
 
-function Decoder() {
+function Codec() {
   const [input, setInput] = useState("");
   const [ops, setOps] = useState<string[]>([]);
   const [steps, setSteps] = useState<Step[] | null>(null);
   const action = useAction();
   const run = () => action.run(async () => setSteps((await api.post<{ steps: Step[] }>("/tools/decode", { input, ops })).steps));
   return (
-    <Panel title="Decoder">
-      <textarea aria-label="Decoder input" className="mono" rows={3} value={input} onChange={(e) => setInput(e.target.value)} style={{ width: "100%" }} placeholder="text, base64, a JWT, %-encoded…" />
+    <Panel title="Codec">
+      <textarea aria-label="Codec input" className="mono" rows={3} value={input} onChange={(e) => setInput(e.target.value)} style={{ width: "100%" }} placeholder="text, base64, a JWT, %-encoded…" />
       <div className="row small" style={{ marginTop: 6 }}>
         <select aria-label="Add operation" value="" onChange={(e) => e.target.value && setOps([...ops, e.target.value])}>
           <option value="">add a step…</option>
@@ -69,14 +70,14 @@ function DiffView({ d }: { d: LineDiff }) {
   );
 }
 
-function Comparer() {
+function Diff() {
   const [a, setA] = useState("");
   const [b, setB] = useState("");
   const [r, setR] = useState<{ response_semantic?: { similarity: number; summary: string }; request_lines: LineDiff; response_lines: LineDiff } | null>(null);
   const action = useAction();
   const run = () => action.run(async () => setR(await api.post("/tools/compare", { a: Number(a), b: Number(b) })));
   return (
-    <Panel title="Comparer">
+    <Panel title="Diff">
       <div className="row small">
         <span>Exchange</span><input aria-label="Compare A" value={a} onChange={(e) => setA(e.target.value)} style={{ width: 70 }} />
         <span>with</span><input aria-label="Compare B" value={b} onChange={(e) => setB(e.target.value)} style={{ width: 70 }} />
@@ -96,33 +97,44 @@ function Comparer() {
   );
 }
 
-function Sequencer() {
+function TokenAnalyzer() {
   const [ex, setEx] = useState("");
   const [locator, setLocator] = useState("cookie:session");
   const [samples, setSamples] = useState(100);
   const [r, setR] = useState<SeqResult | null>(null);
   const action = useAction();
-  const run = () => action.run(async () => setR(await api.post<SeqResult>("/tools/sequencer", { exchange_id: Number(ex), locator, samples })));
+  const run = () => action.run(async () => setR(await api.post<SeqResult>("/tools/token-analyzer", { exchange_id: Number(ex), locator, samples })));
   return (
-    <Panel title="Sequencer">
+    <Panel title="Token analyzer">
       <div className="row small">
         <span>Re-send exchange</span><input aria-label="Token exchange" value={ex} onChange={(e) => setEx(e.target.value)} style={{ width: 70 }} />
         <input aria-label="Samples" type="number" min={10} max={500} value={samples} onChange={(e) => setSamples(Number(e.target.value))} style={{ width: 70 }} />
         <span>times; token at</span>
         <input aria-label="Token locator" className="mono" value={locator} onChange={(e) => setLocator(e.target.value)} style={{ width: 220 }} title="cookie:<name>, header:<name>, json:/pointer or between:<a>|<b>" />
-        <button className="btn primary" disabled={!ex || action.busy} onClick={run} data-testid="sequencer">{action.busy ? "Collecting…" : "Analyse"}</button>
+        <button className="btn primary" disabled={!ex || action.busy} onClick={run} data-testid="token-analyzer">{action.busy ? "Collecting…" : "Analyse"}</button>
       </div>
       <p className="small muted">Shows statistics only; the tokens are live secrets. It can show a token is weak, never that it is strong.</p>
       <ErrorBox error={action.error} />
       {r?.status === "pending_approval" && <div className="notice">Needs approval: {r.summary}</div>}
       {r?.status === "denied" && <div className="error">Denied: {r.reasons.join("; ")}</div>}
       {r?.status === "done" && (
-        <div data-testid="sequencer-result">
+        <div data-testid="token-analyzer-result">
           <div className="row"><Chip value={r.analysis.rating} /><strong>~{r.analysis.estimated_bits} bits</strong><span className="small muted">({r.found} of {r.requests} responses had a token; a sample this size can show at most {r.analysis.sample_limit_bits} bits)</span></div>
           <ul className="small">
             <li>{r.analysis.unique} unique, length {r.analysis.min_len}–{r.analysis.max_len}, alphabet <code>{r.analysis.alphabet}</code></li>
             {r.analysis.notes.map((n) => <li key={n}>{n}</li>)}
           </ul>
+          {r.analysis.bit_tests && (
+            <table className="grid" data-testid="bit-tests">
+              <caption className="small muted">{r.analysis.bit_tests.bits} bits ({r.analysis.bit_tests.bits_per_char} per character)</caption>
+              <thead><tr><th>Test</th><th>Result</th><th>Detail</th></tr></thead>
+              <tbody>
+                {r.analysis.bit_tests.tests.map((t) => (
+                  <tr key={t.name}><td>{t.name}</td><td><Chip value={t.passed ? "pass" : "fail"} /></td><td className="small">{t.detail}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <div className="small muted">Requests: {r.exchange_ids.slice(0, 5).map((e) => <span key={e}><ExchangeLink id={e} /> </span>)}…</div>
         </div>
       )}

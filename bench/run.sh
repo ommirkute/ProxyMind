@@ -78,7 +78,7 @@ PIDS+=($!)
 sleep 1
 
 step "automatic access-control pass"
-"${P[@]}" bench auto | tee "$OUT/$APP-auto.txt" >&2
+"${P[@]}" bench auto --write-checks | tee "$OUT/$APP-auto.txt" >&2
 
 if [ -n "${BENCH_AGENT:-}" ]; then
   step "agent: $BENCH_AGENT"

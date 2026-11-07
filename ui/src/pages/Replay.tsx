@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, originOf, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
-import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav } from "../components";
+import { api, originOf, toast, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
+import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, copyText, useAction, useLoad, useNav } from "../components";
 import {
   cookies,
   decodeComponent,
@@ -14,6 +14,9 @@ import {
   setHeader,
   setJsonParam,
   setQueryParam,
+  setAuthority,
+  setRequestLine,
+  toProtocol,
 } from "../http";
 
 interface RaceGroup {
@@ -40,7 +43,7 @@ interface Step {
   notes?: string[];
 }
 
-/** A Repeater tab, saved in the project (`/api/v1/ui/repeater`). */
+/** A Replay tab, saved in the project (`/api/v1/ui/replay`). */
 interface RTab {
   id: string;
   name: string;
@@ -80,7 +83,7 @@ const blank = (n: number): RTab => ({
   pos: -1,
 });
 
-export default function Repeater() {
+export default function Replay() {
   const { arg, go } = useNav();
   const [state, setState] = useState<Saved | null>(null);
   const [tmp, setTmp] = useState<Record<string, Transient>>({});
@@ -91,6 +94,8 @@ export default function Repeater() {
   const [curlWarnings, setCurlWarnings] = useState<string[]>([]);
   const [raceCount, setRaceCount] = useState(10);
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
+  const [groupOpen, setGroupOpen] = useState(false);
+  const caret = useRef<[number, number] | null>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
   const loaded = useRef(false);
@@ -98,7 +103,9 @@ export default function Repeater() {
   // Load saved tabs once.
   useEffect(() => {
     api
-      .get<Saved | null>("/ui/repeater")
+      .get<Saved | null>("/ui/replay")
+      // Tabs saved before the rename live under the old key.
+      .then((s) => (s?.tabs?.length ? s : api.get<Saved | null>("/ui/repeater").catch(() => null)))
       .then((s) => {
         const tabs = s?.tabs?.length ? s.tabs : [blank(1)];
         setState({ tabs, active: tabs.some((t) => t.id === s?.active) ? s!.active : tabs[0].id });
@@ -114,7 +121,7 @@ export default function Repeater() {
   // Save (debounced) whenever tabs change.
   useEffect(() => {
     if (!state || !loaded.current) return;
-    const t = setTimeout(() => api.put("/ui/repeater", state).catch(() => {}), 600);
+    const t = setTimeout(() => api.put("/ui/replay", state).catch(() => {}), 600);
     return () => clearTimeout(t);
   }, [state]);
 
@@ -127,11 +134,11 @@ export default function Repeater() {
     });
   }, []);
 
-  // A request sent here from History (#/repeater/<id>) or another page opens in a new tab.
+  // A request sent here from History (#/replay/<id>) or another page opens in a new tab.
   useEffect(() => {
     if (!state) return;
     if (arg) {
-      window.history.replaceState(null, "", "#/repeater");
+      window.history.replaceState(null, "", "#/replay");
       api
         .get<ExchangeDetail>(`/exchanges/${arg}`)
         .then((ex) => addTab({ name: `#${arg}`, url: originOf(ex.summary), raw: ex.request.replace(/\r\n/g, "\n") }))
@@ -139,9 +146,9 @@ export default function Repeater() {
       return;
     }
     try {
-      const draft = sessionStorage.getItem("pm_repeater_draft");
+      const draft = sessionStorage.getItem("pm_replay_draft");
       if (draft) {
-        sessionStorage.removeItem("pm_repeater_draft");
+        sessionStorage.removeItem("pm_replay_draft");
         const d = JSON.parse(draft) as { url: string; raw: string; name?: string };
         addTab({ name: d.name ?? "draft", url: d.url, raw: d.raw.replace(/\r\n/g, "\n") });
       }
@@ -273,8 +280,8 @@ export default function Repeater() {
   };
 
   return (
-    <div className="content repeater">
-      <div className="rtabs" role="tablist" aria-label="Repeater tabs">
+    <div className="content replay">
+      <div className="rtabs" role="tablist" aria-label="Replay tabs">
         {state.tabs.map((x) => (
           <div key={x.id} role="tab" aria-selected={x.id === tab.id} className={`rtab ${x.id === tab.id ? "active" : ""}`}
             onClick={() => setState({ ...state, active: x.id })}
@@ -292,7 +299,7 @@ export default function Repeater() {
         <button className="rtab add" title="Duplicate this tab" onClick={() => addTab({ name: `${tab.name} copy`, url: tab.url, raw: tab.raw, identity: tab.identity })}>⧉</button>
       </div>
 
-      <div className="row repeater-bar">
+      <div className="row replay-bar">
         <button className="btn primary" onClick={() => send()} disabled={action.busy || !tab.url} data-testid="send" title="Ctrl+Enter">
           {action.busy ? "Sending…" : t.approval ? "Send approved" : "Send"}
         </button>
@@ -313,7 +320,49 @@ export default function Repeater() {
         <label className="small row" style={{ gap: 4 }} title="Follow same-origin redirects automatically (up to 5)">
           <input type="checkbox" checked={tab.autoFollow} onChange={(e) => update({ autoFollow: e.target.checked })} /> follow redirects
         </label>
+        <select
+          aria-label="Change request"
+          data-testid="request-transform"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (!v) return;
+            if (v.startsWith("oast:")) {
+              action.run(async () => {
+                const p = await api.post<{ http_url?: string; dns_name?: string; email?: string; token: string }>("/collaborator/payloads", { note: `Replay tab ${tab.name}` });
+                const value = (v === "oast:dns" ? p.dns_name : v === "oast:email" ? p.email : p.http_url) ?? p.http_url ?? p.dns_name ?? p.email ?? p.token;
+                const [a, b] = caret.current ?? [tab.raw.length, tab.raw.length];
+                editRaw(tab.raw.slice(0, a) + value + tab.raw.slice(b));
+                toast("Collaborator payload inserted");
+              });
+              return;
+            }
+            if (v.startsWith("code:")) {
+              action.run(async () => {
+                const r = await api.post<{ code: string }>("/tools/code", { url: tab.url, raw: tab.raw, lang: v.slice(5) });
+                await copyText(r.code);
+                toast("Code copied");
+              });
+              return;
+            }
+            const body = v === "method" ? { op: "change_method", raw: tab.raw } : { op: "convert_body", raw: tab.raw, to: v };
+            action.run(async () => editRaw((await api.post<{ raw: string }>("/tools/request-transform", body)).raw));
+          }}
+        >
+          <option value="">Request…</option>
+          <option value="method">Change method (GET ⇄ POST)</option>
+          <option value="url_encoded">Body as URL-encoded form</option>
+          <option value="multipart">Body as multipart form</option>
+          <option value="json">Body as JSON</option>
+          <option value="oast:http">Insert Collaborator URL</option>
+          <option value="oast:dns">Insert Collaborator DNS name</option>
+          <option value="oast:email">Insert Collaborator email</option>
+          <option value="code:python" disabled={!tab.url}>Copy as Python requests</option>
+          <option value="code:javascript" disabled={!tab.url}>Copy as JavaScript fetch</option>
+          <option value="code:powershell" disabled={!tab.url}>Copy as PowerShell</option>
+        </select>
         <button className="btn" onClick={() => setCurlOpen((o) => !o)} data-testid="paste-curl">Paste cURL…</button>
+        <button className="btn" onClick={() => setGroupOpen((o) => !o)} aria-pressed={groupOpen} data-testid="group-open">Send group…</button>
         <button className="btn" onClick={() => setInspector((i) => !i)} aria-pressed={inspector}>Inspector</button>
       </div>
       {curlOpen && (
@@ -324,12 +373,13 @@ export default function Repeater() {
         </div>
       )}
       {curlWarnings.length > 0 && <div className="notice small">Ignored: {curlWarnings.join("; ")}</div>}
+      {groupOpen && <GroupPanel tabs={state.tabs} current={tab} goApprovals={() => go("approvals")} />}
       <ErrorBox error={action.error} />
 
-      <div className={`repeater-grid ${inspector ? "" : "no-inspector"}`}>
+      <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
         <section className="pane">
           <h3 className="pane-title">Request</h3>
-          <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} spellCheck={false} />
+          <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
           <div className="row small race-bar">
             <strong>Race</strong>
             <label>
@@ -371,14 +421,14 @@ export default function Repeater() {
                 decodedBody={detail?.view.response?.body?.text}
                 loadB64={step.exchange_id != null ? () => api.get<ExchangeDetail>(`/exchanges/${step.exchange_id}?bytes=1`).then((d) => d.response_b64) : undefined}
                 empty={step.error ? "No response" : "Loading…"}
-                testid="repeater-response"
+                testid="replay-response"
               />
             </>
           )}
           {!t.race && !step && !t.outcome && <p className="muted">Nothing sent from this tab yet. Ctrl+Enter sends.</p>}
         </section>
 
-        {inspector && <Inspector raw={tab.raw} onChange={editRaw} />}
+        {inspector && <Inspector raw={tab.raw} onChange={editRaw} url={tab.url} />}
       </div>
     </div>
   );
@@ -403,8 +453,10 @@ function followTarget(url: string, raw: string, response: string | null | undefi
 }
 
 /** Parameters, cookies and headers of the request, editable in place. */
-function Inspector({ raw, onChange }: { raw: string; onChange: (raw: string) => void }) {
+function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string) => void; url: string }) {
   const p = parseRequest(raw);
+  const h2 = /^HTTP\/2(\.0)?$/i.test(p.version);
+  const host = p.headers.find((h) => h.name.toLowerCase() === "host")?.value ?? "";
   const q = queryParams(p);
   const form = formParams(p);
   const json = jsonParams(p);
@@ -435,7 +487,19 @@ function Inspector({ raw, onChange }: { raw: string; onChange: (raw: string) => 
   return (
     <section className="pane inspector" aria-label="Inspector">
       <h3 className="pane-title">Inspector</h3>
-      <div className="small mono" style={{ marginBottom: 6 }}>{p.method} {p.target.split("?")[0]}</div>
+      <div className="row small" style={{ marginBottom: 6 }}>
+        <select aria-label="Protocol" value={h2 ? "HTTP/2" : "HTTP/1.1"} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/2" | "HTTP/1.1"))}>
+          <option value="HTTP/1.1">HTTP/1.1</option>
+          <option value="HTTP/2">HTTP/2</option>
+        </select>
+        <span className="mono">{p.method} {p.target.split("?")[0]}</span>
+      </div>
+      {section(h2 ? "HTTP/2 pseudo-headers" : "Request line", [
+        { name: h2 ? ":method" : "method", value: p.method, set: (v: string) => onChange(setRequestLine(raw, { method: v })) },
+        { name: h2 ? ":path" : "path", value: p.target, set: (v: string) => onChange(setRequestLine(raw, { target: v })) },
+        ...(h2 ? [{ name: ":authority", value: host, set: (v: string) => onChange(setAuthority(raw, v)) }] : []),
+      ])}
+      {h2 && <div className="small muted">:scheme is {url.startsWith("http://") ? "http" : "https"} (from the target); :authority is the host header.</div>}
       {section("Query parameters", q.map((x, i) => ({ ...x, decoded: decodeComponent(x.value), set: (v: string) => onChange(setQueryParam(raw, i, v)) })))}
       {section("Body parameters", form.map((x, i) => ({ ...x, decoded: decodeComponent(x.value), set: (v: string) => onChange(setFormParam(raw, i, v)) })))}
       {section("JSON fields", json.map((x) => ({ ...x, set: (v: string) => onChange(setJsonParam(raw, x.name, v)) })))}
@@ -481,6 +545,87 @@ function RaceView({ race, goApprovals }: { race: RaceResult; goApprovals: () => 
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+type GroupResult =
+  | { status: "done"; mode: "sequence" | "parallel"; parallel?: "single_packet" | "last_byte"; results: { index: number; name?: string; exchange_id: number | null; status: number | null; elapsed_ms: number; error?: string }[] }
+  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
+  | { status: "denied"; reasons: string[] };
+
+/** Several tabs sent together: one after another, or at the same moment (one server). */
+function GroupPanel({ tabs, current, goApprovals }: { tabs: RTab[]; current: RTab; goApprovals: () => void }) {
+  const sameServer = (t: RTab) => t.url.replace(/\/+$/, "") === current.url.replace(/\/+$/, "");
+  const [picked, setPicked] = useState<string[]>(() => tabs.filter(sameServer).map((t) => t.id));
+  const [mode, setMode] = useState<"sequence" | "parallel">("sequence");
+  const [stop, setStop] = useState(false);
+  const [approval, setApproval] = useState<string | undefined>();
+  const [result, setResult] = useState<GroupResult | null>(null);
+  const action = useAction();
+  const chosen = tabs.filter((t) => picked.includes(t.id));
+  const toggle = (id: string) => {
+    setApproval(undefined);
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  };
+  const send = () =>
+    action.run(async () => {
+      const r = await api.post<GroupResult>("/replay/group", {
+        requests: chosen.map((t) => ({ url: t.url, raw: t.raw, name: t.name })),
+        mode,
+        stop_on_error: stop,
+        identity: current.identity || undefined,
+        fix_content_length: current.fixCl,
+        approval_id: approval,
+      });
+      setResult(r);
+      setApproval(r.status === "pending_approval" ? r.approval_id : undefined);
+    });
+  return (
+    <div className="notice" data-testid="group-panel" style={{ marginBottom: 8 }}>
+      <div className="row small" style={{ flexWrap: "wrap" }}>
+        <strong>Send group</strong>
+        {tabs.map((t) => (
+          <label key={t.id} title={t.url} style={{ opacity: sameServer(t) ? 1 : 0.5 }}>
+            <input type="checkbox" aria-label={`Group tab ${t.name}`} checked={picked.includes(t.id)} onChange={() => toggle(t.id)} /> {t.name}
+          </label>
+        ))}
+      </div>
+      <div className="row small">
+        <select aria-label="Group mode" value={mode} onChange={(e) => { setMode(e.target.value as typeof mode); setApproval(undefined); }}>
+          <option value="sequence">one after another</option>
+          <option value="parallel">all at the same moment</option>
+        </select>
+        {mode === "sequence" && <label><input type="checkbox" checked={stop} onChange={(e) => setStop(e.target.checked)} /> stop at the first failure</label>}
+        <button className="btn primary" data-testid="group-send" disabled={chosen.length < 2 || action.busy} onClick={send}>
+          {approval ? "Send approved group" : `Send ${chosen.length} tabs`}
+        </button>
+        <span className="muted">All tabs in a group go to one server{current.url ? ` (${current.url})` : ""}, as this tab's identity.</span>
+      </div>
+      <ErrorBox error={action.error} />
+      {result?.status === "denied" && <div className="error">Denied by the rules of engagement: {result.reasons.join("; ")}</div>}
+      {result?.status === "pending_approval" && (
+        <div className="small">
+          {result.summary} needs approval ({result.reasons.join("; ")}). Approve <strong>{result.approval_id}</strong> on the{" "}
+          <a href="#" onClick={(e) => { e.preventDefault(); goApprovals(); }}>Approvals</a> page, then send again.
+        </div>
+      )}
+      {result?.status === "done" && (
+        <table className="grid" data-testid="group-result">
+          <thead><tr><th>Tab</th><th>Status</th><th>Time</th><th>Exchange</th></tr></thead>
+          <tbody>
+            {result.results.map((x) => (
+              <tr key={x.index}>
+                <td>{x.name ?? x.index + 1}</td>
+                <td>{x.error ? <span className="bad">{x.error}</span> : <StatusCode status={x.status} />}</td>
+                <td className="small muted">{x.elapsed_ms} ms</td>
+                <td><ExchangeLink id={x.exchange_id} /></td>
+              </tr>
+            ))}
+          </tbody>
+          {result.parallel && <caption className="small muted">sent {result.parallel === "single_packet" ? "in one HTTP/2 packet" : "with last-byte sync"}</caption>}
+        </table>
+      )}
     </div>
   );
 }

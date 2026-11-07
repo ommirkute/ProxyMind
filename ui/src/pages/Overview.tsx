@@ -142,8 +142,8 @@ export default function Overview() {
           <Panel title="Start testing">
             <div className="quick">
               <a href="#/issues" onClick={link("issues")}><Icon name="scan" size={18} /><span>Crawl &amp; audit<small>Scan a whole site</small></span></a>
-              <a href="#/repeater" onClick={link("repeater")}><Icon name="repeater" size={18} /><span>Repeater<small>Edit and resend</small></span></a>
-              <a href="#/intruder" onClick={link("intruder")}><Icon name="intruder" size={18} /><span>Intruder<small>Fuzz parameters</small></span></a>
+              <a href="#/replay" onClick={link("replay")}><Icon name="replay" size={18} /><span>Replay<small>Edit and resend</small></span></a>
+              <a href="#/fuzzer" onClick={link("fuzzer")}><Icon name="fuzzer" size={18} /><span>Fuzzer<small>Fuzz parameters</small></span></a>
               <a href="#/authz" onClick={link("authz")}><Icon name="authz" size={18} /><span>Access control<small>Compare identities</small></span></a>
             </div>
           </Panel>

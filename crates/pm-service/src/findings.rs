@@ -183,6 +183,20 @@ impl Service {
 
     pub fn finding_update(&self, actor: &Actor, u: FindingUpdate) -> Result<Value> {
         let current = self.finding_get(u.id)?;
+        // A finding a person has judged (or a proof confirmed) is theirs: an
+        // agent, possibly steered by target content, can't reopen, downgrade
+        // or reword it. It can still attach evidence.
+        let settled = current["status"].as_str().is_some_and(|s| s != "suspected");
+        if actor.kind != ActorKind::Human
+            && settled
+            && (u.status.is_some() || u.severity.is_some() || u.description.is_some())
+        {
+            return Err(ServiceError::Invalid(format!(
+                "finding {} is {}: only a person can change it (agents may add evidence)",
+                u.id,
+                current["status"].as_str().unwrap_or_default()
+            )));
+        }
         let mut changes = serde_json::Map::new();
         if let Some(st) = &u.status {
             let allowed: &[&str] = if actor.kind == ActorKind::Human { HUMAN_STATUSES } else { &["suspected"] };

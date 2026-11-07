@@ -61,8 +61,8 @@ interface MacroRun {
   variables: Record<string, string>;
 }
 
-const TOOLS = ["replay", "intruder", "scan", "crawl", "discover", "sequencer", "proof", "authz", "graphql", "openapi"];
-const TOOL_LABEL: Record<string, string> = { replay: "Repeater", scan: "Scanner", discover: "Discovery" };
+const TOOLS = ["replay", "fuzzer", "scan", "crawl", "discover", "token_analyzer", "proof", "authz", "graphql", "openapi"];
+const TOOL_LABEL: Record<string, string> = { replay: "Replay", scan: "Scanner", discover: "Discovery" };
 
 const NEW_RULE: Rule = {
   name: "Stay logged in",
@@ -106,7 +106,7 @@ export default function Sessions() {
   return (
     <div className="content">
       <p className="muted small" style={{ marginTop: 0 }}>
-        Keep Repeater, Intruder, scans and agents logged in. Rules cover requests sent as recorded (not as a test
+        Keep Replay, Fuzzer, scans and agents logged in. Rules cover requests sent as recorded (not as a test
         identity: identities have their own login recipes). Macro requests go through the rules of engagement as{" "}
         {saved.data?.saved_by || "you"} and appear in HTTP history as <code>macro</code>.
       </p>
