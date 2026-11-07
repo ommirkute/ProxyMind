@@ -18,6 +18,7 @@ mod engage;
 mod findings;
 mod fuzzer;
 mod graphql;
+mod graphql_authz;
 mod group;
 mod hidden_paths;
 mod history;

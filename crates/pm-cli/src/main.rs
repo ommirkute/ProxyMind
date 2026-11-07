@@ -2346,13 +2346,15 @@ async fn run() -> Result<()> {
             let me = human_actor(None)?;
             let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
             let r = service.auto_access_control(&me).await?;
+            let graphql = service.graphql_object_access(&me).await?;
             let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
             let writes = if *write_checks { Some(service.auto_write_checks(&me).await?) } else { None };
             if *json {
                 out!(
                     "{}",
                     serde_json::to_string_pretty(
-                        &serde_json::json!({ "discover": disc, "access_control": r, "scan": sweep, "writes": writes })
+                        &serde_json::json!({ "discover": disc, "access_control": r, "graphql": graphql, "scan": sweep,
+                            "writes": writes })
                     )?
                 );
             } else {
@@ -2383,6 +2385,9 @@ async fn run() -> Result<()> {
                 out!("{} candidates, {} checked, {} leaks", r.candidates, r.checks, r.leaks);
                 for l in &r.exposures {
                     out!("  ? suspected exposure {}: {} (finding #{})", l.operation, l.evidence, l.finding_id);
+                }
+                for l in &graphql {
+                    out!("  ? suspected idor {}: {} (finding #{})", l.operation, l.evidence, l.finding_id);
                 }
                 for p in &r.results {
                     out!(
