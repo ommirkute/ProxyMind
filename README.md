@@ -219,9 +219,9 @@ The automatic pass (`proxymind bench auto`) runs against deliberately vulnerable
 |---|---|---|
 | [OWASP Juice Shop](https://github.com/juice-shop/juice-shop) | **9 / 9** | 0 |
 | [VAmPI](https://github.com/erev0s/VAmPI) | **8 / 8** | 0 |
-| VulnShop (built in) | **32 / 38** | 0 |
+| VulnShop (built in) | **33 / 38** | 0 |
 
-VulnShop's remaining six are on pages nothing links to or describes, or need a code the app never reveals: that's what agents are for. Details and how to run it yourself: [bench/README.md](bench/README.md).
+VulnShop's remaining five are on pages nothing links to or describes, or need a code the app never reveals: that's what agents are for. Details and how to run it yourself: [bench/README.md](bench/README.md).
 
 ---
 
