@@ -9,6 +9,7 @@ interface Analysis {
 }
 interface Comment { kind: string; text: string; url: string; exchange_id: number; line: number; count: number }
 interface Script { kind: string; src?: string; snippet: string; length: number; url: string; exchange_id: number; count: number }
+interface JsEndpoint { url: string; method?: string; params?: string[]; script?: boolean; known: boolean; external?: boolean; exchange_id: number; count: number }
 interface Summary { id: number; method: string; host: string; path: string; status: number | null }
 interface Clickjack { framable: boolean; reasons: string[]; poc: string }
 
@@ -16,6 +17,7 @@ const TOOLS = [
   ["analyze", "Analyze target"],
   ["comments", "Find comments"],
   ["scripts", "Find scripts"],
+  ["endpoints", "JS endpoints"],
   ["refs", "Find references"],
   ["csrf", "CSRF PoC"],
   ["clickjack", "Clickjacking"],
@@ -52,7 +54,7 @@ export default function Engage() {
             <button key={k} role="tab" className={`tab ${tool === k ? "active" : ""}`} onClick={() => setTool(k)} data-testid={`engage-tab-${k}`}>{label}</button>
           ))}
         </div>
-        {["analyze", "comments", "scripts"].includes(tool) && (
+        {["analyze", "comments", "scripts", "endpoints"].includes(tool) && (
           <div className="row small">
             <input aria-label="Engage host" placeholder="host contains (optional)" value={host} onChange={(e) => setHost(e.target.value)} style={{ width: 220 }} />
             <label><input type="checkbox" checked={inScope} onChange={(e) => setInScope(e.target.checked)} /> in scope only</label>
@@ -70,6 +72,7 @@ export default function Engage() {
       {tool === "analyze" && <AnalyzeTarget filter={filter} />}
       {tool === "comments" && <Comments filter={filter} />}
       {tool === "scripts" && <Scripts filter={filter} />}
+      {tool === "endpoints" && <JsEndpoints filter={filter} />}
       {tool === "refs" && <References exchange={exchange} />}
       {tool === "csrf" && <CsrfPoc exchange={exchange} />}
       {tool === "clickjack" && <ClickjackTest exchange={exchange} />}
@@ -141,6 +144,58 @@ function Comments({ filter }: { filter: object }) {
                 <td className="mono small">{c.text}</td>
                 <td className="small"><ExchangeLink id={c.exchange_id} /> {c.url} <span className="muted">line {c.line}</span></td>
                 <td>{c.count}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
+    </Panel>
+  );
+}
+
+/** Endpoints the app's JavaScript mentions, new ones (not seen in traffic) first. */
+function JsEndpoints({ filter }: { filter: object }) {
+  const [r, setR] = useState<JsEndpoint[] | null>(null);
+  const [onlyNew, setOnlyNew] = useState(true);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<JsEndpoint[]>("/engage/js-endpoints", filter)));
+  const shown = (r ?? []).filter((e) => !onlyNew || (!e.known && !e.script));
+  const fresh = (r ?? []).filter((e) => !e.known && !e.script && !e.external).length;
+  return (
+    <Panel
+      title="Endpoints in JavaScript"
+      actions={<>
+        <label className="small"><input type="checkbox" checked={onlyNew} onChange={(e) => setOnlyNew(e.target.checked)} /> new only</label>
+        <button className="btn primary" onClick={run} disabled={action.busy} data-testid="engage-endpoints">Find endpoints</button>
+      </>}
+    >
+      <p className="small muted">
+        API paths and URLs mentioned in recorded scripts and inline page scripts. <b>New</b> ones haven't appeared in
+        traffic yet: often routes no page links to. <code>{"{id}"}</code> marks a value the script fills in. The
+        automatic pass (<code>proxymind bench auto</code>) also fetches the scripts pages reference and checks the new
+        ones for you.
+      </p>
+      <ErrorBox error={action.error} />
+      {r && (
+        <p className="small" data-testid="engage-endpoint-summary">
+          {r.length} endpoint(s), <b>{fresh}</b> new on the same site, {r.filter((e) => e.script).length} script(s).
+        </p>
+      )}
+      {r && (shown.length === 0 ? <Empty>{r.length === 0 ? "No endpoints in recorded scripts. Browse the app first (scripts load as you go)." : "Nothing new: every endpoint has been seen in traffic."}</Empty> : (
+        <table className="grid" data-testid="engage-endpoint-list">
+          <thead><tr><th>Method</th><th>Endpoint</th><th>Parameters</th><th></th><th>Mentioned in</th><th></th></tr></thead>
+          <tbody>
+            {shown.map((e, i) => (
+              <tr key={i}>
+                <td className="mono small">{e.method ?? "?"}</td>
+                <td className="mono small" style={{ wordBreak: "break-all" }}>{e.url}</td>
+                <td className="mono small">{(e.params ?? []).join(", ")}</td>
+                <td>
+                  {e.script ? <Chip value="script" /> : e.known ? <Chip value="seen" /> : <Chip value="new" />}
+                  {e.external && <> <Chip value="other site" /></>}
+                </td>
+                <td className="small"><ExchangeLink id={e.exchange_id} />{e.count > 1 && <span className="muted"> +{e.count - 1}</span>}</td>
+                <td><button className="btn" onClick={() => { copyText(e.url); toast("URL copied"); }}>Copy URL</button></td>
               </tr>
             ))}
           </tbody>

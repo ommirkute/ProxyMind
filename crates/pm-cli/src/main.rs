@@ -119,6 +119,11 @@ enum Command {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// Check for a newer ProxyMind release (off unless you turn it on or ask).
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
     /// The built-in AI assistant (local model by default).
     Assistant {
         #[command(subcommand)]
@@ -879,6 +884,18 @@ enum ApprovalAction {
 }
 
 #[derive(Subcommand)]
+enum UpdateAction {
+    /// Ask GitHub now whether a newer release is out (one GET of the public releases list).
+    Check,
+    /// Show the setting and the last answer (sends nothing).
+    Status,
+    /// Let the UI check once a day.
+    On,
+    /// Stop the daily check.
+    Off,
+}
+
+#[derive(Subcommand)]
 enum AssistantAction {
     /// Show the settings and whether they can be used.
     Show,
@@ -1356,6 +1373,26 @@ async fn run() -> Result<()> {
         Command::Roe { action: RoeAction::Use { file } } => {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
+        }
+        Command::Update { action } => {
+            // Works outside a project: the setting lives in the user's home, and
+            // the check isn't target traffic (it never goes through the scope).
+            let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://example.invalid/\"]\n")?;
+            let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
+            attach_plugins(&cli, &service);
+            let me = human_actor(None)?;
+            let st = match action {
+                UpdateAction::Check => service.update_check(&me, true).await?,
+                UpdateAction::Status => service.update_get()?,
+                UpdateAction::On => service.update_set(&me, true)?,
+                UpdateAction::Off => service.update_set(&me, false)?,
+            };
+            out!("ProxyMind {} · daily update check: {}", st.current, if st.state.enabled { "on" } else { "off" });
+            match (&st.state.latest, st.available) {
+                (Some(l), true) => out!("A newer release is out: {l}  {}", st.state.url.as_deref().unwrap_or("")),
+                (Some(l), false) => out!("Up to date (newest release: {l})."),
+                (None, _) => out!("Not checked yet: run `proxymind update check`."),
+            }
         }
         Command::Assistant { action: AssistantAction::Show } => {
             let service = Arc::new(open_service(&cli.project, None)?);
@@ -2377,6 +2414,17 @@ async fn run() -> Result<()> {
                     }
                     for s in &d.versions {
                         out!("  other API version answers: {s}");
+                    }
+                    for j in d.js.iter().filter(|j| j.scripts > 0 || j.new > 0) {
+                        out!(
+                            "  JavaScript: {} script(s) read, {} new endpoint(s) mentioned, {} exist",
+                            j.scripts,
+                            j.new,
+                            j.found.len()
+                        );
+                        for f in j.found.iter().take(20) {
+                            out!("    {f}");
+                        }
                     }
                     for s in d.skipped.iter().take(10) {
                         out!("  skipped {s}");

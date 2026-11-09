@@ -119,6 +119,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - **Passive** (nothing sent): headers, cookies, CORS, errors, secrets, comments
 - **Active**: SQL injection (error, boolean, time, out-of-band), command injection, SSTI, XSS (reflected, stored, DOM), path traversal, open redirect, XXE, SSRF, NoSQL/LDAP/XPath, CRLF, Host header, CORS, auth bypass, hidden parameters, JWT, GraphQL, web cache poisoning and deception, mass assignment, prototype pollution, OAuth, deserialization
 - **With approval**: request smuggling, file upload, race conditions, ReDoS and cross-user writes
+- Parameters a page reads though nothing sends them are found, then scanned like any other input
 - Crawl-and-audit, scan profiles, schedules, pause and resume
 - Your own checks in YAML, no code needed
 
@@ -139,6 +140,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 
 ### 🗺️ Recon
 - Crawler, including a browser-driven crawl for JavaScript apps
+- **JavaScript endpoint mining**: API routes and parameters the app's scripts mention, including ones no page links to
 - Content discovery with soft-404 detection, robots.txt folders and other API versions
 - OpenAPI/Swagger and GraphQL (introspection) import
 - Engagement tools: comments, scripts, references, parameter analysis, CSRF and clickjacking proof pages
@@ -217,9 +219,9 @@ The automatic pass (`proxymind bench auto`) runs against deliberately vulnerable
 |---|---|---|
 | [OWASP Juice Shop](https://github.com/juice-shop/juice-shop) | **9 / 9** | 0 |
 | [VAmPI](https://github.com/erev0s/VAmPI) | **8 / 8** | 0 |
-| VulnShop (built in) | **32 / 38** | 0 |
+| VulnShop (built in) | **33 / 38** | 0 |
 
-VulnShop's remaining six are on pages nothing links to or describes, or need a code the app never reveals: that's what agents are for. Details and how to run it yourself: [bench/README.md](bench/README.md).
+VulnShop's remaining five are on pages nothing links to or describes, or need a code the app never reveals: that's what agents are for. Details and how to run it yourself: [bench/README.md](bench/README.md).
 
 ---
 
@@ -234,7 +236,7 @@ VulnShop's remaining six are on pages nothing links to or describes, or need a c
 
 ## 🛠️ Build from source
 
-Requires **Rust 1.88+** and **Node 20+** (for the web UI).
+Requires **Rust 1.89+** and **Node 20+** (for the web UI).
 
 ```bash
 git clone https://github.com/ommirkute/ProxyMind && cd ProxyMind

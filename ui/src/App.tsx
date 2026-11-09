@@ -16,6 +16,7 @@ import Assistant from "./pages/Assistant";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
 import Network from "./pages/Network";
+import About, { type UpdateStatus } from "./pages/About";
 import Findings from "./pages/Findings";
 import Issues from "./pages/Issues";
 import Tools from "./pages/Tools";
@@ -72,7 +73,7 @@ const GROUPS: Group[] = [
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
   { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "checks", label: "Custom checks" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }] },
+  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "about", label: "About & updates" }] },
 ];
 
 const PAGES = GROUPS.flatMap((g) => g.pages);
@@ -96,6 +97,16 @@ export default function App() {
   const [collapsed, setCollapsed] = usePref<boolean>("pm-sidebar-collapsed", false);
   const [palette, setPalette] = useState(false);
   const [browserOk, setBrowserOk] = useState(false);
+  // The daily update check runs only if the user turned it on (the server
+  // also skips it when the last answer is under a day old).
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  useEffect(() => {
+    api
+      .get<UpdateStatus>("/update")
+      .then((s) => (s.enabled ? api.post<UpdateStatus>("/update/check", {}) : s))
+      .then(setUpdate)
+      .catch(() => {});
+  }, []);
   const [notice, setNotice] = useState<{ message: string; kind: string } | null>(null);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -218,6 +229,7 @@ export default function App() {
     search: Search,
     organizer: Organizer,
     checks: CustomChecks,
+    about: About,
   }[route.page];
 
   const group = groupOf(route.page);
@@ -343,6 +355,11 @@ export default function App() {
                 >
                   <Icon name="globe" size={14} /> Open browser
                 </button>
+              )}
+              {update?.available && (
+                <a className="pill" href="#/about" title="A newer ProxyMind release is out" data-testid="update-available">
+                  <Icon name="activity" size={13} /> {update.latest} available
+                </a>
               )}
               <button className="pill search-pill" onClick={() => setPalette(true)} aria-label="Open command palette">
                 <Icon name="search" size={13} />

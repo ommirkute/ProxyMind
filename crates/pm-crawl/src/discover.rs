@@ -94,6 +94,16 @@ pub const BUILTIN_WORDS: &[&str] = &[
     "__debug__/",
     "trace.axd",
     "elmah.axd",
+    // Endpoints that take a URL or a file name (redirects, fetchers,
+    // downloads): where SSRF, open redirects and path traversal live.
+    "download",
+    "redirect",
+    "go",
+    "out",
+    "fetch",
+    "proxy",
+    "preview",
+    "render",
 ];
 
 /// Folders a robots.txt asks crawlers to stay out of (`Disallow: /admin/`),

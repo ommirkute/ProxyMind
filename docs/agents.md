@@ -95,7 +95,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `openapi_import` | Import an OpenAPI 3 / Swagger 2 description (text or a recorded spec response): operations with example requests and auth; optionally send the GET examples so the model learns them |
 | `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies (a part such as `response_body` or `request_headers`, `invert`, `in_scope`); secrets are replaced before matching, snippets are untrusted |
 | `ws_grep` | Find text in recorded WebSocket messages (direction, scope, inverted); snippets are untrusted |
-| `engage_comments` / `engage_scripts` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, the target's URLs and parameters, what links to a page |
+| `engage_comments` / `engage_scripts` / `engage_js_endpoints` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, endpoints the JavaScript mentions (new ones first), the target's URLs and parameters, what links to a page |
 | `engage_csrf_poc` / `engage_clickjacking` | A CSRF proof page for a recorded request; whether a page can be framed, with a test page |
 | `collaborator_payload` / `collaborator_interactions` | Out-of-band payloads to place by hand, and the callbacks they caused (untrusted) |
 | `organizer_add` / `organizer_list` / `organizer_update` | Keep exchanges aside with a status and a note, for people or agents to come back to |

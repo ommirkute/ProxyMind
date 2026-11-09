@@ -432,6 +432,13 @@ try {
   await page.getByTestId("engage-analyze").click();
   await page.waitForSelector('[data-testid="engage-analysis"]');
   check(await page.getByTestId("engage-analysis").textContent().then((t) => /\d+ requests/.test(t)), "analyze target summarises recorded traffic");
+  await page.getByTestId("engage-tab-endpoints").click();
+  await page.getByTestId("engage-endpoints").click();
+  await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
+  check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.goto(link.replace(/\/auth.*/, "/#/about"));
+  await page.locator('[data-testid="about-version"]', { hasText: "0." }).waitFor();
+  check(!(await page.getByTestId("update-toggle").isChecked()), "the update check is off until the user turns it on");
   await open("replay");
   await page.getByLabel("Raw request").fill("GET /search?q=a+b HTTP/1.1\nHost: shop\n\n");
   await page.getByTestId("request-transform").selectOption("method");

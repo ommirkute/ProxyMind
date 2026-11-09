@@ -1246,8 +1246,12 @@ impl VulnShop {
                 json_resp(200, json!({"sent": true, "debug_code": code.to_string()}))
             }
             ("GET", ["go"]) => {
-                // VS-8: open redirect.
+                // VS-8: open redirect (any site). Control characters are refused
+                // so the bug stays a redirect, not also a header injection.
                 let url = req.query.get("url").cloned().unwrap_or_else(|| "/".into());
+                if url.contains(char::is_control) {
+                    return json_resp(400, json!({"error": "bad url"}));
+                }
                 Response {
                     status: 302,
                     headers: vec![("Location".into(), url)],
