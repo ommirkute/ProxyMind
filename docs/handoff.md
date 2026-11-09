@@ -7,7 +7,7 @@ Read this first, then `CLAUDE.md` (rules), `docs/plan.md` (roadmap) and `docs/ad
 An open-source, AI-native intercepting proxy for authorized web security testing: one workspace where humans and AI agents (over MCP or the built-in assistant) work on the same project, under a policy gate that enforces the rules of engagement. Its differences: any model including local ones, **no proof, no finding** (the tool verifies findings itself), a live app model with multi-identity authorization testing, a hypothesis ledger and coverage map, and open benchmarks.
 
 - Repo: `ommirkute/ProxyMind`, default branch `main`. Licence AGPL-3.0 core (ADR-0007).
-- Rust workspace (edition 2024, MSRV 1.88, `unsafe` forbidden, line width 120) plus a React + TypeScript web UI in `ui/`, built into the binary.
+- Rust workspace (edition 2024, MSRV 1.89, `unsafe` forbidden, line width 120) plus a React + TypeScript web UI in `ui/`, built into the binary.
 - One binary: `proxymind` (crate `pm-cli`).
 
 ## 2. Architecture

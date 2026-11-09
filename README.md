@@ -236,7 +236,7 @@ VulnShop's remaining five are on pages nothing links to or describes, or need a 
 
 ## 🛠️ Build from source
 
-Requires **Rust 1.88+** and **Node 20+** (for the web UI).
+Requires **Rust 1.89+** and **Node 20+** (for the web UI).
 
 ```bash
 git clone https://github.com/ommirkute/ProxyMind && cd ProxyMind
