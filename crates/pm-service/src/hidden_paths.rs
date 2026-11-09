@@ -1,5 +1,6 @@
 //! More of the attack surface for the automatic pass: folders robots.txt
-//! hides, other API versions of known paths, and described XML uploads.
+//! hides, other API versions of known paths, described XML uploads, and
+//! endpoints the app's JavaScript mentions.
 //! Each sends a few requests through the policy gate.
 
 use pm_policy::{Actor, Tier};
@@ -9,6 +10,20 @@ use crate::{Authorization, DiscoverRequest, DiscoverResult, Found, Result, Servi
 
 /// Most known paths tried under other versions, and versions per path.
 const MAX_VERSION_PATHS: usize = 8;
+/// Most scripts fetched, and new endpoints from scripts tried, per origin.
+const MAX_SCRIPTS: usize = 15;
+const MAX_JS_ENDPOINTS: usize = 80;
+
+/// What reading the app's JavaScript added.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct JsSweep {
+    /// Scripts the pages reference, fetched to read.
+    pub scripts: usize,
+    /// Endpoints the scripts mention that traffic hadn't shown.
+    pub new: usize,
+    /// Those that exist (`GET /rest/admin/application-version → 200`).
+    pub found: Vec<String>,
+}
 
 impl Service {
     /// Runs content discovery in each folder the site's robots.txt hides
@@ -142,6 +157,99 @@ impl Service {
             }
         }
         Ok(sent)
+    }
+}
+
+impl Service {
+    /// Reads the app's JavaScript for endpoints traffic hasn't shown: fetches
+    /// the scripts its pages reference (same origin), lists the endpoints
+    /// they mention, and checks the new GET ones without placeholders with
+    /// content discovery (so a catch-all page doesn't count). Those that take
+    /// query parameters are then sent once with them, so the scanner has a
+    /// request to work on.
+    pub(crate) async fn js_discover(&self, actor: &Actor, origin: &str) -> Result<JsSweep> {
+        let mut sweep = JsSweep::default();
+        let host = url::Url::parse(origin).ok().and_then(|u| u.host_str().map(str::to_string));
+        let filter = crate::EngageFilter { host, ..Default::default() };
+        let same = |u: &str| u.starts_with(origin) && u[origin.len()..].starts_with('/');
+        // 1. Scripts: referenced by pages, or named by other scripts.
+        let mut scripts: Vec<String> = Vec::new();
+        let referenced = self.engage_scripts(actor, &filter)?.into_iter().filter_map(|s| s.src);
+        let named = self.engage_js_endpoints(actor, &filter)?.into_iter().filter(|e| e.script).map(|e| e.url);
+        for u in referenced.chain(named) {
+            let path = u.split(['?', '#']).next().unwrap_or_default().to_string();
+            if same(&path) && !scripts.contains(&path) {
+                scripts.push(path);
+            }
+        }
+        let words = |urls: &[String]| -> Vec<String> {
+            urls.iter().map(|u| u[origin.len()..].trim_start_matches('/').to_string()).collect()
+        };
+        scripts.truncate(MAX_SCRIPTS);
+        if !scripts.is_empty() {
+            let req = DiscoverRequest {
+                url: format!("{origin}/"),
+                words: words(&scripts),
+                max_requests: Some(scripts.len()),
+                ..Default::default()
+            };
+            if let Ok(DiscoverResult::Done { found, .. }) = self.discover(actor, req).await {
+                sweep.scripts = found.iter().filter(|f| f.status == 200).count();
+            }
+        }
+        // 2. New endpoints they mention.
+        let new: Vec<crate::FoundEndpoint> = self
+            .engage_js_endpoints(actor, &filter)?
+            .into_iter()
+            .filter(|e| !e.known && !e.external && !e.script && e.method.is_none_or(|m| m == "GET"))
+            .filter(|e| same(&e.url) && !e.url.contains('{'))
+            .take(MAX_JS_ENDPOINTS)
+            .collect();
+        sweep.new = new.len();
+        if new.is_empty() {
+            return Ok(sweep);
+        }
+        let paths: Vec<String> = new.iter().map(|e| e.url.split('?').next().unwrap_or_default().to_string()).collect();
+        let req = DiscoverRequest {
+            url: format!("{origin}/"),
+            words: words(&paths),
+            max_requests: Some(paths.len()),
+            ..Default::default()
+        };
+        let Ok(DiscoverResult::Done { found, .. }) = self.discover(actor, req).await else { return Ok(sweep) };
+        // 3. Found ones with parameters, sent once with them.
+        let endpoint = crate::replay::parse_url_endpoint(origin)?;
+        let mut gated = false;
+        for f in &found {
+            sweep.found.push(format!("GET {} → {}", &f.url[origin.len()..], f.status));
+            let Some(e) = new.iter().find(|e| e.url.split('?').next() == Some(f.url.as_str())) else { continue };
+            if e.params.is_empty() || f.status >= 400 {
+                continue;
+            }
+            let query: Vec<String> = e.params.iter().map(|p| format!("{p}=1")).collect();
+            let target = format!("{}?{}", &f.url[origin.len()..], query.join("&"));
+            let host = url::Url::parse(origin).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            let raw = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\n\r\n");
+            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), false)?;
+            if !gated {
+                let extra = json!({ "js_endpoints": origin });
+                match self.gate_send_with(
+                    actor,
+                    "js_endpoints",
+                    &out,
+                    None,
+                    false,
+                    None,
+                    Some(Tier::ActiveSafe),
+                    extra,
+                )? {
+                    Authorization::Allowed { .. } => gated = true,
+                    _ => break,
+                }
+            }
+            self.send_as(actor, &out, None, false, "discover").await?;
+        }
+        Ok(sweep)
     }
 }
 

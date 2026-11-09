@@ -1522,9 +1522,11 @@ pub fn reflected_params<'a>(names: &[&'a str], marker: &str, got: &Seen) -> Vec<
         .filter(|(i, _)| {
             let v = format!("{marker}{i}");
             // `<marker>1` is a prefix of `<marker>10`: require a non-digit after it.
-            got.body
-                .match_indices(&v)
-                .any(|(at, _)| !got.body[at + v.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            // The body, or a redirect's target (a parameter that becomes the Location).
+            let found = |text: &str| {
+                text.match_indices(&v).any(|(at, _)| !text[at + v.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            };
+            found(&got.body) || got.location.as_deref().is_some_and(found)
         })
         .map(|(_, n)| *n)
         .collect()
@@ -1533,9 +1535,12 @@ pub fn reflected_params<'a>(names: &[&'a str], marker: &str, got: &Seen) -> Vec<
 /// Whether a response differs from the baseline more than the page varies by itself.
 pub fn differs(base: &Seen, base2: &Seen, got: &Seen) -> bool {
     let noise = 1.0 - similarity(&base.body, &base2.body);
+    // A redirect that goes somewhere else (when the baseline always goes to
+    // the same place) is a difference even with an empty body.
+    let moved = base.location.is_some() && base.location == base2.location && got.location != base.location;
     base.status == base2.status
         && noise <= 0.2
-        && (got.status != base.status || similarity(&base.body, &got.body) < 1.0 - noise - 0.05)
+        && (got.status != base.status || moved || similarity(&base.body, &got.body) < 1.0 - noise - 0.05)
 }
 
 /// JavaScript run before the page's own scripts: wraps the dangerous DOM
@@ -2149,5 +2154,16 @@ mod tests {
         let checks: Vec<&str> =
             probes(raw, &[], "pmN", 1000).iter().filter(|p| p.point.kind == PointKind::Name).map(|p| p.check).collect();
         assert_eq!(checks, ["sql_error", "reflected_input", "sql_error", "reflected_input"]);
+    }
+
+    #[test]
+    fn hidden_params_in_redirects() {
+        let redirect = |to: &str| Seen { status: Some(302), location: Some(to.into()), ..Default::default() };
+        let base = redirect("/");
+        assert!(differs(&base, &base.clone(), &redirect("/elsewhere")));
+        assert!(!differs(&base, &base.clone(), &redirect("/")));
+        // A baseline that redirects somewhere new each time says nothing.
+        assert!(!differs(&base, &redirect("/other"), &redirect("/elsewhere")));
+        assert_eq!(reflected_params(&["next", "url"], "pmZ", &redirect("https://pmZ1/")), ["url"]);
     }
 }

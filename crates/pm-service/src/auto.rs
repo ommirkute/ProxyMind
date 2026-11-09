@@ -200,6 +200,8 @@ pub struct DiscoverSweep {
     pub versions: Vec<String>,
     /// XML upload examples from the description that were sent (for the XXE checks).
     pub xml_examples: Vec<String>,
+    /// What reading the app's JavaScript added, per origin.
+    pub js: Vec<crate::JsSweep>,
     pub skipped: Vec<String>,
 }
 
@@ -309,6 +311,7 @@ impl Service {
                 }
             }
             sweep.versions.extend(self.version_siblings(actor, &origin).await?);
+            sweep.js.push(self.js_discover(actor, &origin).await?);
         }
         Ok(sweep)
     }
@@ -400,11 +403,22 @@ impl Service {
             };
             sweep.operations += 1;
             sweep.requests += requests;
+            // Parameters the page accepts though no request sent them: scan them too.
+            let hidden: Vec<String> = issues
+                .iter()
+                .filter(|f| f.issue.check == "hidden_params")
+                .flat_map(|f| f.issue.payload.split(", ").map(str::to_string).collect::<Vec<_>>())
+                .collect();
             // A token weakness (weak secret, alg none) shows on every endpoint
             // that takes the token: one finding per kind is enough.
             let issues: Vec<_> =
                 issues.into_iter().filter(|f| f.issue.check != "jwt" || seen_jwt.insert(f.issue.title)).collect();
             sweep.leads.extend(self.record_scan_leads(actor, &t, &issues)?);
+            if !hidden.is_empty() && !t.fixed {
+                let (requests, leads) = self.scan_hidden_params(actor, &t, &hidden).await?;
+                sweep.requests += requests;
+                sweep.leads.extend(leads);
+            }
         }
         // Checks that need approval: one more pass, only when the rules of
         // engagement let this actor run destructive-tier actions without asking.
@@ -450,6 +464,50 @@ impl Service {
             }
         }
         Ok(sweep)
+    }
+
+    /// Sends the target's request once more with parameters hidden-parameter
+    /// discovery found (benign values), and scans those parameters with the
+    /// same checks: a page that reads `url` or `file` without any request
+    /// sending it gets tested like any other input. Only issues on the new
+    /// parameters are recorded (the others were already scanned).
+    async fn scan_hidden_params(
+        &self,
+        actor: &Actor,
+        t: &ScanTarget,
+        names: &[String],
+    ) -> Result<(usize, Vec<ScanLead>)> {
+        let Ok(ex) = self.exchange_raw(t.exchange_id) else { return Ok((0, Vec::new())) };
+        let raw = String::from_utf8_lossy(&ex.request).into_owned();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let Some(with) = pm_scan::active::with_params(&raw, &refs, "pm") else { return Ok((0, Vec::new())) };
+        let s = &ex.summary;
+        let endpoint = crate::replay::parse_url_endpoint(&pm_core::url(&s.scheme, &s.host, s.port, "/"))?;
+        let out = self.outgoing(endpoint, &with, true)?;
+        let extra = json!({ "hidden_params": names, "operation": t.operation });
+        match self.gate_send_with(actor, "scan_hidden_params", &out, None, true, None, None, extra)? {
+            Authorization::Allowed { .. } => {}
+            _ => return Ok((0, Vec::new())),
+        }
+        let (sent, _) = self.send_as(actor, &out, None, true, "scan").await?;
+        let checks: Vec<String> = t.checks.iter().filter(|c| *c != "hidden_params").cloned().collect();
+        let req = ActiveScanRequest {
+            exchange_id: sent.exchange_id,
+            checks,
+            max_requests: Some(150),
+            oob_wait_seconds: Some(3),
+            ..Default::default()
+        };
+        let Ok(ActiveScanResult::Done { requests, issues, .. }) = self.scan_active(actor, req).await else {
+            return Ok((1, Vec::new()));
+        };
+        let lower: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+        let on_new: Vec<_> = issues
+            .into_iter()
+            .filter(|f| lower.iter().any(|n| f.issue.point.to_ascii_lowercase().ends_with(&format!(" {n}"))))
+            .collect();
+        let target = ScanTarget { exchange_id: sent.exchange_id, ..t.clone() };
+        Ok((requests + 1, self.record_scan_leads(actor, &target, &on_new)?))
     }
 
     /// What to scan: recorded operations (optionally of one origin, e.g.

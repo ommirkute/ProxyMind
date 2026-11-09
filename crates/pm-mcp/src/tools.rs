@@ -502,6 +502,14 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "engage_js_endpoints",
+            "Endpoints that recorded JavaScript mentions (API paths and URLs in scripts and inline page scripts), with \
+             query parameters and the method when the call site shows it. `known: false` means traffic hasn't shown \
+             it yet: often routes no page links to. Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
             "engage_analyze",
             "Analyze the target from recorded traffic: URL counts, dynamic URLs, methods, statuses, content types, and \
              every parameter (query/body/JSON/cookie/multipart, how often, examples, paths). Sends nothing.",
@@ -985,6 +993,10 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_scripts" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_scripts(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_js_endpoints" => {
+            let f: pm_service::EngageFilter = args(a)?;
+            service.engage_js_endpoints(actor, &f).map(to_json).map_err(|e| e.to_string())
         }
         "engage_analyze" => {
             let f: pm_service::EngageFilter = args(a)?;

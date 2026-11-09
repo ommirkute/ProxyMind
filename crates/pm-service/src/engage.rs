@@ -65,6 +65,50 @@ pub struct TargetAnalysis {
     pub params: Vec<ParamSummary>,
 }
 
+/// An endpoint a recorded script mentions.
+#[derive(Debug, Clone, Serialize)]
+pub struct FoundEndpoint {
+    /// Absolute URL (resolved against the page or script it came from).
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<String>,
+    /// Another script, worth reading in turn.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub script: bool,
+    /// Already in the app model (seen in traffic).
+    pub known: bool,
+    /// On another origin than the script that mentions it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
+    /// The first response that mentions it, and how many do.
+    pub exchange_id: i64,
+    pub count: usize,
+}
+
+/// Whether a concrete or templated path matches a model template
+/// (`{…}` segments match anything).
+fn template_matches(template: &str, path: &str) -> bool {
+    let (t, p): (Vec<&str>, Vec<&str>) = (template.split('/').collect(), path.split('/').collect());
+    t.len() == p.len() && t.iter().zip(&p).all(|(a, b)| a == b || a.starts_with('{') || b.starts_with('{'))
+}
+
+/// The scripts of an HTML page (their text), for the endpoint reader.
+fn inline_scripts(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut at = 0;
+    while let Some(open) = lower[at..].find("<script").map(|i| i + at) {
+        let Some(body) = lower[open..].find('>').map(|i| open + i + 1) else { break };
+        let Some(close) = lower[body..].find("</script").map(|i| body + i) else { break };
+        out.push_str(&html[body..close]);
+        out.push('\n');
+        at = close;
+    }
+    out
+}
+
 struct Seen {
     summary: ExchangeSummary,
     request: Vec<u8>,
@@ -187,6 +231,68 @@ impl Service {
             "inline" => 1,
             _ => 2,
         });
+        Ok(found)
+    }
+
+    /// Endpoints that recorded scripts (JavaScript responses and the inline
+    /// scripts of pages) mention, newest-first sources, new ones first.
+    /// Nothing is sent.
+    pub fn engage_js_endpoints(&self, actor: &Actor, f: &EngageFilter) -> Result<Vec<FoundEndpoint>> {
+        let model = self.model()?;
+        let mut found: Vec<FoundEndpoint> = Vec::new();
+        let mut at: HashMap<(String, Option<&'static str>), usize> = HashMap::new();
+        for s in self.recorded(actor, f)? {
+            let Some((_, ct, body)) = &s.response else { continue };
+            let text = String::from_utf8_lossy(body);
+            let script = match engage::kind_of(ct, &text) {
+                Some("js") => text.into_owned(),
+                Some("html") => inline_scripts(&text),
+                _ => continue,
+            };
+            let page = url_of(&s.summary);
+            let Ok(base) = url::Url::parse(&page) else { continue };
+            for e in pm_crawl::js::js_endpoints(&script) {
+                let Ok(u) = base.join(&e.path) else { continue };
+                if !matches!(u.scheme(), "http" | "https") {
+                    continue;
+                }
+                let external = u.origin() != base.origin();
+                // `{param}` survives as %7Bparam%7D in a parsed URL: keep it readable.
+                let url = u.to_string().replace("%7B", "{").replace("%7D", "}");
+                let path = u.path().replace("%7B", "{").replace("%7D", "}");
+                let origin = u.origin().ascii_serialization();
+                let known = model.operations.iter().any(|o| {
+                    o.origin.eq_ignore_ascii_case(&origin)
+                        && e.method.is_none_or(|m| m == o.method)
+                        && template_matches(&o.template, &path)
+                });
+                match at.get(&(url.clone(), e.method)) {
+                    Some(&i) => {
+                        found[i].count += 1;
+                        for p in e.params {
+                            if !found[i].params.contains(&p) {
+                                found[i].params.push(p);
+                            }
+                        }
+                    }
+                    None if found.len() < 5000 => {
+                        at.insert((url.clone(), e.method), found.len());
+                        found.push(FoundEndpoint {
+                            url,
+                            method: e.method,
+                            params: e.params,
+                            script: e.script,
+                            known,
+                            external,
+                            exchange_id: s.summary.id,
+                            count: 1,
+                        });
+                    }
+                    None => {}
+                }
+            }
+        }
+        found.sort_by(|a, b| (a.known, a.external, &a.url).cmp(&(b.known, b.external, &b.url)));
         Ok(found)
     }
 

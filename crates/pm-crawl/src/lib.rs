@@ -7,6 +7,7 @@
 //! executes anything.
 
 pub mod discover;
+pub mod js;
 
 use std::collections::{HashSet, VecDeque};
 

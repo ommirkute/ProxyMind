@@ -152,6 +152,9 @@ pub fn api() -> Router<AppState> {
         .route("/organizer/{id}", axum::routing::patch(organizer_update).delete(organizer_delete))
         .route("/engage/comments", post(engage_comments))
         .route("/engage/scripts", post(engage_scripts))
+        .route("/engage/js-endpoints", post(engage_js_endpoints))
+        .route("/update", get(update_get).put(update_set))
+        .route("/update/check", post(update_check))
         .route("/engage/analyze", post(engage_analyze))
         .route("/engage/references", post(engage_references))
         .route("/engage/csrf", post(engage_csrf))
@@ -512,6 +515,35 @@ async fn engage_comments(State(st): State<AppState>, Json(f): Json<pm_service::E
 
 async fn engage_scripts(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
     ok(st.service.engage_scripts(&st.actor, &f)?)
+}
+
+async fn update_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.update_get()?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSet {
+    enabled: bool,
+}
+
+async fn update_set(State(st): State<AppState>, Json(b): Json<UpdateSet>) -> ApiResult {
+    ok(st.service.update_set(&st.actor, b.enabled)?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct UpdateCheck {
+    /// Ask now even if the daily check is off or the last answer is fresh.
+    force: bool,
+}
+
+async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) -> ApiResult {
+    ok(st.service.update_check(&st.actor, b.force).await?)
+}
+
+async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_js_endpoints(&st.actor, &f)?)
 }
 
 async fn engage_analyze(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
