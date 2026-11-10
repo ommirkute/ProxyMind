@@ -43,6 +43,7 @@ mod scan_schedule;
 mod scan_task;
 mod search;
 mod session;
+mod skills;
 mod tools;
 mod traffic;
 mod update;
@@ -54,7 +55,7 @@ pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
-pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorStatus};
+pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorProbe, CollaboratorStatus};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
@@ -99,6 +100,7 @@ pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
+pub use skills::Skill;
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use update::{UpdateState, UpdateStatus};

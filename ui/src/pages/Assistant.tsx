@@ -187,6 +187,7 @@ export default function Assistant() {
             <ErrorBox error={action.error} />
             <div ref={endRef} />
           </div>
+          <Playbooks onPick={(t) => setText(t)} />
           <div className="row composer">
             <textarea
               aria-label="Message"
@@ -239,5 +240,39 @@ function MessageView({ m }: { m: Message }) {
         );
       })}
     </>
+  );
+}
+
+interface Skill { name: string; title: string; description: string; args: string[]; source: string }
+
+/** Testing playbooks (skills): picking one puts its steps in the message box, with an optional focus. */
+function Playbooks({ onPick }: { onPick: (text: string) => void }) {
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [name, setName] = useState("");
+  const [focus, setFocus] = useState("");
+  useEffect(() => {
+    api.get<Skill[]>("/skills").then(setSkills).catch(() => {});
+  }, []);
+  const pick = async () => {
+    if (!name) return;
+    const r = await api.post<{ text: string }>(`/skills/${encodeURIComponent(name)}`, focus.trim() ? { focus: focus.trim() } : {});
+    onPick(r.text);
+  };
+  if (skills.length === 0) return null;
+  const chosen = skills.find((s) => s.name === name);
+  return (
+    <div className="row small" data-testid="playbooks">
+      <select aria-label="Playbook" value={name} onChange={(e) => setName(e.target.value)}>
+        <option value="">Playbook…</option>
+        {skills.map((s) => (
+          <option key={s.name} value={s.name}>{s.title}{s.source === "user" ? " (yours)" : ""}</option>
+        ))}
+      </select>
+      {chosen?.args.includes("focus") && (
+        <input aria-label="Playbook focus" placeholder="focus (optional), e.g. /api/orders" value={focus} onChange={(e) => setFocus(e.target.value)} style={{ width: 220 }} />
+      )}
+      <button className="btn" disabled={!name} onClick={() => void pick()} data-testid="playbook-use">Use</button>
+      {chosen && <span className="muted">{chosen.description}</span>}
+    </div>
   );
 }

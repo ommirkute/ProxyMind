@@ -108,7 +108,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - Send as any identity; send a group of tabs in sequence or **at the same moment**
 - Race conditions with the HTTP/2 **single-packet attack**
 - Fuzzer: marked positions, attack modes, payload lists, number ranges, processing rules, recursive grep, anomaly highlighting
-- Collaborator: out-of-band payloads over **HTTP, DNS and SMTP**
+- Collaborator: out-of-band payloads over **HTTP, DNS and SMTP**; a callback that arrives hours after a scan still becomes a finding
 
 </td>
 </tr>
@@ -184,7 +184,7 @@ claude mcp add proxymind -- proxymind -p "$PWD/proxymind.pmproj" mcp --actor age
 proxymind approvals watch                  # approve or deny what the agent asks to do
 ```
 
-Agents can search history, read exchanges in token-budgeted views with secrets hidden, query the app model, send requests, run scans and proofs, and record hypotheses. See [docs/agents.md](docs/agents.md).
+Agents can search history, read exchanges in token-budgeted views with secrets hidden, query the app model, send requests, run scans and proofs, and record hypotheses. **Skills** give them testing playbooks to follow (access-control sweep, SSRF hunt, triage, JS recon, auth review, JWT audit, races, uploads), as MCP prompts or tools, and you can add your own. See [docs/agents.md](docs/agents.md).
 
 **No agent?** Use the built-in **Assistant** (UI or terminal). It runs on a local model by default (Ollama, LM Studio, vLLM); cloud models need an explicit opt-in in the rules of engagement.
 
