@@ -48,6 +48,22 @@ pub struct CollaboratorStatus {
     pub smtp: Option<String>,
     pub payloads: u64,
     pub interactions: u64,
+    /// Out-of-band probes the scanner sent (a late callback still becomes a finding).
+    pub probes: u64,
+    /// Findings made from callbacks that came after the scan stopped waiting.
+    pub late_findings: u64,
+}
+
+/// An out-of-band probe the scanner sent.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollaboratorProbe {
+    pub token: String,
+    pub check: String,
+    pub url: String,
+    pub point: String,
+    pub created_ms: i64,
+    /// The finding a late callback made, if one came.
+    pub finding_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,8 +94,11 @@ pub struct CollaboratorInteraction {
     pub ts_ms: i64,
     /// The request head (HTTP) or a description of the lookup (DNS).
     pub raw: String,
-    /// The payload's note, when the token is one of ours.
+    /// The payload's note, when the token is one of ours, or the scanner
+    /// probe that sent it (`scanner: ssrf_oob on … (query url)`).
     pub note: Option<String>,
+    /// The finding a late callback made, when this token's probe has one.
+    pub finding_id: Option<i64>,
 }
 
 fn s(row: &serde_json::Map<String, Value>, k: &str) -> String {
@@ -144,6 +163,12 @@ impl Service {
             smtp: st.get_setting(SMTP_SETTING)?,
             payloads: st.count_rows("oast_payloads", None)?,
             interactions: st.count_rows("oast_interactions", None)?,
+            probes: st.count_rows("oast_probes", None)?,
+            late_findings: st
+                .rows("oast_probes", None, 10_000)?
+                .iter()
+                .filter(|r| r.get("finding_id").is_some_and(|v| !v.is_null()))
+                .count() as u64,
         })
     }
 
@@ -260,12 +285,22 @@ impl Service {
             .iter()
             .map(|r| {
                 let token = s(r, "token");
-                let note = notes
+                let (note, finding_id) = notes
                     .entry(token.clone())
                     .or_insert_with(|| {
-                        st.rows("oast_payloads", Some(("token", &json!(token))), 1)
+                        let payload = st
+                            .rows("oast_payloads", Some(("token", &json!(token))), 1)
                             .ok()
-                            .and_then(|v| v.first().map(|p| s(p, "note")))
+                            .and_then(|v| v.first().map(|p| s(p, "note")));
+                        let probe = st
+                            .rows("oast_probes", Some(("token", &json!(token))), 1)
+                            .ok()
+                            .and_then(|v| v.into_iter().next());
+                        let finding = probe.as_ref().and_then(|p| p.get("finding_id").and_then(Value::as_i64));
+                        let described = probe.map(|p| {
+                            format!("scanner: {} on {} ({})", s(&p, "check_name"), s(&p, "url"), s(&p, "point"))
+                        });
+                        (payload.or(described), finding)
                     })
                     .clone();
                 CollaboratorInteraction {
@@ -277,8 +312,26 @@ impl Service {
                     ts_ms: i(r, "ts_ms"),
                     raw: s(r, "raw"),
                     note,
+                    finding_id,
                     token,
                 }
+            })
+            .collect())
+    }
+
+    /// Out-of-band probes the scanner sent, newest first.
+    pub fn collaborator_probes(&self, limit: usize) -> Result<Vec<CollaboratorProbe>> {
+        let st = self.store.lock();
+        Ok(st
+            .rows("oast_probes", None, limit.clamp(1, 1000))?
+            .iter()
+            .map(|r| CollaboratorProbe {
+                token: s(r, "token"),
+                check: s(r, "check_name"),
+                url: s(r, "url"),
+                point: s(r, "point"),
+                created_ms: i(r, "created_ms"),
+                finding_id: r.get("finding_id").and_then(Value::as_i64),
             })
             .collect())
     }

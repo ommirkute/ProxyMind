@@ -831,6 +831,12 @@ try {
   check(await page.getByTestId("tool-call").first().textContent().then((t) => t.includes("history_search")), "the assistant called a tool and answered");
   const toolResult = modelCalls[1]?.messages.find((m) => m.role === "tool")?.content ?? "";
   check(toolResult.includes("/api/orders/1001"), "the tool ran against real history (through the policy gate)");
+  await page.getByLabel("Playbook").selectOption("idor_sweep");
+  await page.getByLabel("Playbook focus").fill("the orders API");
+  await page.getByTestId("playbook-use").click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="Message"]').value.includes("Focus on: the orders API."));
+  check(true, "a playbook fills the message box with its steps");
+  await page.getByLabel("Message").fill("");
   await page.screenshot({ path: join(SHOTS, "6f-assistant.png") });
   model.close();
 

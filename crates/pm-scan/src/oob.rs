@@ -6,7 +6,8 @@
 //!
 //! | check | where | payloads |
 //! |---|---|---|
-//! | `ssrf_oob` | URL-like parameters, Referer | the callback URL (and `http://<dns name>/`) |
+//! | `ssrf_oob` | URL-like parameters, Referer | the callback URL (and `http://<dns name>/`, or the bare name for host fields) |
+//! | `ssrf_oob` | added headers (pingbacks) | Referer, X-Forwarded-For, X-Forwarded-Host, True-Client-IP, Contact, X-Wap-Profile: log processors and analytics that fetch or look up what they see |
 //! | `xxe_oob` | XML bodies | an external DTD (parameter entity) and an external general entity |
 //! | `sql_oob` | parameters, cookies, headers | SQL Server `xp_dirtree`, MySQL `LOAD_FILE` (UNC), Oracle `UTL_HTTP` and XML, PostgreSQL `dblink` |
 //! | `cmd_oob` | parameters, cookies, headers | `curl`, `wget`, `nslookup` after `;`, `|`, `$()`, backticks |
@@ -108,6 +109,40 @@ fn url_like_name(name: &str) -> bool {
     .any(|k| n == *k || n.ends_with(k) || n.starts_with(k))
 }
 
+/// A field holding a host name rather than a URL.
+fn host_like(name: &str, value: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let named =
+        ["host", "hostname", "domain", "server", "ip", "addr", "address"].iter().any(|k| n == *k || n.ends_with(k));
+    let v = value.trim();
+    named || (url_like_value(v) && !v.contains("://") && !v.starts_with("//"))
+}
+
+/// Headers added to a request to catch back ends that fetch or look up what
+/// they log (analytics, log processors, WAP profile fetchers): `(header,
+/// family, template)`. A template needing a DNS zone is skipped without one.
+const PINGBACKS: &[(&str, &str, &str)] = &[
+    ("Referer", "Referer pingback", "{URL}"),
+    ("X-Forwarded-For", "X-Forwarded-For lookup", "{HOST}"),
+    ("X-Forwarded-Host", "X-Forwarded-Host lookup", "{HOST}"),
+    ("True-Client-IP", "True-Client-IP lookup", "{HOST}"),
+    ("Contact", "Contact header", "root@{HOST}"),
+    ("X-Wap-Profile", "UAProf fetch", "{URL}/wap.xml"),
+];
+
+/// The finding class for an out-of-band check.
+pub fn class(check: &str) -> &'static str {
+    match check {
+        "ssrf_oob" => "ssrf",
+        "xxe_oob" => "xxe",
+        "sql_oob" => "sqli",
+        "cmd_oob" => "command_injection",
+        "ssti_oob" => "ssti",
+        "log4shell" => "rce",
+        _ => "code_injection",
+    }
+}
+
 fn url_like_value(v: &str) -> bool {
     let v = v.trim().to_ascii_lowercase();
     v.starts_with("http://") || v.starts_with("https://") || v.starts_with("//") || {
@@ -126,7 +161,13 @@ fn templates(check: &str, pt: &Point) -> Vec<(&'static str, &'static str)> {
         "ssrf_oob" => {
             let referer = header && pt.name == "referer";
             if referer || (!header && (url_like_name(&pt.name) || url_like_value(&pt.original))) {
-                vec![("HTTP", "{URL}"), ("DNS", "http://{HOST}/")]
+                let mut v = vec![("HTTP", "{URL}"), ("DNS", "http://{HOST}/")];
+                // A field that takes a host name, not a URL (ping tools, webhooks
+                // that add the scheme): a bare name still gets looked up.
+                if host_like(&pt.name, &pt.original) {
+                    v.push(("DNS (bare host)", "{HOST}"));
+                }
+                v
             } else {
                 vec![]
             }
@@ -247,17 +288,33 @@ pub fn probes(
             });
         }
     }
-    for pt in points_with(raw, id_segments) {
+    let points = points_with(raw, id_segments);
+    for pt in &points {
         for check in CHECKS.iter().filter(|c| **c != "xxe_oob" && want(c)) {
-            for (family, tpl) in templates(check, &pt) {
+            for (family, tpl) in templates(check, pt) {
                 if out.len() >= limit {
                     return out;
                 }
                 let t = token();
                 let Some(payload) = cb.fill(&tpl.replace("{O}", &pt.original), &t) else { continue };
-                let Some(r) = inject(raw, &pt, &payload) else { continue };
+                let Some(r) = inject(raw, pt, &payload) else { continue };
                 out.push(OobProbe { probe: Probe { check, point: pt.clone(), payload, raw: r }, token: t, family });
             }
+        }
+    }
+    // Pingbacks last: one request per added header (a header the request
+    // already has was tried above as an insertion point).
+    if want("ssrf_oob") {
+        for (header, family, tpl) in PINGBACKS {
+            let present = points.iter().any(|p| p.kind == PointKind::Header && p.name.eq_ignore_ascii_case(header));
+            if present || out.len() >= limit {
+                continue;
+            }
+            let t = token();
+            let Some(value) = cb.fill(tpl, &t) else { continue };
+            let Some(r) = crate::active::set_header(raw, header, &value) else { continue };
+            let point = Point::request(&format!("{} header", header.to_ascii_lowercase()));
+            out.push(OobProbe { probe: Probe { check: "ssrf_oob", point, payload: value, raw: r }, token: t, family });
         }
     }
     out
@@ -319,8 +376,12 @@ mod tests {
     fn ssrf_targets_url_like_points_and_referer() {
         let raw = "GET /fetch?url=http://a.test/x&q=shoe HTTP/1.1\r\nHost: s\r\nReferer: http://s/\r\n\r\n";
         let ps = probes(raw, &["ssrf_oob".into()], &http(), &[], 99, tokens());
-        let at: Vec<(&str, &str)> =
-            ps.iter().map(|p| (p.probe.point.name.as_str(), p.probe.payload.as_str())).collect();
+        // Insertion points only (the added pingback headers are tested elsewhere).
+        let at: Vec<(&str, &str)> = ps
+            .iter()
+            .filter(|p| p.probe.point.kind != PointKind::Request)
+            .map(|p| (p.probe.point.name.as_str(), p.probe.payload.as_str()))
+            .collect();
         assert_eq!(
             at,
             [
@@ -378,5 +439,38 @@ mod tests {
         let i = issue(&ps[0], "HTTP GET /x from 127.0.0.1");
         assert_eq!((i.check, i.point.as_str(), i.severity), ("ssti_oob", "query q", "high"));
         assert!(i.evidence.starts_with("Jinja2 payload"));
+    }
+
+    #[test]
+    fn pingback_headers_and_bare_hosts() {
+        let cb = Callback { url: Some("http://cb.test:9".into()), domain: Some("oast.test".into()) };
+        let mut n = 0;
+        let tok = || {
+            n += 1;
+            format!("{n:020}")
+        };
+        let raw = "GET /ping?host=example.com HTTP/1.1\r\nHost: shop\r\n\r\n";
+        let ps = probes(raw, &["ssrf_oob".to_string()], &cb, &[], 50, tok);
+        let fam: Vec<&str> = ps.iter().map(|p| p.family).collect();
+        assert!(fam.contains(&"DNS (bare host)"), "{fam:?}");
+        let bare = ps.iter().find(|p| p.family == "DNS (bare host)").unwrap();
+        assert!(String::from_utf8_lossy(&bare.probe.raw).contains(&format!("host={}.oast.test", bare.token)));
+        let xff = ps.iter().find(|p| p.family == "X-Forwarded-For lookup").unwrap();
+        assert!(String::from_utf8_lossy(&xff.probe.raw).contains(&format!("X-Forwarded-For: {}.oast.test", xff.token)));
+        assert_eq!(xff.probe.point.name, "x-forwarded-for header");
+        // Without a DNS zone, only the URL pingbacks remain.
+        let url_only = Callback { url: Some("http://cb.test:9".into()), domain: None };
+        let mut m = 0;
+        let ps = probes(raw, &["ssrf_oob".to_string()], &url_only, &[], 50, || {
+            m += 1;
+            format!("{m:020}")
+        });
+        let fam: Vec<&str> = ps
+            .iter()
+            .map(|p| p.family)
+            .filter(|f| f.contains("Referer") || f.contains("UAProf") || f.contains("lookup"))
+            .collect();
+        assert_eq!(fam, ["Referer pingback", "UAProf fetch"]);
+        assert_eq!(class("sql_oob"), "sqli");
     }
 }

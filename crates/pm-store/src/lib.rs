@@ -245,6 +245,27 @@ CREATE TABLE organizer (
 );
 CREATE INDEX organizer_exchange ON organizer(exchange_id);
 "#,
+    r#"
+-- Out-of-band probes the scanner sent: a callback that arrives after the
+-- scan stopped waiting still becomes a finding (see Service::record_oast).
+CREATE TABLE oast_probes (
+    id          INTEGER PRIMARY KEY,
+    token       TEXT NOT NULL,
+    check_name  TEXT NOT NULL,
+    vuln_class  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    url         TEXT NOT NULL DEFAULT '',
+    point       TEXT NOT NULL DEFAULT '',
+    payload     TEXT NOT NULL DEFAULT '',
+    exchange_id INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    deadline_ms INTEGER NOT NULL,
+    finding_id  INTEGER,
+    created_ms  INTEGER NOT NULL
+);
+CREATE INDEX oast_probes_token ON oast_probes(token);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1294,6 +1315,21 @@ impl Store {
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
+            "oast_probes" => &[
+                "token",
+                "check_name",
+                "vuln_class",
+                "title",
+                "severity",
+                "url",
+                "point",
+                "payload",
+                "exchange_id",
+                "actor",
+                "deadline_ms",
+                "finding_id",
+                "created_ms",
+            ],
             "organizer" => &["exchange_id", "status", "note", "actor", "created_ms", "updated_ms"],
             _ => return None,
         })

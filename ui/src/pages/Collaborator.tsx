@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { api, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
 
-interface Status { public_url?: string; dns_domain?: string; listening?: string; smtp?: string; payloads: number; interactions: number }
+interface Status { public_url?: string; dns_domain?: string; listening?: string; smtp?: string; payloads: number; interactions: number; probes: number; late_findings: number }
 interface Payload { token: string; note: string; created_ms: number; actor: string; http_url?: string; dns_name?: string; email?: string; interactions: number }
-interface Interaction { id: number; token: string; protocol: string; remote: string; method: string; path: string; ts_ms: number; raw: string; note?: string }
+interface Interaction { id: number; token: string; protocol: string; remote: string; method: string; path: string; ts_ms: number; raw: string; note?: string; finding_id?: number }
 
 const time = (ms: number) => new Date(ms).toLocaleTimeString();
 
@@ -40,6 +40,11 @@ function ListenerInfo({ s }: { s: Status }) {
       {s.smtp && <span>mail to <code>{s.smtp}</code></span>}
       {s.listening && <span className="muted">(this process listens on {s.listening})</span>}
       <span className="muted">· {s.payloads} payload(s), {s.interactions} interaction(s)</span>
+      {s.probes > 0 && (
+        <span className="muted" title="A callback that arrives after a scan stopped waiting still becomes a finding" data-testid="collab-probes">
+          · {s.probes} scanner probe(s) watched{s.late_findings > 0 && <>, <b>{s.late_findings}</b> late finding(s)</>}
+        </span>
+      )}
     </div>
   );
 }
@@ -161,7 +166,7 @@ function Interactions({ onCount }: { onCount: (n: number) => void }) {
         <Empty>No callbacks yet.</Empty>
       ) : (
         <table className="grid" data-testid="collab-interactions">
-          <thead><tr><th>Time</th><th>Type</th><th>From</th><th>Request</th><th>Payload note</th></tr></thead>
+          <thead><tr><th>Time</th><th>Type</th><th>From</th><th>Request</th><th>Payload note or scanner probe</th></tr></thead>
           <tbody>
             {items.map((i) => (
               <tr key={i.id} className={open?.id === i.id ? "selected" : ""} onClick={() => setOpen(open?.id === i.id ? null : i)} style={{ cursor: "pointer" }}>
@@ -169,7 +174,10 @@ function Interactions({ onCount }: { onCount: (n: number) => void }) {
                 <td><Chip value={i.protocol} /></td>
                 <td className="small mono">{i.remote}</td>
                 <td className="small mono">{i.method} {i.path}</td>
-                <td className="small">{i.note ?? <span className="muted">(not from this page)</span>}</td>
+                <td className="small">
+                  {i.note ?? <span className="muted">(not from this page)</span>}
+                  {i.finding_id && <> · <a href={`#/findings/${i.finding_id}`} onClick={(e) => e.stopPropagation()}>finding #{i.finding_id}</a></>}
+                </td>
               </tr>
             ))}
           </tbody>

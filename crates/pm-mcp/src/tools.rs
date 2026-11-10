@@ -502,6 +502,21 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "skills_list",
+            "Testing playbooks (skills) you can follow: access-control sweep, SSRF hunt, triage of suspected findings, \
+             JavaScript recon, authentication review, JWT audit, race conditions, file uploads, plus the user's own. \
+             Sends nothing.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "skill_get",
+            "The steps of one skill (from skills_list), with an optional focus (e.g. \"the /api/orders endpoints\"). \
+             Follow them with the other tools; everything you do still goes through the rules of engagement.",
+            json!({ "name": {"type":"string"}, "focus": {"type":"string"} }),
+            &["name"],
+        ),
+        tool(
             "engage_js_endpoints",
             "Endpoints that recorded JavaScript mentions (API paths and URLs in scripts and inline page scripts), with \
              query parameters and the method when the call site shows it. `known: false` means traffic hasn't shown \
@@ -993,6 +1008,24 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_scripts" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_scripts(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "skills_list" => service.skills_list().map(to_json).map_err(|e| e.to_string()),
+        "skill_get" => {
+            #[derive(serde::Deserialize)]
+            struct G {
+                name: String,
+                #[serde(default)]
+                focus: Option<String>,
+            }
+            let g: G = args(a)?;
+            let mut m = std::collections::BTreeMap::new();
+            if let Some(f) = g.focus {
+                m.insert("focus".to_string(), f);
+            }
+            service
+                .skill_get(&g.name, &m)
+                .map(|(sk, text)| json!({ "name": sk.name, "title": sk.title, "steps": text }))
+                .map_err(|e| e.to_string())
         }
         "engage_js_endpoints" => {
             let f: pm_service::EngageFilter = args(a)?;

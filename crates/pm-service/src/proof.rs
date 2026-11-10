@@ -590,8 +590,98 @@ impl Service {
     }
 
     /// Stores an OAST interaction (called by the OAST listener).
+    /// Records a callback. When it is the first for a scanner probe whose
+    /// scan stopped waiting already, it becomes a suspected finding now:
+    /// blind bugs (queued jobs, log processors, nightly imports) often call
+    /// back minutes or hours later.
     pub fn record_oast(&self, i: &pm_oast::Interaction) -> Result<()> {
-        record_oast_in(&mut self.store.lock(), i)
+        let late = {
+            let mut store = self.store.lock();
+            if !record_oast_in(&mut store, i)? {
+                return Ok(());
+            }
+            let first = store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? == 1;
+            let probe = store.rows("oast_probes", Some(("token", &json!(i.token))), 1)?.into_iter().next();
+            probe.filter(|p| {
+                first
+                    && p.get("finding_id").is_none_or(Value::is_null)
+                    && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms > d)
+            })
+        };
+        let Some(p) = late else { return Ok(()) };
+        let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let after = (i.ts_ms - p.get("deadline_ms").and_then(Value::as_i64).unwrap_or(i.ts_ms)) / 1000;
+        let actor = pm_policy::Actor::parse(&s("actor"))
+            .or_else(|_| pm_policy::Actor::parse("human:oast"))
+            .map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let exchange = p.get("exchange_id").and_then(Value::as_i64);
+        let finding = self.finding_create(
+            &actor,
+            crate::NewFinding {
+                title: format!("{} in {} ({}): late callback", s("title"), s("url"), s("point")),
+                vuln_class: s("vuln_class"),
+                severity: s("severity"),
+                description: format!(
+                    "The scanner sent {:?} in {}. The callback came {after} s after the scan stopped waiting: {} {} \
+                     {} from {}. Found from a late out-of-band callback; not proven yet (retest with proof_run \
+                     oast).",
+                    s("payload"),
+                    s("point"),
+                    i.protocol.to_uppercase(),
+                    i.method,
+                    i.path,
+                    i.remote
+                ),
+                url: Some(s("url")),
+                evidence: exchange.into_iter().collect(),
+                hypothesis_id: None,
+            },
+        )?;
+        let id = finding["id"].as_i64();
+        if let (Some(row), Some(fid)) = (p.get("id").and_then(Value::as_i64), id) {
+            let mut changes = serde_json::Map::new();
+            changes.insert("finding_id".into(), json!(fid));
+            self.store.lock().update_row("oast_probes", row, &changes)?;
+        }
+        self.audit(&actor.id(), "oast_late_callback", json!({ "token": i.token, "finding_id": id }), "ok")?;
+        Ok(())
+    }
+
+    /// Stores the out-of-band probes a scan sent (for late callbacks), at
+    /// most 200 000 in a project.
+    pub(crate) fn remember_oob_probes(
+        &self,
+        actor: &pm_policy::Actor,
+        url: &str,
+        deadline_ms: i64,
+        sent: &[(&pm_scan::oob::OobProbe, i64)],
+    ) -> Result<()> {
+        let mut store = self.store.lock();
+        if store.count_rows("oast_probes", None)? >= 200_000 {
+            return Ok(());
+        }
+        for (p, exchange_id) in sent {
+            let issue = pm_scan::oob::issue(p, "");
+            let mut row = serde_json::Map::new();
+            for (k, v) in [
+                ("token", json!(p.token)),
+                ("check_name", json!(p.probe.check)),
+                ("vuln_class", json!(pm_scan::oob::class(p.probe.check))),
+                ("title", json!(issue.title)),
+                ("severity", json!(issue.severity)),
+                ("url", json!(url)),
+                ("point", json!(issue.point)),
+                ("payload", json!(p.probe.payload)),
+                ("exchange_id", json!(exchange_id)),
+                ("actor", json!(actor.id())),
+                ("deadline_ms", json!(deadline_ms)),
+                ("created_ms", json!(pm_core::now_ms())),
+            ] {
+                row.insert(k.into(), v);
+            }
+            store.insert_row("oast_probes", &row)?;
+        }
+        Ok(())
     }
 }
 
@@ -670,11 +760,12 @@ pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Doc
 const OAST_PER_TOKEN: u64 = 20;
 const OAST_TOTAL: u64 = 100_000;
 
-pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<()> {
+/// Stores a callback; `false` when it was dropped (over a cap).
+pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<bool> {
     if store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? >= OAST_PER_TOKEN
         || store.count_rows("oast_interactions", None)? >= OAST_TOTAL
     {
-        return Ok(());
+        return Ok(false);
     }
     let mut row = serde_json::Map::new();
     for (k, v) in [
@@ -689,7 +780,7 @@ pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> 
         row.insert(k.into(), v);
     }
     store.insert_row("oast_interactions", &row)?;
-    Ok(())
+    Ok(true)
 }
 
 fn collect_markers(v: &Value, owner: &str, out: &mut Vec<String>) {

@@ -870,8 +870,15 @@ impl Service {
             sent_count += 1;
             oob_sent.push((p, send(p.probe.raw.clone()).await?.exchange_id));
         }
-        let oob_deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(req.oob_wait_seconds.unwrap_or(10).clamp(1, 60));
+        let wait = std::time::Duration::from_secs(req.oob_wait_seconds.unwrap_or(10).clamp(1, 60));
+        let oob_deadline = std::time::Instant::now() + wait;
+        // Remembered, so a callback after the wait still becomes a finding.
+        if !oob_sent.is_empty() {
+            let s = &ex.summary;
+            let url = pm_core::url(&s.scheme, &s.host, s.port, &s.path);
+            let deadline_ms = pm_core::now_ms() + wait.as_millis() as i64;
+            self.remember_oob_probes(actor, &url, deadline_ms, &oob_sent)?;
+        }
 
         // 3 and 4. Multi-step checks: boolean pairs, then delays (slowest last).
         if !plans.is_empty() {
@@ -1818,7 +1825,7 @@ impl Service {
                 issues.push(ActiveFinding { issue: pm_scan::oob::issue(p, &seen), exchange_id: *exchange_id });
             }
             notes.push(
-                "out-of-band: callbacks that arrive after the wait aren't matched; retest with proof_run oast".into(),
+                "out-of-band: a callback that arrives after the wait still becomes a finding when it comes".into(),
             );
         }
         if actor.kind == ActorKind::Agent {

@@ -119,6 +119,14 @@ enum Command {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
+    Skills {
+        /// A skill to print; none lists them.
+        name: Option<String>,
+        /// What to concentrate on, filled into the skill.
+        #[arg(long)]
+        focus: Option<String>,
+    },
     /// Check for a newer ProxyMind release (off unless you turn it on or ask).
     Update {
         #[command(subcommand)]
@@ -1373,6 +1381,30 @@ async fn run() -> Result<()> {
         Command::Roe { action: RoeAction::Use { file } } => {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
+        }
+        Command::Skills { name, focus } => {
+            let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://example.invalid/\"]\n")?;
+            let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
+            attach_plugins(&cli, &service);
+            match name {
+                None => {
+                    for s in service.skills_list()? {
+                        let mine = if s.source == "user" { " (yours)" } else { "" };
+                        out!("{:<18} {}{mine}\n{:<18} {}", s.name, s.title, "", s.description);
+                    }
+                    out!(
+                        "\nPrint one with `proxymind skills <name> [--focus …]`. Add your own as ~/.proxymind/skills/<name>.md."
+                    );
+                }
+                Some(n) => {
+                    let mut args = std::collections::BTreeMap::new();
+                    if let Some(f) = focus {
+                        args.insert("focus".to_string(), f.clone());
+                    }
+                    let (s, text) = service.skill_get(n, &args)?;
+                    out!("# {}\n\n{text}", s.title);
+                }
+            }
         }
         Command::Update { action } => {
             // Works outside a project: the setting lives in the user's home, and

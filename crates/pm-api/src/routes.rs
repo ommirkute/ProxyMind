@@ -148,12 +148,15 @@ pub fn api() -> Router<AppState> {
         .route("/collaborator/smtp", post(collaborator_smtp))
         .route("/collaborator/payloads", get(collaborator_payloads).post(collaborator_payload))
         .route("/collaborator/interactions", get(collaborator_interactions))
+        .route("/collaborator/probes", get(collaborator_probes))
         .route("/organizer", get(organizer_list).post(organizer_add))
         .route("/organizer/{id}", axum::routing::patch(organizer_update).delete(organizer_delete))
         .route("/engage/comments", post(engage_comments))
         .route("/engage/scripts", post(engage_scripts))
         .route("/engage/js-endpoints", post(engage_js_endpoints))
         .route("/update", get(update_get).put(update_set))
+        .route("/skills", get(skills_list))
+        .route("/skills/{name}", post(skill_get))
         .route("/update/check", post(update_check))
         .route("/engage/analyze", post(engage_analyze))
         .route("/engage/references", post(engage_references))
@@ -415,6 +418,16 @@ async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) ->
     ok(st.service.scan_task_resume(&st.actor, &id)?)
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ProbesQuery {
+    limit: Option<usize>,
+}
+
+async fn collaborator_probes(State(st): State<AppState>, Query(q): Query<ProbesQuery>) -> ApiResult {
+    ok(st.service.collaborator_probes(q.limit.unwrap_or(200))?)
+}
+
 async fn collaborator_status(State(st): State<AppState>) -> ApiResult {
     ok(st.service.collaborator_status()?)
 }
@@ -515,6 +528,19 @@ async fn engage_comments(State(st): State<AppState>, Json(f): Json<pm_service::E
 
 async fn engage_scripts(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
     ok(st.service.engage_scripts(&st.actor, &f)?)
+}
+
+async fn skills_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.skills_list()?)
+}
+
+async fn skill_get(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(args): Json<std::collections::BTreeMap<String, String>>,
+) -> ApiResult {
+    let (skill, text) = st.service.skill_get(&name, &args)?;
+    ok(json!({ "skill": skill, "text": text }))
 }
 
 async fn update_get(State(st): State<AppState>) -> ApiResult {

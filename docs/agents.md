@@ -130,6 +130,25 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
 
+## Skills (testing playbooks)
+
+ProxyMind ships playbooks an agent can follow, as MCP prompts (your client's prompt or slash-command menu) and as the `skills_list` / `skill_get` tools: `idor_sweep`, `triage_findings`, `ssrf_hunt`, `js_recon`, `auth_review`, `jwt_audit`, `race_conditions` and `file_upload`. Each takes an optional `focus` ("the /api/orders endpoints"). They only describe steps with ProxyMind's tools, so everything still goes through the rules of engagement; the ones that change data say to ask first.
+
+Add your own as `~/.proxymind/skills/<name>.md` (a file with a built-in's name replaces it):
+
+```markdown
+---
+name: checkout_review
+title: Checkout review
+description: Price, quantity and coupon tampering in the checkout flow.
+args: focus
+---
+Goal: … {{focus}}
+1. …
+```
+
+`proxymind skills` lists them and `proxymind skills <name> --focus "…"` prints one; the Assistant page has a Playbook picker.
+
 ## Proofs: "no proof, no finding"
 
 A finding only becomes **proven** when ProxyMind checks it itself:
