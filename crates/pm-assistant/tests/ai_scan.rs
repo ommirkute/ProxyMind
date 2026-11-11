@@ -200,3 +200,51 @@ async fn cloud_models_need_the_rules_of_engagement() {
     assert!(e.to_string().contains("allow_cloud_models"), "{e}");
     assert!(svc.ai_scan_list(10).unwrap().is_empty(), "nothing was started");
 }
+
+#[tokio::test]
+async fn a_person_steers_a_running_scan_and_its_findings_are_verified() {
+    let svc = service(false);
+    let (port, seen) = mock_model(vec![
+        openai_tool_call(
+            "finding_create",
+            json!({"title": "Coupon applies twice", "vuln_class": "business_logic", "severity": "medium",
+                   "description": "The same coupon was accepted twice.", "url": "http://shop.test/api/cart"}),
+        ),
+        openai_tool_call(
+            "attack_path_record",
+            json!({"title": "Free goods", "impact": "Orders at no cost", "severity": "high", "steps": [
+                {"text": "Coupon accepted twice", "finding_id": 1},
+                {"text": "Total goes below zero at checkout"}]}),
+        ),
+        openai_tool_call("roe_get", json!({})),
+    ])
+    .await;
+    configure(&svc, ProviderKind::Openai, format!("http://127.0.0.1:{port}/v1"), "", 12);
+    let a = Arc::new(Assistant::new(svc.clone()).unwrap());
+    let scan = a.start_ai_scan(&human(), AiScanRequest { max_steps: Some(8), ..Default::default() }).unwrap();
+    svc.ai_scan_message(&human(), scan.id, "focus on the checkout flow").unwrap();
+    let agent = Actor::parse(&format!("agent:ai-scan-{}", scan.id)).unwrap();
+    assert!(svc.ai_scan_message(&agent, scan.id, "hi").is_err(), "only people message a scan");
+    let sc = finished(&svc, scan.id).await;
+    assert_eq!(sc.status, "done", "{}", sc.error);
+
+    // The message reached the model, marked as the person's.
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|(_, body)| body.to_string().contains("Message from the person running this scan")
+            && body.to_string().contains("focus on the checkout flow")),
+        "the message was delivered"
+    );
+    drop(seen);
+    assert!(svc.ai_scan_message(&human(), scan.id, "too late").is_err(), "a finished scan takes no messages");
+
+    // The chain belongs to the scan; the finding was retested afterwards.
+    let paths = svc.attack_path_list(Some(scan.id)).unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].steps[0].finding_id, Some(1));
+    let kinds: Vec<&str> = sc.log.iter().map(|l| l.kind.as_str()).collect();
+    for k in ["user", "chain", "verify"] {
+        assert!(kinds.contains(&k), "{k} in {kinds:?}");
+    }
+    assert!(svc.finding_get(1).unwrap()["retest"].is_object(), "the verifier retested the finding");
+}

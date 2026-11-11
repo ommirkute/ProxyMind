@@ -360,6 +360,11 @@ impl Service {
         if findings.is_empty() {
             md.push_str("| – | – | No findings recorded | – | – |\n");
         }
+        let chains = self.attack_paths_markdown(None)?;
+        if !chains.is_empty() {
+            md.push('\n');
+            md.push_str(&chains);
+        }
         for f in &findings {
             let id = f["id"].as_i64().unwrap_or(0);
             md.push_str(&format!(

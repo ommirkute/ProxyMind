@@ -525,6 +525,35 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "attack_path_record",
+            "Record an attack path: findings and observations chained into a route to impact (2 to 12 steps, e.g. \
+             \"API key in /static/app.js\" → \"admin API accepts it\" → \"read every order\"). Link steps to \
+             findings (finding_id) and exchanges (exchange_id) where they exist. Severity is the chain's, which can be \
+             higher than any single step. Shown as a graph in the UI and as a section of the report.",
+            json!({ "title": {"type":"string"}, "impact": {"type":"string"},
+                    "severity": {"type":"string","enum":["critical","high","medium","low","info"]},
+                    "steps": {"type":"array","items":{"type":"object","properties":{
+                        "text":{"type":"string"},"finding_id":{"type":"integer"},"exchange_id":{"type":"integer"}},
+                        "required":["text"]}} }),
+            &["title", "impact", "severity", "steps"],
+        ),
+        tool(
+            "attack_path_list",
+            "Attack paths recorded so far (all, or one AI scan's). Sends nothing.",
+            json!({ "scan_id": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "engage_logic",
+            "Business-logic test candidates from recorded traffic: parameters that look like prices, quantities, \
+             discounts, limits, identities, roles or workflow state, each with abuse cases to try (negative \
+             quantities, coupon reuse, jumping to a paid state…), and URLs that look like steps of a flow (cart, \
+             checkout, transfer) for step-skipping tests. Scanners miss these: compare the outcome with what the \
+             business allows. Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
             "recon_dns",
             "DNS records of a host in scope or a parent domain (A, AAAA, CNAME, MX, TXT, NS, SOA, CAA and _dmarc TXT), \
              with notes on what stands out: missing SPF or DMARC, a permissive policy, no CAA, a CNAME to a service \
@@ -1046,6 +1075,23 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_js_endpoints" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_js_endpoints(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "attack_path_record" => {
+            let p: pm_service::NewAttackPath = args(a)?;
+            service.attack_path_create(actor, p).map(to_json).map_err(|e| e.to_string())
+        }
+        "attack_path_list" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                scan_id: Option<i64>,
+            }
+            let g: A = args(a)?;
+            service.attack_path_list(g.scan_id).map(to_json).map_err(|e| e.to_string())
+        }
+        "engage_logic" => {
+            let f: pm_service::EngageFilter = args(a)?;
+            service.engage_logic(actor, &f).map(to_json).map_err(|e| e.to_string())
         }
         "recon_dns" => {
             #[derive(serde::Deserialize)]

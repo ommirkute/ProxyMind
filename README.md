@@ -187,7 +187,7 @@ proxymind approvals watch                  # approve or deny what the agent asks
 
 Agents can search history, read exchanges in token-budgeted views with secrets hidden, query the app model, send requests, run scans and proofs, and record hypotheses. **Skills** give them testing playbooks to follow (access-control sweep, SSRF hunt, triage, JS recon, auth review, JWT audit, races, uploads), as MCP prompts or tools, and you can add your own. See [docs/agents.md](docs/agents.md).
 
-**AI scan:** let the agent run a whole assessment on its own, from recon to chained proofs and a report, with a step and time budget, a live activity log and a Stop button. It works within the rules of engagement like any agent: risky steps wait for your approval.
+**AI scan:** let the agent run a whole assessment on its own, from recon to chained proofs and a report, with a step and time budget, a live activity log and a Stop button. Message it while it runs to change its focus or ask why it did something. It draws the **attack paths** it finds as a graph, tests **business logic** (prices, coupons, limits, workflow order) that scanners can't judge, and ProxyMind **retests every finding** it reports before you read it. It works within the rules of engagement like any agent: risky steps wait for your approval.
 
 **No agent?** Use the built-in **Assistant** (UI or terminal). It runs on a local model by default (Ollama, LM Studio, vLLM); cloud models need an explicit opt-in in the rules of engagement.
 

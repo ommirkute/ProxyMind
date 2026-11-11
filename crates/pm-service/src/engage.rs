@@ -65,6 +65,14 @@ pub struct TargetAnalysis {
     pub params: Vec<ParamSummary>,
 }
 
+/// Business-logic candidates (see `engage_logic`).
+#[derive(Debug, Clone, Serialize)]
+pub struct LogicReport {
+    pub candidates: Vec<pm_tools::logic::LogicCandidate>,
+    /// Recorded URLs that look like steps of a multi-step flow.
+    pub flow_paths: Vec<String>,
+}
+
 /// An endpoint a recorded script mentions.
 #[derive(Debug, Clone, Serialize)]
 pub struct FoundEndpoint {
@@ -359,6 +367,21 @@ impl Service {
             content_types: types,
             params: params.finish(),
         })
+    }
+
+    /// Business-logic test candidates from recorded traffic: parameters that
+    /// look like money, quantities, discounts, limits, identities, roles or
+    /// workflow state, with abuse cases to try, plus paths that look like
+    /// steps of a flow (cart, checkout, transfer…). Sends nothing.
+    pub fn engage_logic(&self, actor: &Actor, f: &EngageFilter) -> Result<LogicReport> {
+        let a = self.engage_analyze(actor, f)?;
+        let paths: Vec<&str> = a.dynamic_urls.iter().filter_map(|u| u.split_once(' ').map(|(_, rest)| rest)).collect();
+        let flows = pm_tools::logic::flow_paths(
+            paths
+                .iter()
+                .map(|u| u.find("://").and_then(|i| u[i + 3..].find('/').map(|j| &u[i + 3 + j..])).unwrap_or(u)),
+        );
+        Ok(LogicReport { candidates: pm_tools::logic::candidates(&a.params), flow_paths: flows })
     }
 
     /// An HTML page that submits the recorded request from another site.

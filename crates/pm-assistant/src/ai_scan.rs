@@ -26,6 +26,19 @@ fn short(v: &Value) -> String {
     if s.len() <= 160 { s } else { format!("{}…", &s[..s.char_indices().nth(160).map_or(s.len(), |(i, _)| i)]) }
 }
 
+/// Messages from the person running the scan, as text for the next turn.
+fn person_blocks(messages: &[String]) -> Vec<Block> {
+    messages
+        .iter()
+        .map(|m| Block::Text {
+            text: format!(
+                "Message from the person running this scan (follow it, within the rules of engagement; answer \
+                 questions briefly, then continue): {m}"
+            ),
+        })
+        .collect()
+}
+
 /// Cuts old tool results (pairs stay intact: only their text shrinks).
 fn compact(all: &mut [Message]) {
     let keep_from = all.len().saturating_sub(KEEP_WHOLE);
@@ -59,6 +72,12 @@ impl Assistant {
                 Ok(status) => (status, String::new()),
                 Err(e) => ("failed", e.to_string()),
             };
+            // A scan that ran to its end retests what it found before anyone reads the report.
+            if status == "done"
+                && let Err(e) = me.service.ai_scan_verify(id).await
+            {
+                let _ = me.service.ai_scan_log(id, "error", &format!("verification failed: {e}"));
+            }
             if let Err(e) = me.service.ai_scan_finish(id, status, &error) {
                 tracing::warn!("could not finish AI scan {id}: {e}");
             }
@@ -143,7 +162,10 @@ impl Assistant {
             let uses: Vec<(String, String, Value)> =
                 reply.tool_uses().map(|(i, n, v)| (i.to_string(), n.to_string(), v.clone())).collect();
             all.push(reply);
-            if uses.is_empty() {
+            let from_person = svc.ai_scan_take_messages(id)?;
+            if uses.is_empty() && !from_person.is_empty() {
+                all.push(Message { role: Role::User, content: person_blocks(&from_person) });
+            } else if uses.is_empty() {
                 if !svc.ai_scan_get(id)?.report.is_empty() {
                     svc.ai_scan_progress(id, steps, chat_id)?;
                     svc.chat_save(chat_id, &json!(all))?;
@@ -186,6 +208,7 @@ impl Assistant {
                         ),
                     });
                 }
+                results.extend(person_blocks(&from_person));
                 all.push(Message { role: Role::User, content: results });
             }
             compact(&mut all);

@@ -934,6 +934,15 @@ enum AiScanAction {
         #[arg(long = "as")]
         actor: Option<String>,
     },
+    /// Send a running scan a message ("focus on checkout", "why did you try that?"); it gets it on its next step.
+    Say {
+        id: i64,
+        text: String,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Print the attack paths a scan recorded (all scans' without an id).
+    Paths { id: Option<i64> },
     /// Print the system prompt a scan would use.
     Prompt,
 }
@@ -1544,6 +1553,24 @@ async fn run() -> Result<()> {
                 AiScanAction::Stop { id, actor } => {
                     let sc = service.ai_scan_stop(&human_actor(actor.as_deref())?, *id)?;
                     out!("#{} {}", sc.id, sc.status);
+                }
+                AiScanAction::Say { id, text, actor } => {
+                    service.ai_scan_message(&human_actor(actor.as_deref())?, *id, text)?;
+                    out!("✓ sent to AI scan #{id}");
+                }
+                AiScanAction::Paths { id } => {
+                    let paths = service.attack_path_list(*id)?;
+                    if paths.is_empty() {
+                        out!("No attack paths recorded.");
+                    }
+                    for p in paths.iter().rev() {
+                        out!("#{} [{}] {}", p.id, p.severity, p.title);
+                        for (i, st) in p.steps.iter().enumerate() {
+                            let f = st.finding_id.map(|f| format!(" (finding #{f})")).unwrap_or_default();
+                            out!("  {}. {}{f}", i + 1, st.text);
+                        }
+                        out!("  → {}", p.impact);
+                    }
                 }
                 AiScanAction::Prompt => {
                     let target = service.policy().roe().include.first().map(|p| p.text.clone()).unwrap_or_default();
