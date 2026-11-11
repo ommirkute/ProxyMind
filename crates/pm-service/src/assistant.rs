@@ -66,6 +66,30 @@ pub struct Chat {
     pub messages: Value,
 }
 
+/// Saved model API keys, in the user's home.
+const KEYS_FILE: &str = "model-keys.json";
+
+/// Where a model API key comes from (never the key itself).
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyStatus {
+    /// environment, saved or none
+    pub source: String,
+    /// The last four characters, e.g. "…a1b2".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+fn valid_key_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(ServiceError::Invalid(
+            "the key's name is a variable-style NAME such as ANTHROPIC_API_KEY, not the key itself".into(),
+        ))
+    }
+}
+
 impl Service {
     pub fn assistant_config(&self) -> Result<AssistantConfig> {
         match self.store.lock().get_setting(ASSISTANT_SETTING)? {
@@ -87,10 +111,8 @@ impl Service {
         if cfg.model.trim().is_empty() {
             return Err(ServiceError::Invalid("choose a model".into()));
         }
-        if !cfg.api_key_env.is_empty() && !cfg.api_key_env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(ServiceError::Invalid(
-                "api_key_env is the NAME of an environment variable, not the key".into(),
-            ));
+        if !cfg.api_key_env.is_empty() {
+            valid_key_name(&cfg.api_key_env)?;
         }
         let cfg = AssistantConfig {
             max_steps: cfg.max_steps.clamp(1, 50),
@@ -101,6 +123,108 @@ impl Service {
         self.store.lock().set_setting(ASSISTANT_SETTING, &text)?;
         self.audit(&actor.id(), "assistant_settings", json!(cfg), "allow")?;
         Ok(cfg)
+    }
+
+    /// Saves a model API key under `name` (e.g. ANTHROPIC_API_KEY) in the
+    /// user's home (`model-keys.json`, readable by the owner only): never in
+    /// the project, never sent back by the API, never visible to agents. An
+    /// environment variable of the same name still wins. People only; the
+    /// audit log records that it changed, not the value.
+    pub fn model_key_set(&self, actor: &Actor, name: &str, key: &str) -> Result<KeyStatus> {
+        if actor.kind != ActorKind::Human {
+            return Err(ServiceError::Invalid("only people can set model API keys".into()));
+        }
+        valid_key_name(name)?;
+        let key = key.trim();
+        if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(ServiceError::Invalid("paste the API key itself (no spaces or line breaks)".into()));
+        }
+        let mut keys = self.model_keys()?;
+        keys.insert(name.to_string(), key.to_string());
+        self.save_model_keys(&keys)?;
+        self.audit(&actor.id(), "model_key_set", json!({ "name": name }), "allow")?;
+        Ok(self.model_key_status(name))
+    }
+
+    /// Removes a saved key. People only.
+    pub fn model_key_remove(&self, actor: &Actor, name: &str) -> Result<KeyStatus> {
+        if actor.kind != ActorKind::Human {
+            return Err(ServiceError::Invalid("only people can remove model API keys".into()));
+        }
+        let mut keys = self.model_keys()?;
+        if keys.remove(name).is_some() {
+            self.save_model_keys(&keys)?;
+            self.audit(&actor.id(), "model_key_remove", json!({ "name": name }), "allow")?;
+        }
+        Ok(self.model_key_status(name))
+    }
+
+    /// The key to use for `name`: the environment variable, else the saved
+    /// key. For the code that calls the model only; never returned by the API.
+    pub fn model_key(&self, name: &str) -> Option<String> {
+        if name.is_empty() {
+            return None;
+        }
+        std::env::var(name)
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .or_else(|| self.model_keys().ok()?.remove(name))
+    }
+
+    /// Where the key for `name` comes from, with its last four characters.
+    pub fn model_key_status(&self, name: &str) -> KeyStatus {
+        let hint = |k: &str| {
+            let tail: String = k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("…{tail}")
+        };
+        if name.is_empty() {
+            return KeyStatus { source: "none".into(), hint: None };
+        }
+        if let Ok(k) = std::env::var(name)
+            && !k.trim().is_empty()
+        {
+            return KeyStatus { source: "environment".into(), hint: Some(hint(k.trim())) };
+        }
+        match self.model_keys().ok().and_then(|mut m| m.remove(name)) {
+            Some(k) => KeyStatus { source: "saved".into(), hint: Some(hint(&k)) },
+            None => KeyStatus { source: "none".into(), hint: None },
+        }
+    }
+
+    fn model_keys_path(&self) -> Result<std::path::PathBuf> {
+        self.plugin_home
+            .get()
+            .map(|h| h.join(KEYS_FILE))
+            .ok_or_else(|| ServiceError::Invalid("no ProxyMind home directory in this process to save keys in".into()))
+    }
+
+    fn model_keys(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let Ok(path) = self.model_keys_path() else { return Ok(Default::default()) };
+        match std::fs::read_to_string(&path) {
+            Ok(t) => Ok(serde_json::from_str(&t).unwrap_or_default()),
+            Err(_) => Ok(Default::default()),
+        }
+    }
+
+    fn save_model_keys(&self, keys: &std::collections::BTreeMap<String, String>) -> Result<()> {
+        let path = self.model_keys_path()?;
+        let text = serde_json::to_string_pretty(keys).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let mut f = o.open(&tmp).map_err(|e| ServiceError::Invalid(format!("saving the key: {e}")))?;
+            std::io::Write::write_all(&mut f, text.as_bytes())
+                .map_err(|e| ServiceError::Invalid(format!("saving the key: {e}")))?;
+        }
+        std::fs::rename(&tmp, &path).map_err(|e| ServiceError::Invalid(format!("saving the key: {e}")))?;
+        Ok(())
     }
 
     /// Whether the rules of engagement allow sending data to cloud models.

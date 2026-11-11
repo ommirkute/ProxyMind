@@ -4,6 +4,7 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
+mod ai_scan;
 mod approvals;
 mod assistant;
 mod authz;
@@ -32,6 +33,7 @@ mod organizer;
 mod plugins;
 mod proof;
 mod race;
+mod recon;
 mod replay;
 mod report;
 mod report_template;
@@ -51,7 +53,8 @@ mod write_checks;
 mod ws;
 mod ws_replay;
 
-pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
+pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor};
+pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
@@ -81,6 +84,7 @@ pub use plugins::{PluginCheckIssue, PluginCheckRequest, PluginCheckResult, Plugi
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
+pub use recon::{DnsReport, WaybackCapture, WaybackReport};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use report::{
     Report, ReportEvidence, ReportFinding, ReportIssue, ReportIssueGroup, ReportOptions, ReportOwaspGroup, ReportProof,

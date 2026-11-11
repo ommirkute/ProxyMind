@@ -12,6 +12,7 @@
 pub mod codec;
 pub mod codegen;
 pub mod curl;
+pub mod dns;
 pub mod engage;
 pub mod har;
 pub mod hql;
@@ -20,3 +21,4 @@ pub mod reqedit;
 pub mod search;
 pub mod sitemap;
 pub mod token_analyzer;
+pub mod wayback;

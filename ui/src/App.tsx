@@ -32,6 +32,7 @@ import Engage from "./pages/Engage";
 import Search from "./pages/Search";
 import Organizer from "./pages/Organizer";
 import CustomChecks from "./pages/CustomChecks";
+import AiScan from "./pages/AiScan";
 
 interface Group {
   id: string;
@@ -66,6 +67,7 @@ const GROUPS: Group[] = [
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
+  { id: "aiscan", label: "AI scan", icon: "scan", section: "Testing", pages: [{ id: "aiscan", label: "AI scan" }] },
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
@@ -230,6 +232,7 @@ export default function App() {
     organizer: Organizer,
     checks: CustomChecks,
     about: About,
+    aiscan: AiScan,
   }[route.page];
 
   const group = groupOf(route.page);

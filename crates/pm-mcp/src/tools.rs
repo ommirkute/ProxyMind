@@ -525,6 +525,22 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "recon_dns",
+            "DNS records of a host in scope or a parent domain (A, AAAA, CNAME, MX, TXT, NS, SOA, CAA and _dmarc TXT), \
+             with notes on what stands out: missing SPF or DMARC, a permissive policy, no CAA, a CNAME to a service \
+             where a deleted resource can be claimed. Asks the DNS resolver; sends nothing to the target.",
+            json!({ "host": {"type":"string"} }),
+            &["host"],
+        ),
+        tool(
+            "recon_wayback",
+            "URLs the Internet Archive (Wayback Machine) captured for a host in scope, interesting ones first \
+             (backups, configs, APIs, admin pages, parameters), with `known: false` for paths traffic hasn't shown. \
+             Old endpoints often still answer. Asks the archive; sends nothing to the target.",
+            json!({ "host": {"type":"string"}, "limit": {"type":"integer"} }),
+            &["host"],
+        ),
+        tool(
             "engage_analyze",
             "Analyze the target from recorded traffic: URL counts, dynamic URLs, methods, statuses, content types, and \
              every parameter (query/body/JSON/cookie/multipart, how often, examples, paths). Sends nothing.",
@@ -1030,6 +1046,29 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_js_endpoints" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_js_endpoints(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "recon_dns" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                host: String,
+            }
+            let g: A = args(a)?;
+            service.recon_dns(actor, &g.host, None).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "recon_wayback" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                host: String,
+                limit: Option<usize>,
+            }
+            let g: A = args(a)?;
+            service
+                .recon_wayback(actor, &g.host, g.limit.unwrap_or(200), None)
+                .await
+                .map(to_json)
+                .map_err(|e| e.to_string())
         }
         "engage_analyze" => {
             let f: pm_service::EngageFilter = args(a)?;

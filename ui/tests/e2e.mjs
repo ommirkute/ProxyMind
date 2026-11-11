@@ -436,6 +436,11 @@ try {
   await page.getByTestId("engage-endpoints").click();
   await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
   check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.getByTestId("engage-tab-dns").click();
+  await page.getByLabel("DNS host").fill("not-in-scope.example");
+  await page.getByTestId("recon-dns").click();
+  await page.getByText("isn't in scope").waitFor();
+  check(true, "DNS recon refuses a host outside the scope");
   await page.goto(link.replace(/\/auth.*/, "/#/about"));
   await page.locator('[data-testid="about-version"]', { hasText: "0." }).waitFor();
   check(!(await page.getByTestId("update-toggle").isChecked()), "the update check is off until the user turns it on");
@@ -808,7 +813,14 @@ try {
       const parsed = JSON.parse(body);
       modelCalls.push(parsed);
       const toolMsg = parsed.messages.find((m) => m.role === "tool");
-      const reply = toolMsg
+      const call = (name, args) => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `c${modelCalls.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] });
+      const tools = parsed.messages.filter((m) => m.role === "tool").length;
+      const aiScan = String(parsed.messages[0]?.content ?? "").includes("AI scan agent");
+      const reply = aiScan
+        ? tools === 0 ? call("ai_scan_phase", { phase: "recon", notes: "e2e run" })
+          : tools === 1 ? call("ai_scan_report", { markdown: "# Report\n\n## Executive summary\nThe e2e scan found nothing." })
+          : { choices: [{ message: { role: "assistant", content: "Done." } }] }
+        : toolMsg
         ? { choices: [{ message: { role: "assistant", content: "Alice opened /api/orders/1001 (her own order)." } }] }
         : { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "history_search", arguments: JSON.stringify({ path: "/api/orders/", limit: 5 }) } }] } }] };
       res.writeHead(200, { "content-type": "application/json" });
@@ -838,6 +850,14 @@ try {
   check(true, "a playbook fills the message box with its steps");
   await page.getByLabel("Message").fill("");
   await page.screenshot({ path: join(SHOTS, "6f-assistant.png") });
+  await open("aiscan");
+  await page.locator('[data-testid="ai-scan-model"]', { hasText: "mock-model" }).waitFor();
+  await page.getByLabel("AI scan steps").fill("10");
+  await page.getByTestId("ai-scan-start").click();
+  await page.locator('[data-testid="ai-scan-report"]', { hasText: "The e2e scan found nothing." }).waitFor({ timeout: 15000 });
+  check(await page.getByTestId("ai-scan-status").textContent().then((t) => t.includes("done")), "an AI scan runs to a report");
+  check(await page.getByTestId("ai-scan-log").textContent().then((t) => t.includes("e2e run")), "its phases show in the activity log");
+  await page.screenshot({ path: join(SHOTS, "6g-ai-scan.png") });
   model.close();
 
   console.log("Crawl");
@@ -1202,7 +1222,7 @@ match:
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200"));
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns"));
   check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
   if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();

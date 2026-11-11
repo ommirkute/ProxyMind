@@ -4,6 +4,7 @@
 //! audit). Models run locally by default; cloud models need
 //! `allow_cloud_models: true` in the rules of engagement.
 
+pub mod ai_scan;
 pub mod llm;
 
 use std::net::IpAddr;
@@ -115,10 +116,11 @@ impl Assistant {
         if cfg.api_key_env.is_empty() {
             return Ok(None);
         }
-        match std::env::var(&cfg.api_key_env) {
-            Ok(k) if !k.trim().is_empty() => Ok(Some(k.trim().to_string())),
-            _ => Err(AssistantError::Setup(format!(
-                "set the {} environment variable before starting ProxyMind (the key is never stored in the project)",
+        match self.service.model_key(&cfg.api_key_env) {
+            Some(k) => Ok(Some(k)),
+            None => Err(AssistantError::Setup(format!(
+                "add the API key ({}) in the assistant settings, or set that environment variable before starting \
+                 ProxyMind (keys are never stored in the project)",
                 cfg.api_key_env
             ))),
         }
@@ -193,7 +195,7 @@ impl Assistant {
     }
 }
 
-fn cut(s: &str) -> String {
+pub(crate) fn cut(s: &str) -> String {
     if s.len() <= MAX_TOOL_RESULT {
         return s.to_string();
     }
@@ -204,11 +206,11 @@ fn cut(s: &str) -> String {
     format!("{}… [cut: {} more bytes; ask for less, e.g. a smaller view or limit]", &s[..end], s.len() - end)
 }
 
-fn host_of(base_url: &str) -> String {
+pub(crate) fn host_of(base_url: &str) -> String {
     url::Url::parse(base_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default()
 }
 
-fn provider_name(p: ProviderKind) -> &'static str {
+pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Openai => "openai-compatible",

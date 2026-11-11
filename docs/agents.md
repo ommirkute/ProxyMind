@@ -96,6 +96,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies (a part such as `response_body` or `request_headers`, `invert`, `in_scope`); secrets are replaced before matching, snippets are untrusted |
 | `ws_grep` | Find text in recorded WebSocket messages (direction, scope, inverted); snippets are untrusted |
 | `engage_comments` / `engage_scripts` / `engage_js_endpoints` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, endpoints the JavaScript mentions (new ones first), the target's URLs and parameters, what links to a page |
+| `recon_dns` / `recon_wayback` | Passive recon for a host in scope (sends nothing to the target): DNS records with notes (SPF, DMARC, CAA, CNAMEs to services where a deleted resource can be claimed), and the URLs the Internet Archive captured, interesting ones first |
 | `engage_csrf_poc` / `engage_clickjacking` | A CSRF proof page for a recorded request; whether a page can be framed, with a test page |
 | `collaborator_payload` / `collaborator_interactions` | Out-of-band payloads to place by hand, and the callbacks they caused (untrusted) |
 | `organizer_add` / `organizer_list` / `organizer_update` | Keep exchanges aside with a status and a note, for people or agents to come back to |
@@ -129,6 +130,17 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
+
+## AI scan (an agent on its own)
+
+The **AI scan** page (or `proxymind ai-scan start`) runs the model set on the Assistant page through a whole assessment: recon, scanning, exploitation to proof of concept, chaining findings into attack paths, and a Markdown report. It acts as `agent:ai-scan-<n>`, so the rules of engagement apply as to any agent: out-of-scope requests are refused, destructive steps wait in Approvals, and every action is audited.
+
+- **Model:** any model the assistant supports. Cloud models (Anthropic, OpenAI) need `data.allow_cloud_models: true` in the rules of engagement and the API key in an environment variable, e.g. `export ANTHROPIC_API_KEY=…` before `proxymind ui`.
+- **Budget:** model calls (default 150) and minutes (default 60); older tool results are shortened so long runs fit the model's context. Stop it from the page or with `proxymind ai-scan stop <n>`.
+- **Progress:** the page shows the phase, an activity log (tool calls, loopbacks, approvals waited on) and the findings; `proxymind ai-scan status <n>` does the same in a terminal.
+- **Report:** download it as Markdown or `proxymind ai-scan report <n> --out report.md`.
+- **The prompt:** see it on the page or with `proxymind ai-scan prompt`. Replace it with `~/.proxymind/ai-scan-prompt.md` (keep `{{target}}`, `{{scope}}` and `{{focus}}`). Limits never come from the prompt: they're enforced by ProxyMind.
+- **Not covered:** port scanning, DNS record lookups, search-engine dorking, Wayback lookups, TLS cipher scans and source-code scanning aren't ProxyMind tools; the agent lists them in the report for a person to run.
 
 ## Skills (testing playbooks)
 

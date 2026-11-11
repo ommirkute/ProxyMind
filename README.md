@@ -141,6 +141,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 ### 🗺️ Recon
 - Crawler, including a browser-driven crawl for JavaScript apps
 - **JavaScript endpoint mining**: API routes and parameters the app's scripts mention, including ones no page links to
+- **Passive recon**: DNS records (SPF, DMARC, CAA, dangling CNAMEs) and Wayback Machine URL history for hosts in scope, without sending anything to the target
 - Content discovery with soft-404 detection, robots.txt folders and other API versions
 - OpenAPI/Swagger and GraphQL (introspection) import
 - Engagement tools: comments, scripts, references, parameter analysis, CSRF and clickjacking proof pages
@@ -185,6 +186,8 @@ proxymind approvals watch                  # approve or deny what the agent asks
 ```
 
 Agents can search history, read exchanges in token-budgeted views with secrets hidden, query the app model, send requests, run scans and proofs, and record hypotheses. **Skills** give them testing playbooks to follow (access-control sweep, SSRF hunt, triage, JS recon, auth review, JWT audit, races, uploads), as MCP prompts or tools, and you can add your own. See [docs/agents.md](docs/agents.md).
+
+**AI scan:** let the agent run a whole assessment on its own, from recon to chained proofs and a report, with a step and time budget, a live activity log and a Stop button. It works within the rules of engagement like any agent: risky steps wait for your approval.
 
 **No agent?** Use the built-in **Assistant** (UI or terminal). It runs on a local model by default (Ollama, LM Studio, vLLM); cloud models need an explicit opt-in in the rules of engagement.
 

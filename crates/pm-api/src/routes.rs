@@ -158,6 +158,8 @@ pub fn api() -> Router<AppState> {
         .route("/skills", get(skills_list))
         .route("/skills/{name}", post(skill_get))
         .route("/update/check", post(update_check))
+        .route("/recon/dns", post(recon_dns))
+        .route("/recon/wayback", post(recon_wayback))
         .route("/engage/analyze", post(engage_analyze))
         .route("/engage/references", post(engage_references))
         .route("/engage/csrf", post(engage_csrf))
@@ -202,8 +204,14 @@ pub fn api() -> Router<AppState> {
         .route("/session/macros/{name}/run", post(session_macro_run))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
+        .route("/assistant/key", axum::routing::put(model_key_set))
+        .route("/assistant/key/{name}", axum::routing::delete(model_key_remove))
         .route("/assistant/chats/{id}", get(assistant_chat))
         .route("/assistant/send", post(assistant_send))
+        .route("/ai-scan", get(ai_scan_list).post(ai_scan_start))
+        .route("/ai-scan/prompt", get(ai_scan_prompt))
+        .route("/ai-scan/{id}", get(ai_scan_get))
+        .route("/ai-scan/{id}/stop", post(ai_scan_stop))
 }
 
 #[derive(Deserialize)]
@@ -562,6 +570,30 @@ async fn update_set(State(st): State<AppState>, Json(b): Json<UpdateSet>) -> Api
 struct UpdateCheck {
     /// Ask now even if the daily check is off or the last answer is fresh.
     force: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconDns {
+    host: String,
+    #[serde(default)]
+    resolver: Option<std::net::SocketAddr>,
+}
+
+async fn recon_dns(State(st): State<AppState>, Json(b): Json<ReconDns>) -> ApiResult {
+    ok(st.service.recon_dns(&st.actor, &b.host, b.resolver).await?)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconWayback {
+    host: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn recon_wayback(State(st): State<AppState>, Json(b): Json<ReconWayback>) -> ApiResult {
+    ok(st.service.recon_wayback(&st.actor, &b.host, b.limit.unwrap_or(500), None).await?)
 }
 
 async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) -> ApiResult {
@@ -1086,6 +1118,21 @@ async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): 
     ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyBody {
+    name: String,
+    key: String,
+}
+
+async fn model_key_set(State(st): State<AppState>, Json(b): Json<KeyBody>) -> ApiResult {
+    ok(st.service.model_key_set(&st.actor, &b.name, &b.key)?)
+}
+
+async fn model_key_remove(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.model_key_remove(&st.actor, &name)?)
+}
+
 async fn assistant_state(State(st): State<AppState>) -> ApiResult {
     let config = st.service.assistant_config()?;
     let ready = st.assistant.check(&config).map(|_| ()).map_err(|e| e.to_string()).err();
@@ -1095,6 +1142,7 @@ async fn assistant_state(State(st): State<AppState>) -> ApiResult {
         "cloud_models_allowed": st.service.cloud_models_allowed(),
         "problem": ready,
         "acts_as": st.assistant.actor().id(),
+        "key": st.service.model_key_status(&config.api_key_env),
         "chats": st.service.chat_list(50)?,
     }))
 }
@@ -1118,6 +1166,28 @@ async fn assistant_send(State(st): State<AppState>, Json(b): Json<SendBody>) -> 
         return Err(ServiceError::Invalid("write a message".into()).into());
     }
     ok(st.assistant.send(b.chat_id, &b.text).await?)
+}
+
+async fn ai_scan_start(State(st): State<AppState>, Json(req): Json<pm_service::AiScanRequest>) -> ApiResult {
+    ok(st.assistant.start_ai_scan(&st.actor, req)?)
+}
+
+async fn ai_scan_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.ai_scan_list(50)?)
+}
+
+async fn ai_scan_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.ai_scan_get(id)?)
+}
+
+async fn ai_scan_stop(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.ai_scan_stop(&st.actor, id)?)
+}
+
+/// The system prompt a scan would get (with the default target).
+async fn ai_scan_prompt(State(st): State<AppState>) -> ApiResult {
+    let target = st.service.policy().roe().include.first().map(|p| p.text.clone()).unwrap_or_default();
+    ok(json!({ "target": target, "prompt": st.service.ai_scan_prompt(&target, "")? }))
 }
 
 async fn network_get(State(st): State<AppState>) -> ApiResult {
