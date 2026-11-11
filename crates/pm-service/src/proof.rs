@@ -224,6 +224,20 @@ impl Service {
         self.proof_run(actor, inputs).await
     }
 
+    /// Ties a proven proof to a finding (made after the proof): the finding
+    /// becomes proven, as if the proof had named it.
+    pub(crate) fn link_proof(&self, proof_id: i64, finding_id: i64) -> Result<()> {
+        let mut p = serde_json::Map::new();
+        p.insert("finding_id".into(), json!(finding_id));
+        self.store.lock().update_row("proofs", proof_id, &p)?;
+        let mut f = serde_json::Map::new();
+        f.insert("status".into(), json!("proven"));
+        f.insert("proof_id".into(), json!(proof_id));
+        f.insert("updated_ms".into(), json!(now_ms()));
+        self.store.lock().update_row("findings", finding_id, &f)?;
+        Ok(())
+    }
+
     pub fn proof_get(&self, proof_id: i64) -> Result<Value> {
         let row = self
             .store

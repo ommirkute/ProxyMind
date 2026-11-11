@@ -225,6 +225,20 @@ proxymind regress run tests/ --target https://staging.example.com --junit result
 - **Results:** each test reports still vulnerable, fixed, skipped (e.g. a credential variable isn't set) or error. The exit code is 1 if any finding is still there or a test errored. `--junit` writes a report for CI dashboards, `--json` prints the results.
 - **Safety:** credentials never go in the files (`{{auth:NAME}}` lines are filled from `PM_AUTH_NAME`). The runner needs no project and sends only to `--target` (or the origin each test was recorded on). `--insecure` accepts self-signed test certificates. Only run tests against systems you are allowed to test.
 
+## Authorization matrix
+
+**Identities & Authz → Authorization matrix**, `proxymind authz matrix [--prove]` or MCP `authz_matrix` replays every readable (GET/HEAD) operation in the app model as every identity and anonymously, and shows a role × endpoint grid: owner, same data, own data, denied. A cell where someone else gets the owner's data is flagged:
+
+- **idor**: another user reads the owner's object (`/api/orders/{id}`);
+- **bfla**: a lower role gets what a privileged role (admin, staff, support…) gets, or a normal user reads an `/admin` path;
+- **no_auth**: the operation answers with the same data without credentials.
+
+With `prove`, each flag is proven with the differential oracle, and proven ones become findings linked to their proof. Requests that change state are skipped (test them with `replay_send` per identity), and so are logout links. Every request goes through the rules of engagement.
+
+## What changed since the last test
+
+At the end of a test, save a snapshot of the app model: **Model → Changes since the last test**, or `proxymind changes --save "Q3 test"`. Next time, compare with it (`proxymind changes`, the same panel, or MCP `model_changes`) to get new, removed and changed operations (parameters added or gone, new statuses, credentials now sent or not) and a retest list that names earlier findings on changed or removed endpoints. `proxymind changes --since last-year.pmproj` compares with another project instead. Operations are matched by method and path template, so a staging snapshot compares with production.
+
 ## What the agent sees
 
 - **Secrets are hidden.** Cookies, tokens, passwords and API keys appear as placeholders such as `{{secret:cookie_session_1}}`. The agent can use placeholders in requests; ProxyMind swaps the real values in when sending. Turn this off with `data.redact_before_llm: false` in the ROE.
