@@ -194,6 +194,10 @@ pub fn api() -> Router<AppState> {
         .route("/audit", get(audit))
         .route("/audit/verify", get(audit_verify))
         .route("/report", get(report))
+        .route("/evidence/pack", get(evidence_pack))
+        .route("/evidence/fingerprint", get(evidence_fingerprint))
+        .route("/evidence/verify", post(evidence_verify).layer(axum::extract::DefaultBodyLimit::max(EVIDENCE_LIMIT)))
+        .route("/coverage/proof", get(coverage_proof))
         .route("/intercept", get(intercept_state))
         .route("/intercept/settings", axum::routing::put(intercept_settings))
         .route("/intercept/forward-all", post(intercept_forward_all))
@@ -854,6 +858,42 @@ async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Res
     let disposition = format!("attachment; filename=\"proxymind-report.{}\"", r.extension);
     Ok(([(header::CONTENT_TYPE, r.content_type.to_string()), (header::CONTENT_DISPOSITION, disposition)], r.body)
         .into_response())
+}
+
+/// Largest evidence pack the verify endpoint takes.
+const EVIDENCE_LIMIT: usize = 512 * 1024 * 1024;
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct PackQuery {
+    all: bool,
+}
+
+/// A signed evidence pack (ZIP) to hand to the client.
+async fn evidence_pack(State(st): State<AppState>, Query(q): Query<PackQuery>) -> Result<Response, ApiError> {
+    let (bytes, fingerprint) = st.service.evidence_pack(&st.actor, q.all)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind-evidence.zip\"".to_string()),
+            (header::HeaderName::from_static("x-evidence-fingerprint"), fingerprint),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn evidence_fingerprint(State(st): State<AppState>) -> ApiResult {
+    ok(serde_json::json!({ "fingerprint": st.service.evidence_fingerprint()? }))
+}
+
+/// Checks an uploaded evidence pack (the body is the ZIP).
+async fn evidence_verify(body: axum::body::Bytes) -> ApiResult {
+    ok(pm_service::verify_evidence(&body))
+}
+
+async fn coverage_proof(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.coverage_proof()?)
 }
 
 async fn finding_retest(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

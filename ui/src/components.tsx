@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Counters } from "./api";
 
-export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan";
+export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
 
 export interface Nav {
   page: Page;

@@ -605,7 +605,8 @@ impl Service {
             probe.filter(|p| {
                 first
                     && p.get("finding_id").is_none_or(Value::is_null)
-                    && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms > d)
+                    // At or after the deadline: the scan has stopped waiting by then.
+                    && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms >= d)
             })
         };
         let Some(p) = late else { return Ok(()) };

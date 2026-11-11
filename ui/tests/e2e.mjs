@@ -286,6 +286,18 @@ try {
   await page.waitForSelector('[data-testid="retest-result"]', { timeout: 30000 });
   check(await page.getByTestId("retest-result").textContent().then((t) => t.includes("reproduced") && t.includes("proof still holds")),
     "retest re-runs the proof");
+  await open("evidence");
+  await page.getByTestId("evidence-fingerprint").waitFor();
+  const [packDl] = await Promise.all([page.waitForEvent("download"), page.getByTestId("evidence-download").click()]);
+  const packPath = join(dir, "evidence.zip");
+  await packDl.saveAs(packPath);
+  await page.getByLabel("Evidence pack file").setInputFiles(packPath);
+  await page.locator('[data-testid="evidence-verdict"]', { hasText: "verified" }).waitFor({ timeout: 15000 });
+  check(await page.getByTestId("evidence-verdict").textContent().then((t) => t.includes("signature") && t.includes("hash chain intact")), "an evidence pack downloads and verifies (signature, files, audit chain, scope)");
+  await page.getByTestId("coverage-summary").waitFor();
+  check(await page.getByTestId("coverage-summary").textContent().then((t) => /\d+(\.\d+)?% tested/.test(t)), "the coverage proof shows how much was tested");
+  await page.screenshot({ path: join(SHOTS, "4b-evidence.png") });
+  await open("findings");
   await page.locator('[data-testid="report-builder"] summary').first().click();
   await page.getByLabel("Report template").selectOption("executive");
   await page.getByLabel("Report format").selectOption("md");

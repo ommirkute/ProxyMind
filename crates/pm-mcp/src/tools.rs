@@ -736,7 +736,8 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "coverage",
-            "What has and hasn't been tested: each operation × relevant vulnerability class, untested first.",
+            "What has and hasn't been tested: each operation × relevant vulnerability class, untested first, with \
+             who tested each cell and how (scanner checks, authorization checks, proofs, hypotheses) and the findings.",
             json!({ "untested_only": {"type":"boolean","description":"Only untested/open cells (default true)"} }),
             &[],
         ),
@@ -1331,7 +1332,11 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
                 untested_only: Option<bool>,
             }
             let g: A = args(a)?;
-            service.coverage(g.untested_only.unwrap_or(true)).map(to_json).map_err(|e| e.to_string())
+            let mut c = service.coverage_proof().map_err(|e| e.to_string())?;
+            if g.untested_only.unwrap_or(true) {
+                c.cells.retain(|x| matches!(x.status.as_str(), "untested" | "open"));
+            }
+            Ok(to_json(c))
         }
         "proof_run" => {
             let r: pm_service::ProofRequest = args(a)?;
