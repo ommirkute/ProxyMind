@@ -130,6 +130,17 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
 
+## AI scan (an agent on its own)
+
+The **AI scan** page (or `proxymind ai-scan start`) runs the model set on the Assistant page through a whole assessment: recon, scanning, exploitation to proof of concept, chaining findings into attack paths, and a Markdown report. It acts as `agent:ai-scan-<n>`, so the rules of engagement apply as to any agent: out-of-scope requests are refused, destructive steps wait in Approvals, and every action is audited.
+
+- **Model:** any model the assistant supports. Cloud models (Anthropic, OpenAI) need `data.allow_cloud_models: true` in the rules of engagement and the API key in an environment variable, e.g. `export ANTHROPIC_API_KEY=…` before `proxymind ui`.
+- **Budget:** model calls (default 150) and minutes (default 60); older tool results are shortened so long runs fit the model's context. Stop it from the page or with `proxymind ai-scan stop <n>`.
+- **Progress:** the page shows the phase, an activity log (tool calls, loopbacks, approvals waited on) and the findings; `proxymind ai-scan status <n>` does the same in a terminal.
+- **Report:** download it as Markdown or `proxymind ai-scan report <n> --out report.md`.
+- **The prompt:** see it on the page or with `proxymind ai-scan prompt`. Replace it with `~/.proxymind/ai-scan-prompt.md` (keep `{{target}}`, `{{scope}}` and `{{focus}}`). Limits never come from the prompt: they're enforced by ProxyMind.
+- **Not covered:** port scanning, DNS record lookups, search-engine dorking, Wayback lookups, TLS cipher scans and source-code scanning aren't ProxyMind tools; the agent lists them in the report for a person to run.
+
 ## Skills (testing playbooks)
 
 ProxyMind ships playbooks an agent can follow, as MCP prompts (your client's prompt or slash-command menu) and as the `skills_list` / `skill_get` tools: `idor_sweep`, `triage_findings`, `ssrf_hunt`, `js_recon`, `auth_review`, `jwt_audit`, `race_conditions` and `file_upload`. Each takes an optional `focus` ("the /api/orders endpoints"). They only describe steps with ProxyMind's tools, so everything still goes through the rules of engagement; the ones that change data say to ask first.

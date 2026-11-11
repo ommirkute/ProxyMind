@@ -4,6 +4,7 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
+mod ai_scan;
 mod approvals;
 mod assistant;
 mod authz;
@@ -51,6 +52,7 @@ mod write_checks;
 mod ws;
 mod ws_replay;
 
+pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor};
 pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};

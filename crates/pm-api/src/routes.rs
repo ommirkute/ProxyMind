@@ -204,6 +204,10 @@ pub fn api() -> Router<AppState> {
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/chats/{id}", get(assistant_chat))
         .route("/assistant/send", post(assistant_send))
+        .route("/ai-scan", get(ai_scan_list).post(ai_scan_start))
+        .route("/ai-scan/prompt", get(ai_scan_prompt))
+        .route("/ai-scan/{id}", get(ai_scan_get))
+        .route("/ai-scan/{id}/stop", post(ai_scan_stop))
 }
 
 #[derive(Deserialize)]
@@ -1118,6 +1122,28 @@ async fn assistant_send(State(st): State<AppState>, Json(b): Json<SendBody>) -> 
         return Err(ServiceError::Invalid("write a message".into()).into());
     }
     ok(st.assistant.send(b.chat_id, &b.text).await?)
+}
+
+async fn ai_scan_start(State(st): State<AppState>, Json(req): Json<pm_service::AiScanRequest>) -> ApiResult {
+    ok(st.assistant.start_ai_scan(&st.actor, req)?)
+}
+
+async fn ai_scan_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.ai_scan_list(50)?)
+}
+
+async fn ai_scan_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.ai_scan_get(id)?)
+}
+
+async fn ai_scan_stop(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.ai_scan_stop(&st.actor, id)?)
+}
+
+/// The system prompt a scan would get (with the default target).
+async fn ai_scan_prompt(State(st): State<AppState>) -> ApiResult {
+    let target = st.service.policy().roe().include.first().map(|p| p.text.clone()).unwrap_or_default();
+    ok(json!({ "target": target, "prompt": st.service.ai_scan_prompt(&target, "")? }))
 }
 
 async fn network_get(State(st): State<AppState>) -> ApiResult {

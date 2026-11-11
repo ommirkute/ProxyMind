@@ -266,6 +266,28 @@ CREATE TABLE oast_probes (
 );
 CREATE INDEX oast_probes_token ON oast_probes(token);
 "#,
+    r#"
+-- AI scans: an agent assessing the target on its own, through the policy
+-- gate. The transcript is an assistant chat; this keeps the run's state.
+CREATE TABLE ai_scans (
+    id          INTEGER PRIMARY KEY,
+    target      TEXT NOT NULL,
+    focus       TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL,
+    phase       TEXT NOT NULL DEFAULT 'recon',
+    chat_id     INTEGER,
+    model       TEXT NOT NULL DEFAULT '',
+    steps       INTEGER NOT NULL DEFAULT 0,
+    max_steps   INTEGER NOT NULL,
+    deadline_ms INTEGER NOT NULL,
+    log         TEXT NOT NULL DEFAULT '[]',
+    report      TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL,
+    updated_ms  INTEGER NOT NULL
+);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1315,6 +1337,23 @@ impl Store {
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
+            "ai_scans" => &[
+                "target",
+                "focus",
+                "status",
+                "phase",
+                "chat_id",
+                "model",
+                "steps",
+                "max_steps",
+                "deadline_ms",
+                "log",
+                "report",
+                "error",
+                "actor",
+                "created_ms",
+                "updated_ms",
+            ],
             "oast_probes" => &[
                 "token",
                 "check_name",

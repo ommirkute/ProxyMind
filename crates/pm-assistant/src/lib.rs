@@ -4,6 +4,7 @@
 //! audit). Models run locally by default; cloud models need
 //! `allow_cloud_models: true` in the rules of engagement.
 
+pub mod ai_scan;
 pub mod llm;
 
 use std::net::IpAddr;
@@ -193,7 +194,7 @@ impl Assistant {
     }
 }
 
-fn cut(s: &str) -> String {
+pub(crate) fn cut(s: &str) -> String {
     if s.len() <= MAX_TOOL_RESULT {
         return s.to_string();
     }
@@ -204,11 +205,11 @@ fn cut(s: &str) -> String {
     format!("{}… [cut: {} more bytes; ask for less, e.g. a smaller view or limit]", &s[..end], s.len() - end)
 }
 
-fn host_of(base_url: &str) -> String {
+pub(crate) fn host_of(base_url: &str) -> String {
     url::Url::parse(base_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default()
 }
 
-fn provider_name(p: ProviderKind) -> &'static str {
+pub(crate) fn provider_name(p: ProviderKind) -> &'static str {
     match p {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Openai => "openai-compatible",

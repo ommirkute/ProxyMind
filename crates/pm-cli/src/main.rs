@@ -119,6 +119,11 @@ enum Command {
         #[command(subcommand)]
         action: RulesAction,
     },
+    /// AI scan: the configured model assesses the target on its own, recon to chained proofs (see `assistant`).
+    AiScan {
+        #[command(subcommand)]
+        action: AiScanAction,
+    },
     /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
     Skills {
         /// A skill to print; none lists them.
@@ -892,6 +897,43 @@ enum ApprovalAction {
 }
 
 #[derive(Subcommand)]
+enum AiScanAction {
+    /// Start a scan and follow it until it ends (Ctrl+C leaves it running only in this process: stop it first).
+    Start {
+        /// Target URL (default: the first URL in the scope).
+        #[arg(long)]
+        target: Option<String>,
+        /// What to concentrate on.
+        #[arg(long)]
+        focus: Option<String>,
+        /// Most model calls (default 150).
+        #[arg(long)]
+        max_steps: Option<u32>,
+        /// Longest run in minutes (default 60).
+        #[arg(long)]
+        minutes: Option<u32>,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// List scans, or show one with its log.
+    Status { id: Option<i64> },
+    /// Print a scan's report (or write it to a file).
+    Report {
+        id: i64,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Ask a running scan to stop (works from another terminal).
+    Stop {
+        id: i64,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Print the system prompt a scan would use.
+    Prompt,
+}
+
+#[derive(Subcommand)]
 enum UpdateAction {
     /// Ask GitHub now whether a newer release is out (one GET of the public releases list).
     Check,
@@ -1382,6 +1424,106 @@ async fn run() -> Result<()> {
             open_service(&cli.project, Some(file))?;
             out!("✓ {} is now the rules of engagement for {}", file.display(), cli.project.display());
         }
+        Command::AiScan { action } => {
+            let service = Arc::new(open_service(&cli.project, None)?);
+            attach_plugins(&cli, &service);
+            service.ai_scan_recover()?;
+            let line = |l: &pm_service::AiScanLog| {
+                let t = chrono_like(l.ts_ms);
+                format!("{t}  {:<12} {}", l.kind, l.text.lines().next().unwrap_or(""))
+            };
+            match action {
+                AiScanAction::Start { target, focus, max_steps, minutes, actor } => {
+                    let me = human_actor(actor.as_deref())?;
+                    let assistant = Arc::new(pm_assistant::Assistant::new(service.clone())?);
+                    let req = pm_service::AiScanRequest {
+                        target: target.clone(),
+                        focus: focus.clone(),
+                        max_steps: *max_steps,
+                        max_minutes: *minutes,
+                    };
+                    let scan = assistant.start_ai_scan(&me, req)?;
+                    out!(
+                        "AI scan #{} on {} (model {}): following; stop it with `proxymind ai-scan stop {}`",
+                        scan.id,
+                        scan.target,
+                        scan.model,
+                        scan.id
+                    );
+                    let mut shown = 0;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let sc = service.ai_scan_get(scan.id)?;
+                        for l in sc.log.iter().skip(shown) {
+                            out!("{}", line(l));
+                        }
+                        shown = sc.log.len();
+                        if !matches!(sc.status.as_str(), "running" | "stopping") {
+                            out!(
+                                "\n{}: {} model calls, {} finding(s){}",
+                                sc.status,
+                                sc.steps,
+                                sc.findings,
+                                if sc.error.is_empty() { String::new() } else { format!(" ({})", sc.error) }
+                            );
+                            if !sc.report.is_empty() {
+                                out!("Report: `proxymind ai-scan report {}`", sc.id);
+                            }
+                            break;
+                        }
+                    }
+                }
+                AiScanAction::Status { id: None } => {
+                    for sc in service.ai_scan_list(50)? {
+                        out!(
+                            "#{:<4} {:<9} {:<13} {:>4}/{:<4} steps  {} finding(s)  {}",
+                            sc.id,
+                            sc.status,
+                            sc.phase,
+                            sc.steps,
+                            sc.max_steps,
+                            sc.findings,
+                            sc.target
+                        );
+                    }
+                }
+                AiScanAction::Status { id: Some(id) } => {
+                    let sc = service.ai_scan_get(*id)?;
+                    out!(
+                        "#{} {} · phase {} · {}/{} steps · {} finding(s) · {}",
+                        sc.id,
+                        sc.status,
+                        sc.phase,
+                        sc.steps,
+                        sc.max_steps,
+                        sc.findings,
+                        sc.target
+                    );
+                    for l in &sc.log {
+                        out!("{}", line(l));
+                    }
+                }
+                AiScanAction::Report { id, out } => {
+                    let sc = service.ai_scan_get(*id)?;
+                    anyhow::ensure!(!sc.report.is_empty(), "scan #{id} has no report yet (status {})", sc.status);
+                    match out {
+                        Some(p) => {
+                            std::fs::write(p, &sc.report)?;
+                            out!("✓ report written to {}", p.display());
+                        }
+                        None => out!("{}", sc.report),
+                    }
+                }
+                AiScanAction::Stop { id, actor } => {
+                    let sc = service.ai_scan_stop(&human_actor(actor.as_deref())?, *id)?;
+                    out!("#{} {}", sc.id, sc.status);
+                }
+                AiScanAction::Prompt => {
+                    let target = service.policy().roe().include.first().map(|p| p.text.clone()).unwrap_or_default();
+                    out!("{}", service.ai_scan_prompt(&target, "")?);
+                }
+            }
+        }
         Command::Skills { name, focus } => {
             let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://example.invalid/\"]\n")?;
             let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
@@ -1550,6 +1692,7 @@ async fn run() -> Result<()> {
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
             attach_plugins(&cli, &service);
+            service.ai_scan_recover()?;
             let me = human_actor(actor.as_deref())?;
             let mut setup = pm_api::ProxySetup::default();
             if !*no_proxy {
@@ -3129,4 +3272,10 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let mut f = o.open(path).with_context(|| format!("creating {}", path.display()))?;
     f.write_all(data)?;
     Ok(())
+}
+
+/// `HH:MM:SS` (UTC) for a log line.
+fn chrono_like(ms: i64) -> String {
+    let secs = ms.div_euclid(1000).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
