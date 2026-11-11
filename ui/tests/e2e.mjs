@@ -863,6 +863,8 @@ try {
   await page.getByLabel("AI scan steps").fill("10");
   await page.getByTestId("ai-scan-start").click();
   await page.locator('[data-testid="ai-scan-report"]', { hasText: "The e2e scan found nothing." }).waitFor({ timeout: 15000 });
+  // The report appears before the scan ends: ProxyMind still retests its findings.
+  await page.locator('[data-testid="ai-scan-status"]', { hasText: "done" }).waitFor({ timeout: 30000 }).catch(() => {});
   check(await page.getByTestId("ai-scan-status").textContent().then((t) => t.includes("done")), "an AI scan runs to a report");
   check(await page.getByTestId("ai-scan-log").textContent().then((t) => t.includes("e2e run")), "its phases show in the activity log");
   await page.getByTestId("attack-graph").waitFor();
