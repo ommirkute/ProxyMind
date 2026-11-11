@@ -21,6 +21,7 @@ const BUILTIN: &[&str] = &[
     include_str!("../skills/jwt_audit.md"),
     include_str!("../skills/race_conditions.md"),
     include_str!("../skills/file_upload.md"),
+    include_str!("../skills/business_logic.md"),
 ];
 
 /// Most user skills read, and the largest one.

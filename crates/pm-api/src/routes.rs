@@ -154,6 +154,7 @@ pub fn api() -> Router<AppState> {
         .route("/engage/comments", post(engage_comments))
         .route("/engage/scripts", post(engage_scripts))
         .route("/engage/js-endpoints", post(engage_js_endpoints))
+        .route("/engage/logic", post(engage_logic))
         .route("/update", get(update_get).put(update_set))
         .route("/skills", get(skills_list))
         .route("/skills/{name}", post(skill_get))
@@ -212,6 +213,10 @@ pub fn api() -> Router<AppState> {
         .route("/ai-scan/prompt", get(ai_scan_prompt))
         .route("/ai-scan/{id}", get(ai_scan_get))
         .route("/ai-scan/{id}/stop", post(ai_scan_stop))
+        .route("/ai-scan/{id}/message", post(ai_scan_message))
+        .route("/attack-paths", get(attack_paths).post(attack_path_create))
+        .route("/attack-paths/{id}", axum::routing::delete(attack_path_delete))
+        .route("/attack-graph", get(attack_graph))
 }
 
 #[derive(Deserialize)]
@@ -602,6 +607,10 @@ async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) ->
 
 async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
     ok(st.service.engage_js_endpoints(&st.actor, &f)?)
+}
+
+async fn engage_logic(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_logic(&st.actor, &f)?)
 }
 
 async fn engage_analyze(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
@@ -1182,6 +1191,39 @@ async fn ai_scan_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResu
 
 async fn ai_scan_stop(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
     ok(st.service.ai_scan_stop(&st.actor, id)?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AiScanMessage {
+    text: String,
+}
+
+async fn ai_scan_message(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AiScanMessage>) -> ApiResult {
+    ok(st.service.ai_scan_message(&st.actor, id, &b.text)?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ScanQuery {
+    scan: Option<i64>,
+}
+
+async fn attack_paths(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
+    ok(st.service.attack_path_list(q.scan)?)
+}
+
+async fn attack_path_create(State(st): State<AppState>, Json(p): Json<pm_service::NewAttackPath>) -> ApiResult {
+    ok(st.service.attack_path_create(&st.actor, p)?)
+}
+
+async fn attack_path_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    st.service.attack_path_delete(&st.actor, id)?;
+    ok(serde_json::json!({ "deleted": id }))
+}
+
+async fn attack_graph(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
+    ok(st.service.attack_graph(q.scan)?)
 }
 
 /// The system prompt a scan would get (with the default target).

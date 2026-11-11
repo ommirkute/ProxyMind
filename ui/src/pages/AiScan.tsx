@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, toast } from "../api";
+import { AttackGraph } from "../AttackGraph";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
 
 interface Log { ts_ms: number; kind: string; text: string }
@@ -135,6 +136,7 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
   if (!s) return null;
   const at = PHASES.indexOf(s.phase);
   return (
+    <>
     <Panel
       title={`AI scan #${s.id}`}
       actions={active(s) && s.status === "running" ? <button className="btn" onClick={() => void stopScan()} data-testid="ai-scan-stop">Stop</button> : undefined}
@@ -152,6 +154,7 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
           <span key={p} className={`chip ${i < at ? "ok" : i === at ? "accent" : ""}`}>{i + 1}. {p}</span>
         ))}
       </div>
+      {s.status === "running" && <Say id={s.id} onSent={setS} />}
       {s.report && (
         <details open className="small" data-testid="ai-scan-report">
           <summary>
@@ -177,5 +180,27 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
         </table>
       )}
     </Panel>
+    <AttackGraph scan={s.id} refresh={`${s.updated_ms}:${s.status}`} title={`Attack paths of AI scan #${s.id}`} />
+    </>
+  );
+}
+
+/** Sends the running agent a message: it reads it with its next step. */
+function Say({ id, onSent }: { id: number; onSent: (s: Scan) => void }) {
+  const [text, setText] = useState("");
+  const action = useAction();
+  const send = () =>
+    action.run(async () => {
+      onSent(await api.post<Scan>(`/ai-scan/${id}/message`, { text }));
+      setText("");
+      toast("Sent: the agent reads it with its next step");
+    });
+  return (
+    <div className="row">
+      <input aria-label="Message the agent" placeholder="Message the agent: “focus on checkout”, “skip /admin”, “why did you try that?”" value={text}
+        onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) void send(); }} style={{ flex: 1, minWidth: 240 }} />
+      <button className="btn" onClick={() => void send()} disabled={action.busy || !text.trim()} data-testid="ai-scan-say">Send</button>
+      <ErrorBox error={action.error} />
+    </div>
   );
 }

@@ -42,7 +42,7 @@ pub struct AiScanRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiScanLog {
     pub ts_ms: i64,
-    /// phase, tool, note, loopback, recon, approval, out_of_scope, model, stop, error
+    /// phase, tool, note, loopback, recon, approval, out_of_scope, model, stop, error, user, chain, verify
     pub kind: String,
     pub text: String,
 }
@@ -269,6 +269,83 @@ impl Service {
             self.audit(&actor.id(), "ai_scan_stop", json!({ "scan": id }), "allow")?;
         }
         self.ai_scan_get(id)
+    }
+
+    /// A message from a person to a running scan ("focus on checkout", "why
+    /// did you try that?"). It reaches the agent with its next step.
+    pub fn ai_scan_message(&self, actor: &Actor, id: i64, text: &str) -> Result<AiScan> {
+        if actor.kind != pm_policy::ActorKind::Human {
+            return Err(ServiceError::Invalid("only people send messages to an AI scan".into()));
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(ServiceError::Invalid("the message is empty".into()));
+        }
+        let r = self.ai_row(id)?;
+        if s(&r, "status") != "running" {
+            return Err(ServiceError::Invalid(format!("AI scan {id} isn't running")));
+        }
+        let mut inbox: Vec<String> = serde_json::from_str(&s(&r, "inbox")).unwrap_or_default();
+        if inbox.len() >= 20 {
+            return Err(ServiceError::Invalid("20 messages are already waiting for the agent".into()));
+        }
+        let text: String = text.chars().take(2000).collect();
+        inbox.push(text.clone());
+        self.ai_update(id, vec![("inbox", json!(serde_json::to_string(&inbox).unwrap_or_default()))])?;
+        self.ai_scan_log(id, "user", &format!("{}: {text}", actor.id()))?;
+        self.audit(&actor.id(), "ai_scan_message", json!({ "scan": id, "chars": text.len() }), "allow")?;
+        self.ai_scan_get(id)
+    }
+
+    /// Messages waiting for the agent; empties the inbox.
+    pub fn ai_scan_take_messages(&self, id: i64) -> Result<Vec<String>> {
+        let r = self.ai_row(id)?;
+        let inbox: Vec<String> = serde_json::from_str(&s(&r, "inbox")).unwrap_or_default();
+        if !inbox.is_empty() {
+            self.ai_update(id, vec![("inbox", json!("[]"))])?;
+        }
+        Ok(inbox)
+    }
+
+    /// Retests what the scan's agent found (its proofs or scanner checks,
+    /// at most 30 findings), logs each result and adds a "Verification"
+    /// section to the report, so a finding that doesn't reproduce is marked
+    /// before a person reads it.
+    pub async fn ai_scan_verify(&self, id: i64) -> Result<Vec<crate::Retest>> {
+        let actor = scan_actor(id);
+        let rows = self.store.lock().rows("findings", Some(("actor", &json!(actor.id()))), 30)?;
+        let mut out = Vec::new();
+        let mut lines = Vec::new();
+        for r in rows.iter().rev() {
+            let fid = n(r, "id");
+            let title = s(r, "title");
+            let rt = match self.finding_retest(&actor, fid).await {
+                Ok(rt) => rt,
+                Err(e) => {
+                    self.ai_scan_log(id, "verify", &format!("#{fid} {title}: couldn't retest ({e})"))?;
+                    lines.push(format!("- #{fid} {title}: couldn't retest ({e})"));
+                    continue;
+                }
+            };
+            let verdict = match rt.reproduced {
+                Some(true) => "reproduced",
+                Some(false) => "NOT reproduced",
+                None => "not checked",
+            };
+            self.ai_scan_log(id, "verify", &format!("#{fid} {title}: {verdict} ({})", rt.summary))?;
+            lines.push(format!("- #{fid} {title}: **{verdict}** ({})", rt.summary));
+            out.push(rt);
+        }
+        if !lines.is_empty() {
+            let report = self.ai_scan_get(id)?.report;
+            let section = format!(
+                "\n\n## Verification by ProxyMind\n\nEach finding was retested after the scan (its proof re-run, or its \
+                 scanner check). Findings marked NOT reproduced need a person's look before they are reported.\n\n{}\n",
+                lines.join("\n")
+            );
+            self.ai_update(id, vec![("report", json!(format!("{}{section}", report.trim_end())))])?;
+        }
+        Ok(out)
     }
 
     /// Whether the scan should keep going (not stopped, within its budget).

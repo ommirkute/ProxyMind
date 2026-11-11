@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AttackGraph } from "../AttackGraph";
 import { api, cweUrl, fmtDateTime, toast, type Finding, type IdentityInfo, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
@@ -57,6 +58,7 @@ export default function Findings() {
         </Panel>
         {selected ? <FindingDetail key={selected} id={selected} onChange={list.reload} /> : <Panel><Empty>Select a finding.</Empty></Panel>}
       </div>
+      <AttackGraph refresh={counters?.audit_records} />
     </div>
   );
 }

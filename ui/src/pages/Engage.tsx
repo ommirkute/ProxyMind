@@ -15,6 +15,8 @@ interface DnsRecord { name: string; type: string; ttl: number; value: string }
 interface DnsReport { host: string; resolver: string; records: DnsRecord[]; notes: string[] }
 interface Capture { url: string; status?: number; mime?: string; timestamp: string; note?: string; known: boolean }
 interface WaybackReport { host: string; total: number; interesting: number; captures: Capture[] }
+interface LogicCandidate { param: string; category: string; paths: string[]; examples: string[]; tests: string[] }
+interface LogicReport { candidates: LogicCandidate[]; flow_paths: string[] }
 interface Clickjack { framable: boolean; reasons: string[]; poc: string }
 
 const TOOLS = [
@@ -22,6 +24,7 @@ const TOOLS = [
   ["comments", "Find comments"],
   ["scripts", "Find scripts"],
   ["endpoints", "JS endpoints"],
+  ["logic", "Logic tests"],
   ["refs", "Find references"],
   ["csrf", "CSRF PoC"],
   ["clickjack", "Clickjacking"],
@@ -60,7 +63,7 @@ export default function Engage() {
             <button key={k} role="tab" className={`tab ${tool === k ? "active" : ""}`} onClick={() => setTool(k)} data-testid={`engage-tab-${k}`}>{label}</button>
           ))}
         </div>
-        {["analyze", "comments", "scripts", "endpoints"].includes(tool) && (
+        {["analyze", "comments", "scripts", "endpoints", "logic"].includes(tool) && (
           <div className="row small">
             <input aria-label="Engage host" placeholder="host contains (optional)" value={host} onChange={(e) => setHost(e.target.value)} style={{ width: 220 }} />
             <label><input type="checkbox" checked={inScope} onChange={(e) => setInScope(e.target.checked)} /> in scope only</label>
@@ -85,6 +88,7 @@ export default function Engage() {
       {tool === "comments" && <Comments filter={filter} />}
       {tool === "scripts" && <Scripts filter={filter} />}
       {tool === "endpoints" && <JsEndpoints filter={filter} />}
+      {tool === "logic" && <LogicTests filter={filter} />}
       {tool === "refs" && <References exchange={exchange} />}
       {tool === "csrf" && <CsrfPoc exchange={exchange} />}
       {tool === "clickjack" && <ClickjackTest exchange={exchange} />}
@@ -454,6 +458,41 @@ function WaybackUrls() {
           </tbody>
         </table>
       ))}
+    </Panel>
+  );
+}
+
+function LogicTests({ filter }: { filter: object }) {
+  const [r, setR] = useState<LogicReport | null>(null);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<LogicReport>("/engage/logic", filter)));
+  return (
+    <Panel title="Business-logic tests" actions={<button className="btn primary" onClick={run} disabled={action.busy} data-testid="engage-logic">Find candidates</button>}>
+      <p className="small muted">
+        Parameters that look like prices, quantities, discounts, limits, identities, roles or workflow state, with abuse
+        cases to try in Replay, and URLs that look like steps of a flow (for skipping, repeating or reversing steps).
+        Scanners can't judge these: compare the resulting state (the order, the balance) with what the business allows.
+        Agents get the same list (<code>engage_logic</code>) and the <code>business_logic</code> skill.
+      </p>
+      <ErrorBox error={action.error} />
+      {r && (r.candidates.length === 0 ? <Empty>No candidates in recorded traffic. Walk through the cart, checkout, coupons and profile first.</Empty> : (
+        <table className="grid" data-testid="engage-logic-list">
+          <thead><tr><th>Parameter</th><th>Kind</th><th>Sent to</th><th>Try</th></tr></thead>
+          <tbody>
+            {r.candidates.map((c, i) => (
+              <tr key={i}>
+                <td className="mono small">{c.param}{c.examples.length > 0 && <div className="muted">e.g. {c.examples.join(", ")}</div>}</td>
+                <td><Chip value={c.category} /></td>
+                <td className="mono small" style={{ wordBreak: "break-all" }}>{c.paths.join(" ")}</td>
+                <td className="small"><ul style={{ margin: 0, paddingLeft: 16 }}>{c.tests.map((t, j) => <li key={j}>{t}</li>)}</ul></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
+      {r && r.flow_paths.length > 0 && (
+        <p className="small" data-testid="engage-logic-flows">Flow steps: {r.flow_paths.map((p) => <code key={p} style={{ marginRight: 6 }}>{p}</code>)}</p>
+      )}
     </Panel>
   );
 }

@@ -288,6 +288,23 @@ CREATE TABLE ai_scans (
     updated_ms  INTEGER NOT NULL
 );
 "#,
+    r#"
+-- Attack paths: findings and observations chained into a route to impact,
+-- recorded by agents (an AI scan's, or any other) or people. `steps` is
+-- JSON: [{text, finding_id?, exchange_id?}]. Messages a person sends a
+-- running AI scan wait in `inbox` until its next step.
+CREATE TABLE attack_paths (
+    id          INTEGER PRIMARY KEY,
+    scan_id     INTEGER,
+    title       TEXT NOT NULL,
+    impact      TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    steps       TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL
+);
+ALTER TABLE ai_scans ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1353,7 +1370,9 @@ impl Store {
                 "actor",
                 "created_ms",
                 "updated_ms",
+                "inbox",
             ],
+            "attack_paths" => &["scan_id", "title", "impact", "severity", "steps", "actor", "created_ms"],
             "oast_probes" => &[
                 "token",
                 "check_name",

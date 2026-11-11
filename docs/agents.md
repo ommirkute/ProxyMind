@@ -97,6 +97,8 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `ws_grep` | Find text in recorded WebSocket messages (direction, scope, inverted); snippets are untrusted |
 | `engage_comments` / `engage_scripts` / `engage_js_endpoints` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, endpoints the JavaScript mentions (new ones first), the target's URLs and parameters, what links to a page |
 | `recon_dns` / `recon_wayback` | Passive recon for a host in scope (sends nothing to the target): DNS records with notes (SPF, DMARC, CAA, CNAMEs to services where a deleted resource can be claimed), and the URLs the Internet Archive captured, interesting ones first |
+| `engage_logic` | Business-logic test candidates from recorded traffic (prices, quantities, discounts, limits, identities, roles, workflow state) with abuse cases, and flow-like URLs (sends nothing) |
+| `attack_path_record` / `attack_path_list` | Record a chain of findings and observations that leads to an impact (2 to 12 steps); shown as a graph and in the report |
 | `engage_csrf_poc` / `engage_clickjacking` | A CSRF proof page for a recorded request; whether a page can be framed, with a test page |
 | `collaborator_payload` / `collaborator_interactions` | Out-of-band payloads to place by hand, and the callbacks they caused (untrusted) |
 | `organizer_add` / `organizer_list` / `organizer_update` | Keep exchanges aside with a status and a note, for people or agents to come back to |
@@ -135,16 +137,20 @@ Also available: the `proxymind://roe` resource and the `start_engagement` prompt
 
 The **AI scan** page (or `proxymind ai-scan start`) runs the model set on the Assistant page through a whole assessment: recon, scanning, exploitation to proof of concept, chaining findings into attack paths, and a Markdown report. It acts as `agent:ai-scan-<n>`, so the rules of engagement apply as to any agent: out-of-scope requests are refused, destructive steps wait in Approvals, and every action is audited.
 
-- **Model:** any model the assistant supports. Cloud models (Anthropic, OpenAI) need `data.allow_cloud_models: true` in the rules of engagement and the API key in an environment variable, e.g. `export ANTHROPIC_API_KEY=…` before `proxymind ui`.
+- **Model:** any model the assistant supports. Cloud models (Anthropic, OpenAI) need `data.allow_cloud_models: true` in the rules of engagement and an API key: save it on the Assistant page (or set the environment variable it names).
 - **Budget:** model calls (default 150) and minutes (default 60); older tool results are shortened so long runs fit the model's context. Stop it from the page or with `proxymind ai-scan stop <n>`.
 - **Progress:** the page shows the phase, an activity log (tool calls, loopbacks, approvals waited on) and the findings; `proxymind ai-scan status <n>` does the same in a terminal.
+- **Steer it:** type a message on the page while it runs ("focus on checkout", "skip /admin", "why did you try that?"), or `proxymind ai-scan say <n> "…"`. The agent reads it with its next step and still can't step outside the rules of engagement.
+- **Attack paths:** in the chaining phase the agent records each chain with `attack_path_record` (steps linked to findings and exchanges). The page draws them as a graph; any agent can record them, and they're a section of the project report. `proxymind ai-scan paths <n>` prints them.
+- **Verification:** when a scan ends normally, ProxyMind retests every finding its agent created (its proof, or its scanner check) and appends the result to the report, so a finding that no longer reproduces is marked before you read it.
+- **Business logic:** the agent runs `engage_logic` (parameters that look like prices, quantities, coupons, limits, roles or workflow state, with abuse cases) and follows the `business_logic` skill. Engagement tools → "Logic tests" shows you the same list.
 - **Report:** download it as Markdown or `proxymind ai-scan report <n> --out report.md`.
 - **The prompt:** see it on the page or with `proxymind ai-scan prompt`. Replace it with `~/.proxymind/ai-scan-prompt.md` (keep `{{target}}`, `{{scope}}` and `{{focus}}`). Limits never come from the prompt: they're enforced by ProxyMind.
-- **Not covered:** port scanning, DNS record lookups, search-engine dorking, Wayback lookups, TLS cipher scans and source-code scanning aren't ProxyMind tools; the agent lists them in the report for a person to run.
+- **Not covered:** port scanning, subdomain enumeration, search-engine dorking, TLS cipher scans and source-code scanning aren't ProxyMind tools; the agent lists them in the report for a person to run.
 
 ## Skills (testing playbooks)
 
-ProxyMind ships playbooks an agent can follow, as MCP prompts (your client's prompt or slash-command menu) and as the `skills_list` / `skill_get` tools: `idor_sweep`, `triage_findings`, `ssrf_hunt`, `js_recon`, `auth_review`, `jwt_audit`, `race_conditions` and `file_upload`. Each takes an optional `focus` ("the /api/orders endpoints"). They only describe steps with ProxyMind's tools, so everything still goes through the rules of engagement; the ones that change data say to ask first.
+ProxyMind ships playbooks an agent can follow, as MCP prompts (your client's prompt or slash-command menu) and as the `skills_list` / `skill_get` tools: `idor_sweep`, `triage_findings`, `ssrf_hunt`, `js_recon`, `auth_review`, `jwt_audit`, `race_conditions`, `file_upload` and `business_logic`. Each takes an optional `focus` ("the /api/orders endpoints"). They only describe steps with ProxyMind's tools, so everything still goes through the rules of engagement; the ones that change data say to ask first.
 
 Add your own as `~/.proxymind/skills/<name>.md` (a file with a built-in's name replaces it):
 

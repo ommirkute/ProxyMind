@@ -436,6 +436,10 @@ try {
   await page.getByTestId("engage-endpoints").click();
   await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
   check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.getByTestId("engage-tab-logic").click();
+  await page.getByTestId("engage-logic").click();
+  await page.locator('[data-testid="engage-logic-list"], .empty').first().waitFor();
+  check(true, "the business-logic tab lists candidates from recorded traffic");
   await page.getByTestId("engage-tab-dns").click();
   await page.getByLabel("DNS host").fill("not-in-scope.example");
   await page.getByTestId("recon-dns").click();
@@ -818,7 +822,8 @@ try {
       const aiScan = String(parsed.messages[0]?.content ?? "").includes("AI scan agent");
       const reply = aiScan
         ? tools === 0 ? call("ai_scan_phase", { phase: "recon", notes: "e2e run" })
-          : tools === 1 ? call("ai_scan_report", { markdown: "# Report\n\n## Executive summary\nThe e2e scan found nothing." })
+          : tools === 1 ? call("attack_path_record", { title: "e2e chain", impact: "read any order", severity: "high", steps: [{ text: "Order ids are sequential" }, { text: "Orders load without an owner check" }] })
+          : tools === 2 ? call("ai_scan_report", { markdown: "# Report\n\n## Executive summary\nThe e2e scan found nothing." })
           : { choices: [{ message: { role: "assistant", content: "Done." } }] }
         : toolMsg
         ? { choices: [{ message: { role: "assistant", content: "Alice opened /api/orders/1001 (her own order)." } }] }
@@ -857,6 +862,9 @@ try {
   await page.locator('[data-testid="ai-scan-report"]', { hasText: "The e2e scan found nothing." }).waitFor({ timeout: 15000 });
   check(await page.getByTestId("ai-scan-status").textContent().then((t) => t.includes("done")), "an AI scan runs to a report");
   check(await page.getByTestId("ai-scan-log").textContent().then((t) => t.includes("e2e run")), "its phases show in the activity log");
+  await page.getByTestId("attack-graph").waitFor();
+  await page.getByTestId("attack-graph").locator("xpath=../..").screenshot({ path: join(SHOTS, "6h-attack-graph.png") });
+  check(await page.getByTestId("attack-path-list").textContent().then((t) => t.includes("e2e chain") && t.includes("Orders load without an owner check")), "the scan's attack path shows as a graph");
   await page.screenshot({ path: join(SHOTS, "6g-ai-scan.png") });
   model.close();
 

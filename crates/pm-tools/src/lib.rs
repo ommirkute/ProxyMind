@@ -17,6 +17,7 @@ pub mod engage;
 pub mod har;
 pub mod hql;
 pub mod linediff;
+pub mod logic;
 pub mod reqedit;
 pub mod search;
 pub mod sitemap;
