@@ -37,6 +37,7 @@ mod plugins;
 mod proof;
 mod race;
 mod recon;
+mod regress;
 mod replay;
 mod report;
 mod report_template;
@@ -91,6 +92,7 @@ pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use race::{RaceGroup, RaceModeChoice, RaceRequest, RaceResult};
 pub use recon::{DnsReport, WaybackCapture, WaybackReport};
+pub use regress::{RegressionExport, RegressionResult, Skipped, junit, run_regression};
 pub use replay::{ReplayRequest, ReplayResult};
 pub use report::{
     Report, ReportEvidence, ReportFinding, ReportIssue, ReportIssueGroup, ReportOptions, ReportOwaspGroup, ReportProof,

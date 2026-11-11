@@ -18,6 +18,7 @@ pub mod har;
 pub mod hql;
 pub mod linediff;
 pub mod logic;
+pub mod regress;
 pub mod reqedit;
 pub mod search;
 pub mod sign;

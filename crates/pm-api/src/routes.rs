@@ -198,6 +198,8 @@ pub fn api() -> Router<AppState> {
         .route("/evidence/fingerprint", get(evidence_fingerprint))
         .route("/evidence/verify", post(evidence_verify).layer(axum::extract::DefaultBodyLimit::max(EVIDENCE_LIMIT)))
         .route("/coverage/proof", get(coverage_proof))
+        .route("/regress", get(regress_list))
+        .route("/regress/export", get(regress_export))
         .route("/intercept", get(intercept_state))
         .route("/intercept/settings", axum::routing::put(intercept_settings))
         .route("/intercept/forward-all", post(intercept_forward_all))
@@ -890,6 +892,23 @@ async fn evidence_fingerprint(State(st): State<AppState>) -> ApiResult {
 /// Checks an uploaded evidence pack (the body is the ZIP).
 async fn evidence_verify(body: axum::body::Bytes) -> ApiResult {
     ok(pm_service::verify_evidence(&body))
+}
+
+async fn regress_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.regression_tests()?)
+}
+
+/// The regression tests as a ZIP (tests, README, example CI workflow).
+async fn regress_export(State(st): State<AppState>) -> Result<Response, ApiError> {
+    let (bytes, _) = st.service.regression_zip(&st.actor)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"proxymind-regressions.zip\"".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn coverage_proof(State(st): State<AppState>) -> ApiResult {

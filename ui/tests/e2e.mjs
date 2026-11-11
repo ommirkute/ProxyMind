@@ -294,6 +294,8 @@ try {
   await page.getByLabel("Evidence pack file").setInputFiles(packPath);
   await page.locator('[data-testid="evidence-verdict"]', { hasText: "verified" }).waitFor({ timeout: 15000 });
   check(await page.getByTestId("evidence-verdict").textContent().then((t) => t.includes("signature") && t.includes("hash chain intact")), "an evidence pack downloads and verifies (signature, files, audit chain, scope)");
+  await page.getByTestId("regress-summary").waitFor();
+  check(await page.getByTestId("regress-summary").textContent().then((t) => /^[1-9]\d* test/.test(t.trim())), "the proven IDOR becomes a CI regression test");
   await page.getByTestId("coverage-summary").waitFor();
   check(await page.getByTestId("coverage-summary").textContent().then((t) => /\d+(\.\d+)?% tested/.test(t)), "the coverage proof shows how much was tested");
   await page.screenshot({ path: join(SHOTS, "4b-evidence.png") });
