@@ -53,7 +53,7 @@ mod ws;
 mod ws_replay;
 
 pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor};
-pub use assistant::{AssistantConfig, Chat, ChatSummary, ProviderKind};
+pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};

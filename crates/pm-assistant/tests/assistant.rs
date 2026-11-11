@@ -174,3 +174,42 @@ async fn step_limit_stops_a_looping_model() {
     assert_eq!(seen.lock().unwrap().len(), 3);
     assert!(turn.note.unwrap().contains("Stopped after 3"));
 }
+
+#[tokio::test]
+async fn a_key_saved_in_proxymind_is_used_and_never_shown() {
+    let svc = service(false);
+    let home = std::env::temp_dir().join(format!("pm-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    svc.attach_plugin_home(home.clone());
+    let (port, seen) =
+        mock_model(vec![json!({"content":[{"type":"text","text":"Hello."}],"stop_reason":"end_turn"})]).await;
+    // A variable name nobody sets: the key has to come from ProxyMind's own store.
+    let name = "PM_TEST_SAVED_KEY_ONLY";
+    configure(&svc, ProviderKind::Anthropic, format!("http://localhost:{port}/v1"), name, 4);
+    let a = Assistant::new(svc.clone()).unwrap();
+    let err = a.send(None, "hi").await.unwrap_err();
+    assert!(err.to_string().contains("assistant settings"), "{err}");
+
+    let agent = Actor::parse("agent:claude").unwrap();
+    assert!(svc.model_key_set(&agent, name, "sk-test-123456").is_err(), "agents can't set keys");
+    assert!(svc.model_key_set(&Actor::parse("human:tester").unwrap(), "not a name!", "k").is_err());
+    let st = svc.model_key_set(&Actor::parse("human:tester").unwrap(), name, "sk-test-123456").unwrap();
+    assert_eq!((st.source.as_str(), st.hint.as_deref()), ("saved", Some("…3456")));
+    a.send(None, "hi").await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert!(seen[0].0.to_ascii_lowercase().contains("x-api-key: sk-test-123456"), "{}", seen[0].0);
+    drop(seen);
+
+    // On disk in the home folder, owner-only, never in the project or the audit log.
+    let path = home.join("model-keys.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let audit = serde_json::to_string(&svc.audit_list(100).unwrap()).unwrap();
+    assert!(!audit.contains("sk-test-123456"));
+    svc.model_key_remove(&Actor::parse("human:tester").unwrap(), name).unwrap();
+    assert_eq!(svc.model_key_status(name).source, "none");
+    let _ = std::fs::remove_dir_all(&home);
+}

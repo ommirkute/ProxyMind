@@ -116,10 +116,11 @@ impl Assistant {
         if cfg.api_key_env.is_empty() {
             return Ok(None);
         }
-        match std::env::var(&cfg.api_key_env) {
-            Ok(k) if !k.trim().is_empty() => Ok(Some(k.trim().to_string())),
-            _ => Err(AssistantError::Setup(format!(
-                "set the {} environment variable before starting ProxyMind (the key is never stored in the project)",
+        match self.service.model_key(&cfg.api_key_env) {
+            Some(k) => Ok(Some(k)),
+            None => Err(AssistantError::Setup(format!(
+                "add the API key ({}) in the assistant settings, or set that environment variable before starting \
+                 ProxyMind (keys are never stored in the project)",
                 cfg.api_key_env
             ))),
         }

@@ -202,6 +202,8 @@ pub fn api() -> Router<AppState> {
         .route("/session/macros/{name}/run", post(session_macro_run))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
+        .route("/assistant/key", axum::routing::put(model_key_set))
+        .route("/assistant/key/{name}", axum::routing::delete(model_key_remove))
         .route("/assistant/chats/{id}", get(assistant_chat))
         .route("/assistant/send", post(assistant_send))
         .route("/ai-scan", get(ai_scan_list).post(ai_scan_start))
@@ -1090,6 +1092,21 @@ async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): 
     ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyBody {
+    name: String,
+    key: String,
+}
+
+async fn model_key_set(State(st): State<AppState>, Json(b): Json<KeyBody>) -> ApiResult {
+    ok(st.service.model_key_set(&st.actor, &b.name, &b.key)?)
+}
+
+async fn model_key_remove(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.model_key_remove(&st.actor, &name)?)
+}
+
 async fn assistant_state(State(st): State<AppState>) -> ApiResult {
     let config = st.service.assistant_config()?;
     let ready = st.assistant.check(&config).map(|_| ()).map_err(|e| e.to_string()).err();
@@ -1099,6 +1116,7 @@ async fn assistant_state(State(st): State<AppState>) -> ApiResult {
         "cloud_models_allowed": st.service.cloud_models_allowed(),
         "problem": ready,
         "acts_as": st.assistant.actor().id(),
+        "key": st.service.model_key_status(&config.api_key_env),
         "chats": st.service.chat_list(50)?,
     }))
 }

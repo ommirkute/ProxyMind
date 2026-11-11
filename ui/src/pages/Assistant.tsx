@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, fmtTime } from "../api";
+import { api, fmtTime, toast } from "../api";
 import { Empty, ErrorBox, useAction, useLoad, useNav } from "../components";
 
 type Block =
@@ -27,6 +27,7 @@ interface State {
   cloud_models_allowed: boolean;
   problem: string | null;
   acts_as: string;
+  key?: { source: string; hint?: string };
   chats: { id: number; title: string; updated_ms: number }[];
 }
 
@@ -160,11 +161,15 @@ export default function Assistant() {
                   value={cfg.api_key_env}
                   onChange={(e) => setCfg({ api_key_env: e.target.value })}
                 />
+                <label>API key</label>
+                <KeyField name={cfg.api_key_env} status={s?.config.api_key_env === cfg.api_key_env ? s?.key : undefined} onChange={state.reload} />
                 <label>Max steps per message</label>
                 <input aria-label="Max steps" type="number" min={1} max={50} value={cfg.max_steps} onChange={(e) => setCfg({ max_steps: Number(e.target.value) })} />
               </div>
               <p className="small muted">
-                The key is read from that environment variable when ProxyMind starts; it is never stored in the project. Cloud models also need{" "}
+                Paste the key here and press Save key: it is kept on this computer only (in your ProxyMind folder, readable by you),
+                never in the project file, and never shown again. An environment variable of the same name, if set, takes precedence.
+                The AI scan uses the same model and key. Cloud models also need{" "}
                 <code>allow_cloud_models: true</code> in the rules of engagement
                 {s && ` (currently ${s.cloud_models_allowed ? "allowed" : "not allowed"})`}.
               </p>
@@ -273,6 +278,37 @@ function Playbooks({ onPick }: { onPick: (text: string) => void }) {
       )}
       <button className="btn" disabled={!name} onClick={() => void pick()} data-testid="playbook-use">Use</button>
       {chosen && <span className="muted">{chosen.description}</span>}
+    </div>
+  );
+}
+
+/** Saves the model API key on this computer (never in the project); shows only where it comes from. */
+function KeyField({ name, status, onChange }: { name: string; status?: { source: string; hint?: string }; onChange: () => void }) {
+  const [key, setKey] = useState("");
+  const action = useAction();
+  if (!name) return <span className="small muted">Not needed for local servers. Set the variable name above first for a cloud API.</span>;
+  const save = () =>
+    action.run(async () => {
+      await api.put("/assistant/key", { name, key });
+      setKey("");
+      toast("API key saved on this computer");
+      onChange();
+    });
+  const remove = () =>
+    action.run(async () => {
+      await api.del(`/assistant/key/${encodeURIComponent(name)}`);
+      toast("Saved API key removed");
+      onChange();
+    });
+  return (
+    <div className="row small" data-testid="assistant-key">
+      <input type="password" autoComplete="off" aria-label="API key" placeholder={`paste the ${name} value`} value={key} onChange={(e) => setKey(e.target.value)} style={{ width: 260 }} />
+      <button className="btn" disabled={!key.trim() || action.busy} onClick={save} data-testid="assistant-key-save">Save key</button>
+      {status?.source === "saved" && <button className="btn" disabled={action.busy} onClick={remove}>Remove</button>}
+      <span className="muted" data-testid="assistant-key-status">
+        {status?.source === "saved" ? `saved (${status.hint})` : status?.source === "environment" ? `from the environment (${status.hint})` : "no key yet"}
+      </span>
+      <ErrorBox error={action.error} />
     </div>
   );
 }
