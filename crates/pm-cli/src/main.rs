@@ -135,6 +135,11 @@ enum Command {
         #[arg(long = "as")]
         actor: Option<String>,
     },
+    /// Proven findings as regression tests for CI: export them, or run them against a test environment.
+    Regress {
+        #[command(subcommand)]
+        action: RegressAction,
+    },
     /// Check an evidence pack: signature, file hashes, audit chain, scope, evidence. Needs no project.
     Verify {
         pack: PathBuf,
@@ -971,6 +976,34 @@ enum AiScanAction {
 }
 
 #[derive(Subcommand)]
+enum RegressAction {
+    /// Write a test per proven finding (plus a README and an example CI workflow) to a ZIP.
+    Export {
+        #[arg(long, default_value = "proxymind-regressions.zip")]
+        out: PathBuf,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Run tests (files or directories of *.json) and say which findings are still there. Needs no project.
+    /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there.
+    Run {
+        paths: Vec<PathBuf>,
+        /// Send to this origin instead of the one each test was recorded on, e.g. https://staging.example.com.
+        #[arg(long)]
+        target: Option<String>,
+        /// Write JUnit XML here for the CI dashboard.
+        #[arg(long)]
+        junit: Option<PathBuf>,
+        /// Accept the target's TLS certificate without checking it (self-signed test environments).
+        #[arg(long)]
+        insecure: bool,
+        /// Print the results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ReconAction {
     /// DNS records of a host in scope (or a parent domain), with notes (SPF, DMARC, CAA, dangling CNAMEs).
     Dns {
@@ -1621,6 +1654,71 @@ async fn run() -> Result<()> {
                 "  Give the client this fingerprint separately; they check the pack with `proxymind verify {}`.",
                 out.display()
             );
+        }
+        Command::Regress { action: RegressAction::Export { out, actor } } => {
+            let service = open_service(&cli.project, None)?;
+            let (bytes, export) = service.regression_zip(&human_actor(actor.as_deref())?)?;
+            std::fs::write(out, &bytes)?;
+            out!("✓ {}: {} test(s)", out.display(), export.tests.len());
+            for s in &export.skipped {
+                out!("  no test for #{} {}: {}", s.finding_id, s.title, s.reason);
+            }
+        }
+        Command::Regress { action: RegressAction::Run { paths, target, junit, insecure, json } } => {
+            let mut files = Vec::new();
+            for p in paths {
+                if p.is_dir() {
+                    let mut found: Vec<PathBuf> = std::fs::read_dir(p)?
+                        .filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|f| f.extension().is_some_and(|x| x == "json"))
+                        .collect();
+                    found.sort();
+                    files.extend(found);
+                } else {
+                    files.push(p.clone());
+                }
+            }
+            if files.is_empty() {
+                anyhow::bail!("no test files given");
+            }
+            let env = |k: &str| std::env::var(k).ok();
+            let mut results = Vec::new();
+            for f in &files {
+                let text = std::fs::read_to_string(f)?;
+                let t: pm_service::pm_tools::regress::RegressionTest =
+                    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+                let r = pm_service::run_regression(&t, target.as_deref(), !insecure, &env).await;
+                if !*json {
+                    let mark = match r.outcome.as_str() {
+                        "vulnerable" => "✗ STILL VULNERABLE",
+                        "fixed" => "✓ fixed",
+                        "skipped" => "- skipped",
+                        _ => "! error",
+                    };
+                    out!("{mark:<20} #{} {}  ({})", r.finding_id, r.title, r.detail);
+                }
+                results.push(r);
+            }
+            if let Some(j) = junit {
+                std::fs::write(j, pm_service::junit(&results))?;
+            }
+            let still = results.iter().filter(|r| r.outcome == "vulnerable").count();
+            let errors = results.iter().filter(|r| r.outcome == "error").count();
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                out!(
+                    "{} test(s): {} still vulnerable, {} fixed, {} skipped, {} error(s)",
+                    results.len(),
+                    still,
+                    results.iter().filter(|r| r.outcome == "fixed").count(),
+                    results.iter().filter(|r| r.outcome == "skipped").count(),
+                    errors
+                );
+            }
+            if still > 0 || errors > 0 {
+                std::process::exit(1);
+            }
         }
         Command::Verify { pack, json } => {
             let bytes = std::fs::read(pack)?;

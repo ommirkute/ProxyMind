@@ -16,6 +16,7 @@ export default function Evidence() {
     <div className="content">
       <Export />
       <Verify />
+      <Regressions />
       <Coverage />
     </div>
   );
@@ -142,6 +143,61 @@ function Coverage() {
           </tbody>
         </table>
       ))}
+    </Panel>
+  );
+}
+
+interface RegressionTest { finding: { id: number; title: string; severity: string }; oracle: string; origin: string; auth?: string[] }
+interface RegressionExport { tests: RegressionTest[]; skipped: { finding_id: number; title: string; reason: string }[] }
+
+const envName = (id: string) => "PM_AUTH_" + id.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+
+/** Proven findings as tests a developer's CI runs until they are fixed. */
+function Regressions() {
+  const [r, setR] = useState<RegressionExport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { api.get<RegressionExport>("/regress").then(setR).catch((e: Error) => setError(e.message)); }, []);
+  const envs = Array.from(new Set((r?.tests ?? []).flatMap((t) => (t.auth ?? []).map(envName)))).sort();
+  return (
+    <Panel
+      title="Regression tests for CI"
+      actions={<a className="btn primary" href="/api/v1/regress/export" download="proxymind-regressions.zip" data-testid="regress-download">Download tests</a>}
+    >
+      <p className="small muted">
+        Every proven finding as a small test the development team runs in CI against a test environment:
+        <code> proxymind regress run tests/ --target https://staging.example.com --junit results.xml</code>. It fails
+        while the finding is still there and passes once it is fixed. The ZIP has a README and an example GitHub Actions
+        workflow. Credentials stay out of the files: the runner reads them from environment variables (CI secrets).
+      </p>
+      <ErrorBox error={error} />
+      {r && (
+        <>
+          <p className="small" data-testid="regress-summary">
+            <b>{r.tests.length}</b> test(s) · {r.skipped.length} finding(s) without one
+            {envs.length > 0 && <> · secrets to set: {envs.map((e) => <code key={e} style={{ marginRight: 6 }}>{e}</code>)}</>}
+          </p>
+          {r.tests.length === 0 && r.skipped.length === 0 ? <Empty>No findings yet.</Empty> : (
+            <table className="grid" data-testid="regress-list">
+              <tbody>
+                {r.tests.map((t) => (
+                  <tr key={t.finding.id}>
+                    <td><Chip value="test" /></td>
+                    <td className="small"><a href={`#/findings/${t.finding.id}`}>#{t.finding.id}</a> {t.finding.title}</td>
+                    <td className="small muted">{t.oracle.replace("_", " ")}{(t.auth ?? []).length > 0 && ` · as ${t.auth!.join(", ")}`}</td>
+                  </tr>
+                ))}
+                {r.skipped.map((x) => (
+                  <tr key={`s${x.finding_id}`}>
+                    <td><Chip value="no test" /></td>
+                    <td className="small"><a href={`#/findings/${x.finding_id}`}>#{x.finding_id}</a> {x.title}</td>
+                    <td className="small muted">{x.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
     </Panel>
   );
 }

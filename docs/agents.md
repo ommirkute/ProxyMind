@@ -212,6 +212,19 @@ What it doesn't prove: that the signer was honest before signing. It proves the 
 
 The **coverage proof** (`proxymind coverage --all`, the same page, MCP `coverage`) lists every operation in the app model against the vulnerability classes that apply to it, marked vulnerable, tested, open or untested, with who tested each and how: scanner checks (only the checks that actually ran), authorization checks, proofs and hypotheses. Untested cells come first.
 
+## Regression tests for CI
+
+Every proven finding can become a small test that the development team runs in CI until it is fixed: **Evidence & coverage → Regression tests** or `proxymind regress export --out tests.zip`. The ZIP holds one JSON file per finding, a README and an example GitHub Actions workflow.
+
+```bash
+export PM_AUTH_BOB="Cookie: session=…"        # credentials, from CI secrets
+proxymind regress run tests/ --target https://staging.example.com --junit results.xml
+```
+
+- **What becomes a test:** findings proven by differential authorization (another user's request still returns the owner's data), reflection (a fresh payload still comes back unencoded) or timing (the delay payload is still slower than the baseline). Out-of-band proofs need a callback server, and unproven findings have nothing to re-check; the export lists them with the reason.
+- **Results:** each test reports still vulnerable, fixed, skipped (e.g. a credential variable isn't set) or error. The exit code is 1 if any finding is still there or a test errored. `--junit` writes a report for CI dashboards, `--json` prints the results.
+- **Safety:** credentials never go in the files (`{{auth:NAME}}` lines are filled from `PM_AUTH_NAME`). The runner needs no project and sends only to `--target` (or the origin each test was recorded on). `--insecure` accepts self-signed test certificates. Only run tests against systems you are allowed to test.
+
 ## What the agent sees
 
 - **Secrets are hidden.** Cookies, tokens, passwords and API keys appear as placeholders such as `{{secret:cookie_session_1}}`. The agent can use placeholders in requests; ProxyMind swaps the real values in when sending. Turn this off with `data.redact_before_llm: false` in the ROE.

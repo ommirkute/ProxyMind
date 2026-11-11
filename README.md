@@ -154,6 +154,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - Proof oracles: differential authz, timing, OAST, XSS in headless Chromium
 - **Coverage proof**: every operation × vulnerability class, who tested it and how (scanner checks, authz checks, proofs), and what nobody tested
 - **Signed evidence packs** the client verifies themselves (`proxymind evidence`, `proxymind verify`)
+- **Findings as CI regression tests**: every proven finding exports as a test developers run against staging until it's fixed (`proxymind regress run`, JUnit output)
 - Issue library with CWE/OWASP mapping and fix advice
 - Reports in **HTML, Markdown, JSON and SARIF**; executive, technical, compliance or your own template
 - Sealed projects: encrypt a project file to hand it over safely
