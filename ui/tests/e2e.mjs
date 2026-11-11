@@ -256,10 +256,7 @@ try {
   await page.waitForSelector('[data-testid="authz-results"] >> text=same as owner');
   check(true, "bob gets alice's order: same as owner");
   check(await page.locator('[data-testid="authz-results"]').first().textContent().then((t) => t.includes("denied")), "anonymous is denied");
-  await page.getByTestId("authz-matrix-run").click();
-  await page.getByTestId("authz-matrix-summary").waitFor({ timeout: 60000 });
-  check(await page.getByTestId("authz-matrix").textContent().then((t) => t.includes("/api/orders/{id}") && t.includes("SAME DATA")), "the authorization matrix shows bob getting alice's order");
-  check(await page.getByTestId("authz-matrix-summary").textContent().then((t) => /[1-9]\d* proven/.test(t)), "the matrix proves the flagged cell");
+
   await page.screenshot({ path: join(SHOTS, "3-authz.png") });
 
   console.log("Findings and proof");
@@ -1257,6 +1254,12 @@ match:
   await page.getByTestId("changes-result").waitFor();
   check(await page.getByTestId("changes-result").textContent().then((t) => t.includes("e2e round 1") && t.includes("unchanged")), "a model snapshot compares with the current model");
   await page.screenshot({ path: join(SHOTS, "7-model.png"), fullPage: true });
+  await open("authz");
+  await page.getByTestId("authz-matrix-run").click();
+  await page.getByTestId("authz-matrix-summary").waitFor({ timeout: 60000 });
+  check(await page.getByTestId("authz-matrix").textContent().then((t) => t.includes("/api/orders/{id}") && t.includes("SAME DATA")), "the authorization matrix shows bob getting alice's order");
+  check(await page.getByTestId("authz-matrix-summary").textContent().then((t) => /[1-9]\d* proven/.test(t)), "the matrix proves the flagged cell");
+  await page.screenshot({ path: join(SHOTS, "3c-authz-matrix.png"), fullPage: true });
   await open("audit");
   await page.waitForSelector('[data-testid="audit-verify"]');
   check(await page.getByTestId("audit-verify").textContent().then((t) => t.includes("intact")), "audit log verified intact");

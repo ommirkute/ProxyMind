@@ -80,6 +80,9 @@ impl Service {
             self.identity_list()?.into_iter().map(|i| (i.name, i.role)).filter(|(n, _)| n != ANONYMOUS).collect();
         ids.sort();
         let role_of = |n: &str| ids.iter().find(|(x, _)| x == n).map(|(_, r)| r.clone()).unwrap_or_default();
+        // Who made a recorded request: stored for replays, matched by credentials for proxied traffic.
+        let identities: Vec<pm_identity::Identity> =
+            self.store.lock().list_identities()?.iter().filter_map(|r| serde_json::from_str(&r.data).ok()).collect();
         let max = req.max_operations.unwrap_or(40).clamp(1, 200);
         let mut out = AuthzMatrix { identities: ids.clone(), rows: vec![], skipped: vec![], flagged: 0, proven: 0 };
         out.identities.push((ANONYMOUS.into(), String::new()));
@@ -104,7 +107,12 @@ impl Service {
                 if !ex.summary.status.is_some_and(|s| (200..300).contains(&s)) {
                     continue;
                 }
-                let owner = ex.summary.identity.clone().filter(|i| ids.iter().any(|(n, _)| n == i));
+                let owner = ex
+                    .summary
+                    .identity
+                    .clone()
+                    .or_else(|| crate::model::resolve_identity(&ex.request, &identities))
+                    .filter(|i| ids.iter().any(|(n, _)| n == i));
                 if owner.is_some() {
                     pick = Some((*id, owner));
                     break;
