@@ -11,6 +11,10 @@ interface Comment { kind: string; text: string; url: string; exchange_id: number
 interface Script { kind: string; src?: string; snippet: string; length: number; url: string; exchange_id: number; count: number }
 interface JsEndpoint { url: string; method?: string; params?: string[]; script?: boolean; known: boolean; external?: boolean; exchange_id: number; count: number }
 interface Summary { id: number; method: string; host: string; path: string; status: number | null }
+interface DnsRecord { name: string; type: string; ttl: number; value: string }
+interface DnsReport { host: string; resolver: string; records: DnsRecord[]; notes: string[] }
+interface Capture { url: string; status?: number; mime?: string; timestamp: string; note?: string; known: boolean }
+interface WaybackReport { host: string; total: number; interesting: number; captures: Capture[] }
 interface Clickjack { framable: boolean; reasons: string[]; poc: string }
 
 const TOOLS = [
@@ -22,6 +26,8 @@ const TOOLS = [
   ["csrf", "CSRF PoC"],
   ["clickjack", "Clickjacking"],
   ["dom", "DOM test"],
+  ["dns", "DNS records"],
+  ["wayback", "Wayback URLs"],
 ] as const;
 type Tool = (typeof TOOLS)[number][0];
 
@@ -67,7 +73,13 @@ export default function Engage() {
             <span className="muted">(or right-click a row in HTTP history)</span>
           </div>
         )}
-        <p className="small muted">These tools read recorded traffic; they send nothing.</p>
+        {["dns", "wayback"].includes(tool) ? (
+          <p className="small muted">
+            Passive recon for a host in scope: asks {tool === "dns" ? "the DNS resolver" : "the Internet Archive"}, never the target.
+          </p>
+        ) : (
+          <p className="small muted">These tools read recorded traffic; they send nothing.</p>
+        )}
       </Panel>
       {tool === "analyze" && <AnalyzeTarget filter={filter} />}
       {tool === "comments" && <Comments filter={filter} />}
@@ -77,6 +89,8 @@ export default function Engage() {
       {tool === "csrf" && <CsrfPoc exchange={exchange} />}
       {tool === "clickjack" && <ClickjackTest exchange={exchange} />}
       {tool === "dom" && <DomTest exchange={exchange} />}
+      {tool === "dns" && <DnsRecords />}
+      {tool === "wayback" && <WaybackUrls />}
     </div>
   );
 }
@@ -350,6 +364,96 @@ function DomTest({ exchange }: { exchange: string }) {
           <p className="small muted">Scripts: {r.scripts.map(([u, used]) => `${u}${used ? "" : " (not recorded)"}`).join(", ") || "inline only"}</p>
         </div>
       )}
+    </Panel>
+  );
+}
+
+function DnsRecords() {
+  const [host, setHost] = useState("");
+  const [r, setR] = useState<DnsReport | null>(null);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<DnsReport>("/recon/dns", { host: host.trim() })));
+  return (
+    <Panel
+      title="DNS records"
+      actions={<>
+        <input aria-label="DNS host" placeholder="shop.example.com" value={host} onChange={(e) => setHost(e.target.value)} style={{ width: 220 }} />
+        <button className="btn primary" onClick={run} disabled={action.busy || !host.trim()} data-testid="recon-dns">Look up</button>
+      </>}
+    >
+      <p className="small muted">
+        A, AAAA, CNAME, MX, TXT, NS, SOA, CAA and DMARC records of a host in scope or a parent domain, with notes on
+        mail spoofing (SPF, DMARC), certificate issuance (CAA) and CNAMEs to services where a deleted resource can be
+        claimed.
+      </p>
+      <ErrorBox error={action.error} />
+      {r && (
+        <>
+          <p className="small">{r.records.length} record(s) for <b>{r.host}</b> from {r.resolver}.</p>
+          {r.notes.length > 0 && (
+            <ul className="small" data-testid="recon-dns-notes">{r.notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+          )}
+          {r.records.length === 0 ? <Empty>No records.</Empty> : (
+            <table className="grid" data-testid="recon-dns-list">
+              <thead><tr><th>Type</th><th>Name</th><th>TTL</th><th>Value</th></tr></thead>
+              <tbody>
+                {r.records.map((x, i) => (
+                  <tr key={i}>
+                    <td><Chip value={x.type} /></td>
+                    <td className="mono small">{x.name}</td>
+                    <td className="small">{x.ttl}</td>
+                    <td className="mono small" style={{ wordBreak: "break-all" }}>{x.value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function WaybackUrls() {
+  const [host, setHost] = useState("");
+  const [r, setR] = useState<WaybackReport | null>(null);
+  const [onlyInteresting, setOnlyInteresting] = useState(false);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<WaybackReport>("/recon/wayback", { host: host.trim(), limit: 1000 })));
+  const shown = (r?.captures ?? []).filter((c) => !onlyInteresting || c.note);
+  const date = (t: string) => (t.length >= 8 ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` : t);
+  return (
+    <Panel
+      title="Wayback Machine URLs"
+      actions={<>
+        <label className="small"><input type="checkbox" checked={onlyInteresting} onChange={(e) => setOnlyInteresting(e.target.checked)} /> interesting only</label>
+        <input aria-label="Wayback host" placeholder="shop.example.com" value={host} onChange={(e) => setHost(e.target.value)} style={{ width: 220 }} />
+        <button className="btn primary" onClick={run} disabled={action.busy || !host.trim()} data-testid="recon-wayback">Fetch history</button>
+      </>}
+    >
+      <p className="small muted">
+        URLs the Internet Archive has captured for a host in scope, interesting ones first (backups, configs, APIs,
+        admin pages, parameters). Old endpoints often still answer: open one in Replay to check. The request goes
+        through the upstream proxy settings.
+      </p>
+      <ErrorBox error={action.error} />
+      {r && <p className="small">{r.total} archived URL(s), <b>{r.interesting}</b> interesting{r.captures.length < r.total ? `, first ${r.captures.length} shown` : ""}.</p>}
+      {r && (shown.length === 0 ? <Empty>No archived URLs.</Empty> : (
+        <table className="grid" data-testid="recon-wayback-list">
+          <thead><tr><th>Status</th><th>URL</th><th>Why</th><th>Captured</th><th></th></tr></thead>
+          <tbody>
+            {shown.map((c, i) => (
+              <tr key={i}>
+                <td className="small">{c.status ?? "-"}</td>
+                <td className="mono small" style={{ wordBreak: "break-all" }}>{c.url}</td>
+                <td>{c.note && <Chip value={c.note} />} {c.known && <Chip value="seen" />}</td>
+                <td className="small">{date(c.timestamp)}</td>
+                <td><button className="btn" onClick={() => { copyText(c.url); toast("URL copied"); }}>Copy URL</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
     </Panel>
   );
 }

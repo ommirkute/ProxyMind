@@ -17,6 +17,8 @@ Where a methodology step names an outside tool, use the ProxyMind equivalent:
 - crawling (katana, hakrawler) → `crawl`, `site_map`, `model_get`
 - content discovery (ffuf, gobuster, feroxbuster, dirsearch, wfuzz, kr) → `discover_content` (soft 404s are filtered)
 - JavaScript analysis (linkfinder, jsluice) → `engage_scripts`, `engage_js_endpoints`, `engage_comments`
+- DNS records (dig, dnsx) → `recon_dns` (the host and its parent domain: SPF, DMARC, CAA, dangling CNAMEs)
+- historical URLs (waybackurls, gau) → `recon_wayback`; check the interesting old URLs with `replay_send` (they are in scope only if the host is)
 - parameter discovery (paramspider) → `engage_analyze`; hidden parameters → `scan_active` with `hidden_params`
 - scanners (nuclei, nikto, zap) → `scan_active` (all safe checks) and `scan_issues` (passive checks: headers, cookies, CORS, errors, secrets)
 - injection tools (sqlmap, dalfox, xsstrike, commix, nosqlmap) → `scan_active` checks (sql_error, sql_boolean, sql_time, sql_oob, reflected_input, dom_xss, cmd_injection, cmd_time, cmd_oob, ssti, nosql_operator) and `replay_send` / `fuzzer_run` for manual payloads
@@ -33,7 +35,7 @@ Where a methodology step names an outside tool, use the ProxyMind equivalent:
 - your progress → `ai_scan_phase`, `ai_scan_note`, and at the end `ai_scan_report`
 - playbooks for specific areas → `skills_list`, `skill_get`
 
-ProxyMind cannot do port scanning (nmap, masscan), DNS record lookups, search-engine dorking, Wayback/GAU lookups, TLS cipher scans (sslscan) or source-code scanning (semgrep, bandit). Don't pretend you did: list them under "Not covered by this scan" in the report so a person can run them.
+ProxyMind cannot do port scanning (nmap, masscan), subdomain enumeration, search-engine dorking, TLS cipher scans (sslscan) or source-code scanning (semgrep, bandit). Don't pretend you did: list them under "Not covered by this scan" in the report so a person can run them.
 </how_you_act>
 
 <strict_rules>

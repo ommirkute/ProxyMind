@@ -96,6 +96,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `history_grep` | Find text (or a regex) in recorded requests and responses with decoded bodies (a part such as `response_body` or `request_headers`, `invert`, `in_scope`); secrets are replaced before matching, snippets are untrusted |
 | `ws_grep` | Find text in recorded WebSocket messages (direction, scope, inverted); snippets are untrusted |
 | `engage_comments` / `engage_scripts` / `engage_js_endpoints` / `engage_analyze` / `engage_references` | Engagement tools over recorded traffic (send nothing): comments, scripts, endpoints the JavaScript mentions (new ones first), the target's URLs and parameters, what links to a page |
+| `recon_dns` / `recon_wayback` | Passive recon for a host in scope (sends nothing to the target): DNS records with notes (SPF, DMARC, CAA, CNAMEs to services where a deleted resource can be claimed), and the URLs the Internet Archive captured, interesting ones first |
 | `engage_csrf_poc` / `engage_clickjacking` | A CSRF proof page for a recorded request; whether a page can be framed, with a test page |
 | `collaborator_payload` / `collaborator_interactions` | Out-of-band payloads to place by hand, and the callbacks they caused (untrusted) |
 | `organizer_add` / `organizer_list` / `organizer_update` | Keep exchanges aside with a status and a note, for people or agents to come back to |

@@ -124,6 +124,11 @@ enum Command {
         #[command(subcommand)]
         action: AiScanAction,
     },
+    /// Passive recon that sends nothing to the target: DNS records, Wayback Machine history.
+    Recon {
+        #[command(subcommand)]
+        action: ReconAction,
+    },
     /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
     Skills {
         /// A skill to print; none lists them.
@@ -934,6 +939,28 @@ enum AiScanAction {
 }
 
 #[derive(Subcommand)]
+enum ReconAction {
+    /// DNS records of a host in scope (or a parent domain), with notes (SPF, DMARC, CAA, dangling CNAMEs).
+    Dns {
+        host: String,
+        /// Resolver to ask, e.g. 1.1.1.1:53 (default: the system's).
+        #[arg(long)]
+        resolver: Option<std::net::SocketAddr>,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// URLs the Internet Archive captured for a host in scope, interesting ones first.
+    Wayback {
+        host: String,
+        /// Most URLs to print (default 100).
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum UpdateAction {
     /// Ask GitHub now whether a newer release is out (one GET of the public releases list).
     Check,
@@ -1521,6 +1548,31 @@ async fn run() -> Result<()> {
                 AiScanAction::Prompt => {
                     let target = service.policy().roe().include.first().map(|p| p.text.clone()).unwrap_or_default();
                     out!("{}", service.ai_scan_prompt(&target, "")?);
+                }
+            }
+        }
+        Command::Recon { action } => {
+            let service = open_service(&cli.project, None)?;
+            match action {
+                ReconAction::Dns { host, resolver, actor } => {
+                    let r = service.recon_dns(&human_actor(actor.as_deref())?, host, *resolver).await?;
+                    out!("{} (resolver {})", r.host, r.resolver);
+                    for rec in &r.records {
+                        out!("  {:<6} {:<7} {:<32} {}", rec.kind, rec.ttl, rec.name, rec.value);
+                    }
+                    for n in &r.notes {
+                        out!("  ! {n}");
+                    }
+                }
+                ReconAction::Wayback { host, limit, actor } => {
+                    let r = service.recon_wayback(&human_actor(actor.as_deref())?, host, *limit, None).await?;
+                    out!("{}: {} archived URLs, {} interesting", r.host, r.total, r.interesting);
+                    for c in &r.captures {
+                        let st = c.capture.status.map_or("-".to_string(), |s| s.to_string());
+                        let note = c.capture.note.map(|n| format!("  [{n}]")).unwrap_or_default();
+                        let known = if c.known { "  (seen)" } else { "" };
+                        out!("  {st:<4} {}{note}{known}", c.capture.url);
+                    }
                 }
             }
         }

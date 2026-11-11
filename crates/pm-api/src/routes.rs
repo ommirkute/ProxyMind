@@ -158,6 +158,8 @@ pub fn api() -> Router<AppState> {
         .route("/skills", get(skills_list))
         .route("/skills/{name}", post(skill_get))
         .route("/update/check", post(update_check))
+        .route("/recon/dns", post(recon_dns))
+        .route("/recon/wayback", post(recon_wayback))
         .route("/engage/analyze", post(engage_analyze))
         .route("/engage/references", post(engage_references))
         .route("/engage/csrf", post(engage_csrf))
@@ -568,6 +570,30 @@ async fn update_set(State(st): State<AppState>, Json(b): Json<UpdateSet>) -> Api
 struct UpdateCheck {
     /// Ask now even if the daily check is off or the last answer is fresh.
     force: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconDns {
+    host: String,
+    #[serde(default)]
+    resolver: Option<std::net::SocketAddr>,
+}
+
+async fn recon_dns(State(st): State<AppState>, Json(b): Json<ReconDns>) -> ApiResult {
+    ok(st.service.recon_dns(&st.actor, &b.host, b.resolver).await?)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconWayback {
+    host: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn recon_wayback(State(st): State<AppState>, Json(b): Json<ReconWayback>) -> ApiResult {
+    ok(st.service.recon_wayback(&st.actor, &b.host, b.limit.unwrap_or(500), None).await?)
 }
 
 async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) -> ApiResult {

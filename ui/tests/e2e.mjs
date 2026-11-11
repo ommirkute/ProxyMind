@@ -436,6 +436,11 @@ try {
   await page.getByTestId("engage-endpoints").click();
   await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
   check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.getByTestId("engage-tab-dns").click();
+  await page.getByLabel("DNS host").fill("not-in-scope.example");
+  await page.getByTestId("recon-dns").click();
+  await page.getByText("isn't in scope").waitFor();
+  check(true, "DNS recon refuses a host outside the scope");
   await page.goto(link.replace(/\/auth.*/, "/#/about"));
   await page.locator('[data-testid="about-version"]', { hasText: "0." }).waitFor();
   check(!(await page.getByTestId("update-toggle").isChecked()), "the update check is off until the user turns it on");

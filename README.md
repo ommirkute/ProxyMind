@@ -141,6 +141,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 ### 🗺️ Recon
 - Crawler, including a browser-driven crawl for JavaScript apps
 - **JavaScript endpoint mining**: API routes and parameters the app's scripts mention, including ones no page links to
+- **Passive recon**: DNS records (SPF, DMARC, CAA, dangling CNAMEs) and Wayback Machine URL history for hosts in scope, without sending anything to the target
 - Content discovery with soft-404 detection, robots.txt folders and other API versions
 - OpenAPI/Swagger and GraphQL (introspection) import
 - Engagement tools: comments, scripts, references, parameter analysis, CSRF and clickjacking proof pages
