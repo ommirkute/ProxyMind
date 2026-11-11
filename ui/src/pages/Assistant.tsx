@@ -19,6 +19,10 @@ interface Config {
   api_key_env: string;
   max_steps: number;
   max_tokens: number;
+  price_input: number;
+  price_output: number;
+  tools: "full" | "compact";
+  worker_model: string;
 }
 
 interface State {
@@ -44,10 +48,12 @@ interface Turn {
 }
 
 const PRESETS: { label: string; cfg: Partial<Config> }[] = [
-  { label: "Ollama (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:11434/v1", api_key_env: "" } },
-  { label: "LM Studio (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:1234/v1", api_key_env: "" } },
-  { label: "Anthropic", cfg: { provider: "anthropic", base_url: "https://api.anthropic.com/v1", api_key_env: "ANTHROPIC_API_KEY" } },
-  { label: "OpenAI", cfg: { provider: "openai", base_url: "https://api.openai.com/v1", api_key_env: "OPENAI_API_KEY" } },
+  { label: "Ollama (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:11434/v1", api_key_env: "", tools: "compact", price_input: 0, price_output: 0 } },
+  { label: "LM Studio (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:1234/v1", api_key_env: "", tools: "compact", price_input: 0, price_output: 0 } },
+  { label: "llama.cpp server (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:8080/v1", api_key_env: "", tools: "compact", price_input: 0, price_output: 0 } },
+  { label: "vLLM (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:8000/v1", api_key_env: "", tools: "full", price_input: 0, price_output: 0 } },
+  { label: "Anthropic", cfg: { provider: "anthropic", base_url: "https://api.anthropic.com/v1", api_key_env: "ANTHROPIC_API_KEY", tools: "full" } },
+  { label: "OpenAI", cfg: { provider: "openai", base_url: "https://api.openai.com/v1", api_key_env: "OPENAI_API_KEY", tools: "full" } },
 ];
 
 export default function Assistant() {
@@ -153,7 +159,7 @@ export default function Assistant() {
                 <label>Base URL</label>
                 <input aria-label="Base URL" value={cfg.base_url} onChange={(e) => setCfg({ base_url: e.target.value })} />
                 <label>Model</label>
-                <input aria-label="Model" placeholder="model name as the server lists it" value={cfg.model} onChange={(e) => setCfg({ model: e.target.value })} />
+                <ModelField cfg={cfg} onPick={(model) => setCfg({ model })} />
                 <label>API key variable</label>
                 <input
                   aria-label="API key environment variable"
@@ -165,6 +171,19 @@ export default function Assistant() {
                 <KeyField name={cfg.api_key_env} status={s?.config.api_key_env === cfg.api_key_env ? s?.key : undefined} onChange={state.reload} />
                 <label>Max steps per message</label>
                 <input aria-label="Max steps" type="number" min={1} max={50} value={cfg.max_steps} onChange={(e) => setCfg({ max_steps: Number(e.target.value) })} />
+                <label>Worker model</label>
+                <input aria-label="Worker model" placeholder="AI scan workers (empty: the same model), e.g. a cheaper one" value={cfg.worker_model ?? ""} onChange={(e) => setCfg({ worker_model: e.target.value })} />
+                <label>Tools</label>
+                <select aria-label="Tool profile" value={cfg.tools ?? "full"} onChange={(e) => setCfg({ tools: e.target.value as Config["tools"] })}>
+                  <option value="full">Full (every tool)</option>
+                  <option value="compact">Compact (core tools, for small local models)</option>
+                </select>
+                <label>Price (USD / 1M tokens)</label>
+                <span className="row">
+                  <input aria-label="Input price" type="number" min={0} step="0.01" value={cfg.price_input ?? 0} onChange={(e) => setCfg({ price_input: Number(e.target.value) })} style={{ width: 90 }} /> in
+                  <input aria-label="Output price" type="number" min={0} step="0.01" value={cfg.price_output ?? 0} onChange={(e) => setCfg({ price_output: Number(e.target.value) })} style={{ width: 90 }} /> out
+                  <span className="muted small">from your provider's pricing page; 0 shows tokens only</span>
+                </span>
               </div>
               <p className="small muted">
                 Paste the key here and press Save key: it is kept on this computer only (in your ProxyMind folder, readable by you),
@@ -310,5 +329,21 @@ function KeyField({ name, status, onChange }: { name: string; status?: { source:
       </span>
       <ErrorBox error={action.error} />
     </div>
+  );
+}
+
+/** The model name, with a button that asks the server which models it has. */
+function ModelField({ cfg, onPick }: { cfg: Config; onPick: (m: string) => void }) {
+  const [models, setModels] = useState<string[] | null>(null);
+  const action = useAction();
+  const fetchModels = () => action.run(async () => setModels((await api.post<{ models: string[] }>("/assistant/models", cfg)).models));
+  return (
+    <span className="row">
+      <input aria-label="Model" list="assistant-models" placeholder="model name as the server lists it" value={cfg.model} onChange={(e) => onPick(e.target.value)} style={{ flex: 1 }} />
+      <datalist id="assistant-models">{(models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+      <button className="btn" onClick={() => void fetchModels()} disabled={action.busy} data-testid="assistant-models">List models</button>
+      {models && <span className="small muted" data-testid="assistant-model-count">{models.length} available</span>}
+      {action.error && <span className="small" style={{ color: "var(--bad)" }}>{action.error}</span>}
+    </span>
   );
 }

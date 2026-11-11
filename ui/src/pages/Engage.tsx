@@ -15,11 +15,14 @@ interface DnsRecord { name: string; type: string; ttl: number; value: string }
 interface DnsReport { host: string; resolver: string; records: DnsRecord[]; notes: string[] }
 interface Capture { url: string; status?: number; mime?: string; timestamp: string; note?: string; known: boolean }
 interface WaybackReport { host: string; total: number; interesting: number; captures: Capture[] }
+interface Hint { kind: string; why: string; suggest: string; weight: number }
+interface TriageItem { exchange_id: number; method: string; url: string; score: number; hints: Hint[]; similar: number }
 interface LogicCandidate { param: string; category: string; paths: string[]; examples: string[]; tests: string[] }
 interface LogicReport { candidates: LogicCandidate[]; flow_paths: string[] }
 interface Clickjack { framable: boolean; reasons: string[]; poc: string }
 
 const TOOLS = [
+  ["triage", "Worth testing"],
   ["analyze", "Analyze target"],
   ["comments", "Find comments"],
   ["scripts", "Find scripts"],
@@ -45,7 +48,7 @@ function download(name: string, text: string) {
 /** Engagement tools over recorded traffic: nothing is sent. Route arg: "<tool>:<exchange id>". */
 export default function Engage() {
   const { arg } = useNav();
-  const [tool, setTool] = useState<Tool>("analyze");
+  const [tool, setTool] = useState<Tool>("triage");
   const [exchange, setExchange] = useState("");
   const [host, setHost] = useState("");
   const [inScope, setInScope] = useState(true);
@@ -63,7 +66,7 @@ export default function Engage() {
             <button key={k} role="tab" className={`tab ${tool === k ? "active" : ""}`} onClick={() => setTool(k)} data-testid={`engage-tab-${k}`}>{label}</button>
           ))}
         </div>
-        {["analyze", "comments", "scripts", "endpoints", "logic"].includes(tool) && (
+        {["triage", "analyze", "comments", "scripts", "endpoints", "logic"].includes(tool) && (
           <div className="row small">
             <input aria-label="Engage host" placeholder="host contains (optional)" value={host} onChange={(e) => setHost(e.target.value)} style={{ width: 220 }} />
             <label><input type="checkbox" checked={inScope} onChange={(e) => setInScope(e.target.checked)} /> in scope only</label>
@@ -84,6 +87,7 @@ export default function Engage() {
           <p className="small muted">These tools read recorded traffic; they send nothing.</p>
         )}
       </Panel>
+      {tool === "triage" && <Triage filter={filter} />}
       {tool === "analyze" && <AnalyzeTarget filter={filter} />}
       {tool === "comments" && <Comments filter={filter} />}
       {tool === "scripts" && <Scripts filter={filter} />}
@@ -493,6 +497,41 @@ function LogicTests({ filter }: { filter: object }) {
       {r && r.flow_paths.length > 0 && (
         <p className="small" data-testid="engage-logic-flows">Flow steps: {r.flow_paths.map((p) => <code key={p} style={{ marginRight: 6 }}>{p}</code>)}</p>
       )}
+    </Panel>
+  );
+}
+
+function Triage({ filter }: { filter: object }) {
+  const [r, setR] = useState<TriageItem[] | null>(null);
+  const action = useAction();
+  const run = () => action.run(async () => setR(await api.post<TriageItem[]>("/traffic/triage", { ...filter, limit: 100 })));
+  return (
+    <Panel title="Worth testing" actions={<button className="btn primary" onClick={run} disabled={action.busy} data-testid="engage-triage">Rank requests</button>}>
+      <p className="small muted">
+        Recorded requests ranked by what makes them worth testing (object ids, URL/file/command parameters, reflected
+        input, JWTs, uploads, GraphQL, APIs open without credentials, admin paths, error details), with what to try.
+        One row per method and path shape. Agents get the same list (<code>traffic_triage</code>).
+      </p>
+      <ErrorBox error={action.error} />
+      {r && (r.length === 0 ? <Empty>Nothing stands out yet. Browse more of the app first.</Empty> : (
+        <table className="grid" data-testid="engage-triage-list">
+          <thead><tr><th>Score</th><th>Request</th><th>Why, and what to try</th><th></th></tr></thead>
+          <tbody>
+            {r.map((t) => (
+              <tr key={t.exchange_id}>
+                <td><b>{t.score}</b></td>
+                <td className="mono small" style={{ wordBreak: "break-all" }}>{t.method} {t.url}{t.similar > 0 && <div className="muted">+{t.similar} similar</div>}</td>
+                <td className="small">
+                  {t.hints.map((h, i) => (
+                    <div key={i}><Chip value={h.kind} /> {h.why} <span className="muted">→ {h.suggest}</span></div>
+                  ))}
+                </td>
+                <td><ExchangeLink id={t.exchange_id} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
     </Panel>
   );
 }

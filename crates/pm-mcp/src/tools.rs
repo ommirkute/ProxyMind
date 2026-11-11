@@ -554,6 +554,31 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "traffic_triage",
+            "Recorded requests worth testing, most promising first, each with why and what to try: object ids in \
+             paths, URL/file/command-like parameters, reflected input, JWTs (alg none, HS*, kid/jku), uploads, \
+             GraphQL, APIs answering without credentials, admin paths, error details. One entry per method and path \
+             shape. Sends nothing.",
+            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "limit": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "memory_save",
+            "Save a note for later scans of a host in scope: a login that works (never the password itself: name \
+             the identity), an endpoint worth revisiting, a dead end, a technique that worked. Kinds: login, \
+             endpoint, dead_end, technique, note. An AI scan's agents default to the scan's host.",
+            json!({ "kind": {"type":"string","enum":["login","endpoint","dead_end","technique","note"]},
+                    "text": {"type":"string"}, "host": {"type":"string"} }),
+            &["kind", "text"],
+        ),
+        tool(
+            "memory_list",
+            "Notes saved about a host by earlier work, plus people's verdicts on findings there (false positives \
+             not to report again, confirmed and fixed issues). Sends nothing.",
+            json!({ "host": {"type":"string"} }),
+            &["host"],
+        ),
+        tool(
             "recon_dns",
             "DNS records of a host in scope or a parent domain (A, AAAA, CNAME, MX, TXT, NS, SOA, CAA and _dmarc TXT), \
              with notes on what stands out: missing SPF or DMARC, a permissive policy, no CAA, a CNAME to a service \
@@ -1092,6 +1117,41 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_logic" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_logic(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "traffic_triage" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                host: Option<String>,
+                in_scope: Option<bool>,
+                limit: Option<usize>,
+            }
+            let g: A = args(a)?;
+            let f = pm_service::EngageFilter { host: g.host, in_scope: g.in_scope, ..Default::default() };
+            service.traffic_triage(actor, &f, g.limit.unwrap_or(40)).map(to_json).map_err(|e| e.to_string())
+        }
+        "memory_save" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                kind: String,
+                text: String,
+                host: Option<String>,
+            }
+            let g: A = args(a)?;
+            service.memory_save(actor, g.host.as_deref(), &g.kind, &g.text).map(to_json).map_err(|e| e.to_string())
+        }
+        "memory_list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                host: String,
+            }
+            let g: A = args(a)?;
+            let h = g.host.trim().to_ascii_lowercase();
+            let notes = service.memory_list(Some(&h)).map_err(|e| e.to_string())?;
+            let verdicts = service.verdicts_for(&h).map_err(|e| e.to_string())?;
+            Ok(json!({ "notes": notes, "verdicts": verdicts }))
         }
         "recon_dns" => {
             #[derive(serde::Deserialize)]

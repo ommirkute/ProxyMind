@@ -37,6 +37,8 @@ pub struct AiScanRequest {
     pub max_steps: Option<u32>,
     /// Longest run in minutes (default 60, max 1440).
     pub max_minutes: Option<u32>,
+    /// Most it may spend in USD (needs prices in the assistant settings).
+    pub max_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +72,12 @@ pub struct AiScan {
     pub report: String,
     /// Findings this scan's agent created.
     pub findings: usize,
+    /// Tokens used so far, and their cost in USD (0 when no price is set).
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost: f64,
+    /// The cost budget in USD (0: none).
+    pub max_cost: f64,
     pub log: Vec<AiScanLog>,
 }
 
@@ -78,9 +86,21 @@ pub fn scan_actor(id: i64) -> Actor {
     Actor::parse(&format!("agent:ai-scan-{id}")).expect("valid actor id")
 }
 
-/// The scan an actor works for, if it is an AI scan agent.
+/// The actor for worker `n` of scan `id`.
+pub fn worker_actor(id: i64, n: usize) -> Actor {
+    Actor::parse(&format!("agent:ai-scan-{id}-w{n}")).expect("valid actor id")
+}
+
+/// The scan an actor works for, if it is an AI scan agent or one of its workers.
 pub fn scan_of(actor: &Actor) -> Option<i64> {
-    actor.id().strip_prefix("agent:ai-scan-")?.parse().ok()
+    let rest = actor.id().strip_prefix("agent:ai-scan-")?.to_string();
+    rest.split("-w").next()?.parse().ok()
+}
+
+/// Whether `actor_id` is scan `id`'s agent or one of its workers.
+fn of_scan(actor_id: &str, id: i64) -> bool {
+    let lead = format!("agent:ai-scan-{id}");
+    actor_id == lead || actor_id.strip_prefix(&format!("{lead}-w")).is_some_and(|n| n.parse::<usize>().is_ok())
 }
 
 fn s(r: &serde_json::Map<String, Value>, k: &str) -> String {
@@ -164,6 +184,12 @@ impl Service {
             ("model", json!(model)),
             ("max_steps", json!(steps)),
             ("deadline_ms", json!(now + i64::from(minutes) * 60_000)),
+            (
+                "max_cost_micros",
+                json!(
+                    req.max_cost.filter(|c| c.is_finite() && *c > 0.0).map_or(0, |c| (c.min(100_000.0) * 1e6) as i64)
+                ),
+            ),
             ("actor", json!(actor.id())),
             ("created_ms", json!(now)),
             ("updated_ms", json!(now)),
@@ -174,18 +200,29 @@ impl Service {
         self.audit(
             &actor.id(),
             "ai_scan_start",
-            json!({ "scan": id, "target": target, "max_steps": steps, "max_minutes": minutes, "model": model }),
+            json!({ "scan": id, "target": target, "max_steps": steps, "max_minutes": minutes, "model": model,
+                    "max_cost": req.max_cost }),
             "allow",
         )?;
         self.ai_scan_get(id)
+    }
+
+    /// Findings created by scan `id`'s agent and workers, newest first.
+    fn scan_findings(&self, id: i64) -> Result<Vec<serde_json::Map<String, Value>>> {
+        Ok(self
+            .store
+            .lock()
+            .rows("findings", None, 10_000)?
+            .into_iter()
+            .filter(|r| of_scan(&s(r, "actor"), id))
+            .collect())
     }
 
     pub fn ai_scan_get(&self, id: i64) -> Result<AiScan> {
         let r = self.ai_row(id)?;
         let log: Vec<AiScanLog> = serde_json::from_str(&s(&r, "log")).unwrap_or_default();
         let agent = scan_actor(id).id();
-        let findings =
-            self.store.lock().rows("findings", Some(("actor", &json!(agent))), 10_000).map(|v| v.len()).unwrap_or(0);
+        let findings = self.scan_findings(id).map(|v| v.len()).unwrap_or(0);
         Ok(AiScan {
             id,
             target: s(&r, "target"),
@@ -204,6 +241,10 @@ impl Service {
             error: s(&r, "error"),
             report: s(&r, "report"),
             findings,
+            tokens_in: n(&r, "tokens_in"),
+            tokens_out: n(&r, "tokens_out"),
+            cost: n(&r, "cost_micros") as f64 / 1e6,
+            max_cost: n(&r, "max_cost_micros") as f64 / 1e6,
             log,
         })
     }
@@ -247,6 +288,19 @@ impl Service {
         }
         self.ai_update(id, vec![("report", json!(markdown)), ("phase", json!("report"))])?;
         self.ai_scan_log(id, "phase", "report submitted")
+    }
+
+    /// Adds a model call's tokens and cost to the scan's totals.
+    pub fn ai_scan_usage(&self, id: i64, tokens_in: u64, tokens_out: u64, cost_micros: i64) -> Result<()> {
+        let r = self.ai_row(id)?;
+        self.ai_update(
+            id,
+            vec![
+                ("tokens_in", json!(n(&r, "tokens_in") + tokens_in as i64)),
+                ("tokens_out", json!(n(&r, "tokens_out") + tokens_out as i64)),
+                ("cost_micros", json!(n(&r, "cost_micros") + cost_micros.max(0))),
+            ],
+        )
     }
 
     pub fn ai_scan_progress(&self, id: i64, steps: i64, chat_id: i64) -> Result<()> {
@@ -313,7 +367,8 @@ impl Service {
     /// before a person reads it.
     pub async fn ai_scan_verify(&self, id: i64) -> Result<Vec<crate::Retest>> {
         let actor = scan_actor(id);
-        let rows = self.store.lock().rows("findings", Some(("actor", &json!(actor.id()))), 30)?;
+        let mut rows = self.scan_findings(id)?;
+        rows.truncate(30);
         let mut out = Vec::new();
         let mut lines = Vec::new();
         for r in rows.iter().rev() {
@@ -355,6 +410,9 @@ impl Service {
             "stopping" => Some("stopped by a person"),
             "running" if pm_core::now_ms() > n(&r, "deadline_ms") => Some("time budget used up"),
             "running" if n(&r, "steps") >= n(&r, "max_steps") => Some("step budget used up"),
+            "running" if n(&r, "max_cost_micros") > 0 && n(&r, "cost_micros") >= n(&r, "max_cost_micros") => {
+                Some("cost budget used up")
+            }
             "running" => None,
             _ => Some("not running"),
         })
@@ -440,11 +498,23 @@ mod tests {
         assert_eq!(a.id(), "agent:ai-scan-42");
         assert_eq!(scan_of(&a), Some(42));
         assert_eq!(scan_of(&Actor::parse("agent:claude").unwrap()), None);
+        assert_eq!(scan_of(&worker_actor(42, 3)), Some(42));
+        assert!(of_scan("agent:ai-scan-42-w3", 42) && of_scan("agent:ai-scan-42", 42));
+        assert!(!of_scan("agent:ai-scan-421", 42) && !of_scan("agent:ai-scan-42-wx", 42));
     }
 
     #[test]
     fn the_prompt_names_the_tools_it_maps_to() {
-        for t in ["ai_scan_phase", "ai_scan_note", "ai_scan_report", "scan_active", "engage_js_endpoints"] {
+        for t in [
+            "ai_scan_phase",
+            "ai_scan_note",
+            "ai_scan_report",
+            "scan_active",
+            "engage_js_endpoints",
+            "ai_scan_delegate",
+            "memory_save",
+            "traffic_triage",
+        ] {
             assert!(PROMPT.contains(t), "{t}");
         }
         assert!(PROMPT.contains("{{target}}") && PROMPT.contains("{{scope}}"));

@@ -305,6 +305,29 @@ CREATE TABLE attack_paths (
 );
 ALTER TABLE ai_scans ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';
 "#,
+    r#"
+-- Model usage and a cost budget per AI scan (cost in millionths of a USD,
+-- 0 = no budget), and a model-written explanation and fix per finding.
+ALTER TABLE ai_scans ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN cost_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN max_cost_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN explanation TEXT NOT NULL DEFAULT '';
+"#,
+    r#"
+-- Agent memory: notes one scan of a host leaves for the next (a login
+-- that works, an endpoint, a dead end, a technique). Agents write them;
+-- people delete them.
+CREATE TABLE agent_memory (
+    id          INTEGER PRIMARY KEY,
+    host        TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL
+);
+CREATE INDEX agent_memory_host ON agent_memory(host);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1351,6 +1374,7 @@ impl Store {
                 "duplicates",
                 "created_ms",
                 "updated_ms",
+                "explanation",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
@@ -1371,8 +1395,13 @@ impl Store {
                 "created_ms",
                 "updated_ms",
                 "inbox",
+                "tokens_in",
+                "tokens_out",
+                "cost_micros",
+                "max_cost_micros",
             ],
             "attack_paths" => &["scan_id", "title", "impact", "severity", "steps", "actor", "created_ms"],
+            "agent_memory" => &["host", "kind", "text", "actor", "created_ms"],
             "oast_probes" => &[
                 "token",
                 "check_name",

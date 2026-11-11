@@ -98,7 +98,7 @@ fn rand_id() -> u16 {
 
 impl Service {
     /// Hosts the scope covers: exact hosts, and suffixes for `*.` patterns.
-    fn scope_hosts(&self) -> Vec<(String, bool)> {
+    pub(crate) fn scope_hosts(&self) -> Vec<(String, bool)> {
         self.policy
             .roe()
             .include

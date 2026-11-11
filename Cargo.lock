@@ -1315,6 +1315,7 @@ name = "pm-assistant"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pm-ai",
  "pm-core",
  "pm-http",
  "pm-mcp",

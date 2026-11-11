@@ -40,7 +40,7 @@ fn person_blocks(messages: &[String]) -> Vec<Block> {
 }
 
 /// Cuts old tool results (pairs stay intact: only their text shrinks).
-fn compact(all: &mut [Message]) {
+pub(crate) fn compact(all: &mut [Message]) {
     let keep_from = all.len().saturating_sub(KEEP_WHOLE);
     for m in all.iter_mut().take(keep_from).skip(1) {
         for b in &mut m.content {
@@ -72,6 +72,11 @@ impl Assistant {
                 Ok(status) => (status, String::new()),
                 Err(e) => ("failed", e.to_string()),
             };
+            // Workers finish their current task (or see the scan stop) before the verdict.
+            let waited = std::time::Instant::now();
+            while me.workers_running(id) && waited.elapsed() < std::time::Duration::from_secs(600) {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
             // A scan that ran to its end retests what it found before anyone reads the report.
             if status == "done"
                 && let Err(e) = me.service.ai_scan_verify(id).await
@@ -86,21 +91,32 @@ impl Assistant {
     }
 
     /// Runs scan `id` to the end; returns its final status.
-    pub async fn run_ai_scan(&self, id: i64, cfg: &AssistantConfig, key: Option<&str>) -> Result<&'static str> {
+    pub async fn run_ai_scan(
+        self: &Arc<Self>,
+        id: i64,
+        cfg: &AssistantConfig,
+        key: Option<&str>,
+    ) -> Result<&'static str> {
         let svc = &self.service;
         let scan = svc.ai_scan_get(id)?;
         let actor = scan_actor(id);
         let system = format!("{}\n\n{}", svc.ai_scan_prompt(&scan.target, &scan.focus)?, pm_mcp::INSTRUCTIONS);
-        let mut tools = pm_mcp::tool_definitions();
+        let mut tools = crate::tools_for(cfg);
         tools.extend(ai_scan_tool_definitions());
+        tools.extend(crate::workers::lead_tool_definitions());
         let chat_id = svc.chat_create(&format!("AI scan #{id}: {}", scan.target))?;
         let minutes = (scan.deadline_ms - scan.created_ms) / 60_000;
+        let brief = svc.memory_brief(&scan.target)?;
+        let brief = if brief.is_empty() { String::new() } else { format!("\n\n{brief}") };
         let mut all = vec![Message::user_text(&format!(
             "Start the assessment of {}. Work through the phases with ProxyMind's tools, recording progress with \
              ai_scan_phase and ai_scan_note. When every phase is done, or the budget is nearly used, submit the full \
-             report with ai_scan_report. Budget: {} model calls and {minutes} minutes.",
+             report with ai_scan_report. Budget: {} model calls and {minutes} minutes.{brief}",
             scan.target, scan.max_steps
         ))];
+        if !brief.is_empty() {
+            svc.ai_scan_log(id, "memory", "started from earlier notes and people's verdicts on this host")?;
+        }
         svc.ai_scan_log(id, "phase", &format!("recon: started on {}", scan.target))?;
         let sender = if is_local_url(&cfg.base_url) { &self.local } else { &self.sender };
         let max_tokens = cfg.max_tokens.max(MIN_TOKENS);
@@ -119,6 +135,8 @@ impl Assistant {
                     ));
                     let call = Call { model: &cfg.model, max_tokens, system: &system, tools: &tools, messages: &all };
                     if let Ok(sent) = llm::call(sender, cfg.provider, &cfg.base_url, key, &call).await {
+                        let u = sent.usage;
+                        svc.ai_scan_usage(id, u.input, u.output, cfg.cost_micros(u.input, u.output))?;
                         for (_, name, input) in sent.reply.tool_uses() {
                             if name == "ai_scan_report" {
                                 let _ = svc.ai_scan_tool(&actor, name, input);
@@ -140,10 +158,13 @@ impl Assistant {
                 }
             };
             steps += 1;
+            let u = sent.usage;
+            svc.ai_scan_usage(id, u.input, u.output, cfg.cost_micros(u.input, u.output))?;
             svc.audit_model_call(
                 &actor,
                 json!({ "ai_scan": id, "provider": provider_name(cfg.provider), "host": host_of(&cfg.base_url),
-                        "model": cfg.model, "bytes_sent": sent.bytes_sent }),
+                        "model": cfg.model, "bytes_sent": sent.bytes_sent,
+                        "tokens_in": u.input, "tokens_out": u.output, "estimated": u.estimated }),
                 "allow",
             )?;
             let reply = sent.reply;
@@ -165,6 +186,10 @@ impl Assistant {
             let from_person = svc.ai_scan_take_messages(id)?;
             if uses.is_empty() && !from_person.is_empty() {
                 all.push(Message { role: Role::User, content: person_blocks(&from_person) });
+            } else if uses.is_empty() && self.workers_running(id) {
+                all.push(Message::user_text(
+                    "Workers are still running: wait for them with ai_scan_workers (wait_seconds), then continue.",
+                ));
             } else if uses.is_empty() {
                 if !svc.ai_scan_get(id)?.report.is_empty() {
                     svc.ai_scan_progress(id, steps, chat_id)?;
@@ -184,14 +209,30 @@ impl Assistant {
             } else {
                 let mut results = Vec::new();
                 for (tool_id, name, input) in uses {
-                    let outcome = match svc.ai_scan_tool(&actor, &name, &input) {
+                    let outcome = match self.lead_tool(id, cfg, key, &name, &input).await {
                         Some(r) => r,
-                        None => pm_mcp::call_tool(svc, &actor, &name, input.clone()).await,
+                        None => match svc.ai_scan_tool(&actor, &name, &input) {
+                            Some(r) => r,
+                            None => pm_mcp::call_tool(svc, &actor, &name, input.clone()).await,
+                        },
                     };
                     let (content, is_error) = match outcome {
                         Ok(v) => (v.to_string(), false),
                         Err(e) => (e, true),
                     };
+                    let (content, injected) = crate::guard(content);
+                    if !injected.is_empty() {
+                        svc.ai_scan_log(
+                            id,
+                            "injection",
+                            &format!("{name}: target text tries to instruct the model: {}", injected.join(" | ")),
+                        )?;
+                        svc.audit_model_call(
+                            &actor,
+                            json!({ "ai_scan": id, "possible_prompt_injection": injected, "tool": name }),
+                            "flag",
+                        )?;
+                    }
                     if !name.starts_with("ai_scan_") {
                         let kind = if content.contains("pending_approval") { "approval" } else { "tool" };
                         let mark = if is_error { " ✗" } else { "" };

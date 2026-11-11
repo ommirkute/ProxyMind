@@ -26,7 +26,7 @@ pub(crate) fn issue_key(class: &str) -> String {
 }
 
 /// A URL without its query and fragment, for spotting duplicates.
-fn url_key(url: &str) -> &str {
+pub(crate) fn url_key(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
@@ -164,7 +164,16 @@ impl Service {
         }
         let id = self.store.lock().insert_row("findings", &row)?;
         self.audit(&actor.id(), "finding_create", json!({ "id": id, "title": f.title }), "allow")?;
-        self.finding_get(id)
+        let mut v = self.finding_get(id)?;
+        // Learn from people's verdicts: say so when they rejected the same issue here before.
+        if let Some((fp, title)) = self.similar_false_positive(&key, url_key(&url))? {
+            v["similar_false_positive"] = json!({ "id": fp, "title": title });
+            v["note"] = json!(format!(
+                "A person marked finding #{fp} ({title}), the same issue at the same place, as a false positive. \
+                 Check what is different this time and say so in the description, or withdraw this finding."
+            ));
+        }
+        Ok(v)
     }
 
     pub fn finding_get(&self, id: i64) -> Result<Value> {
@@ -238,6 +247,21 @@ impl Service {
     /// that was scanned (a scanner lead's first evidence exchange). The
     /// result is kept on the finding; a proof that holds again marks it
     /// proven (reopening a fixed one), anything else leaves the status alone.
+    /// Saves a model-written explanation and fix on a finding (people only:
+    /// the assistant writes it when a person asks).
+    pub fn finding_set_explanation(&self, actor: &Actor, id: i64, markdown: &str) -> Result<Value> {
+        if actor.kind != pm_policy::ActorKind::Human {
+            return Err(ServiceError::Invalid("only people save a finding explanation".into()));
+        }
+        self.finding_get(id)?;
+        let mut ch = serde_json::Map::new();
+        ch.insert("explanation".into(), json!(markdown.chars().take(20_000).collect::<String>()));
+        ch.insert("updated_ms".into(), json!(now_ms()));
+        self.store.lock().update_row("findings", id, &ch)?;
+        self.audit(&actor.id(), "finding_explain", json!({ "id": id, "chars": markdown.len() }), "allow")?;
+        self.finding_get(id)
+    }
+
     pub async fn finding_retest(&self, actor: &Actor, id: i64) -> Result<Retest> {
         let f = self.finding_get(id)?;
         let mut r = Retest {
@@ -395,6 +419,12 @@ impl Service {
             }
             if let Some(t) = f["retest"]["summary"].as_str() {
                 md.push_str(&format!("\n**Last retest:** {t}\n"));
+            }
+            if let Some(x) = f["explanation"].as_str().filter(|x| !x.trim().is_empty()) {
+                // Demote the explanation's headings so they sit under this finding.
+                let x: String =
+                    x.lines().map(|l| if l.starts_with('#') { format!("##{l}\n") } else { format!("{l}\n") }).collect();
+                md.push_str(&format!("\n### Explanation and fix (AI-written; review before applying)\n\n{x}"));
             }
             for p in self.proofs_for_finding(id)?.iter().filter(|p| p["proven"] == true).take(1) {
                 md.push_str(&format!(

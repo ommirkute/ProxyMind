@@ -20,7 +20,7 @@ pub enum ProviderKind {
     Openai,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AssistantConfig {
     pub provider: ProviderKind,
@@ -33,6 +33,25 @@ pub struct AssistantConfig {
     /// Most model calls per message, so a confused model can't loop forever.
     pub max_steps: u32,
     pub max_tokens: u32,
+    /// USD per million input and output tokens, for the cost meter (0:
+    /// unknown, only tokens are shown). Prices change: copy them from the
+    /// provider's pricing page.
+    pub price_input: f64,
+    pub price_output: f64,
+    /// `full` (every tool) or `compact` (a core set, for small local models
+    /// that struggle with a long tool list).
+    pub tools: ToolProfile,
+    /// Model for an AI scan's worker agents (empty: the same model), e.g. a
+    /// cheaper one for focused tasks.
+    pub worker_model: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolProfile {
+    #[default]
+    Full,
+    Compact,
 }
 
 impl Default for AssistantConfig {
@@ -45,6 +64,10 @@ impl Default for AssistantConfig {
             api_key_env: String::new(),
             max_steps: 12,
             max_tokens: 2048,
+            price_input: 0.0,
+            price_output: 0.0,
+            tools: ToolProfile::Full,
+            worker_model: String::new(),
         }
     }
 }
@@ -117,6 +140,8 @@ impl Service {
         let cfg = AssistantConfig {
             max_steps: cfg.max_steps.clamp(1, 50),
             max_tokens: cfg.max_tokens.clamp(256, 32000),
+            price_input: if cfg.price_input.is_finite() { cfg.price_input.clamp(0.0, 10_000.0) } else { 0.0 },
+            price_output: if cfg.price_output.is_finite() { cfg.price_output.clamp(0.0, 10_000.0) } else { 0.0 },
             ..cfg
         };
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
@@ -262,5 +287,12 @@ impl Service {
             .into_iter()
             .map(|(id, title, updated_ms)| ChatSummary { id, title, updated_ms })
             .collect())
+    }
+}
+
+impl AssistantConfig {
+    /// The cost of a call in millionths of a dollar (0 when no price is set).
+    pub fn cost_micros(&self, tokens_in: u64, tokens_out: u64) -> i64 {
+        (tokens_in as f64 * self.price_input + tokens_out as f64 * self.price_output).round() as i64
     }
 }

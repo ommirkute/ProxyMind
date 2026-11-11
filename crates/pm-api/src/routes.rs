@@ -155,6 +155,9 @@ pub fn api() -> Router<AppState> {
         .route("/engage/scripts", post(engage_scripts))
         .route("/engage/js-endpoints", post(engage_js_endpoints))
         .route("/engage/logic", post(engage_logic))
+        .route("/traffic/triage", post(traffic_triage))
+        .route("/memory", get(memory_list))
+        .route("/memory/{id}", axum::routing::delete(memory_delete))
         .route("/update", get(update_get).put(update_set))
         .route("/skills", get(skills_list))
         .route("/skills/{name}", post(skill_get))
@@ -209,6 +212,8 @@ pub fn api() -> Router<AppState> {
         .route("/assistant/key/{name}", axum::routing::delete(model_key_remove))
         .route("/assistant/chats/{id}", get(assistant_chat))
         .route("/assistant/send", post(assistant_send))
+        .route("/assistant/models", post(assistant_models))
+        .route("/findings/{id}/explain", post(finding_explain))
         .route("/ai-scan", get(ai_scan_list).post(ai_scan_start))
         .route("/ai-scan/prompt", get(ai_scan_prompt))
         .route("/ai-scan/{id}", get(ai_scan_get))
@@ -607,6 +612,34 @@ async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) ->
 
 async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
     ok(st.service.engage_js_endpoints(&st.actor, &f)?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct TriageBody {
+    host: Option<String>,
+    in_scope: Option<bool>,
+    limit: Option<usize>,
+}
+
+async fn traffic_triage(State(st): State<AppState>, Json(b): Json<TriageBody>) -> ApiResult {
+    let f = pm_service::EngageFilter { host: b.host, in_scope: b.in_scope, ..Default::default() };
+    ok(st.service.traffic_triage(&st.actor, &f, b.limit.unwrap_or(100))?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct HostQuery {
+    host: Option<String>,
+}
+
+async fn memory_list(State(st): State<AppState>, Query(q): Query<HostQuery>) -> ApiResult {
+    ok(st.service.memory_list(q.host.as_deref())?)
+}
+
+async fn memory_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    st.service.memory_delete(&st.actor, id)?;
+    ok(serde_json::json!({ "deleted": id }))
 }
 
 async fn engage_logic(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
@@ -1158,6 +1191,22 @@ async fn assistant_state(State(st): State<AppState>) -> ApiResult {
 
 async fn assistant_config(State(st): State<AppState>, Json(cfg): Json<pm_service::AssistantConfig>) -> ApiResult {
     ok(st.service.assistant_config_set(&st.actor, cfg)?)
+}
+
+/// Models the server in `cfg` offers (the form's values, before saving).
+async fn assistant_models(State(st): State<AppState>, Json(cfg): Json<pm_service::AssistantConfig>) -> ApiResult {
+    ok(serde_json::json!({ "models": st.assistant.list_models(&cfg).await? }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ExplainBody {
+    framework: Option<String>,
+}
+
+async fn finding_explain(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<ExplainBody>) -> ApiResult {
+    let md = st.assistant.explain_finding(&st.actor, id, b.framework.as_deref()).await?;
+    ok(serde_json::json!({ "explanation": md }))
 }
 
 async fn assistant_chat(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

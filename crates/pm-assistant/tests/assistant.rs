@@ -69,6 +69,7 @@ fn configure(svc: &Service, provider: ProviderKind, base_url: String, key_env: &
         api_key_env: key_env.into(),
         max_steps,
         max_tokens: 1000,
+        ..AssistantConfig::default()
     };
     svc.assistant_config_set(&human, cfg).unwrap();
 }

@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+pm-ai = { version = "0.1.0", path = "../pm-ai" }
 pm-core = { version = "0.1.0", path = "../pm-core" }
 thiserror = "2.0.21"
 pm-http = { version = "0.1.0", path = "../pm-http" }

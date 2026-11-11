@@ -436,6 +436,10 @@ try {
   await page.getByTestId("engage-endpoints").click();
   await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
   check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.getByTestId("engage-tab-triage").click();
+  await page.getByTestId("engage-triage").click();
+  await page.locator('[data-testid="engage-triage-list"]').waitFor();
+  check(await page.getByTestId("engage-triage-list").textContent().then((t) => t.includes("idor")), "Worth testing ranks recorded requests (object ids flagged)");
   await page.getByTestId("engage-tab-logic").click();
   await page.getByTestId("engage-logic").click();
   await page.locator('[data-testid="engage-logic-list"], .empty').first().waitFor();
@@ -820,7 +824,10 @@ try {
       const call = (name, args) => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `c${modelCalls.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] });
       const tools = parsed.messages.filter((m) => m.role === "tool").length;
       const aiScan = String(parsed.messages[0]?.content ?? "").includes("AI scan agent");
-      const reply = aiScan
+      const explain = String(parsed.messages[0]?.content ?? "").includes("senior application security engineer");
+      const reply = explain
+        ? { choices: [{ message: { role: "assistant", content: "## What is wrong\nOrders load by id with no owner check (e2e)." } }], usage: { prompt_tokens: 900, completion_tokens: 40 } }
+        : aiScan
         ? tools === 0 ? call("ai_scan_phase", { phase: "recon", notes: "e2e run" })
           : tools === 1 ? call("attack_path_record", { title: "e2e chain", impact: "read any order", severity: "high", steps: [{ text: "Order ids are sequential" }, { text: "Orders load without an owner check" }] })
           : tools === 2 ? call("ai_scan_report", { markdown: "# Report\n\n## Executive summary\nThe e2e scan found nothing." })
@@ -839,7 +846,7 @@ try {
   await page.getByRole("main").getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Ollama (local)" }).click();
   await page.getByLabel("Base URL").fill(`http://127.0.0.1:${model.address().port}/v1`);
-  await page.getByLabel("Model").fill("mock-model");
+  await page.getByLabel("Model", { exact: true }).fill("mock-model");
   await page.getByTestId("assistant-save").click();
   await page.waitForSelector('[data-testid="assistant-problem"]', { state: "detached" });
   await page.getByLabel("Message").fill("Which orders did alice look at?");
@@ -860,12 +867,20 @@ try {
   await page.getByLabel("AI scan steps").fill("10");
   await page.getByTestId("ai-scan-start").click();
   await page.locator('[data-testid="ai-scan-report"]', { hasText: "The e2e scan found nothing." }).waitFor({ timeout: 15000 });
+  // The report appears before the scan ends: ProxyMind still retests its findings.
+  await page.locator('[data-testid="ai-scan-status"]', { hasText: "done" }).waitFor({ timeout: 30000 }).catch(() => {});
   check(await page.getByTestId("ai-scan-status").textContent().then((t) => t.includes("done")), "an AI scan runs to a report");
   check(await page.getByTestId("ai-scan-log").textContent().then((t) => t.includes("e2e run")), "its phases show in the activity log");
   await page.getByTestId("attack-graph").waitFor();
   await page.getByTestId("attack-graph").locator("xpath=../..").screenshot({ path: join(SHOTS, "6h-attack-graph.png") });
   check(await page.getByTestId("attack-path-list").textContent().then((t) => t.includes("e2e chain") && t.includes("Orders load without an owner check")), "the scan's attack path shows as a graph");
+  check(await page.getByTestId("ai-scan-cost").textContent().then((t) => /tokens/.test(t)), "the scan shows the tokens it used");
   await page.screenshot({ path: join(SHOTS, "6g-ai-scan.png") });
+  await open("findings");
+  await page.locator('[data-testid="findings"] tbody tr').first().click();
+  await page.getByTestId("explain").click();
+  await page.locator('[data-testid="explanation"]', { hasText: "no owner check (e2e)" }).waitFor({ timeout: 15000 });
+  check(true, "Explain & fix writes an explanation onto the finding");
   model.close();
 
   console.log("Crawl");

@@ -59,13 +59,16 @@ pub fn anthropic_body(c: &Call<'_>) -> Value {
         .iter()
         .map(|t| json!({ "name": t["name"], "description": t["description"], "input_schema": t["inputSchema"] }))
         .collect();
-    json!({
+    let mut body = json!({
         "model": c.model,
         "max_tokens": c.max_tokens,
         "system": c.system,
-        "tools": tools,
         "messages": c.messages,
-    })
+    });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    body
 }
 
 pub fn parse_anthropic(v: &Value) -> Result<Message> {
@@ -131,7 +134,12 @@ pub fn openai_body(c: &Call<'_>) -> Value {
             }
         }
     }
-    json!({ "model": c.model, "max_tokens": c.max_tokens, "tools": tools, "messages": messages })
+    let mut body = json!({ "model": c.model, "max_tokens": c.max_tokens, "messages": messages });
+    // OpenAI refuses an empty tool list.
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    body
 }
 
 pub fn parse_openai(v: &Value) -> Result<Message> {
@@ -164,6 +172,30 @@ pub struct Sent {
     pub reply: Message,
     pub bytes_sent: usize,
     pub host: String,
+    pub usage: Usage,
+}
+
+/// Tokens a call used, as the API reported them (or estimated from sizes,
+/// about 4 bytes a token, when it didn't).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub estimated: bool,
+}
+
+/// Reads the usage block of an Anthropic or OpenAI-style reply.
+pub fn usage_of(v: &Value) -> Option<Usage> {
+    let u = &v["usage"];
+    let n = |k: &str| u[k].as_u64();
+    if let (Some(i), Some(o)) = (n("input_tokens"), n("output_tokens")) {
+        let cached = n("cache_read_input_tokens").unwrap_or(0) + n("cache_creation_input_tokens").unwrap_or(0);
+        return Some(Usage { input: i + cached, output: o, estimated: false });
+    }
+    if let (Some(i), Some(o)) = (n("prompt_tokens"), n("completion_tokens")) {
+        return Some(Usage { input: i, output: o, estimated: false });
+    }
+    None
 }
 
 /// One model call.
@@ -222,7 +254,12 @@ pub async fn call(
         ProviderKind::Anthropic => parse_anthropic(&v)?,
         ProviderKind::Openai => parse_openai(&v)?,
     };
-    Ok(Sent { reply, bytes_sent: body.len(), host })
+    let usage = usage_of(&v).unwrap_or(Usage {
+        input: body.len() as u64 / 4,
+        output: serde_json::to_string(&reply.content).map_or(0, |t| t.len() as u64 / 4),
+        estimated: true,
+    });
+    Ok(Sent { reply, bytes_sent: body.len(), host, usage })
 }
 
 #[cfg(test)]
