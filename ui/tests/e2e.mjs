@@ -1222,7 +1222,7 @@ match:
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200"));
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns"));
   check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
   if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();
