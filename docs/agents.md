@@ -188,6 +188,30 @@ Proofs keep their inputs, so `proxymind proof rerun <id>` repeats one during a r
 
 **Tiers follow the payload, not just the method.** A GET whose query or body carries destructive SQL (`DROP TABLE`, `DELETE FROM`, `INTO OUTFILE`), destructive OS commands (`rm -rf`, `shutdown`) or a delete mutation is *destructive* (refused for agents by default); command-injection probes, SQL writes and bulk actions are *intrusive*. Encoding tricks (double percent-encoding, comments, JSON escapes) are undone first. The approval request says what was found.
 
+## Evidence packs and coverage proof
+
+**Evidence & coverage** (under the Dashboard group) or `proxymind evidence --out pack.zip` builds one ZIP for the client:
+
+- `report.html` and `report.md`;
+- the exact request and response bytes behind every finding, proof and attack path (`--all` adds all in-scope traffic, up to 5000 exchanges);
+- `findings.json`, `proofs.json`, `attack_paths.json`, `coverage.json`;
+- the hash-chained audit log (`audit.jsonl`) and the rules of engagement (`roe.yaml`);
+- `manifest.json`, which lists every file's SHA-256 and every recorded exchange, signed (`manifest.sig`) with this installation's Ed25519 key (kept in your ProxyMind folder, readable only by you).
+
+Send the client your key's fingerprint separately (it is shown on the page). They check the pack with `proxymind verify pack.zip` or the page's upload box, without needing your project:
+
+| Check | What it means |
+|---|---|
+| signature | The manifest is signed by the key with that fingerprint, and wasn't changed since. |
+| files | Every file matches its hash in the manifest; nothing is missing or added. |
+| audit log | The audit chain is intact and is the one the manifest names. |
+| scope | Every request ProxyMind's tools sent (scanner, Replay, agents, proofs) and every allowed action was inside `roe.yaml`. Out-of-scope pages the tester's own browser visited through the proxy are counted separately. If the rules changed during the engagement, the check says so. |
+| evidence | Each finding's evidence exchanges are in the pack. |
+
+What it doesn't prove: that the signer was honest before signing. It proves the pack is unchanged and consistent with itself, and tells the client whose key signed it.
+
+The **coverage proof** (`proxymind coverage --all`, the same page, MCP `coverage`) lists every operation in the app model against the vulnerability classes that apply to it, marked vulnerable, tested, open or untested, with who tested each and how: scanner checks (only the checks that actually ran), authorization checks, proofs and hypotheses. Untested cells come first.
+
 ## What the agent sees
 
 - **Secrets are hidden.** Cookies, tokens, passwords and API keys appear as placeholders such as `{{secret:cookie_session_1}}`. The agent can use placeholders in requests; ProxyMind swaps the real values in when sending. Turn this off with `data.redact_before_llm: false` in the ROE.

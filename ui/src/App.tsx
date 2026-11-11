@@ -33,6 +33,7 @@ import Search from "./pages/Search";
 import Organizer from "./pages/Organizer";
 import CustomChecks from "./pages/CustomChecks";
 import AiScan from "./pages/AiScan";
+import Evidence from "./pages/Evidence";
 
 interface Group {
   id: string;
@@ -49,6 +50,7 @@ const GROUPS: Group[] = [
     { id: "overview", label: "Overview" },
     { id: "search", label: "Search" },
     { id: "findings", label: "Findings" },
+    { id: "evidence", label: "Evidence & coverage" },
     { id: "issues", label: "Scanner issues" },
     { id: "scans", label: "Scans" },
     { id: "approvals", label: "Approvals" },
@@ -224,6 +226,7 @@ export default function App() {
     wshistory: WsHistory,
     sessions: Sessions,
     findings: Findings,
+    evidence: Evidence,
     audit: Audit,
     network: Network,
     collaborator: Collaborator,

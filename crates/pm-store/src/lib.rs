@@ -403,7 +403,7 @@ pub struct ApprovalRow {
 }
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AuditRecord {
     pub seq: i64,
     pub ts_ms: i64,
@@ -412,14 +412,29 @@ pub struct AuditRecord {
     /// JSON text describing the action.
     pub detail: String,
     pub decision: String,
-    #[serde(serialize_with = "hex_bytes")]
+    #[serde(serialize_with = "hex_bytes", deserialize_with = "from_hex")]
     pub prev_hash: Vec<u8>,
-    #[serde(serialize_with = "hex_bytes")]
+    #[serde(serialize_with = "hex_bytes", deserialize_with = "from_hex")]
     pub hash: Vec<u8>,
 }
 
 fn hex_bytes<S: serde::Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_str(&b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+}
+
+fn from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<u8>, D::Error> {
+    let s: String = serde::Deserialize::deserialize(d)?;
+    if !s.len().is_multiple_of(2) {
+        return Err(serde::de::Error::custom("odd hex length"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            s.get(i..i + 2)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| serde::de::Error::custom("bad hex"))
+        })
+        .collect()
 }
 
 /// A finished (or failed) request/response pair to record.

@@ -17,6 +17,7 @@ mod custom_checks;
 mod discover;
 mod dom_test;
 mod engage;
+mod evidence;
 mod findings;
 mod fuzzer;
 mod graphql;
@@ -67,6 +68,7 @@ pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, Save
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use dom_test::{DomTestRequest, DomTestResult};
 pub use engage::{EngageFilter, FoundComment, FoundEndpoint, FoundScript, LogicReport, TargetAnalysis, TriageItem};
+pub use evidence::{Check, CoverageCellProof, CoverageProof, EvidenceVerification, PACK_FORMAT, verify_evidence};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
@@ -297,7 +299,9 @@ impl Service {
         let text = params.to_string();
         let params = if text.len() > 4096 {
             let cut = text.char_indices().take_while(|(i, _)| *i < 4096).map(|(_, c)| c).collect::<String>();
-            json!({ "preview": cut, "blake3": blake3_hex(&text) })
+            // What the action was asked to do (e.g. a scan's checks) stays whole: coverage reads it.
+            let extra = params.get("extra").filter(|e| e.to_string().len() <= 4096).cloned();
+            json!({ "preview": cut, "blake3": blake3_hex(&text), "extra": extra })
         } else {
             params.clone()
         };

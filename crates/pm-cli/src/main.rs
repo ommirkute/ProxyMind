@@ -124,6 +124,24 @@ enum Command {
         #[command(subcommand)]
         action: AiScanAction,
     },
+    /// Export a signed evidence pack (report, exact traffic, proofs, audit chain, scope, coverage) for the client.
+    Evidence {
+        /// Where to write the ZIP.
+        #[arg(long, default_value = "proxymind-evidence.zip")]
+        out: PathBuf,
+        /// Also include the bytes of every in-scope exchange (up to 5000), not only the evidence.
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// Check an evidence pack: signature, file hashes, audit chain, scope, evidence. Needs no project.
+    Verify {
+        pack: PathBuf,
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Passive recon that sends nothing to the target: DNS records, Wayback Machine history.
     Recon {
         #[command(subcommand)]
@@ -230,9 +248,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// What has and hasn't been tested.
+    /// What has and hasn't been tested: every operation × vulnerability class, with who tested it and how.
     Coverage {
-        /// Include finished (confirmed/refuted) cells
+        /// Include tested and vulnerable cells, not only open and untested ones
         #[arg(long)]
         all: bool,
         #[arg(long)]
@@ -1593,6 +1611,35 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        Command::Evidence { out, all, actor } => {
+            let service = open_service(&cli.project, None)?;
+            attach_plugins(&cli, &service);
+            let (bytes, fingerprint) = service.evidence_pack(&human_actor(actor.as_deref())?, *all)?;
+            std::fs::write(out, &bytes)?;
+            out!("✓ {} ({} KB), signed by key {fingerprint}", out.display(), bytes.len() / 1024);
+            out!(
+                "  Give the client this fingerprint separately; they check the pack with `proxymind verify {}`.",
+                out.display()
+            );
+        }
+        Command::Verify { pack, json } => {
+            let bytes = std::fs::read(pack)?;
+            let v = pm_service::verify_evidence(&bytes);
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                for c in &v.checks {
+                    out!("{} {:<10} {}", if c.ok { "✓" } else { "✗" }, c.name, c.detail);
+                }
+                if let Some(fp) = &v.fingerprint {
+                    out!("  Signer: {fp} (compare with the fingerprint the tester gave you)");
+                }
+                out!("{}", if v.ok { "The pack is intact and consistent." } else { "The pack FAILED verification." });
+            }
+            if !v.ok {
+                std::process::exit(1);
+            }
+        }
         Command::Recon { action } => {
             let service = open_service(&cli.project, None)?;
             match action {
@@ -1911,14 +1958,26 @@ async fn run() -> Result<()> {
         }
         Command::Coverage { all, json } => {
             let service = open_service(&cli.project, None)?;
-            let c = service.coverage(!all)?;
+            let mut c = service.coverage_proof()?;
+            if !all {
+                c.cells.retain(|x| matches!(x.status.as_str(), "untested" | "open"));
+            }
             if *json {
                 out!("{}", serde_json::to_string_pretty(&c)?);
             } else {
-                out!("{}% tested · {:?}", c.percent_tested, c.totals);
+                out!(
+                    "{} operations: {}% tested · {} vulnerable · {} tested · {} open · {} untested",
+                    c.operations,
+                    c.percent_tested,
+                    c.totals["vulnerable"],
+                    c.totals["tested"],
+                    c.totals["open"],
+                    c.totals["untested"]
+                );
                 for cell in &c.cells {
                     let param = if cell.param.is_empty() { String::new() } else { format!(" [{}]", cell.param) };
-                    out!("{:<10} {:<16} {}{}", cell.status, cell.vuln_class, cell.operation, param);
+                    let how = if cell.how.is_empty() { String::new() } else { format!("  ({})", cell.how.join("; ")) };
+                    out!("{:<10} {:<16} {}{param}{how}", cell.status, cell.vuln_class, cell.operation);
                 }
             }
         }

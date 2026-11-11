@@ -35,6 +35,7 @@ Other proxies give AI access to their tools. **ProxyMind gives AI an understandi
 | ✅ **No proof, no finding** | Findings are proven by ProxyMind itself: differential access checks, out-of-band callbacks, statistical timing, XSS run in a headless browser. Every proof re-runs with one click. |
 | 🤖 **Any model, any agent, offline** | A built-in MCP server for Claude Code, Cursor or your own agents, plus a built-in assistant that works with local models. Agents see secrets only as placeholders. |
 | 🛡️ **Rules of engagement as code** | Scope, rate limits, time windows and approvals are enforced by the core, outside the model, with a tamper-evident audit log. |
+| 🔏 **Verifiable evidence** | Hand the client a signed evidence pack: report, exact traffic behind each finding, proofs, audit chain, scope and a coverage proof. They check it with `proxymind verify`: nothing edited, every request in scope, every finding backed. |
 | ⚡ **One fast binary** | Written in Rust. The proxy, web UI, API, scanner and MCP server ship as a single file for Windows, macOS and Linux, plus a desktop app and a container image. |
 
 ---
@@ -151,7 +152,8 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 
 ### 📊 Proof & reporting
 - Proof oracles: differential authz, timing, OAST, XSS in headless Chromium
-- Hypothesis ledger and coverage: what was tested, by whom, what's left
+- **Coverage proof**: every operation × vulnerability class, who tested it and how (scanner checks, authz checks, proofs), and what nobody tested
+- **Signed evidence packs** the client verifies themselves (`proxymind evidence`, `proxymind verify`)
 - Issue library with CWE/OWASP mapping and fix advice
 - Reports in **HTML, Markdown, JSON and SARIF**; executive, technical, compliance or your own template
 - Sealed projects: encrypt a project file to hand it over safely
