@@ -55,7 +55,7 @@ mod ws;
 mod ws_replay;
 
 pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor, scan_of};
-pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind};
+pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind, ToolProfile};
 pub use attack_paths::{AttackGraph, AttackPath, AttackStep, GraphEdge, GraphNode, NewAttackPath};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};

@@ -172,6 +172,8 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         )}
       </div>
 
+      <Explain id={id} text={d.explanation ?? ""} onDone={f.reload} />
+
       <h3>Proofs</h3>
       {d.proofs?.length ? (
         d.proofs.map((p) => (
@@ -384,5 +386,37 @@ function TemplateEditor({ templates, reload }: { templates: ReportTemplate[]; re
       </div>
       <textarea aria-label="Template body" className="mono" rows={8} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} style={{ width: "100%", marginTop: 6 }} />
     </details>
+  );
+}
+
+/** Asks the assistant's model to explain the finding for developers, with a fix. */
+function Explain({ id, text, onDone }: { id: number; text: string; onDone: () => void }) {
+  const [framework, setFramework] = useState("");
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      await api.post(`/findings/${id}/explain`, { framework: framework || undefined });
+      onDone();
+    });
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="row">
+        <h3 style={{ margin: 0 }}>Explanation and fix</h3>
+        <input aria-label="Framework" placeholder="framework (optional): Express, Django, Spring…" value={framework} onChange={(e) => setFramework(e.target.value)} style={{ width: 260 }} />
+        <button className="btn" onClick={() => void run()} disabled={action.busy} data-testid="explain">
+          {action.busy ? "Writing…" : text ? "Rewrite" : "Explain & fix"}
+        </button>
+      </div>
+      <ErrorBox error={action.error} />
+      {text ? (
+        <pre className="raw small" style={{ whiteSpace: "pre-wrap" }} data-testid="explanation">{text}</pre>
+      ) : (
+        <p className="small muted">
+          The assistant's model explains the issue for developers, why it matters, a code fix for the framework you name,
+          and how to verify it. Evidence is redacted as for any agent; the result goes into the report. Review it before
+          applying.
+        </p>
+      )}
+    </div>
   );
 }

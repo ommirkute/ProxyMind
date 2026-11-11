@@ -917,6 +917,9 @@ enum AiScanAction {
         /// Longest run in minutes (default 60).
         #[arg(long)]
         minutes: Option<u32>,
+        /// Most to spend in USD (needs prices in the assistant settings).
+        #[arg(long)]
+        max_cost: Option<f64>,
         #[arg(long = "as")]
         actor: Option<String>,
     },
@@ -1469,7 +1472,7 @@ async fn run() -> Result<()> {
                 format!("{t}  {:<12} {}", l.kind, l.text.lines().next().unwrap_or(""))
             };
             match action {
-                AiScanAction::Start { target, focus, max_steps, minutes, actor } => {
+                AiScanAction::Start { target, focus, max_steps, minutes, max_cost, actor } => {
                     let me = human_actor(actor.as_deref())?;
                     let assistant = Arc::new(pm_assistant::Assistant::new(service.clone())?);
                     let req = pm_service::AiScanRequest {
@@ -1477,6 +1480,7 @@ async fn run() -> Result<()> {
                         focus: focus.clone(),
                         max_steps: *max_steps,
                         max_minutes: *minutes,
+                        max_cost: *max_cost,
                     };
                     let scan = assistant.start_ai_scan(&me, req)?;
                     out!(

@@ -37,6 +37,8 @@ pub struct AiScanRequest {
     pub max_steps: Option<u32>,
     /// Longest run in minutes (default 60, max 1440).
     pub max_minutes: Option<u32>,
+    /// Most it may spend in USD (needs prices in the assistant settings).
+    pub max_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +72,12 @@ pub struct AiScan {
     pub report: String,
     /// Findings this scan's agent created.
     pub findings: usize,
+    /// Tokens used so far, and their cost in USD (0 when no price is set).
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost: f64,
+    /// The cost budget in USD (0: none).
+    pub max_cost: f64,
     pub log: Vec<AiScanLog>,
 }
 
@@ -164,6 +172,12 @@ impl Service {
             ("model", json!(model)),
             ("max_steps", json!(steps)),
             ("deadline_ms", json!(now + i64::from(minutes) * 60_000)),
+            (
+                "max_cost_micros",
+                json!(
+                    req.max_cost.filter(|c| c.is_finite() && *c > 0.0).map_or(0, |c| (c.min(100_000.0) * 1e6) as i64)
+                ),
+            ),
             ("actor", json!(actor.id())),
             ("created_ms", json!(now)),
             ("updated_ms", json!(now)),
@@ -174,7 +188,8 @@ impl Service {
         self.audit(
             &actor.id(),
             "ai_scan_start",
-            json!({ "scan": id, "target": target, "max_steps": steps, "max_minutes": minutes, "model": model }),
+            json!({ "scan": id, "target": target, "max_steps": steps, "max_minutes": minutes, "model": model,
+                    "max_cost": req.max_cost }),
             "allow",
         )?;
         self.ai_scan_get(id)
@@ -204,6 +219,10 @@ impl Service {
             error: s(&r, "error"),
             report: s(&r, "report"),
             findings,
+            tokens_in: n(&r, "tokens_in"),
+            tokens_out: n(&r, "tokens_out"),
+            cost: n(&r, "cost_micros") as f64 / 1e6,
+            max_cost: n(&r, "max_cost_micros") as f64 / 1e6,
             log,
         })
     }
@@ -247,6 +266,19 @@ impl Service {
         }
         self.ai_update(id, vec![("report", json!(markdown)), ("phase", json!("report"))])?;
         self.ai_scan_log(id, "phase", "report submitted")
+    }
+
+    /// Adds a model call's tokens and cost to the scan's totals.
+    pub fn ai_scan_usage(&self, id: i64, tokens_in: u64, tokens_out: u64, cost_micros: i64) -> Result<()> {
+        let r = self.ai_row(id)?;
+        self.ai_update(
+            id,
+            vec![
+                ("tokens_in", json!(n(&r, "tokens_in") + tokens_in as i64)),
+                ("tokens_out", json!(n(&r, "tokens_out") + tokens_out as i64)),
+                ("cost_micros", json!(n(&r, "cost_micros") + cost_micros.max(0))),
+            ],
+        )
     }
 
     pub fn ai_scan_progress(&self, id: i64, steps: i64, chat_id: i64) -> Result<()> {
@@ -355,6 +387,9 @@ impl Service {
             "stopping" => Some("stopped by a person"),
             "running" if pm_core::now_ms() > n(&r, "deadline_ms") => Some("time budget used up"),
             "running" if n(&r, "steps") >= n(&r, "max_steps") => Some("step budget used up"),
+            "running" if n(&r, "max_cost_micros") > 0 && n(&r, "cost_micros") >= n(&r, "max_cost_micros") => {
+                Some("cost budget used up")
+            }
             "running" => None,
             _ => Some("not running"),
         })

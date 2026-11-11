@@ -820,7 +820,10 @@ try {
       const call = (name, args) => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: `c${modelCalls.length}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] });
       const tools = parsed.messages.filter((m) => m.role === "tool").length;
       const aiScan = String(parsed.messages[0]?.content ?? "").includes("AI scan agent");
-      const reply = aiScan
+      const explain = String(parsed.messages[0]?.content ?? "").includes("senior application security engineer");
+      const reply = explain
+        ? { choices: [{ message: { role: "assistant", content: "## What is wrong\nOrders load by id with no owner check (e2e)." } }], usage: { prompt_tokens: 900, completion_tokens: 40 } }
+        : aiScan
         ? tools === 0 ? call("ai_scan_phase", { phase: "recon", notes: "e2e run" })
           : tools === 1 ? call("attack_path_record", { title: "e2e chain", impact: "read any order", severity: "high", steps: [{ text: "Order ids are sequential" }, { text: "Orders load without an owner check" }] })
           : tools === 2 ? call("ai_scan_report", { markdown: "# Report\n\n## Executive summary\nThe e2e scan found nothing." })
@@ -865,7 +868,13 @@ try {
   await page.getByTestId("attack-graph").waitFor();
   await page.getByTestId("attack-graph").locator("xpath=../..").screenshot({ path: join(SHOTS, "6h-attack-graph.png") });
   check(await page.getByTestId("attack-path-list").textContent().then((t) => t.includes("e2e chain") && t.includes("Orders load without an owner check")), "the scan's attack path shows as a graph");
+  check(await page.getByTestId("ai-scan-cost").textContent().then((t) => /tokens/.test(t)), "the scan shows the tokens it used");
   await page.screenshot({ path: join(SHOTS, "6g-ai-scan.png") });
+  await open("findings");
+  await page.locator('[data-testid="findings"] tbody tr').first().click();
+  await page.getByTestId("explain").click();
+  await page.locator('[data-testid="explanation"]', { hasText: "no owner check (e2e)" }).waitFor({ timeout: 15000 });
+  check(true, "Explain & fix writes an explanation onto the finding");
   model.close();
 
   console.log("Crawl");

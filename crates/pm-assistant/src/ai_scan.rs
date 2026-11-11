@@ -91,7 +91,7 @@ impl Assistant {
         let scan = svc.ai_scan_get(id)?;
         let actor = scan_actor(id);
         let system = format!("{}\n\n{}", svc.ai_scan_prompt(&scan.target, &scan.focus)?, pm_mcp::INSTRUCTIONS);
-        let mut tools = pm_mcp::tool_definitions();
+        let mut tools = crate::tools_for(cfg);
         tools.extend(ai_scan_tool_definitions());
         let chat_id = svc.chat_create(&format!("AI scan #{id}: {}", scan.target))?;
         let minutes = (scan.deadline_ms - scan.created_ms) / 60_000;
@@ -119,6 +119,8 @@ impl Assistant {
                     ));
                     let call = Call { model: &cfg.model, max_tokens, system: &system, tools: &tools, messages: &all };
                     if let Ok(sent) = llm::call(sender, cfg.provider, &cfg.base_url, key, &call).await {
+                        let u = sent.usage;
+                        svc.ai_scan_usage(id, u.input, u.output, cfg.cost_micros(u.input, u.output))?;
                         for (_, name, input) in sent.reply.tool_uses() {
                             if name == "ai_scan_report" {
                                 let _ = svc.ai_scan_tool(&actor, name, input);
@@ -140,10 +142,13 @@ impl Assistant {
                 }
             };
             steps += 1;
+            let u = sent.usage;
+            svc.ai_scan_usage(id, u.input, u.output, cfg.cost_micros(u.input, u.output))?;
             svc.audit_model_call(
                 &actor,
                 json!({ "ai_scan": id, "provider": provider_name(cfg.provider), "host": host_of(&cfg.base_url),
-                        "model": cfg.model, "bytes_sent": sent.bytes_sent }),
+                        "model": cfg.model, "bytes_sent": sent.bytes_sent,
+                        "tokens_in": u.input, "tokens_out": u.output, "estimated": u.estimated }),
                 "allow",
             )?;
             let reply = sent.reply;
@@ -192,6 +197,19 @@ impl Assistant {
                         Ok(v) => (v.to_string(), false),
                         Err(e) => (e, true),
                     };
+                    let (content, injected) = crate::guard(content);
+                    if !injected.is_empty() {
+                        svc.ai_scan_log(
+                            id,
+                            "injection",
+                            &format!("{name}: target text tries to instruct the model: {}", injected.join(" | ")),
+                        )?;
+                        svc.audit_model_call(
+                            &actor,
+                            json!({ "ai_scan": id, "possible_prompt_injection": injected, "tool": name }),
+                            "flag",
+                        )?;
+                    }
                     if !name.starts_with("ai_scan_") {
                         let kind = if content.contains("pending_approval") { "approval" } else { "tool" };
                         let mark = if is_error { " ✗" } else { "" };

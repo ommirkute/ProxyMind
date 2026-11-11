@@ -290,6 +290,8 @@ export interface Finding {
   issue?: IssueType;
   retest?: Retest | null;
   duplicates?: number;
+  /** Model-written explanation and fix (Markdown), if someone asked for one. */
+  explanation?: string;
 }
 
 export interface IssueType {

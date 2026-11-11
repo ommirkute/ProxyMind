@@ -305,6 +305,15 @@ CREATE TABLE attack_paths (
 );
 ALTER TABLE ai_scans ADD COLUMN inbox TEXT NOT NULL DEFAULT '[]';
 "#,
+    r#"
+-- Model usage and a cost budget per AI scan (cost in millionths of a USD,
+-- 0 = no budget), and a model-written explanation and fix per finding.
+ALTER TABLE ai_scans ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN cost_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_scans ADD COLUMN max_cost_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN explanation TEXT NOT NULL DEFAULT '';
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1351,6 +1360,7 @@ impl Store {
                 "duplicates",
                 "created_ms",
                 "updated_ms",
+                "explanation",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
@@ -1371,6 +1381,10 @@ impl Store {
                 "created_ms",
                 "updated_ms",
                 "inbox",
+                "tokens_in",
+                "tokens_out",
+                "cost_micros",
+                "max_cost_micros",
             ],
             "attack_paths" => &["scan_id", "title", "impact", "severity", "steps", "actor", "created_ms"],
             "oast_probes" => &[

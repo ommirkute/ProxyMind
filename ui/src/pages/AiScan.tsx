@@ -8,12 +8,20 @@ interface Scan {
   id: number; target: string; focus: string; status: string; phase: string; model: string;
   steps: number; max_steps: number; deadline_ms: number; actor: string; started_by: string;
   created_ms: number; updated_ms: number; error: string; report: string; findings: number; log: Log[];
+  tokens_in: number; tokens_out: number; cost: number; max_cost: number;
 }
 interface AssistantState { config: { model: string; base_url: string }; local: boolean; cloud_models_allowed: boolean; problem?: string | null }
 
 const PHASES = ["recon", "scanning", "exploitation", "chaining", "report"];
 const active = (s: Scan) => s.status === "running" || s.status === "stopping";
 const time = (ms: number) => new Date(ms).toLocaleTimeString();
+const fmtTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+const usd = (n: number) => "$" + n.toFixed(2);
+function costText(s: Scan): string {
+  const tokens = `${fmtTokens((s.tokens_in ?? 0) + (s.tokens_out ?? 0))} tokens`;
+  if (!s.cost && !s.max_cost) return tokens;
+  return `${tokens} · ${usd(s.cost ?? 0)}${s.max_cost ? ` of ${usd(s.max_cost)}` : ""}`;
+}
 
 function download(name: string, text: string) {
   const a = document.createElement("a");
@@ -65,6 +73,7 @@ function Start({ state, stateError, onStarted }: { state: AssistantState | null;
   const [focus, setFocus] = useState("");
   const [steps, setSteps] = useState(150);
   const [minutes, setMinutes] = useState(60);
+  const [maxCost, setMaxCost] = useState(0);
   const [prompt, setPrompt] = useState<string | null>(null);
   const action = useAction();
   useEffect(() => {
@@ -72,7 +81,7 @@ function Start({ state, stateError, onStarted }: { state: AssistantState | null;
   }, []);
   const start = () =>
     action.run(async () => {
-      const s = await api.post<Scan>("/ai-scan", { target: target || undefined, focus: focus || undefined, max_steps: steps, max_minutes: minutes });
+      const s = await api.post<Scan>("/ai-scan", { target: target || undefined, focus: focus || undefined, max_steps: steps, max_minutes: minutes, max_cost: maxCost > 0 ? maxCost : undefined });
       toast(`AI scan #${s.id} started`);
       onStarted(s.id);
     });
@@ -96,6 +105,7 @@ function Start({ state, stateError, onStarted }: { state: AssistantState | null;
         <input aria-label="AI scan focus" placeholder="focus (optional), e.g. the API and login" value={focus} onChange={(e) => setFocus(e.target.value)} style={{ width: 260 }} />
         <label className="small">steps <input type="number" aria-label="AI scan steps" min={1} max={1000} value={steps} onChange={(e) => setSteps(Number(e.target.value))} style={{ width: 80 }} /></label>
         <label className="small">minutes <input type="number" aria-label="AI scan minutes" min={1} max={1440} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))} style={{ width: 80 }} /></label>
+        <label className="small">max USD <input type="number" aria-label="AI scan max cost" min={0} step="0.5" value={maxCost} onChange={(e) => setMaxCost(Number(e.target.value))} style={{ width: 80 }} title="0: no cost limit. Needs prices in the assistant settings." /></label>
         <button className="btn primary" onClick={start} disabled={action.busy || !!state?.problem} data-testid="ai-scan-start">Start AI scan</button>
       </div>
       <ErrorBox error={action.error} />
@@ -145,6 +155,7 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
         <Chip value={s.status} />
         <span className="mono">{s.target}</span>
         <span>{s.steps}/{s.max_steps} model calls</span>
+        <span data-testid="ai-scan-cost">{costText(s)}</span>
         <span><a href="#/findings">{s.findings} finding(s)</a></span>
         <span className="muted">model {s.model} · acts as {s.actor}</span>
         {s.error && <span style={{ color: "var(--bad)" }}>{s.error}</span>}
