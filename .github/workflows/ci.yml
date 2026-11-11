@@ -74,7 +74,9 @@ jobs:
         working-directory: sdk/typescript
         env:
           PROXYMIND: ${{ github.workspace }}/target/debug/proxymind
-      - run: npx playwright-core install --with-deps chromium
+      # The runner image already has Chrome's system libraries; skipping --with-deps keeps
+      # apt (and its mirrors) out of the browser tests.
+      - run: npx playwright-core install chromium
         working-directory: ui
       - run: npm run test:e2e
         working-directory: ui
