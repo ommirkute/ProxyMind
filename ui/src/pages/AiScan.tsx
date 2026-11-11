@@ -192,6 +192,7 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
       )}
     </Panel>
     <AttackGraph scan={s.id} refresh={`${s.updated_ms}:${s.status}`} title={`Attack paths of AI scan #${s.id}`} />
+    <MemoryPanel host={hostOf(s.target)} refresh={s.updated_ms} />
     </>
   );
 }
@@ -213,5 +214,47 @@ function Say({ id, onSent }: { id: number; onSent: (s: Scan) => void }) {
       <button className="btn" onClick={() => void send()} disabled={action.busy || !text.trim()} data-testid="ai-scan-say">Send</button>
       <ErrorBox error={action.error} />
     </div>
+  );
+}
+
+interface Memory { id: number; host: string; kind: string; text: string; actor: string; created_ms: number }
+
+const hostOf = (url: string) => {
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+};
+
+/** What agents remembered about the host for later scans; people can delete notes. */
+function MemoryPanel({ host, refresh }: { host: string; refresh: unknown }) {
+  const [notes, setNotes] = useState<Memory[] | null>(null);
+  const load = () => api.get<Memory[]>(`/memory?host=${encodeURIComponent(host)}`).then(setNotes).catch(() => setNotes([]));
+  useEffect(() => { if (host) void load(); }, [host, refresh]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!host || !notes) return null;
+  const remove = async (id: number) => {
+    await api.del(`/memory/${id}`);
+    toast("Note deleted");
+    void load();
+  };
+  return (
+    <Panel title={`Memory for ${host}`}>
+      <p className="small muted">
+        Notes the agents saved for later scans of this host (logins, endpoints, dead ends, techniques). The next AI
+        scan starts from them and from your verdicts on findings here: findings you mark false positive aren't
+        reported again without new evidence.
+      </p>
+      {notes.length === 0 ? <Empty>No notes yet.</Empty> : (
+        <table className="grid" data-testid="memory-list">
+          <tbody>
+            {notes.map((m) => (
+              <tr key={m.id}>
+                <td><Chip value={m.kind} /></td>
+                <td className="small" style={{ wordBreak: "break-word" }}>{m.text}</td>
+                <td className="small mono muted">{m.actor}</td>
+                <td><button className="btn sm" onClick={() => void remove(m.id)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
   );
 }

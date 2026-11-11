@@ -41,6 +41,9 @@ pub struct AssistantConfig {
     /// `full` (every tool) or `compact` (a core set, for small local models
     /// that struggle with a long tool list).
     pub tools: ToolProfile,
+    /// Model for an AI scan's worker agents (empty: the same model), e.g. a
+    /// cheaper one for focused tasks.
+    pub worker_model: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +67,7 @@ impl Default for AssistantConfig {
             price_input: 0.0,
             price_output: 0.0,
             tools: ToolProfile::Full,
+            worker_model: String::new(),
         }
     }
 }

@@ -314,6 +314,20 @@ ALTER TABLE ai_scans ADD COLUMN cost_micros INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE ai_scans ADD COLUMN max_cost_micros INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN explanation TEXT NOT NULL DEFAULT '';
 "#,
+    r#"
+-- Agent memory: notes one scan of a host leaves for the next (a login
+-- that works, an endpoint, a dead end, a technique). Agents write them;
+-- people delete them.
+CREATE TABLE agent_memory (
+    id          INTEGER PRIMARY KEY,
+    host        TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL
+);
+CREATE INDEX agent_memory_host ON agent_memory(host);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1387,6 +1401,7 @@ impl Store {
                 "max_cost_micros",
             ],
             "attack_paths" => &["scan_id", "title", "impact", "severity", "steps", "actor", "created_ms"],
+            "agent_memory" => &["host", "kind", "text", "actor", "created_ms"],
             "oast_probes" => &[
                 "token",
                 "check_name",

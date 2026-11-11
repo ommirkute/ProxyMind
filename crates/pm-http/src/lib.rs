@@ -309,6 +309,14 @@ impl ChunkedScanner {
 /// `(scheme, authority, origin-form path)`. Returns `None` for other forms.
 pub fn split_absolute_target(target: &str) -> Option<(&str, &str, &str)> {
     let (scheme, rest) = target.split_once("://")?;
+    // A scheme is a letter then letters, digits, '+', '-' or '.' (RFC 3986). Anything else
+    // (an origin-form target whose query carries a URL, `/go?to=http://x`) isn't absolute-form.
+    let mut chars = scheme.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return None;
+    }
     let slash = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(slash);
     Some((scheme, authority, if path.is_empty() { "/" } else { path }))
@@ -597,6 +605,10 @@ mod tests {
         assert_eq!(split_absolute_target("http://a.com:81/x?y"), Some(("http", "a.com:81", "/x?y")));
         assert_eq!(split_absolute_target("http://a.com"), Some(("http", "a.com", "/")));
         assert_eq!(split_absolute_target("/x"), None);
+        // A URL in the query of an origin-form target doesn't make it absolute-form.
+        assert_eq!(split_absolute_target("/fetch?url=http://example.test/"), None);
+        assert_eq!(split_absolute_target("/go?to=https://a.b/c&x=1"), None);
+        assert_eq!(split_absolute_target("*"), None);
         assert_eq!(split_host_port("a.com", 80), Some(("a.com".into(), 80)));
         assert_eq!(split_host_port("[::1]:8443", 443), Some(("::1".into(), 8443)));
     }

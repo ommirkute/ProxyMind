@@ -26,7 +26,7 @@ pub(crate) fn issue_key(class: &str) -> String {
 }
 
 /// A URL without its query and fragment, for spotting duplicates.
-fn url_key(url: &str) -> &str {
+pub(crate) fn url_key(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
@@ -164,7 +164,16 @@ impl Service {
         }
         let id = self.store.lock().insert_row("findings", &row)?;
         self.audit(&actor.id(), "finding_create", json!({ "id": id, "title": f.title }), "allow")?;
-        self.finding_get(id)
+        let mut v = self.finding_get(id)?;
+        // Learn from people's verdicts: say so when they rejected the same issue here before.
+        if let Some((fp, title)) = self.similar_false_positive(&key, url_key(&url))? {
+            v["similar_false_positive"] = json!({ "id": fp, "title": title });
+            v["note"] = json!(format!(
+                "A person marked finding #{fp} ({title}), the same issue at the same place, as a false positive. \
+                 Check what is different this time and say so in the description, or withdraw this finding."
+            ));
+        }
+        Ok(v)
     }
 
     pub fn finding_get(&self, id: i64) -> Result<Value> {

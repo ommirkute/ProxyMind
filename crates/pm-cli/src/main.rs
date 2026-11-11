@@ -946,6 +946,8 @@ enum AiScanAction {
     },
     /// Print the attack paths a scan recorded (all scans' without an id).
     Paths { id: Option<i64> },
+    /// Print what agents remembered about hosts (all hosts without one).
+    Memory { host: Option<String> },
     /// Print the system prompt a scan would use.
     Prompt,
 }
@@ -1561,6 +1563,15 @@ async fn run() -> Result<()> {
                 AiScanAction::Say { id, text, actor } => {
                     service.ai_scan_message(&human_actor(actor.as_deref())?, *id, text)?;
                     out!("✓ sent to AI scan #{id}");
+                }
+                AiScanAction::Memory { host } => {
+                    let notes = service.memory_list(host.as_deref())?;
+                    if notes.is_empty() {
+                        out!("No notes saved.");
+                    }
+                    for m in notes.iter().rev() {
+                        out!("#{} {} [{}] {}  ({})", m.id, m.host, m.kind, m.text, m.actor);
+                    }
                 }
                 AiScanAction::Paths { id } => {
                     let paths = service.attack_path_list(*id)?;

@@ -436,6 +436,10 @@ try {
   await page.getByTestId("engage-endpoints").click();
   await page.waitForSelector('[data-testid="engage-endpoint-summary"]');
   check(await page.getByTestId("engage-endpoint-summary").textContent().then((t) => /\d+ endpoint/.test(t)), "JS endpoints lists what recorded scripts mention");
+  await page.getByTestId("engage-tab-triage").click();
+  await page.getByTestId("engage-triage").click();
+  await page.locator('[data-testid="engage-triage-list"]').waitFor();
+  check(await page.getByTestId("engage-triage-list").textContent().then((t) => t.includes("idor")), "Worth testing ranks recorded requests (object ids flagged)");
   await page.getByTestId("engage-tab-logic").click();
   await page.getByTestId("engage-logic").click();
   await page.locator('[data-testid="engage-logic-list"], .empty').first().waitFor();
@@ -842,7 +846,7 @@ try {
   await page.getByRole("main").getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Ollama (local)" }).click();
   await page.getByLabel("Base URL").fill(`http://127.0.0.1:${model.address().port}/v1`);
-  await page.getByLabel("Model").fill("mock-model");
+  await page.getByLabel("Model", { exact: true }).fill("mock-model");
   await page.getByTestId("assistant-save").click();
   await page.waitForSelector('[data-testid="assistant-problem"]', { state: "detached" });
   await page.getByLabel("Message").fill("Which orders did alice look at?");

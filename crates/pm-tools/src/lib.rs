@@ -22,4 +22,5 @@ pub mod reqedit;
 pub mod search;
 pub mod sitemap;
 pub mod token_analyzer;
+pub mod triage;
 pub mod wayback;

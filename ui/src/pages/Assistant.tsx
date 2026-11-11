@@ -22,6 +22,7 @@ interface Config {
   price_input: number;
   price_output: number;
   tools: "full" | "compact";
+  worker_model: string;
 }
 
 interface State {
@@ -170,6 +171,8 @@ export default function Assistant() {
                 <KeyField name={cfg.api_key_env} status={s?.config.api_key_env === cfg.api_key_env ? s?.key : undefined} onChange={state.reload} />
                 <label>Max steps per message</label>
                 <input aria-label="Max steps" type="number" min={1} max={50} value={cfg.max_steps} onChange={(e) => setCfg({ max_steps: Number(e.target.value) })} />
+                <label>Worker model</label>
+                <input aria-label="Worker model" placeholder="AI scan workers (empty: the same model), e.g. a cheaper one" value={cfg.worker_model ?? ""} onChange={(e) => setCfg({ worker_model: e.target.value })} />
                 <label>Tools</label>
                 <select aria-label="Tool profile" value={cfg.tools ?? "full"} onChange={(e) => setCfg({ tools: e.target.value as Config["tools"] })}>
                   <option value="full">Full (every tool)</option>

@@ -65,6 +65,19 @@ pub struct TargetAnalysis {
     pub params: Vec<ParamSummary>,
 }
 
+/// A recorded request worth testing (see `traffic_triage`).
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageItem {
+    pub exchange_id: i64,
+    pub method: String,
+    pub url: String,
+    /// Sum of the hints' weights.
+    pub score: u32,
+    pub hints: Vec<pm_tools::triage::Hint>,
+    /// Other recorded requests with the same method and path shape.
+    pub similar: usize,
+}
+
 /// Business-logic candidates (see `engage_logic`).
 #[derive(Debug, Clone, Serialize)]
 pub struct LogicReport {
@@ -367,6 +380,72 @@ impl Service {
             content_types: types,
             params: params.finish(),
         })
+    }
+
+    /// Recorded requests worth testing, most promising first: object ids,
+    /// URL/file/command-like parameters, reflected input, JWTs, uploads,
+    /// GraphQL, unauthenticated APIs, admin paths and error details, each
+    /// with what to try. One entry per method and path shape (ids folded),
+    /// at most `limit`. Sends nothing.
+    pub fn traffic_triage(&self, actor: &Actor, f: &EngageFilter, limit: usize) -> Result<Vec<TriageItem>> {
+        let seen = self.recorded(actor, f)?;
+        let mut by_shape: BTreeMap<String, TriageItem> = BTreeMap::new();
+        for s in &seen {
+            let (status, ct, body) = match &s.response {
+                Some((head, ct, body)) => (Some(head.status), ct.as_str(), body.as_slice()),
+                None => (None, "", &[][..]),
+            };
+            let hints = pm_tools::triage::hints(&pm_tools::triage::Exchange {
+                method: &s.summary.method,
+                path: &s.summary.path,
+                request: &s.request,
+                status,
+                content_type: ct,
+                body,
+            });
+            let score: u32 = hints.iter().map(|h| u32::from(h.weight)).sum();
+            let path = s.summary.path.split(['?', '#']).next().unwrap_or("");
+            let folded: Vec<String> = path
+                .split('/')
+                .map(|seg| {
+                    let id = (!seg.is_empty() && seg.len() <= 12 && seg.bytes().all(|b| b.is_ascii_digit()))
+                        || (seg.len() == 36 && seg.matches('-').count() == 4);
+                    if id { "{id}".to_string() } else { seg.to_string() }
+                })
+                .collect();
+            let shape = format!("{} {}{}", s.summary.method, s.summary.host, folded.join("/"));
+            let e = by_shape.entry(shape).or_insert_with(|| TriageItem {
+                exchange_id: s.summary.id,
+                method: s.summary.method.clone(),
+                url: url_of(&s.summary),
+                score: 0,
+                hints: vec![],
+                similar: 0,
+            });
+            if score > e.score {
+                let similar = e.similar;
+                *e = TriageItem {
+                    exchange_id: s.summary.id,
+                    method: s.summary.method.clone(),
+                    url: url_of(&s.summary),
+                    score,
+                    hints,
+                    similar,
+                };
+            }
+            e.similar += 1;
+        }
+        let mut out: Vec<TriageItem> = by_shape
+            .into_values()
+            .filter(|t| t.score > 0)
+            .map(|mut t| {
+                t.similar -= 1;
+                t
+            })
+            .collect();
+        out.sort_by(|a, b| b.score.cmp(&a.score).then(a.exchange_id.cmp(&b.exchange_id)));
+        out.truncate(limit.clamp(1, 500));
+        Ok(out)
     }
 
     /// Business-logic test candidates from recorded traffic: parameters that

@@ -81,6 +81,21 @@ async fn plain_http_goes_where_the_host_header_says() {
 }
 
 #[tokio::test]
+async fn a_url_in_the_query_leaves_the_target_untouched() {
+    // An origin-form target whose query carries a URL must not be read as absolute-form.
+    let s = setup("urlquery").await;
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend = l.local_addr().unwrap().port();
+    tokio::spawn(async move { serve_echo(l.accept().await.unwrap().0).await });
+    let mut c = TcpStream::connect(("127.0.0.1", s.proxy)).await.unwrap();
+    let target = "/fetch?url=http://example.test/a&b=https://x.test";
+    c.write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{backend}\r\n\r\n").as_bytes()).await.unwrap();
+    let resp = read_all(c).await;
+    assert!(resp.ends_with(&format!("backend saw: GET {target} HTTP/1.1")), "{resp}");
+    assert_eq!(recorded(&s.project).await.3, target);
+}
+
+#[tokio::test]
 async fn tls_without_connect_uses_sni_for_the_certificate_and_host_for_the_target() {
     let s = setup("tls").await;
     // A TLS backend on localhost.

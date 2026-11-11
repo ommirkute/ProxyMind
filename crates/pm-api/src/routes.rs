@@ -155,6 +155,9 @@ pub fn api() -> Router<AppState> {
         .route("/engage/scripts", post(engage_scripts))
         .route("/engage/js-endpoints", post(engage_js_endpoints))
         .route("/engage/logic", post(engage_logic))
+        .route("/traffic/triage", post(traffic_triage))
+        .route("/memory", get(memory_list))
+        .route("/memory/{id}", axum::routing::delete(memory_delete))
         .route("/update", get(update_get).put(update_set))
         .route("/skills", get(skills_list))
         .route("/skills/{name}", post(skill_get))
@@ -609,6 +612,34 @@ async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) ->
 
 async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
     ok(st.service.engage_js_endpoints(&st.actor, &f)?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct TriageBody {
+    host: Option<String>,
+    in_scope: Option<bool>,
+    limit: Option<usize>,
+}
+
+async fn traffic_triage(State(st): State<AppState>, Json(b): Json<TriageBody>) -> ApiResult {
+    let f = pm_service::EngageFilter { host: b.host, in_scope: b.in_scope, ..Default::default() };
+    ok(st.service.traffic_triage(&st.actor, &f, b.limit.unwrap_or(100))?)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct HostQuery {
+    host: Option<String>,
+}
+
+async fn memory_list(State(st): State<AppState>, Query(q): Query<HostQuery>) -> ApiResult {
+    ok(st.service.memory_list(q.host.as_deref())?)
+}
+
+async fn memory_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    st.service.memory_delete(&st.actor, id)?;
+    ok(serde_json::json!({ "deleted": id }))
 }
 
 async fn engage_logic(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {

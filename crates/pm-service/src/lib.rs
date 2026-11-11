@@ -27,6 +27,7 @@ mod history;
 mod identity;
 mod intercept;
 mod login_record;
+mod memory;
 mod model;
 mod network;
 mod openapi;
@@ -54,7 +55,7 @@ mod write_checks;
 mod ws;
 mod ws_replay;
 
-pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor, scan_of};
+pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor, scan_of, worker_actor};
 pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind, ToolProfile};
 pub use attack_paths::{AttackGraph, AttackPath, AttackStep, GraphEdge, GraphNode, NewAttackPath};
 pub use authz::{AuthzCheckRequest, AuthzReport};
@@ -65,7 +66,7 @@ pub use crawl::{CrawlRequest, CrawlResult};
 pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use dom_test::{DomTestRequest, DomTestResult};
-pub use engage::{EngageFilter, FoundComment, FoundEndpoint, FoundScript, LogicReport, TargetAnalysis};
+pub use engage::{EngageFilter, FoundComment, FoundEndpoint, FoundScript, LogicReport, TargetAnalysis, TriageItem};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
 pub use graphql::{GraphQlImportRequest, GraphQlImportResult, GraphQlOperation};
@@ -75,6 +76,7 @@ pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
 pub use intercept::InterceptState;
 pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
+pub use memory::{FindingVerdict, MEMORY_KINDS, Memory};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
     LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,

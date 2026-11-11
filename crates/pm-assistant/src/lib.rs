@@ -7,6 +7,7 @@
 pub mod ai_scan;
 mod explain;
 pub mod llm;
+pub mod workers;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -62,6 +63,8 @@ pub struct Assistant {
     local: Sender,
     /// One conversation step at a time.
     busy: Mutex<()>,
+    /// AI scan workers, by scan.
+    workers: std::sync::Mutex<std::collections::HashMap<i64, Vec<workers::Worker>>>,
 }
 
 /// True for loopback, private and link-local addresses and `localhost`
@@ -95,7 +98,7 @@ impl Assistant {
         let sender = new()?.with_network(service.network().clone());
         let local = new()?;
         let actor = Actor::parse("agent:assistant").map_err(|e| AssistantError::Setup(e.to_string()))?;
-        Ok(Self { service, actor, sender, local, busy: Mutex::new(()) })
+        Ok(Self { service, actor, sender, local, busy: Mutex::new(()), workers: Default::default() })
     }
 
     pub fn actor(&self) -> &Actor {
