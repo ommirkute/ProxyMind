@@ -1279,7 +1279,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pm-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "brotli-decompressor",
  "flate2",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "pm-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "pm-assistant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "pm-ai",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "pm-browser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-core",
  "pm-http",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "pm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1373,11 +1373,11 @@ dependencies = [
 
 [[package]]
 name = "pm-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pm-crawl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "url",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "pm-demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-http",
  "ring",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "pm-diff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-ai",
  "pm-http",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "pm-fuzz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-core",
  "regex",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "pm-graphql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "pm-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "memchr",
  "thiserror",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "pm-identity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-http",
  "regex",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "pm-ledger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "pm-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "pm-service",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "pm-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-ai",
  "pm-core",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "pm-oast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-core",
  "pm-http",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "pm-openapi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-http",
  "serde",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "pm-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-core",
  "pm-http",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "pm-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "ipnet",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "pm-proof"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "pm-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "pm-replay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "pm-scan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pm-http",
  "regex",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "pm-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "pm-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "pm-tls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "pm-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "memchr",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "pm-vault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "ring",

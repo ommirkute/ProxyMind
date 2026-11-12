@@ -13,7 +13,7 @@
  * Licensed under the Apache License 2.0 (unlike the AGPL core).
  */
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 type Json = Record<string, unknown>;
 type Query = Record<string, string | number | boolean | undefined | null>;

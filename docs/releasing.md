@@ -3,8 +3,8 @@
 ## Cutting a release
 
 1. Make sure `main` is green: run CI by hand (Actions → CI → Run workflow) so macOS and Windows are covered, and run Nightly.
-2. Set the version in `Cargo.toml` (`[workspace.package] version`) and commit.
-3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+2. Set the version everywhere it appears: `Cargo.toml` (`[workspace.package] version` and the `pm-*` dependency versions in each crate), `desktop/Cargo.toml` and `desktop/tauri.conf.json`, `ui/package.json`, `sdk/python/pyproject.toml` and `proxymind/__init__.py`, `sdk/typescript/package.json` and `src/index.ts`. Refresh the lockfiles (`cargo build`, `cargo update --workspace` in `desktop/`, `npm install --package-lock-only` in `ui/` and `sdk/typescript/`), add the release to `CHANGELOG.md`, and commit.
+3. Tag and push (`git tag v0.2.0 && git push origin v0.2.0`), or create the release with a new tag in the GitHub UI.
 
 `.github/workflows/release.yml` then:
 

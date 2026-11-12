@@ -15,31 +15,31 @@ tracing = "0.1.44"
 jiff = "0.2.38"
 parking_lot = "0.12.5"
 memchr = "2.8.3"
-pm-ai = { version = "0.1.0", path = "../pm-ai" }
-pm-browser = { version = "0.1.0", path = "../pm-browser" }
-pm-core = { version = "0.1.0", path = "../pm-core" }
-pm-fuzz = { version = "0.1.0", path = "../pm-fuzz" }
-pm-crawl = { version = "0.1.0", path = "../pm-crawl" }
-pm-diff = { version = "0.1.0", path = "../pm-diff" }
-pm-graphql = { version = "0.1.0", path = "../pm-graphql" }
-pm-http = { version = "0.1.0", path = "../pm-http" }
-pm-identity = { version = "0.1.0", path = "../pm-identity" }
-pm-ledger = { version = "0.1.0", path = "../pm-ledger" }
-pm-model = { version = "0.1.0", path = "../pm-model" }
-pm-oast = { version = "0.1.0", path = "../pm-oast" }
-pm-openapi = { version = "0.1.0", path = "../pm-openapi" }
+pm-ai = { version = "0.2.0", path = "../pm-ai" }
+pm-browser = { version = "0.2.0", path = "../pm-browser" }
+pm-core = { version = "0.2.0", path = "../pm-core" }
+pm-fuzz = { version = "0.2.0", path = "../pm-fuzz" }
+pm-crawl = { version = "0.2.0", path = "../pm-crawl" }
+pm-diff = { version = "0.2.0", path = "../pm-diff" }
+pm-graphql = { version = "0.2.0", path = "../pm-graphql" }
+pm-http = { version = "0.2.0", path = "../pm-http" }
+pm-identity = { version = "0.2.0", path = "../pm-identity" }
+pm-ledger = { version = "0.2.0", path = "../pm-ledger" }
+pm-model = { version = "0.2.0", path = "../pm-model" }
+pm-oast = { version = "0.2.0", path = "../pm-oast" }
+pm-openapi = { version = "0.2.0", path = "../pm-openapi" }
 serde-saphyr = "1.1.0"
-pm-policy = { version = "0.1.0", path = "../pm-policy" }
-pm-proof = { version = "0.1.0", path = "../pm-proof" }
-pm-proxy = { version = "0.1.0", path = "../pm-proxy" }
-pm-replay = { version = "0.1.0", path = "../pm-replay" }
+pm-policy = { version = "0.2.0", path = "../pm-policy" }
+pm-proof = { version = "0.2.0", path = "../pm-proof" }
+pm-proxy = { version = "0.2.0", path = "../pm-proxy" }
+pm-replay = { version = "0.2.0", path = "../pm-replay" }
 regex = "1.13.1"
 ring = "0.17.14"
-pm-plugin = { version = "0.1.0", path = "../pm-plugin" }
-pm-scan = { version = "0.1.0", path = "../pm-scan" }
-pm-tools = { version = "0.1.0", path = "../pm-tools" }
-pm-store = { version = "0.1.0", path = "../pm-store" }
-pm-tls = { version = "0.1.0", path = "../pm-tls" }
+pm-plugin = { version = "0.2.0", path = "../pm-plugin" }
+pm-scan = { version = "0.2.0", path = "../pm-scan" }
+pm-tools = { version = "0.2.0", path = "../pm-tools" }
+pm-store = { version = "0.2.0", path = "../pm-store" }
+pm-tls = { version = "0.2.0", path = "../pm-tls" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

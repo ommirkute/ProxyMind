@@ -28,7 +28,7 @@ body:
     attributes:
       label: Version
       description: Output of `proxymind --version`.
-      placeholder: proxymind 0.1.0
+      placeholder: proxymind 0.2.0
     validations:
       required: true
   - type: dropdown

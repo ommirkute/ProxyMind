@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 __all__ = ["Client", "ApiError", "Denied", "PendingApproval"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 class ApiError(Exception):

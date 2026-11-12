@@ -10,9 +10,9 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
-pm-core = { version = "0.1.0", path = "../pm-core" }
-pm-http = { version = "0.1.0", path = "../pm-http" }
-pm-tls = { version = "0.1.0", path = "../pm-tls" }
+pm-core = { version = "0.2.0", path = "../pm-core" }
+pm-http = { version = "0.2.0", path = "../pm-http" }
+pm-tls = { version = "0.2.0", path = "../pm-tls" }
 tokio = { version = "1.53.3", features = ["full"] }
 tracing = "0.1.44"
 parking_lot = "0.12.5"
