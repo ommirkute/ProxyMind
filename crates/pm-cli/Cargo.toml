@@ -22,19 +22,19 @@ anyhow = "1.0.104"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde_json = "1.0.154"
-pm-service = { version = "0.1.0", path = "../pm-service" }
+pm-service = { version = "0.2.0", path = "../pm-service" }
 jiff = "0.2.38"
-pm-mcp = { version = "0.1.0", path = "../pm-mcp" }
-pm-demo = { version = "0.1.0", path = "../pm-demo" }
-pm-oast = { version = "0.1.0", path = "../pm-oast" }
+pm-mcp = { version = "0.2.0", path = "../pm-mcp" }
+pm-demo = { version = "0.2.0", path = "../pm-demo" }
+pm-oast = { version = "0.2.0", path = "../pm-oast" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = "1.1.0"
-pm-model = { version = "0.1.0", path = "../pm-model" }
+pm-model = { version = "0.2.0", path = "../pm-model" }
 url = "2.5.8"
-pm-assistant = { version = "0.1.0", path = "../pm-assistant" }
-pm-api = { version = "0.1.0", path = "../pm-api" }
-pm-plugin = { version = "0.1.0", path = "../pm-plugin" }
-pm-vault = { version = "0.1.0", path = "../pm-vault" }
+pm-assistant = { version = "0.2.0", path = "../pm-assistant" }
+pm-api = { version = "0.2.0", path = "../pm-api" }
+pm-plugin = { version = "0.2.0", path = "../pm-plugin" }
+pm-vault = { version = "0.2.0", path = "../pm-vault" }
 rpassword = "7.4.0"
 axum = "0.8.9"
 

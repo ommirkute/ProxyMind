@@ -297,6 +297,67 @@ fn similarity(a: &[u8], b: &[u8]) -> f64 {
 }
 
 /// Why a found path deserves a look, if it does.
+/// Names of pages that usually take a URL or a file name, and the
+/// parameter to guess for them: `(name, value)`. These pages often answer
+/// 404 (or an error) until the parameter is there.
+pub const PARAM_WORDS: &[&str] = &[
+    "download",
+    "redirect",
+    "go",
+    "out",
+    "fetch",
+    "proxy",
+    "preview",
+    "render",
+    "link",
+    "url",
+    "image",
+    "img",
+    "callback",
+    "webhook",
+    "load",
+    "file",
+    "files",
+    "export",
+    "attachment",
+    "view",
+    "read",
+    "doc",
+    "document",
+    "include",
+    "template",
+];
+
+/// The parameter a page named `word` probably takes, with a harmless
+/// value: a URL that resolves nowhere, or an ordinary file name.
+pub fn param_for(word: &str) -> Option<(&'static str, &'static str)> {
+    let w = word.to_ascii_lowercase();
+    const URLS: &[&str] = &[
+        "redirect", "go", "out", "fetch", "proxy", "preview", "render", "link", "url", "image", "img", "callback",
+        "webhook", "load",
+    ];
+    const FILES: &[&str] = &[
+        "download",
+        "file",
+        "files",
+        "export",
+        "attachment",
+        "view",
+        "read",
+        "doc",
+        "document",
+        "include",
+        "template",
+    ];
+    if URLS.contains(&w.as_str()) {
+        Some(("url", "http://proxymind-probe.invalid/"))
+    } else if FILES.contains(&w.as_str()) {
+        Some(("file", "index.html"))
+    } else {
+        None
+    }
+}
+
 pub fn interesting(path: &str) -> Option<&'static str> {
     let p = path.to_ascii_lowercase();
     const MARKERS: &[(&str, &str)] = &[
@@ -333,6 +394,14 @@ pub fn interesting(path: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn param_guesses() {
+        assert_eq!(param_for("Fetch"), Some(("url", "http://proxymind-probe.invalid/")));
+        assert_eq!(param_for("download"), Some(("file", "index.html")));
+        assert_eq!(param_for("about"), None);
+        assert!(PARAM_WORDS.iter().all(|w| param_for(w).is_some()));
+    }
 
     fn w(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

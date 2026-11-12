@@ -66,7 +66,11 @@ pub enum DiscoverResult {
 
 fn get_request(u: &Url) -> String {
     let host = pm_core::authority(u.scheme(), u.host_str().unwrap_or(""), u.port_or_known_default().unwrap_or(80));
-    format!("GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ProxyMind-discover\r\nAccept: */*\r\n\r\n", u.path())
+    let target = match u.query() {
+        Some(q) => format!("{}?{q}", u.path()),
+        None => u.path().to_string(),
+    };
+    format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ProxyMind-discover\r\nAccept: */*\r\n\r\n")
 }
 
 fn token() -> Result<String> {
@@ -193,11 +197,16 @@ impl Service {
                 continue;
             };
             let word = u.path().trim_end_matches('/').rsplit('/').next().unwrap_or_default();
-            let missing = matches!(status, 404 | 410)
-                || fingerprints[shape(&u)]
-                    .as_ref()
-                    .is_some_and(|nf| nf.matches(status, location.as_deref(), &body, word));
-            if missing {
+            let fingerprint = fingerprints[shape(&u)].as_ref();
+            if fingerprint.is_some_and(|nf| nf.matches(status, location.as_deref(), &body, word)) {
+                continue;
+            }
+            // A 404 unlike the server's own "not found" page, on a page named
+            // like one that takes a URL or a file, is the application
+            // answering: the route exists and wants its parameter.
+            let guess = discover::param_for(word).filter(|_| u.query().is_none());
+            let app_404 = matches!(status, 404 | 410);
+            if app_404 && !(guess.is_some() && fingerprint.is_some_and(|nf| matches!(nf.status, 404 | 410))) {
                 continue;
             }
             // The app model leaves out discovery's 4xx answers (most are
@@ -218,6 +227,31 @@ impl Service {
                 location,
                 note: discover::interesting(u.path()),
             });
+            // It refused or failed without its parameter: send it once with the
+            // likely one, so the scanner has something to test (SSRF, traversal).
+            if let Some((name, value)) =
+                guess.filter(|_| app_404 || (400..600).contains(&status) && !matches!(status, 401 | 403))
+            {
+                let mut with = u.clone();
+                with.query_pairs_mut().append_pair(name, value);
+                let out = self.outgoing(
+                    crate::replay::parse_url_endpoint(with.as_str())?,
+                    get_request(&with).as_bytes(),
+                    false,
+                )?;
+                tried += 1;
+                let sent = self.send_as(actor, &out, identity, false, "discover_hit").await?.0;
+                if let Some((st, loc, b)) = sent.response.as_deref().and_then(parts) {
+                    found.push(Found {
+                        url: with.to_string(),
+                        status: st,
+                        length: b.len(),
+                        exchange_id: sent.exchange_id,
+                        location: loc,
+                        note: Some("takes a parameter (guessed)"),
+                    });
+                }
+            }
         }
         self.audit(
             &actor.id(),
@@ -226,5 +260,18 @@ impl Service {
             "ok",
         )?;
         Ok(DiscoverResult::Done { base: dir.to_string(), tried, found, soft_404, skipped, errors })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_request_keeps_the_query() {
+        let u = Url::parse("http://h:8080/download?file=index.html").unwrap();
+        assert!(get_request(&u).starts_with("GET /download?file=index.html HTTP/1.1\r\nHost: h:8080\r\n"));
+        let u = Url::parse("http://h/a/").unwrap();
+        assert!(get_request(&u).starts_with("GET /a/ HTTP/1.1\r\n"));
     }
 }

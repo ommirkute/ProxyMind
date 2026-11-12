@@ -310,10 +310,41 @@ impl Service {
                     Err(e) => sweep.skipped.push(format!("{}: {e}", spec.url)),
                 }
             }
+            sweep.found += self.folder_param_pages(actor, &origin).await?;
             sweep.versions.extend(self.version_siblings(actor, &origin).await?);
             sweep.js.push(self.js_discover(actor, &origin).await?);
         }
         Ok(sweep)
+    }
+
+    /// Pages that take a URL or a file are often inside the API folder
+    /// (`/api/fetch`), not at the root: looks for them in the app's busiest
+    /// top-level folders (at most four). Returns how many were found.
+    async fn folder_param_pages(&self, actor: &Actor, origin: &str) -> Result<usize> {
+        const STATIC: &[&str] = &["static", "assets", "css", "js", "img", "images", "fonts", "media", "public"];
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for o in self.model()?.operations.iter().filter(|o| o.origin == origin) {
+            let first = o.template.trim_start_matches('/').split('/').next().unwrap_or_default();
+            let deeper = o.template.trim_start_matches('/').contains('/');
+            if deeper && !first.is_empty() && !first.starts_with('{') && !STATIC.contains(&first) {
+                *counts.entry(first.to_string()).or_default() += 1;
+            }
+        }
+        let mut folders: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n >= 2).collect();
+        folders.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut found = 0;
+        for (folder, _) in folders.into_iter().take(4) {
+            let req = DiscoverRequest {
+                url: format!("{origin}/{folder}/"),
+                words: pm_crawl::discover::PARAM_WORDS.iter().map(|w| w.to_string()).collect(),
+                builtin: false,
+                ..Default::default()
+            };
+            if let Ok(DiscoverResult::Done { found: f, .. }) = self.discover(actor, req).await {
+                found += f.len();
+            }
+        }
+        Ok(found)
     }
 
     /// Sends the description's sign-up examples (unauthenticated POSTs to
@@ -539,6 +570,10 @@ impl Service {
         let password_checks: Vec<String> = vec!["password_change".into()];
         let submit_checks: Vec<String> = SWEEP_SUBMIT_CHECKS.iter().map(|c| c.to_string()).collect();
         let same_origin = |o: &&pm_model::Operation| origin.is_none_or(|x| o.origin.eq_ignore_ascii_case(x));
+        let answered =
+            |o: &pm_model::Operation| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403);
+        let failed_on_value =
+            |o: &pm_model::Operation| o.statuses.keys().any(|s| matches!(s, 400 | 404 | 410 | 422 | 500..=504));
         // GETs that worked, minus ones whose name says they change state
         // (`/createdb`, `/logout`…: a GET is not always harmless).
         let candidates: Vec<_> = model
@@ -546,14 +581,17 @@ impl Service {
             .iter()
             .filter(same_origin)
             .filter(|o| o.method == "GET" && !changes_state(&o.template) && !is_password_change(&o.template))
-            // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass candidates).
-            .filter(|o| o.statuses.keys().any(|s| (200..400).contains(s) || *s == 401 || *s == 403))
+            // Answered (2xx), redirected (3xx), or denied (401/403: auth bypass
+            // candidates); or, with a query, failed on its value (`?file=` not
+            // found, `?url=` not fetched): the route exists and reads it.
+            .filter(|o| answered(o) || (!o.query_params.is_empty() && failed_on_value(o)))
             .collect();
         let has_params = |o: &&pm_model::Operation| !o.path_params.is_empty() || !o.query_params.is_empty();
-        // Among operations without parameters, ones that send credentials
-        // first: their cookies and tokens are what the checks work on.
+        // Ones that worked first; among operations without parameters, ones
+        // that send credentials first: their cookies and tokens are what the
+        // checks work on.
         let mut candidates = candidates;
-        candidates.sort_by_key(|o| !o.authenticated);
+        candidates.sort_by_key(|o| (!answered(o), !o.authenticated));
         let ops = candidates
             .iter()
             .filter(|o| has_params(o))
@@ -962,5 +1000,52 @@ impl Service {
             });
         }
         Ok(leads)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pm_policy::{Policy, Roe};
+    use pm_store::{NewExchange, Store};
+
+    use crate::Service;
+
+    fn record(s: &Service, source: &str, path: &str, status: u16) {
+        let request = format!("GET {path} HTTP/1.1\r\nHost: app.example.com\r\n\r\n").into_bytes();
+        let response = format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\n\r\nok").into_bytes();
+        s.store
+            .lock()
+            .insert_exchange(&NewExchange {
+                ts_ms: 1,
+                duration_ms: None,
+                source: source.into(),
+                actor_id: "human:t".into(),
+                scheme: "https".into(),
+                host: "app.example.com".into(),
+                port: 443,
+                method: "GET".into(),
+                path: path.into(),
+                status: Some(status),
+                request,
+                response: Some(response),
+                error: None,
+                identity: None,
+                hypothesis_id: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn pages_that_fail_on_their_value_are_scanned_after_ones_that_work() {
+        let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://app.example.com/\"]\n").unwrap();
+        let s = Service::new(Store::open_in_memory().unwrap(), Policy::new(roe)).unwrap();
+        record(&s, "discover_hit", "/api/fetch?url=http%3A%2F%2Fproxymind-probe.invalid%2F", 502);
+        record(&s, "proxy", "/search?q=tea", 200);
+        record(&s, "proxy", "/missing", 404);
+        let ops: Vec<String> = s.scan_targets(None, 10, 10, 0).unwrap().into_iter().map(|t| t.operation).collect();
+        let at = |p: &str| ops.iter().position(|o| o.contains(p));
+        assert!(at("/api/fetch").is_some(), "{ops:?}");
+        assert!(at("/search") < at("/api/fetch"), "{ops:?}");
+        assert!(at("/missing").is_none(), "a 404 without a query is not a page: {ops:?}");
     }
 }
