@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
+import { Chip, Empty, ErrorBox, ExchangeLink, Panel, pollRetryDelay, useAction, useLoad, useNav } from "../components";
 
 interface Issue {
   check: string;
@@ -61,7 +61,7 @@ export default function Issues() {
                 <tr key={`${i.check}${i.origin}${i.path}${i.evidence}`}>
                   <td><Chip value={i.severity} /></td>
                   <td>{i.title}</td>
-                  <td className="mono small">{i.origin}{i.path === "*" ? " (site-wide)" : i.path}</td>
+                  <td className="mono small" style={{ overflowWrap: "anywhere", minWidth: 160 }}>{i.origin}{i.path === "*" ? " (site-wide)" : i.path}</td>
                   <td className="small">{i.count}× {i.exchange_ids.slice(0, 3).map((e) => <span key={e}><ExchangeLink id={e} /> </span>)}</td>
                   <td className="small" style={{ maxWidth: 360, wordBreak: "break-word" }}>{i.evidence}</td>
                   <td><button className="btn" disabled={action.busy} onClick={() => toFinding(i)}>Make finding</button></td>
@@ -126,7 +126,7 @@ function ActiveScan({ initial }: { initial?: string }) {
                   <tr key={i.exchange_id}>
                     <td><Chip value={i.severity} /></td>
                     <td>{i.title}</td>
-                    <td className="mono">{i.point} = {i.payload}</td>
+                    <td className="mono" style={{ overflowWrap: "anywhere", minWidth: 160 }}>{i.point} = {i.payload}</td>
                     <td style={{ maxWidth: 320, wordBreak: "break-word" }}>{i.evidence} <ExchangeLink id={i.exchange_id} /></td>
                     <td className="muted">{i.prove_with ?? "–"}</td>
                   </tr>
@@ -174,19 +174,27 @@ function CrawlAudit() {
   useEffect(() => {
     if (!id) return;
     let stop = false;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       try {
         const t = await api.get<ScanTask>(`/scan/tasks/${id}`);
         if (stop) return;
+        if (failures) action.setError(null);
+        failures = 0;
         setTask(t);
-        if (running(t)) setTimeout(poll, 1000);
+        if (running(t)) timer = setTimeout(poll, 1000);
       } catch (e) {
-        if (!stop) action.setError((e as Error).message);
+        if (stop) return;
+        action.setError((e as Error).message);
+        const wait = pollRetryDelay(e, failures++);
+        if (wait !== null) timer = setTimeout(poll, wait);
       }
     };
     poll();
     return () => {
       stop = true;
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -251,7 +259,7 @@ function CrawlAudit() {
                     <td><Chip value={i.severity} /></td>
                     <td>{i.title}</td>
                     <td className="mono">{i.operation}</td>
-                    <td className="mono">{i.point} = {i.payload}</td>
+                    <td className="mono" style={{ overflowWrap: "anywhere", minWidth: 160 }}>{i.point} = {i.payload}</td>
                     <td style={{ maxWidth: 320, wordBreak: "break-word" }}>{i.evidence} <ExchangeLink id={i.exchange_id} /></td>
                     <td>
                       {i.finding_id !== undefined && (

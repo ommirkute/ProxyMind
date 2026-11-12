@@ -54,8 +54,11 @@ pub struct UpstreamProxy {
     /// Optional login (Basic for HTTP proxies, username/password for SOCKS5).
     pub username: String,
     pub password: String,
-    /// SOCKS5 only: let the proxy resolve target names ("socks5h"). Off by
-    /// default so ProxyMind resolves and checks the address it connects to.
+    /// Let the proxy resolve target names: "socks5h" for SOCKS5; for HTTP
+    /// proxies, CONNECT tunnels name the host instead of the checked address
+    /// (for proxies that only allow named hosts). Off by default so the proxy
+    /// connects to the address ProxyMind resolved and checked against the
+    /// denied networks. Plain HTTP through an HTTP proxy always goes by name.
     pub remote_dns: bool,
     /// Hosts reached directly: `example.com`, `*.example.com` or `*`.
     pub bypass: Vec<String>,

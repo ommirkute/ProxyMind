@@ -69,7 +69,11 @@ export default function Assistant() {
   const save = useAction();
   const endRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => endRef.current?.scrollIntoView?.({ block: "end" }), [messages, action.busy]);
+  // A block body on purpose: scrollIntoView returns a Promise in current
+  // browsers, and React would call a returned Promise as the cleanup (crash).
+  useEffect(() => {
+    endRef.current?.scrollIntoView?.({ block: "end" });
+  }, [messages, action.busy]);
 
   const open = (id: number | null) => {
     setNote(null);

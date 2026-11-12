@@ -57,7 +57,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 - REST API with live events, hardened for browsers; web UI (history, viewer, Replay, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
 - Intercept-and-edit queue: hold requests and responses by scope, host, path and type; edit, forward or drop from the UI; edits and drops are audited, and the project keeps the server's original responses. Humans only: agents use Replay through the policy gate
-- Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Replay, agents and proofs; policy address checks still apply
+- Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Replay, agents and proofs; policy address checks still apply, and checked HTTPS tunnels CONNECT to the checked address (opt out with `remote_dns`)
 - Extra proxy listeners (more ports or interfaces, invisible clients, per-listener redirect with force TLS), hostname resolution overrides and TLS pass-through hosts
 - Active scanner step 1 (docs/scanner-matrix.md): blind SQL injection (boolean and time based) and OS command injection (output and time based), headers and cookies as insertion points, more template engines, confirmation of every hit, fast-to-slow ordering
 - Active scanner step 3a: NoSQL (errors and operator differential), LDAP and XPath errors, CRLF, Host header injection, active CORS, auth bypass on 401/403 with controls, hidden parameter mining

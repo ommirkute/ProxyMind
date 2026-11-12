@@ -5,7 +5,7 @@
 // Uses the real `proxymind` binary (PROXYMIND, default ../target/debug/proxymind)
 // and Chromium (CHROMIUM, default: Playwright's bundled path).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -84,7 +84,19 @@ async function browseAs(proxy, shop, user, paths) {
 try {
   mkdirSync(SHOTS, { recursive: true });
   // proxymind renders XSS proofs in the same Chromium the test drives.
-  const exe = process.env.CHROMIUM ?? ["/opt/pw-browsers/chromium-1194/chrome-linux/chrome"].find(existsSync);
+  // A preinstalled Playwright Chromium (newest build; older builds use chrome-linux/, newer chrome-linux64/).
+  const preinstalled = () => {
+    try {
+      return readdirSync("/opt/pw-browsers")
+        .filter((d) => /^chromium-\d+$/.test(d))
+        .sort((a, b) => Number(b.slice(9)) - Number(a.slice(9)))
+        .flatMap((d) => ["chrome-linux64", "chrome-linux"].map((sub) => `/opt/pw-browsers/${d}/${sub}/chrome`))
+        .find(existsSync);
+    } catch {
+      return undefined;
+    }
+  };
+  const exe = process.env.CHROMIUM ?? preinstalled();
   const browserPath = exe ?? chromium.executablePath();
   if (existsSync(browserPath)) process.env.PROXYMIND_CHROMIUM ??= browserPath;
   const [shop, proxy, ui] = [await freePort(), await freePort(), await freePort()];
@@ -880,6 +892,12 @@ try {
   check(true, "a playbook fills the message box with its steps");
   await page.getByLabel("Message").fill("");
   await page.screenshot({ path: join(SHOTS, "6f-assistant.png") });
+  // Leaving the Assistant used to blank the whole app: an effect returned scrollIntoView's
+  // Promise (current browsers), which React then called as the effect's cleanup.
+  await open("sessions");
+  await page.getByTestId("session-save").waitFor({ timeout: 5000 }).catch(() => {});
+  check((await page.getByTestId("session-save").isVisible()) && (await page.getByTestId("page-error").count()) === 0,
+    "leaving the Assistant leaves the app working");
   await open("aiscan");
   await page.locator('[data-testid="ai-scan-model"]', { hasText: "mock-model" }).waitFor();
   await page.getByLabel("AI scan steps").fill("10");

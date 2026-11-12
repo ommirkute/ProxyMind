@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, originOf, toast, type ExchangeDetail, type IdentityInfo } from "../api";
-import { ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav, usePref } from "../components";
+import { ErrorBox, ExchangeLink, MessageView, StatusCode, pollRetryDelay, useAction, useLoad, useNav, usePref } from "../components";
 import { autoMark } from "../http";
 
 interface Row {
@@ -277,20 +277,28 @@ export default function Fuzzer() {
     if (!attackId) return;
     let stop = false;
     let have = 0;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
         const v = await api.get<AttackView>(`/fuzzer/attacks/${attackId}?from=${have}`);
         if (stop) return;
+        if (failures) action.setError(null);
+        failures = 0;
         have += v.rows.length;
         setView((old) => (old && old.attack_id === v.attack_id ? { ...v, rows: [...old.rows, ...v.rows] } : v));
-        if (v.status === "running" || v.status === "paused") setTimeout(tick, 500);
+        if (v.status === "running" || v.status === "paused") timer = setTimeout(tick, 500);
       } catch (e) {
-        if (!stop) action.setError((e as Error).message);
+        if (stop) return;
+        action.setError((e as Error).message);
+        const wait = pollRetryDelay(e, failures++);
+        if (wait !== null) timer = setTimeout(tick, wait);
       }
     };
     tick();
     return () => {
       stop = true;
+      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attackId]);

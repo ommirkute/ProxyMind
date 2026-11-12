@@ -18,6 +18,27 @@ version may change project files, APIs and the CLI.
   page. Also exposed as new `proof_run` oracles `boolean_injection`, `path_traversal` and `marker`. SDKs gain
   `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
 
+### Fixed
+
+- **The UI went blank after leaving the Assistant page, or when a chat reply arrived,** in current Chrome and
+  Chromium. An effect returned `scrollIntoView()`'s value, which these browsers now make a Promise, and React called
+  it as the effect's cleanup. A page error now also stays inside the page area (with "Try again") instead of
+  blanking the whole UI.
+- **Denied networks could be bypassed through an upstream HTTP proxy for HTTPS.** Tunnels went by host name, so the
+  proxy resolved the name again and could reach an address ProxyMind never checked (DNS rebinding). Checked
+  tunnels now `CONNECT` to the checked address; TLS still uses the name. Proxies that only allow named hosts can
+  turn on "let the proxy resolve names" (`remote_dns`), now offered for HTTP proxies too. Plain HTTP through an
+  HTTP proxy still goes by name (the proxy takes the Host from the target).
+- **Network settings:** the "Connect directly to" list dropped new lines while typing, so a second host couldn't be
+  entered; it now keeps them and drops empty lines when you leave the field or save.
+- **Narrow windows:** tab strips (Engagement tools, Fuzzer, HTTP history) wrapped past their panel and the last tabs
+  could not be clicked; they now wrap onto a second row. The header keeps the current sub-tab in view, and the
+  scanner issue tables no longer let one long URL or payload squeeze the other columns.
+- **Live progress** for crawl-and-audit tasks, Fuzzer attacks and AI scans no longer stops for good after one failed
+  poll (a dropped connection or a server hiccup); it retries with backoff. Sessions and Network show "Loading…"
+  instead of an empty page while they load.
+- **End-to-end test:** finds the newest preinstalled Chromium instead of one fixed build.
+
 ## 0.2.0 (2026-11-12)
 
 ### AI testing

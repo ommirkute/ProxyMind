@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, toast } from "../api";
 import { AttackGraph } from "../AttackGraph";
-import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
+import { Chip, Empty, ErrorBox, Panel, copyText, pollRetryDelay, useAction, useLoad } from "../components";
 
 interface Log { ts_ms: number; kind: string; text: string }
 interface Scan {
@@ -125,15 +125,27 @@ function Run({ id, onChange }: { id: number; onChange: () => void }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let stop = false;
+    let failures = 0;
     let timer: ReturnType<typeof setTimeout>;
     const load = () =>
       api.get<Scan>(`/ai-scan/${id}`).then((r) => {
         if (stop) return;
+        failures = 0;
         setS(r);
         setError(null);
         if (active(r)) timer = setTimeout(load, 2000);
         else onChange();
-      }).catch((e: Error) => !stop && setError(e.message));
+      }).catch((e: Error) => {
+        if (stop) return;
+        const wait = pollRetryDelay(e, failures++);
+        if (wait === null) {
+          setError(e.message);
+          return;
+        }
+        // A blip: keep the last state on screen and try again.
+        if (failures === 1) toast(`Lost contact with ProxyMind, retrying: ${e.message}`, "bad");
+        timer = setTimeout(load, wait);
+      });
     load();
     return () => { stop = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps

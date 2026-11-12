@@ -47,7 +47,7 @@ export default function Network() {
   const action = useAction();
   const loaded = draft ?? saved.data;
   const cfg = loaded ? { ...loaded, hosts: loaded.hosts ?? [], tls_passthrough: loaded.tls_passthrough ?? [] } : null;
-  if (!cfg) return <div className="content"><ErrorBox error={saved.error} /></div>;
+  if (!cfg) return <div className="content">{saved.error ? <ErrorBox error={saved.error} /> : <span className="muted">Loading…</span>}</div>;
 
   const set = (patch: Partial<NetConfig>) => {
     setNotice(null);
@@ -61,7 +61,8 @@ export default function Network() {
     set({ client_certs: cfg.client_certs.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   const save = () =>
     action.run(async () => {
-      const r = await api.put<NetConfig>("/network", { ...cfg, tls_passthrough: cfg.tls_passthrough.filter(Boolean) });
+      const upstream = cfg.upstream && { ...cfg.upstream, bypass: cfg.upstream.bypass.filter(Boolean) };
+      const r = await api.put<NetConfig>("/network", { ...cfg, upstream, tls_passthrough: cfg.tls_passthrough.filter(Boolean) });
       saved.setData(r);
       setDraft(null);
       setNotice("Saved. The proxy, Replay and agents use these settings from now on.");
@@ -101,22 +102,26 @@ export default function Network() {
               <input aria-label="Proxy username" placeholder="username" value={up.username} onChange={(e) => setUp({ username: e.target.value })} />
               <input aria-label="Proxy password" type="password" placeholder="password" value={up.password} onChange={(e) => setUp({ password: e.target.value })} />
             </div>
-            {up.kind === "socks5" && (
-              <>
-                <label>DNS</label>
-                <label className="row small" style={{ gap: 4 }}>
-                  <input type="checkbox" checked={up.remote_dns} onChange={(e) => setUp({ remote_dns: e.target.checked })} />
-                  Let the proxy resolve names (socks5h). Off: ProxyMind resolves and checks each address itself.
-                </label>
-              </>
-            )}
+            <label>DNS</label>
+            <label className="row small" style={{ gap: 4 }}>
+              <input
+                type="checkbox"
+                aria-label="Let the proxy resolve names"
+                checked={up.remote_dns}
+                onChange={(e) => setUp({ remote_dns: e.target.checked })}
+              />
+              {up.kind === "socks5"
+                ? "Let the proxy resolve names (socks5h). Off: ProxyMind resolves each name, checks the address against the denied networks and asks the proxy for that address."
+                : "Let the proxy resolve names in HTTPS tunnels (CONNECT host:port), for proxies that only allow named hosts. Off: the tunnel asks for the address ProxyMind resolved and checked. Plain HTTP always goes by name."}
+            </label>
             <label>Connect directly to</label>
             <textarea
               aria-label="Bypass list"
               rows={3}
               placeholder={"localhost\n*.internal.example"}
               value={up.bypass.join("\n")}
-              onChange={(e) => setUp({ bypass: e.target.value.split(/\n/).map((x) => x.trim()).filter(Boolean) })}
+              onChange={(e) => setUp({ bypass: e.target.value.split(/\n/).map((x) => x.trim()) })}
+              onBlur={() => setUp({ bypass: up.bypass.filter(Boolean) })}
             />
           </div>
         )}
