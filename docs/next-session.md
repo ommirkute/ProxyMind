@@ -1,88 +1,147 @@
-# Next session: implementation plan
+# Next session: status and plan
 
-Written 2026-10-24 at the end of a session. Read `docs/handoff.md` first, then this.
+Written 2026-11-12, right after version 0.2.0 was merged to `main` (PR #21). Read `CLAUDE.md`, then
+`docs/handoff.md` (architecture, crates, pitfalls), then this file. This file replaces the older plan; everything it
+listed is done.
 
-GitHub Actions minutes run out until **November 1**. Until then, run every local check before each push (list at the end).
+## 1. Where things stand
 
-## Where things stand
+- `main` is at **0.2.0** and green on Linux CI. The **v0.2.0 release is not published yet**: the owner creates the
+  tag and release in the GitHub UI (tag pushes from the cloud sandbox are refused). Publishing runs
+  `.github/workflows/release.yml` (binaries for Linux, macOS and Windows, checksums, SBOM, Docker image).
+- No open pull requests. No work in progress. The session branch equals `main`.
+- Benchmarks without a model (`bench/README.md`): **VulnShop 35/38** (2 proven), **VAmPI 8/8** (1 proven),
+  **Juice Shop 9/9** (1 proven), **0 false positives**.
+- `CHANGELOG.md` lists what 0.2.0 added since 0.1.0.
 
-Done and pushed:
+## 2. What ProxyMind does today (all working, all with tests)
 
-- Scanner steps 1 to 4b.
-- UI redesign.
-- Built-in browser (`ui --open-browser`, `POST /browser/open`).
-- Browser-driven crawling (`crawl --browser`).
+Everything goes through one service layer (`pm-service`) and the policy gate (`pm-policy`, rules of engagement,
+tiers, approvals, audit chain). The API (`pm-api`), MCP server (`pm-mcp`), CLI (`pm-cli`) and web UI (`ui/`) are thin
+layers over it.
 
-Pushed in the last commit:
+| Area | What works | Where |
+|---|---|---|
+| Proxy | HTTP/1.1, HTTP/2, WebSocket, TLS interception with a local CA, intercept and edit, match-and-replace rules, invisible mode, extra listeners, hostname overrides, TLS pass-through. Traffic is byte-exact (ADR-0002) | `pm-http`, `pm-tls`, `pm-proxy` |
+| History | Query language, saved filters, full-text search, site map, WebSocket history, notes and highlights, HAR and cURL import and export, 100k-exchange scale | `pm-store`, `pm-service` |
+| Replay and Fuzzer | Tabs and history, inspector, HTTP/2 pseudo-headers; background attacks, payload types and processing, grep extract, recursive grep | `pm-replay`, `pm-fuzz` |
+| Sessions and identities | Cookie jar, macros, session rules, recorded logins, session-expiry detection and re-login | `pm-identity` |
+| Authorization | Per-request checks as other identities, differential oracle, **authorization matrix** (role × endpoint grid: IDOR, BFLA, missing login; proven on request) | `pm-service/src/authz_matrix.rs`, `pm-diff` |
+| App model | Operations with templates, parameters, statuses; OpenAPI and GraphQL import; **snapshots and "what changed since the last test"** | `pm-model`, `pm-service/src/changes.rs` |
+| Discovery and crawl | Wordlist discovery with soft-404 fingerprints, hidden folders, API version siblings, pages that take a URL or file (also inside API folders), HTTP crawler, browser-driven crawl for JavaScript apps, JavaScript endpoint mining, hidden-parameter discovery | `pm-crawl`, `pm-browser`, `pm-service/src/discover.rs`, `auto.rs` |
+| Scanner | Passive checks; active checks: SQL injection (error, boolean, time, out-of-band), command injection, SSTI, XSS (reflected, stored, DOM), path traversal, open redirect, XXE, SSRF, NoSQL/LDAP/XPath, CRLF, Host header, CORS, auth bypass, JWT, GraphQL, cache poisoning and deception, mass assignment, prototype pollution, OAuth, deserialization; with approval: request smuggling, file upload, races, ReDoS, cross-user writes. Profiles, saved tasks, pause and resume, schedules. Custom checks in YAML | `pm-scan`, `pm-service/src/scan*.rs` |
+| Out-of-band | DNS, HTTP and SMTP listeners, payloads in Replay and Fuzzer, late callbacks counted | `pm-oast` |
+| Proof engine | Oracles: differential authorization, reflection (XSS in headless Chromium), timing, out-of-band. Hypothesis ledger; findings linked to proofs | `pm-proof`, `pm-ledger` |
+| Findings and reports | Issue library (CWE, OWASP), statuses, retest, duplicate merging; HTML, Markdown, PDF, JSON, SARIF; saved templates | `pm-service` |
+| Evidence | **Signed evidence packs** with a coverage proof, checked offline by `proxymind verify`; **proven findings as CI regression tests** (`regress export|run`) | `pm-service/src/evidence.rs`, `regress.rs`, `pm-tools` |
+| AI | Assistant (chat agent using the same tools), **AI scan** (recon to chained findings, attack graph, live steering, verifier, business-logic tests), cost meter and budget, prompt-injection guard, explain-and-fix, local-model presets, memory across engagements, verdict learning, triage, parallel workers, skills over MCP. API keys set in the UI and kept in the vault | `pm-ai`, `pm-assistant`, `pm-vault`, `pm-service/src/ai_scan.rs`, `attack_paths.rs`, `memory.rs` |
+| Recon | Passive DNS records and Wayback history | `pm-tools`, `pm-service/src/recon.rs` |
+| Tools | Decoder, Comparer, token analyzer (FIPS 140-2 tests), Organizer, global search | `pm-tools` |
+| Plugins | Passive and active checks over a process protocol, sandbox, UI panels, WASM runtime, signed manifests | `pm-plugin` (ADR-0014 to 0016) |
+| Shipping | Web UI embedded in the binary, Tauri desktop app with installers, Docker image, signed release workflow, SBOM, nightly fuzzing, opt-in update check, Python and TypeScript SDKs, sealed (encrypted) projects | `desktop/`, `sdk/`, `.github/workflows/` |
 
-- **SPA hash routes in browser crawls.**
-  - `pm_crawl::Frontier::keeping_routes` keeps `#/…` and `#!/…` fragments as separate pages; plain anchors still collapse.
-  - `pm-browser` `page_key` keeps route fragments when deciding whether a click left the page.
-  - Unit tests for both.
-- **Task 43** (recorded logins and session-expiry detection), now finished (see section 1):
-  - `pm-identity`:
-    - `LoginStep.extract` (`LoginExtract{name, regex}`) and `LoginStep.set_headers` (templates like `Bearer {{v1}}`).
-    - `LoggedOut{statuses, location_contains, body_contains}` and `Identity.logged_out`.
-    - `Identity::looks_logged_out`, `response_text`.
-    - `LoginStep` and `Identity` now derive `Default`.
-  - `pm-service/src/identity.rs`: `identity_login` runs multi-step recipes. It keeps a per-run cookie jar, sends those cookies to later steps, substitutes `{{vars}}` and applies `set_headers`. Old one-step recipes behave as before.
-  - `pm-service/src/replay.rs`: `send_as` re-logs in when `ident.looks_logged_out(resp)`, so it uses the learned signature.
-  - `pm-service/src/login_record.rs` (new):
-    - `history_mark()` returns the newest exchange id.
-    - `identity_record_login(actor, name, role, from, to)` reads the proxy exchanges in the window (in scope, no static files). It takes credentials from the last request that has them, then works backwards to find the steps that set those cookies or return those tokens, plus the steps they depend on. It turns values passed between steps into `{{vN}}` extractions, sets a health check from a later authenticated GET, and saves the identity. Humans only.
-    - `identity_learn_logged_out(actor, name)` logs in and sends the health check with and without credentials. It keeps what tells the two answers apart: a redirect path, a 401/419/440 status, or a body marker. When the health check also passes while logged out, it adds `expect_contains`.
+Known limits:
 
-## 1. Task 43: recorded logins and session expiry — done
+- Only 2 to 4 findings per benchmark are **proven**; the rest are "suspected". Proof is ProxyMind's main claim, so
+  this is the biggest gap (see 3.2).
+- VulnShop still misses three planted bugs: VS-10 (SSTI on `/greet`, which nothing links to), VS-11 (reset codes
+  that count up; the benchmark never visits the endpoint) and VS-5 (gift-card race that needs a code the app never
+  shows).
+- The AI scan has never been scored on the benchmarks (that needs a model API key).
+- Pull-request CI runs on Linux only. macOS and Windows run on `main` and by hand.
+- No team mode, no HTTP/3 or gRPC, no code signing for macOS and Windows, no auto-update.
+- `docs/handoff.md` section 4 ("What's next") is out of date; this file is the plan. Sections 1, 2 and 5 are current.
 
-Finished on 2026-10-24: integration test (`crates/pm-service/tests/login_record.rs`), API, CLI, MCP (`identity_learn_logged_out`), the Authz page's "Record a login" card with an e2e step, and re-login counts plus a "session lost" stop in crawl-and-audit tasks. See the handoff section "Recorded logins and session expiry". Not done: `bench/run.sh` doesn't learn logged-out looks (its identities have no health checks); an option there is to record each user's login from the browse step.
+## 3. Plan, in order
 
-## 2. Task 44: scan profiles, scheduling and resume — done
+### 3.1 Publish 0.2.0 and check the release (owner plus a short session)
 
-Finished on 2026-10-24: built-in and saved profiles, tasks saved in the project with pause/resume (including after a restart), hourly/daily/weekly schedules with a ticker in the UI server and desktop app, API/CLI/MCP, the Dashboard → Scans page and an e2e step. See the handoff section "Scan profiles, resume and schedules". Left for later: time zones other than UTC.
+1. Owner: run CI by hand on `main` (Actions → CI → Run workflow) so macOS and Windows are covered.
+2. Owner: create release `v0.2.0` on `main` in the GitHub UI, with the 0.2.0 section of `CHANGELOG.md` as notes.
+3. Session: read the release workflow run with the GitHub tools; fix anything that fails in a PR. Check that the
+   assets exist (five binaries, `SHA256SUMS`, SBOM, desktop installers) and that the update check
+   (`pm-service/src/update.rs`) sees 0.2.0 as the newest release.
 
-## 3. Task 45: issue library and report templates — done
+### 3.2 Prove more of what the scanner finds (recommended main work)
 
-Finished on 2026-10-24: a 48-entry issue library with CWE and OWASP mappings, findings filled in from it, duplicate merging, fixed / accepted-risk statuses, retest, executive / technical / compliance templates plus saved MiniJinja templates, HTML / Markdown / PDF output, API/CLI/MCP, and the UI report builder and Issue library page. See the handoff section "Issue library, finding workflow and report templates". Left for later: a Word (.docx) export; per-finding comments and assignment (belongs with team use).
+Goal: after an automatic pass, most findings are "proven", each with a stored proof. Target: VulnShop proven from
+2/38 to at least 15/38, with no false proofs on Juice Shop or VAmPI.
 
-## 4. Task 46: plugin platform — part 1 done (2026-11-03)
+- Add an automatic "prove" step at the end of `auto` (and a `findings prove` command, API route, MCP tool and UI
+  button) that picks an oracle by vulnerability class and runs it through `proof_run`:
+  - SQL injection: a boolean pair plus a control (true and false conditions give different answers, twice), or the
+    timing oracle with a control delay.
+  - SSRF, XXE, out-of-band SQL injection and command injection: the out-of-band oracle with a fresh payload.
+  - Path traversal: two different known files give their expected markers, and a random name does not.
+  - Open redirect, CRLF, Host header: re-send with a fresh random marker and check the exact header.
+  - XSS: the existing `reflection` oracle (already there; wire it into the automatic step).
+  - IDOR and BFLA: already proven by the matrix; reuse.
+- Pure verdict logic goes in `pm-proof` with unit tests; the sending goes in `pm-service/src/proof.rs`, gated like
+  every other send. Proofs link to findings with `link_proof`.
+- Proven findings then flow into evidence packs and `regress export` without more work; check both in a test.
+- Measure with `bench/run.sh` on all three apps and record the proven counts in `bench/README.md`.
 
-Done: active-check plugins through the gate, the sandbox (clean env; Linux: no network, resource limits), the Plugins page, API/CLI/MCP/SDK (see the handoff, ADR-0015). A Python helper (`proxymind.plugin`) exists. Still open from the list below: UI panels, a WASM runtime, signed manifests, a TypeScript helper.
+### 3.3 The last VulnShop misses, without fitting the scanner to VulnShop
 
+- VS-11: when the model has a password-reset or code-issuing operation, request several codes for a test account
+  and run the token analyzer on them (sequential or low-entropy codes are a finding). The benchmark must also visit
+  the reset endpoint once (`bench/apps/vulnshop.sh`), as a tester would.
+- VS-10: leave it unless a general signal appears (for example a page name found in JavaScript or in a sitemap). Do
+  not add words like `greet` to the wordlist.
+- VS-5: leave it; it needs a secret the app does not reveal.
 
-- Plugins today are passive checks over a process protocol (`crates/pm-plugin`; see `docs/adr`). Extend the protocol:
-  - `active_check`: a plugin returns probes, and the service sends them through the policy gate (tiers apply).
-  - `on_request` / `on_response` hooks (like match-replace rules) that can only read, unless the ROE allows them to change requests.
-  - UI panels: a plugin can declare a panel that the UI renders in a sandboxed iframe (`sandbox="allow-scripts"`, postMessage to a narrow API with no tokens).
-- **Sandbox**:
-  - Run plugin processes with no network (all traffic goes through the service), resource limits, and a timeout.
-  - On Linux use seccomp/landlock where available; elsewhere fall back to process limits.
-  - Or add a WASM runtime (`wasmtime`) for portable plugins, which would be the preferred long-term path; write an ADR first.
-- **Manifest**: permissions (tiers, hosts, panels), version, signature (optional). Add install, enable and disable in the UI and CLI.
-- **SDK**: plugin helpers in the Python and TypeScript SDKs, plus an example active check.
+### 3.4 Score the AI scan (needs a model API key from the owner)
 
-## 5. Second tier (later sessions, in order)
+- Add `bench/run.sh --agent` (or a new script) that runs `ai-scan` on each app with a budget, then scores with the
+  same ground truth. Record found, proven, false positives, cost and time in `bench/README.md`.
+- Ask for the key with the credential form; never put it in files or commits.
+- Use the results to tune prompts, the verifier and the worker count.
 
-1. **Team use**: a shared project server mode (`proxymind serve --team`), users and roles, per-user audit, finding assignment and comments. Start with an ADR on auth (OIDC or local accounts).
-2. **Hosted OAST**: a deployable `pm-oast` server (DNS + HTTP + SMTP) with per-project tokens and polling. Clients can use self-hosted or our hosted instance.
-3. **Protocols**: HTTP/3 (quinn) proxying, gRPC (h2 + protobuf decoding with optional `.proto` upload), and better WebSocket fuzzing.
-4. **Shipping**: transparent project encryption by default, code signing for macOS and Windows (needs certificates from the user), auto-update (Tauri updater, signed), and a release checklist run.
-5. **Benchmarks**: crAPI ground truth (verify it), an agent-driven benchmark with scoring (needs a model API key), and tracking scores over time in `bench/README.md`.
+### 3.5 Later, in this order
 
-## Small follow-ups noticed
+1. **Team mode**: a shared project server (`proxymind serve --team`), users and roles, per-user audit, assigning
+   and commenting on findings. Write an ADR on sign-in first (OIDC or local accounts).
+2. **Hosted out-of-band server**: a deployable `pm-oast` with per-project tokens and polling.
+3. **Protocols**: HTTP/3, gRPC (with optional `.proto` upload), better WebSocket fuzzing.
+4. **Shipping**: project encryption on by default, code signing for macOS and Windows (needs certificates from the
+   owner), signed auto-update in the desktop app.
+5. **Benchmarks**: verify the crAPI ground truth and add it to the table.
 
-- The Juice Shop browser crawl visited only about 6 pages before the hash-route fix. Re-run `bench/run.sh juice-shop` and record the page count and score. Scores on 2026-10-26: VulnShop 25/38, VAmPI 5/8, Juice Shop 9/9, 0 false positives (see bench/README.md).
-- Chromium still makes two Google calls that we cannot block (documented in handoff).
-- On November 1, re-run CI on the latest commit of the branch.
+### 3.6 Small clean-ups worth doing early
 
-## Local checks before each push
+- Rewrite `docs/handoff.md` section 4 to point here, and trim its "Status of the session" text.
+- `the_baseline_discovers_imports_and_sweeps` (in `crates/pm-service/tests/discover.rs`) takes about 150 seconds;
+  see if it can run on a smaller sweep.
+- Add macOS and Windows jobs to pull-request CI only if Actions minutes allow (see the handoff).
 
-```bash
-cargo fmt --all
-CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
-cargo build && cargo test --no-fail-fast
-cd ui && npm run build && cd .. && cargo build && cd ui && npm run test:e2e && cd ..
-PROXYMIND=target/debug/proxymind python3 -m unittest discover -s sdk/python/tests
-cd sdk/typescript && npm run build && PROXYMIND=../../target/debug/proxymind npm test && cd ../..
-# desktop, only when its code changes:
-cd desktop && cargo clippy --all-targets -- -D warnings && cd .. && rm -rf desktop/target
-```
+## 4. How to work (rules that caused trouble before)
+
+- **Branch and PRs**: develop on the branch the session assigns. The owner lets the session open PRs and merge them
+  once CI is green. After a merge, restart the branch from `origin/main` and force-push with lease. The owner makes
+  tags and releases.
+- **Checks before every push** (CI runs the same):
+
+  ```bash
+  cargo fmt --all
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -q --all-targets -- -D warnings
+  CARGO_INCREMENTAL=0 cargo test -q --no-fail-fast; echo "exit $?"   # read the exit code, not a grep of the output
+  cd ui && npm run build && cd .. && cargo build && cd ui && npm run test:e2e && cd ..
+  git checkout -q ui/tsconfig.tsbuildinfo
+  ```
+
+  Build the UI before `cargo build`: the binary embeds `ui/dist`.
+- **Disk**: `target/` passes 20 GB and the disk fills up. Always set `CARGO_INCREMENTAL=0`; when space runs low,
+  delete `target/`, old benchmark folders in the scratchpad and Docker images. Don't run a benchmark and a rebuild
+  at the same time (the benchmark uses `target/debug/proxymind`).
+- **Benchmarks**: `WORK=<scratch>/vs-$(date +%s) BENCH_NO_START=1 PROXYMIND=$PWD/target/debug/proxymind
+  bench/run.sh vulnshop` (VulnShop starts itself). VAmPI and Juice Shop need `dockerd` running and
+  `cd bench && docker compose up -d vampi juice-shop`. Each run takes 10 to 20 minutes; run them in the background.
+  After a scanner change, run all three and compare every finding with the ground truth to count false positives.
+- **Changing discovery or the sweep** changes request counts; `crates/pm-service/tests/discover.rs` asserts them.
+- **Adding a feature**: pure logic in the lowest crate with unit tests → a gated `pm-service` method → MCP tool,
+  API route, CLI command, UI → an integration test and an e2e step → docs (`README.md`, `docs/agents.md`,
+  `docs/handoff.md`, `CHANGELOG.md` under a new "Unreleased" heading).
+- **Version bumps**: every place is listed in `docs/releasing.md`.
+- **Standing rules from the owner**: keep the word "Burp" out of the UI and code comments (factual comparisons in
+  docs are fine) and never reverse-engineer it; no model names in commits, PRs or code; no secrets in commits;
+  don't inspect or use the sandbox's proxy credentials; don't fit the scanner to VulnShop.

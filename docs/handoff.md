@@ -151,7 +151,7 @@ All of this has automated tests and passes CI on Linux, macOS and Windows plus a
 
 ## 4. What's next, and how to do each
 
-**Latest plan: see `docs/next-session.md`** (finish recorded logins, then scan profiles/scheduling/resume, issue library and report templates, plugin platform, then the second tier).
+**Latest plan: see `docs/next-session.md`** (status at 0.2.0, then: publish the release, prove more findings automatically, the last VulnShop misses, score the AI scan, then team mode and the rest). The lettered items below are history; all are done unless next-session says otherwise.
 
 Order from `docs/plan.md`. B and C need things the cloud sandbox doesn't have (noted below); the rest of A is fully doable in the sandbox and is the recommended next phase.
 
