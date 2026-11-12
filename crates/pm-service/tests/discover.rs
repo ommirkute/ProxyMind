@@ -20,9 +20,12 @@ async fn finds_hidden_files_with_the_builtin_list() {
     let r = s.discover(&human, DiscoverRequest { url: format!("{url}/"), ..Default::default() }).await.unwrap();
     let DiscoverResult::Done { found, soft_404, tried, .. } = r else { panic!("{r:?}") };
     assert!(!soft_404, "VulnShop answers 404 at the root");
-    assert_eq!(tried, pm_service::pm_crawl::discover::BUILTIN_WORDS.len());
     let paths: Vec<&str> = found.iter().map(|f| f.url.trim_start_matches(&url)).collect();
-    for p in ["/.git/config", "/.git/HEAD", "/openapi.json", "/robots.txt"] {
+    // Every word once, plus one request with a guessed parameter for each page
+    // that refused without it (VulnShop's `/download` wants `?file=`).
+    let guessed = found.iter().filter(|f| f.note == Some("takes a parameter (guessed)")).count();
+    assert_eq!(tried, pm_service::pm_crawl::discover::BUILTIN_WORDS.len() + guessed);
+    for p in ["/.git/config", "/.git/HEAD", "/openapi.json", "/robots.txt", "/download?file=index.html"] {
         assert!(paths.contains(&p), "{p} in {paths:?}");
     }
     let git = found.iter().find(|f| f.url.ends_with("/.git/config")).unwrap();
