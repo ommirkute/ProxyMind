@@ -42,7 +42,7 @@ The model-free baseline (`proxymind bench auto`) has three steps, all through th
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 33/38 | 2/38 | 0 |
+| VulnShop | 35/38 | 2/38 | 0 |
 | Juice Shop | 9/9 | 1/9 | 0 |
 | VAmPI | 8/8 | 1/8 | 0 |
 
@@ -53,6 +53,8 @@ Measured 2026-10-20 against the pinned images, after scanner step 1 (blind SQL i
 2026-11-06: the sweep adds the Host header, CORS and hidden-parameter checks (VS-19, VS-20, VS-22; only a debug-like name such as `debug` that changes the answer is recorded, as an exposure: on Juice Shop the other names were list filters like `sort`). Discovery now looks inside the folders robots.txt hides (VS-17's 403 page; discovery's 401/403 hits are recorded again as `discover_hit` so the model keeps them for the auth bypass check), tries other API versions of known logins and GETs (`/api/v2/login` next to `/api/login` and `/api/v3/…`: VS-21), and sends the description's XML upload examples, which the OpenAPI parser now builds, so the XXE check has a request (VS-16). Write checks also race described one-time actions (redeem, claim, vote) as a second user; VulnShop's gift card needs a code its description doesn't give, so VS-5 stays missed. VulnShop 31/38, no false positives. 2026-11-07: GraphQL queries that take an id are asked, as another test user, for an object the model knows the owner of (VS-12): 32/38. Still missed: endpoints nothing links to or describes (VS-4, VS-8…VS-11) and the gift-card race (VS-5).
 
 2026-11-09: parameters a page reads though nothing sends them are scanned (hidden-parameter discovery now also notices a changed redirect target), and discovery tries common names of pages that take a URL or file: VulnShop's `/go?url=` open redirect (VS-8) is found, 33/38. `/go` was also header-injectable (found on the way); like `/out` it now refuses control characters. The automatic pass also reads the app's JavaScript for endpoints: on Juice Shop 19 of the 50 new routes its scripts mention exist and get scanned, with no new false positives. Still missed: SSRF and path traversal on endpoints that answer 404 without their parameter (VS-4, VS-9), `/greet` (VS-10), the reset codes (VS-11) and the gift-card race (VS-5).
+
+2026-11-12: discovery's guessed-parameter probe now sends its query (it sent the bare path), the same page names are tried inside API folders the model knows (`/api/fetch` next to `/api/orders/{id}`), and the sweep also scans GETs with a query that failed on its value (400, 404, 410, 422, 5xx: a `?file=` that is not there, a `?url=` that does not resolve), after the ones that worked. VS-4 (SSRF) and VS-9 (path traversal) are found: 35/38, no false positives. Still missed: `/greet` (VS-10, nothing links to it), the reset codes (VS-11, not browsed) and the gift-card race (VS-5).
 
 ## Proxy traffic matrix
 
