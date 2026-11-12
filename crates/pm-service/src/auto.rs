@@ -310,10 +310,41 @@ impl Service {
                     Err(e) => sweep.skipped.push(format!("{}: {e}", spec.url)),
                 }
             }
+            sweep.found += self.folder_param_pages(actor, &origin).await?;
             sweep.versions.extend(self.version_siblings(actor, &origin).await?);
             sweep.js.push(self.js_discover(actor, &origin).await?);
         }
         Ok(sweep)
+    }
+
+    /// Pages that take a URL or a file are often inside the API folder
+    /// (`/api/fetch`), not at the root: looks for them in the app's busiest
+    /// top-level folders (at most four). Returns how many were found.
+    async fn folder_param_pages(&self, actor: &Actor, origin: &str) -> Result<usize> {
+        const STATIC: &[&str] = &["static", "assets", "css", "js", "img", "images", "fonts", "media", "public"];
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for o in self.model()?.operations.iter().filter(|o| o.origin == origin) {
+            let first = o.template.trim_start_matches('/').split('/').next().unwrap_or_default();
+            let deeper = o.template.trim_start_matches('/').contains('/');
+            if deeper && !first.is_empty() && !first.starts_with('{') && !STATIC.contains(&first) {
+                *counts.entry(first.to_string()).or_default() += 1;
+            }
+        }
+        let mut folders: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n >= 2).collect();
+        folders.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut found = 0;
+        for (folder, _) in folders.into_iter().take(4) {
+            let req = DiscoverRequest {
+                url: format!("{origin}/{folder}/"),
+                words: pm_crawl::discover::PARAM_WORDS.iter().map(|w| w.to_string()).collect(),
+                builtin: false,
+                ..Default::default()
+            };
+            if let Ok(DiscoverResult::Done { found: f, .. }) = self.discover(actor, req).await {
+                found += f.len();
+            }
+        }
+        Ok(found)
     }
 
     /// Sends the description's sign-up examples (unauthenticated POSTs to
