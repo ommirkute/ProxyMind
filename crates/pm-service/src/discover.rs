@@ -66,7 +66,11 @@ pub enum DiscoverResult {
 
 fn get_request(u: &Url) -> String {
     let host = pm_core::authority(u.scheme(), u.host_str().unwrap_or(""), u.port_or_known_default().unwrap_or(80));
-    format!("GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ProxyMind-discover\r\nAccept: */*\r\n\r\n", u.path())
+    let target = match u.query() {
+        Some(q) => format!("{}?{q}", u.path()),
+        None => u.path().to_string(),
+    };
+    format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ProxyMind-discover\r\nAccept: */*\r\n\r\n")
 }
 
 fn token() -> Result<String> {
@@ -256,5 +260,18 @@ impl Service {
             "ok",
         )?;
         Ok(DiscoverResult::Done { base: dir.to_string(), tried, found, soft_404, skipped, errors })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_request_keeps_the_query() {
+        let u = Url::parse("http://h:8080/download?file=index.html").unwrap();
+        assert!(get_request(&u).starts_with("GET /download?file=index.html HTTP/1.1\r\nHost: h:8080\r\n"));
+        let u = Url::parse("http://h/a/").unwrap();
+        assert!(get_request(&u).starts_with("GET /a/ HTTP/1.1\r\n"));
     }
 }
