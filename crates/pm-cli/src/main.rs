@@ -578,6 +578,9 @@ enum BenchAction {
         /// Skip the active-scanner sweep
         #[arg(long)]
         no_scan: bool,
+        /// Skip the automatic prove step (pick an oracle per suspected finding and prove it)
+        #[arg(long)]
+        no_prove: bool,
         /// Also run the write checks last: the API description's write operations on a
         /// test user's object, as the owner (ReDoS) and as another user (authorization).
         /// They change data and can slow the server; destructive tier (approval).
@@ -612,6 +615,9 @@ enum FindingAction {
     },
     /// Show one finding with its proofs.
     Show { id: i64 },
+    /// Try to prove a finding (an id), or every suspected finding, with the
+    /// oracle that fits its class; proven ones get a stored proof.
+    Prove { id: Option<i64> },
     /// Mark a finding confirmed.
     Confirm { id: i64 },
     /// Mark a finding as a false positive.
@@ -2222,6 +2228,33 @@ async fn run() -> Result<()> {
                     }
                 }
                 FindingAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.finding_get(*id)?)?),
+                FindingAction::Prove { id } => match id {
+                    Some(id) => {
+                        let r = service.finding_prove(&me, *id).await?;
+                        out!(
+                            "{} finding #{} ({}){}",
+                            if r.proven { "✓ proven" } else { "✗ not proven" },
+                            r.finding_id,
+                            r.vuln_class,
+                            r.oracle.map(|o| format!(" by {o}")).unwrap_or_default()
+                        );
+                        for reason in &r.reasons {
+                            out!("  {reason}");
+                        }
+                    }
+                    None => {
+                        let sweep = service.auto_prove(&me).await?;
+                        out!("{} attempted, {} proven", sweep.attempted, sweep.proven);
+                        for p in sweep.results.iter().filter(|p| p.proven) {
+                            out!(
+                                "  ✓ proven {} (finding #{}) by {}",
+                                p.vuln_class,
+                                p.finding_id,
+                                p.oracle.as_deref().unwrap_or("?")
+                            );
+                        }
+                    }
+                },
                 FindingAction::Confirm { id } => out!("finding {} is now {}", id, set(*id, "confirmed")?["status"]),
                 FindingAction::FalsePositive { id } => {
                     out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
@@ -2889,7 +2922,7 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, write_checks, json } } => {
+        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, no_prove, write_checks, json } } => {
             let service = open_service(&cli.project, None)?;
             let me = human_actor(None)?;
             let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
@@ -2897,12 +2930,14 @@ async fn run() -> Result<()> {
             let graphql = service.graphql_object_access(&me).await?;
             let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
             let writes = if *write_checks { Some(service.auto_write_checks(&me).await?) } else { None };
+            // Prove last, once every suspected finding the other passes recorded exists.
+            let proven = if *no_prove { None } else { Some(service.auto_prove(&me).await?) };
             if *json {
                 out!(
                     "{}",
                     serde_json::to_string_pretty(
                         &serde_json::json!({ "discover": disc, "access_control": r, "graphql": graphql, "scan": sweep,
-                            "writes": writes })
+                            "writes": writes, "prove": proven })
                     )?
                 );
             } else {
@@ -2982,6 +3017,17 @@ async fn run() -> Result<()> {
                     }
                     for n in &w.notes {
                         out!("  {n}");
+                    }
+                }
+                if let Some(pr) = &proven {
+                    out!("prove: {} attempted, {} proven", pr.attempted, pr.proven);
+                    for p in pr.results.iter().filter(|p| p.proven) {
+                        out!(
+                            "  ✓ proven {} (finding #{}) by {}",
+                            p.vuln_class,
+                            p.finding_id,
+                            p.oracle.as_deref().unwrap_or("?")
+                        );
                     }
                 }
             }

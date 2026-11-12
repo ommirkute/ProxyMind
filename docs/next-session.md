@@ -10,8 +10,9 @@ listed is done.
   tag and release in the GitHub UI (tag pushes from the cloud sandbox are refused). Publishing runs
   `.github/workflows/release.yml` (binaries for Linux, macOS and Windows, checksums, SBOM, Docker image).
 - No open pull requests. No work in progress. The session branch equals `main`.
-- Benchmarks without a model (`bench/README.md`): **VulnShop 35/38** (2 proven), **VAmPI 8/8** (1 proven),
-  **Juice Shop 9/9** (1 proven), **0 false positives**.
+- Benchmarks without a model (`bench/README.md`): **VulnShop 35/38** (**12 proven** after the automatic prove step,
+  up from 2), **VAmPI 8/8** (≥1 proven, prove step not re-measured — Docker Hub rate-limited this sandbox),
+  **Juice Shop 9/9** (≥1 proven, same), **0 false positives** on VulnShop.
 - `CHANGELOG.md` lists what 0.2.0 added since 0.1.0.
 
 ## 2. What ProxyMind does today (all working, all with tests)
@@ -42,8 +43,10 @@ layers over it.
 
 Known limits:
 
-- Only 2 to 4 findings per benchmark are **proven**; the rest are "suspected". Proof is ProxyMind's main claim, so
-  this is the biggest gap (see 3.2).
+- The automatic **prove** step (3.2) now proves most VulnShop findings (12/38, up from 2). Remaining gaps: VAmPI and
+  Juice Shop need re-measuring in CI (Docker Hub rate-limited this sandbox), and some classes still have no automatic
+  oracle (header-based time SQLi, NoSQL operator, GraphQL-over-POST IDOR, XXE, host-header, stored/DOM XSS, and the
+  token/cache/OAuth/deserialization classes). Pushing VulnShop from 12 toward 15+ means adding those.
 - VulnShop still misses three planted bugs: VS-10 (SSTI on `/greet`, which nothing links to), VS-11 (reset codes
   that count up; the benchmark never visits the endpoint) and VS-5 (gift-card race that needs a code the app never
   shows).
@@ -62,24 +65,24 @@ Known limits:
    assets exist (five binaries, `SHA256SUMS`, SBOM, desktop installers) and that the update check
    (`pm-service/src/update.rs`) sees 0.2.0 as the newest release.
 
-### 3.2 Prove more of what the scanner finds (recommended main work)
+### 3.2 Prove more of what the scanner finds — **largely done** (2026-11-12)
 
-Goal: after an automatic pass, most findings are "proven", each with a stored proof. Target: VulnShop proven from
-2/38 to at least 15/38, with no false proofs on Juice Shop or VAmPI.
+Goal was: VulnShop proven from 2/38 to at least 15/38, no false proofs. **Delivered: VulnShop 2/38 → 12/38, 0 false
+positives.** The automatic prove step is in `pm-service/src/prove_auto.rs` (`auto_prove`, `finding_prove`), runs at the
+end of `bench auto` (skip with `--no-prove`), and is exposed as `proxymind findings prove [id]`,
+`POST /api/v1/findings/{id}/prove` and `/findings/prove`, MCP `finding_prove`, and an Auto-prove button on the
+Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tests: `boolean_injection`,
+`sql_error` (error-based), `path_traversal`, `marker` (open redirect / CRLF / host); their sends are in
+`pm-service/src/proof.rs`, gated like every other send, and link to findings with `link_proof`. Tests:
+`crates/pm-service/tests/prove_auto.rs` (each oracle proves a real VulnShop bug and rejects its trap).
 
-- Add an automatic "prove" step at the end of `auto` (and a `findings prove` command, API route, MCP tool and UI
-  button) that picks an oracle by vulnerability class and runs it through `proof_run`:
-  - SQL injection: a boolean pair plus a control (true and false conditions give different answers, twice), or the
-    timing oracle with a control delay.
-  - SSRF, XXE, out-of-band SQL injection and command injection: the out-of-band oracle with a fresh payload.
-  - Path traversal: two different known files give their expected markers, and a random name does not.
-  - Open redirect, CRLF, Host header: re-send with a fresh random marker and check the exact header.
-  - XSS: the existing `reflection` oracle (already there; wire it into the automatic step).
-  - IDOR and BFLA: already proven by the matrix; reuse.
-- Pure verdict logic goes in `pm-proof` with unit tests; the sending goes in `pm-service/src/proof.rs`, gated like
-  every other send. Proofs link to findings with `link_proof`.
-- Proven findings then flow into evidence packs and `regress export` without more work; check both in a test.
-- Measure with `bench/run.sh` on all three apps and record the proven counts in `bench/README.md`.
+**Follow-ups to push past 12 toward 15+ (and to finish the measurement):**
+- Re-measure VAmPI and Juice Shop in CI and fill `bench/README.md` (this sandbox was Docker-Hub rate-limited).
+- Add oracles for the classes still suspected: header-based time SQLi (needs to add the insertion-point header to the
+  request, e.g. User-Agent; VS-15), NoSQL operator injection (VS-21), GraphQL-over-POST IDOR (VS-12), blind XXE
+  (VS-16), host-header injection (VS-19), and stored/DOM XSS (VS-23/VS-25, render a different exchange).
+- Confirm proven findings flow into evidence packs and `regress export` (they reuse the stored proofs; add an explicit
+  test if not already covered by `evidence.rs`/`regress.rs`).
 
 ### 3.3 The last VulnShop misses, without fitting the scanner to VulnShop
 

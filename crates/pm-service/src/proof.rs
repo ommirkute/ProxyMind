@@ -45,6 +45,21 @@ pub struct ProofRequest {
     pub raw: Option<String>,
     /// oast: how long to wait for a callback (default 10 s, max 60).
     pub wait_seconds: Option<u64>,
+    /// boolean_injection: [baseline, true-condition, false-condition] raw
+    /// requests. path_traversal: [baseline, control, file-1, file-2, …] where
+    /// each file-N request reads a known file; `markers[N]` is what proves it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raws: Vec<String>,
+    /// path_traversal: a marker expected in each file request's response (same
+    /// order as the file requests in `raws`, i.e. offset by the two leading
+    /// baseline/control requests), e.g. "root:". Values from the target are
+    /// untrusted; these are strings ProxyMind chose, so safe to match on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<String>,
+    /// marker: what to prove — "redirect" (open redirect), "crlf" (CRLF header
+    /// injection) or "host" (Host-header injection). The request goes in `raw`
+    /// with `{{marker}}` where a fresh random value should be placed.
+    pub marker_kind: Option<String>,
     /// timing/oast/reflection: send with this identity's credentials.
     pub identity: Option<String>,
     /// Mark this finding as proven if the proof succeeds.
@@ -149,9 +164,14 @@ impl Service {
             "timing" => self.prove_timing(actor, &req).await?,
             "oast" => self.prove_oast(actor, &req).await?,
             "reflection" => self.prove_reflection(actor, &req).await?,
+            "sql_error" => self.prove_sql_error(actor, &req).await?,
+            "boolean_injection" => self.prove_boolean(actor, &req).await?,
+            "path_traversal" => self.prove_traversal(actor, &req).await?,
+            "marker" => self.prove_marker(actor, &req).await?,
             other => {
                 return invalid(format!(
-                    "unknown oracle {other:?}; use differential_authz, timing, oast or reflection"
+                    "unknown oracle {other:?}; use differential_authz, timing, oast, reflection, boolean_injection, \
+                     path_traversal or marker"
                 ));
             }
         };
@@ -581,6 +601,268 @@ impl Service {
         Ok(Ok((verdict, vec![sent.exchange_id], details)))
     }
 
+    /// Error-based SQL injection: send the baseline, two quote payloads and a
+    /// benign change; a database error that appears only with the quote proves
+    /// the input reaches a SQL statement.
+    #[allow(clippy::type_complexity)]
+    async fn prove_sql_error(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        if req.raws.len() != 4 {
+            return invalid("sql_error needs raws = [baseline, quote, second-quote, benign]");
+        }
+        let endpoint = self.proof_endpoint(req)?;
+        let outs: Vec<_> =
+            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let params = json!({ "raws": req.raws, "identity": req.identity });
+        match self.gate_proof(
+            actor,
+            "proof_sql_error",
+            Tier::ActiveIntrusive,
+            &outs[1],
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let mut sends = Vec::new();
+        for out in &outs {
+            sends.push(self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?.0);
+        }
+        // A database error signature in the (decoded) response body.
+        let db_error = |s: &crate::replay::Sent| {
+            let resp = s.response.clone().unwrap_or_default();
+            let body = String::from_utf8_lossy(pm_http::split_message(&resp).1).into_owned();
+            pm_scan::error_signature(&body).is_some_and(|(_, is_db, _)| is_db)
+        };
+        let verdict = pm_proof::sql_error(&pm_proof::SqlErrorInputs {
+            control_clean: !db_error(&sends[0]),
+            quote_error: db_error(&sends[1]),
+            second_quote_error: db_error(&sends[2]),
+            benign_clean: !db_error(&sends[3]),
+        });
+        let ids: Vec<i64> = sends.iter().map(|s| s.exchange_id).collect();
+        let details = json!({
+            "control_clean": !db_error(&sends[0]), "quote_error": db_error(&sends[1]),
+            "second_quote_error": db_error(&sends[2]), "benign_clean": !db_error(&sends[3]), "exchanges": ids,
+        });
+        Ok(Ok((verdict, ids, details)))
+    }
+
+    /// Boolean-condition injection: send the baseline, a tautology and a
+    /// contradiction, twice. Proven when the tautology returns the normal page
+    /// and the contradiction a clearly different one, consistently.
+    #[allow(clippy::type_complexity)]
+    async fn prove_boolean(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        if req.raws.len() != 3 {
+            return invalid("boolean_injection needs raws = [baseline, true-condition, false-condition]");
+        }
+        let endpoint = self.proof_endpoint(req)?;
+        let base = self.outgoing(endpoint.clone(), req.raws[0].as_bytes(), true)?;
+        let tcond = self.outgoing(endpoint.clone(), req.raws[1].as_bytes(), true)?;
+        let fcond = self.outgoing(endpoint, req.raws[2].as_bytes(), true)?;
+        let params = json!({ "raws": req.raws, "identity": req.identity });
+        match self.gate_proof(
+            actor,
+            "proof_boolean",
+            Tier::ActiveIntrusive,
+            &tcond,
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let mut ids = Vec::new();
+        let mut rounds = Vec::new();
+        for _ in 0..2 {
+            let (b, _) = self.send_as(actor, &base, req.identity.as_deref(), true, "proof").await?;
+            let (t, _) = self.send_as(actor, &tcond, req.identity.as_deref(), true, "proof").await?;
+            let (f, _) = self.send_as(actor, &fcond, req.identity.as_deref(), true, "proof").await?;
+            ids.extend([b.exchange_id, t.exchange_id, f.exchange_id]);
+            rounds.push((b, t, f));
+        }
+        let sim = |a: &crate::replay::Sent, c: &crate::replay::Sent, noise: &pm_diff::NoiseMask| {
+            pm_diff::diff(&a.response.clone().unwrap_or_default(), &c.response.clone().unwrap_or_default(), noise)
+                .similarity
+        };
+        let split = |b: &crate::replay::Sent, t: &crate::replay::Sent, f: &crate::replay::Sent| {
+            let noise =
+                pm_diff::learn_noise(&b.response.clone().unwrap_or_default(), &t.response.clone().unwrap_or_default());
+            (sim(b, t, &noise), sim(b, f, &noise), sim(t, f, &noise))
+        };
+        let (ts1, fs1, tf1) = split(&rounds[0].0, &rounds[0].1, &rounds[0].2);
+        let (ts2, _fs2, tf2) = split(&rounds[1].0, &rounds[1].1, &rounds[1].2);
+        let repeated = ts1 >= 0.9 && ts2 >= 0.9 && tf1 <= 0.85 && tf2 <= 0.85;
+        let verdict = pm_proof::boolean_injection(&pm_proof::BooleanInputs {
+            true_similarity: ts1,
+            false_similarity: fs1,
+            true_false_similarity: tf1,
+            status_true: rounds[0].1.status,
+            status_false: rounds[0].2.status,
+            repeated_consistent: repeated,
+        });
+        let details = json!({
+            "true_similarity": ts1, "false_similarity": fs1, "true_false_similarity": tf1,
+            "round2": { "true_similarity": ts2, "true_false_similarity": tf2 },
+            "statuses": { "true": rounds[0].1.status, "false": rounds[0].2.status },
+            "exchanges": ids,
+        });
+        Ok(Ok((verdict, ids, details)))
+    }
+
+    /// Path traversal: read known files and confirm a bogus name reads nothing.
+    #[allow(clippy::type_complexity)]
+    async fn prove_traversal(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        if req.raws.len() < 3 || req.markers.len() != req.raws.len() - 2 {
+            return invalid(
+                "path_traversal needs raws = [baseline, control, file-1, …] and one marker per file request",
+            );
+        }
+        let endpoint = self.proof_endpoint(req)?;
+        let outs: Vec<_> =
+            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let params = json!({ "raws": req.raws, "markers": req.markers, "identity": req.identity });
+        // The first file request carries the traversal payload: gate on it.
+        match self.gate_proof(
+            actor,
+            "proof_traversal",
+            Tier::ActiveIntrusive,
+            &outs[2],
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let mut sends = Vec::new();
+        for out in &outs {
+            sends.push(self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?.0);
+        }
+        let body = |s: &crate::replay::Sent| {
+            String::from_utf8_lossy(pm_http::split_message(&s.response.clone().unwrap_or_default()).1).into_owned()
+        };
+        let baseline_body = body(&sends[0]);
+        let control_body = body(&sends[1]);
+        let mut markers_found = Vec::new();
+        let mut differs = false;
+        for (i, m) in req.markers.iter().enumerate() {
+            let fb = body(&sends[i + 2]);
+            if fb.contains(m.as_str()) && !baseline_body.contains(m.as_str()) {
+                markers_found.push(format!("{:?}: {m}", req.raws[i + 2].lines().next().unwrap_or_default()));
+                let noise = pm_diff::learn_noise(
+                    &sends[0].response.clone().unwrap_or_default(),
+                    &sends[0].response.clone().unwrap_or_default(),
+                );
+                if pm_diff::diff(
+                    &sends[0].response.clone().unwrap_or_default(),
+                    &sends[i + 2].response.clone().unwrap_or_default(),
+                    &noise,
+                )
+                .similarity
+                    < 0.9
+                {
+                    differs = true;
+                }
+            }
+        }
+        // The bogus name must not read any of the files back.
+        let control_clean = !req.markers.iter().any(|m| control_body.contains(m.as_str()));
+        let verdict = pm_proof::path_traversal(&pm_proof::TraversalInputs {
+            markers_found: markers_found.clone(),
+            control_clean,
+            differs_from_baseline: differs,
+        });
+        let ids: Vec<i64> = sends.iter().map(|s| s.exchange_id).collect();
+        let details = json!({ "markers_found": markers_found, "control_clean": control_clean, "exchanges": ids });
+        Ok(Ok((verdict, ids, details)))
+    }
+
+    /// Marker oracle: inject a fresh random marker and check it reaches the one
+    /// dangerous place — the redirect target's host, an injected response
+    /// header, or a reflected absolute URL.
+    #[allow(clippy::type_complexity)]
+    async fn prove_marker(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        let raw =
+            req.raw.clone().ok_or_else(|| ServiceError::Invalid("marker needs raw containing {{marker}}".into()))?;
+        if !raw.contains("{{marker}}") {
+            return invalid("put {{marker}} in raw where a fresh random value should go");
+        }
+        let kind = req.marker_kind.clone().unwrap_or_default();
+        let (label, hit_kind) = match kind.as_str() {
+            "redirect" => ("open redirect", MarkerHit::RedirectHost),
+            "crlf" => ("CRLF header injection", MarkerHit::ResponseHeader),
+            "host" => ("Host-header injection", MarkerHit::Reflected),
+            _ => return invalid("marker_kind must be \"redirect\", \"crlf\" or \"host\""),
+        };
+        let endpoint = self.proof_endpoint(req)?;
+        let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let params = json!({ "raw": raw, "marker_kind": kind, "identity": req.identity });
+        match self.gate_proof(
+            actor,
+            "proof_marker",
+            Tier::ActiveIntrusive,
+            &template,
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let marker = marker_token()?;
+        let filled = raw.replace("{{marker}}", &marker);
+        let out = self.outgoing(endpoint, filled.as_bytes(), true)?;
+        let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
+        let resp = sent.response.clone().unwrap_or_default();
+        let (hit, detail) = marker_lands(&resp, &marker, hit_kind, &out.endpoint.host);
+        let verdict = pm_proof::marker(&pm_proof::MarkerInputs {
+            label: label.into(),
+            marker: marker.clone(),
+            hit,
+            control_hit: false,
+            detail: detail.clone(),
+        });
+        let details = json!({ "marker": marker, "marker_kind": kind, "hit": hit, "detail": detail,
+                              "exchange": sent.exchange_id });
+        Ok(Ok((verdict, vec![sent.exchange_id], details)))
+    }
+
+    /// Endpoint for an oracle that works from a template, from exchange_id or url.
+    fn proof_endpoint(&self, req: &ProofRequest) -> Result<Endpoint> {
+        match (req.exchange_id, &req.url) {
+            (Some(id), _) => Ok(self.exchange_outgoing(id)?.0.endpoint),
+            (None, Some(u)) => parse_url_endpoint(u),
+            _ => invalid("needs exchange_id or url"),
+        }
+    }
+
     /// Where payloads should send callbacks (the OAST listener's public URL).
     pub fn set_oast_public_url(&self, url: &str) -> Result<()> {
         url::Url::parse(url).map_err(|e| ServiceError::Invalid(format!("bad OAST url: {e}")))?;
@@ -706,6 +988,74 @@ fn xss_token() -> Result<String> {
     let mut b = [0u8; 10];
     SystemRandom::new().fill(&mut b).map_err(|_| ServiceError::Invalid("no system randomness".into()))?;
     Ok(format!("pm{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>()))
+}
+
+/// A fresh, unguessable marker safe to use inside a host label (letters and
+/// digits only) so a reflected copy can only have come from our injection.
+fn marker_token() -> Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 8];
+    SystemRandom::new().fill(&mut b).map_err(|_| ServiceError::Invalid("no system randomness".into()))?;
+    Ok(format!("pm{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>()))
+}
+
+/// Where a marker has to land for the marker oracle to count it a hit.
+#[derive(Debug, Clone, Copy)]
+enum MarkerHit {
+    /// The redirect target's host contains the marker (open redirect).
+    RedirectHost,
+    /// A response header name or value contains the marker (CRLF injection).
+    ResponseHeader,
+    /// The marker is reflected in a Location or absolute URL (Host injection).
+    Reflected,
+}
+
+/// Decides whether `marker` reached the dangerous place in a recorded
+/// response, and returns short printable evidence. `self_host` is the target's
+/// own host, so a redirect back to it is not counted.
+fn marker_lands(resp: &[u8], marker: &str, kind: MarkerHit, self_host: &str) -> (bool, String) {
+    let (head, body) = pm_http::split_message(resp);
+    let Ok(parsed) = pm_http::parse_response_head(head) else {
+        return (false, "could not parse the response".into());
+    };
+    let header = |name: &str| {
+        parsed
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .map(|h| String::from_utf8_lossy(&h.value).into_owned())
+    };
+    match kind {
+        MarkerHit::RedirectHost => {
+            let Some(loc) = header("location") else { return (false, "no Location header".into()) };
+            let host = url::Url::parse(&loc)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .or_else(|| loc.trim_start_matches(['/', '\\']).split(['/', '?', '#']).next().map(str::to_string))
+                .unwrap_or_default();
+            let hit = host.contains(marker) && !host.eq_ignore_ascii_case(self_host);
+            (hit, format!("Location: {}", loc.chars().take(120).collect::<String>()))
+        }
+        MarkerHit::ResponseHeader => {
+            let found = parsed.headers.iter().find(|h| {
+                h.name.to_ascii_lowercase().contains(marker)
+                    || String::from_utf8_lossy(&h.value).to_ascii_lowercase().contains(marker)
+            });
+            match found {
+                Some(h) => (true, format!("response header {}: {}", h.name, String::from_utf8_lossy(&h.value))),
+                None => (false, "no response header carried the marker".into()),
+            }
+        }
+        MarkerHit::Reflected => {
+            if let Some(loc) = header("location").filter(|l| l.contains(marker)) {
+                return (true, format!("Location: {}", loc.chars().take(120).collect::<String>()));
+            }
+            let body = String::from_utf8_lossy(body);
+            let needle = format!("//{marker}");
+            let hit = body.contains(&needle) || body.contains(&format!("{marker}."));
+            (hit, if hit { format!("marker reflected in an absolute URL ({marker})") } else { "not reflected".into() })
+        }
+    }
 }
 
 /// For a template using {{token}} in a payload of the user's own, the

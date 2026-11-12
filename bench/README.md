@@ -32,19 +32,22 @@ BENCH_AGENT='claude -p "Use the proxymind MCP server to find and prove vulnerabi
 
 The nightly workflow runs the baseline on VulnShop, VAmPI and Juice Shop and posts the scores in the job summary.
 
-The model-free baseline (`proxymind bench auto`) has three steps, all through the policy gate:
+The model-free baseline (`proxymind bench auto`) has four steps, all through the policy gate:
 
 1. **Discovery**: hidden files at each origin's root. Sensitive ones (source control, `.env`, dumps, metrics) become suspected *exposure* findings, one per kind. An API description that turns up is imported and its GET examples sent, so the next steps see those endpoints.
 2. **Access control**: every candidate the app model suggests (objects with a known owner, admin-looking operations) is replayed as the other identities; leaks are recorded and proven, unprovable ones dropped. Data an anonymous request also gets is public, not a leak.
 3. **Active sweep**: the active scanner runs once over each recorded GET operation with parameters (query values and path identifiers, including words like `/users/v1/{username}`); SQL errors, template evaluation, file reads and open redirects become suspected findings.
+4. **Prove** (`--no-prove` to skip): each suspected finding is handed to the oracle that fits its class — boolean/time-based for SQLi, timing for command injection, out-of-band for SSRF, the headless browser for reflected XSS, two-file reads for path traversal, a fresh marker for open redirect and CRLF, and the differential oracle for IDOR/BFLA. A finding that proves gets a stored proof and is marked proven.
 
 ## Baseline today (no agent)
 
 | App | Found | Proven | False positives |
 |---|---|---|---|
-| VulnShop | 35/38 | 2/38 | 0 |
-| Juice Shop | 9/9 | 1/9 | 0 |
-| VAmPI | 8/8 | 1/8 | 0 |
+| VulnShop | 35/38 | 12/38 | 0 |
+| Juice Shop | 9/9 | ≥1/9 | 0 |
+| VAmPI | 8/8 | ≥1/8 | 0 |
+
+Measured 2026-11-12 after the automatic **prove** step was added (`bench auto`, step 4): VulnShop's proven count went from 2/38 to **12/38** with no false positives (`unmatched_findings` and `findings_on_secure_endpoints` both empty). The prove step picks an oracle by class and verifies each suspected finding: VS-1/VS-2 (IDOR/BFLA, differential), VS-3 (boolean SQLi), VS-7/VS-26/VS-38 (error-based SQLi), VS-4 (SSRF, out-of-band), VS-6 (reflected XSS, headless browser), VS-8 (open redirect, marker), VS-9 (path traversal, two-file), VS-14 (command injection, timing) and VS-18 (CRLF, marker). Still suspected (no automatic oracle yet or out of reach): VS-15 (time-based SQLi in the User-Agent header, whose insertion point the recorded baseline lacks), VS-12 (GraphQL IDOR over POST), VS-16 (blind XXE), VS-19 (host-header), VS-21 (NoSQL operator), VS-23/VS-25 (stored/DOM XSS) and the token/cache/OAuth/deserialization classes. VAmPI and Juice Shop were **not** re-measured on this machine (Docker Hub rate-limited image pulls here); their rows show the lower bound from the differential oracle and should be re-measured in CI — the prove step only runs the same rigorous, control-checked oracles there, and every oracle rejects its VulnShop trap in `crates/pm-service/tests/prove_auto.rs` and `crates/pm-service/tests/proof.rs`.
 
 Measured 2026-11-06 for VAmPI (8/8): `bench auto --write-checks` (destructive tier, allowed by the bench rules) tries the description's write operations on a test user's object: a ReDoS probe as the owner (VA-7) and the write as the other user, read back to tell a cross-user change from the caller's own (VA-4). Before that, on 2026-11-05 (6/8): the OpenAPI import now resolves an empty server URL to the document's folder (examples were sent to `/openapi.json/...`), skips GET examples that change state (`/createdb`), and the baseline sends the description's sign-up example with unique account values, so the mass-assignment check (which now also reads back account listings) finds VA-5. Measured 2026-10-26 after the detection pass driven by these benchmarks: logins are scanned (SQL injection in Juice Shop's login, JS-1; account enumeration in VAmPI's, VA-6), password changes are re-sent without the current password (JS-6), sign-ups get a unique email per probe (JS-4), discovery finds debug endpoints that leak credentials under API collections (VA-2) and confidential files in directory listings (JS-8, which needed the HTTP client to keep a body the server cut short), the access-control pass flags responses that show another test user's email (JS-5), and reflected input becomes an XSS finding (VS-6). VAmPI's remaining misses need state-changing tests (VA-4 changes another user's password, VA-5's sign-up doesn't echo the admin flag) or a ReDoS (VA-7).
 

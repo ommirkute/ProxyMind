@@ -266,6 +266,9 @@ try {
   await page.getByLabel("Severity").selectOption("high");
   await page.getByLabel("Evidence").fill(String(orderId));
   await page.getByRole("button", { name: "Save" }).click();
+  // A suspected finding offers Auto-prove (pick an oracle by class) before it is proven.
+  await page.getByTestId("auto-prove").waitFor({ timeout: 15000 });
+  check(true, "a suspected finding offers Auto-prove");
   await page.getByLabel("Attacker").selectOption("bob");
   await page.getByTestId("prove").click();
   await page.waitForSelector('[data-testid="proof-result"]');

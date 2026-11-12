@@ -3,6 +3,21 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
+## Unreleased
+
+### Proof
+
+- **Automatic proving.** A new step turns the scanner's *suspected* findings into *proven* ones: it picks the oracle
+  that fits each finding's class, rebuilds the request from its evidence and runs it through the policy gate. SQL
+  injection is proven by a boolean true/false split (or the timing oracle), command injection by timing, SSRF by an
+  out-of-band callback, reflected XSS in the headless browser, path traversal by reading known files while a bogus
+  name reads nothing, and open redirect and CRLF by a fresh random marker reaching the redirect target or a response
+  header. IDOR and BFLA reuse the differential oracle. It runs at the end of `proxymind bench auto` (skip with
+  `--no-prove`), as `proxymind findings prove [id]`, over the API (`POST /api/v1/findings/{id}/prove`,
+  `POST /api/v1/findings/prove`), as the MCP tool `finding_prove`, and from an **Auto-prove** button on the Findings
+  page. Also exposed as new `proof_run` oracles `boolean_injection`, `path_traversal` and `marker`. SDKs gain
+  `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
+
 ## 0.2.0 (2026-11-12)
 
 ### AI testing

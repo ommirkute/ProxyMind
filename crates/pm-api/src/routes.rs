@@ -188,6 +188,8 @@ pub fn api() -> Router<AppState> {
         .route("/findings", get(findings).post(finding_create))
         .route("/findings/{id}", get(finding).patch(finding_update))
         .route("/findings/{id}/retest", post(finding_retest))
+        .route("/findings/{id}/prove", post(finding_prove))
+        .route("/findings/prove", post(findings_prove_all))
         .route("/library", get(library))
         .route("/report/templates", get(report_templates).post(report_template_save))
         .route("/report/templates/{name}", axum::routing::delete(report_template_delete))
@@ -944,6 +946,14 @@ async fn regress_export(State(st): State<AppState>) -> Result<Response, ApiError
 
 async fn coverage_proof(State(st): State<AppState>) -> ApiResult {
     ok(st.service.coverage_proof()?)
+}
+
+async fn finding_prove(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.finding_prove(&st.actor, id).await?)
+}
+
+async fn findings_prove_all(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.auto_prove(&st.actor).await?)
 }
 
 async fn finding_retest(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {

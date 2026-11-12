@@ -130,7 +130,8 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `hypothesis_create` / `hypothesis_update` / `hypothesis_list` | The shared ledger of what is being tested and what was ruled out |
 | `coverage` | Each operation × relevant vulnerability class, untested and high-priority first |
 | `finding_create` / `finding_update` / `finding_list` | Record findings with evidence; agents can't mark them proven or confirmed |
-| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast` or `reflection` |
+| `finding_prove` | Pick the oracle that fits a finding's class and prove it: boolean/time-based (SQLi), out-of-band (SSRF), the browser (XSS), two-file reads (path traversal), a fresh marker (open redirect/CRLF), the differential oracle (IDOR/BFLA) |
+| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast`, `reflection`, `boolean_injection`, `path_traversal` or `marker` |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.

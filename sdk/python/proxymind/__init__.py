@@ -249,6 +249,14 @@ class Client:
     def proof(self, proof_id: int) -> dict:
         return self._get(f"/proofs/{proof_id}")
 
+    def finding_prove(self, finding_id: int) -> dict:
+        """Try to prove a finding with the oracle that fits its class."""
+        return self._post(f"/findings/{finding_id}/prove", {})
+
+    def findings_prove_all(self) -> dict:
+        """Prove every suspected finding whose class has an oracle."""
+        return self._post("/findings/prove", {})
+
     def approvals(self, status: Optional[str] = None) -> list:
         """Approvals, all by default; status: pending, approved, denied, used."""
         return self._get("/approvals", status=status or "all")

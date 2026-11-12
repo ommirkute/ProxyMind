@@ -818,6 +818,15 @@ pub fn tool_definitions() -> Vec<Value> {
             &["id"],
         ),
         tool(
+            "finding_prove",
+            "Try to prove a suspected finding: picks the oracle that fits its class (boolean/time-based for SQLi, \
+             out-of-band for SSRF, the headless browser for XSS, two-file reads for path traversal, a fresh marker \
+             for open redirect/CRLF, the differential oracle for IDOR/BFLA), rebuilds the request from its evidence \
+             and runs it through proof_run. A proof is stored and the finding becomes 'proven' on success.",
+            json!({ "id": {"type":"integer"} }),
+            &["id"],
+        ),
+        tool(
             "issue_library",
             "What a kind of issue is, its impact, how to fix it, and its CWE and OWASP categories. Give a finding \
              class or scanner check (e.g. sqli, reflected_input, idor); without one, lists every entry's id and name.",
@@ -1397,6 +1406,15 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
             }
             let g: A = args(a)?;
             service.finding_retest(actor, g.id).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "finding_prove" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                id: i64,
+            }
+            let g: A = args(a)?;
+            service.finding_prove(actor, g.id).await.map(to_json).map_err(|e| e.to_string())
         }
         "issue_library" => {
             #[derive(serde::Deserialize)]
