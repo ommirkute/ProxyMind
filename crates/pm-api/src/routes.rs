@@ -134,6 +134,9 @@ pub fn api() -> Router<AppState> {
         .route("/authz/check", post(authz_check))
         .route("/authz/results", get(authz_results))
         .route("/authz/candidates", get(authz_candidates))
+        .route("/authz/matrix", post(authz_matrix))
+        .route("/model/snapshots", get(model_snapshots).post(model_snapshot_save))
+        .route("/model/changes", get(model_changes))
         .route("/model", get(model))
         .route("/coverage", get(coverage))
         .route("/scan/issues", get(scan_issues))
@@ -390,6 +393,34 @@ async fn identity_learn_logged_out(State(st): State<AppState>, Path(name): Path<
 
 async fn history_mark(State(st): State<AppState>) -> ApiResult {
     ok(serde_json::json!({ "id": st.service.history_mark()? }))
+}
+
+async fn authz_matrix(State(st): State<AppState>, Json(r): Json<pm_service::AuthzMatrixRequest>) -> ApiResult {
+    ok(st.service.authz_matrix(&st.actor, r).await?)
+}
+
+async fn model_snapshots(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.model_snapshot_list()?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotBody {
+    name: String,
+}
+
+async fn model_snapshot_save(State(st): State<AppState>, Json(b): Json<SnapshotBody>) -> ApiResult {
+    ok(st.service.model_snapshot_save(&st.actor, &b.name)?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangesQuery {
+    snapshot: i64,
+}
+
+async fn model_changes(State(st): State<AppState>, Query(q): Query<ChangesQuery>) -> ApiResult {
+    ok(st.service.model_changes(q.snapshot)?)
 }
 
 async fn authz_check(State(st): State<AppState>, Json(r): Json<AuthzCheckRequest>) -> ApiResult {

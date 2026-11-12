@@ -328,6 +328,17 @@ CREATE TABLE agent_memory (
 );
 CREATE INDEX agent_memory_host ON agent_memory(host);
 "#,
+    r#"
+-- Saved snapshots of the app model (operations, parameters, statuses), to
+-- compare a later engagement with ("what changed since the last test").
+CREATE TABLE model_snapshots (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    created_ms  INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1417,6 +1428,7 @@ impl Store {
             ],
             "attack_paths" => &["scan_id", "title", "impact", "severity", "steps", "actor", "created_ms"],
             "agent_memory" => &["host", "kind", "text", "actor", "created_ms"],
+            "model_snapshots" => &["name", "created_ms", "actor", "data"],
             "oast_probes" => &[
                 "token",
                 "check_name",

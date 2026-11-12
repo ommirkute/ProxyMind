@@ -554,6 +554,24 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "authz_matrix",
+            "The authorization matrix: every readable operation replayed as every identity and anonymously, as a \
+             role x endpoint grid (owner, same_as_owner, allowed_different, denied…). Cells where someone else gets \
+             the owner's data are flagged as idor, bfla (a lower role gets a privileged role's data) or no_auth. With \
+             prove=true each flag is proven with the differential oracle and proven ones become findings. GET/HEAD \
+             only; every request goes through the rules of engagement.",
+            json!({ "prove": {"type":"boolean"}, "max_operations": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
+            "model_changes",
+            "What changed since a saved model snapshot (a person saves them, e.g. at the end of the last test): new, \
+             removed and changed operations (parameters, statuses, credentials), and a retest list that includes \
+             earlier findings on changed endpoints. Without snapshot_id, lists the snapshots. Sends nothing.",
+            json!({ "snapshot_id": {"type":"integer"} }),
+            &[],
+        ),
+        tool(
             "traffic_triage",
             "Recorded requests worth testing, most promising first, each with why and what to try: object ids in \
              paths, URL/file/command-like parameters, reflected input, JWTs (alg none, HS*, kid/jku), uploads, \
@@ -1118,6 +1136,22 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "engage_logic" => {
             let f: pm_service::EngageFilter = args(a)?;
             service.engage_logic(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "authz_matrix" => {
+            let r: pm_service::AuthzMatrixRequest = args(a)?;
+            service.authz_matrix(actor, r).await.map(to_json).map_err(|e| e.to_string())
+        }
+        "model_changes" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(deny_unknown_fields)]
+            struct A {
+                snapshot_id: Option<i64>,
+            }
+            let g: A = args(a)?;
+            match g.snapshot_id {
+                Some(id) => service.model_changes(id).map(to_json).map_err(|e| e.to_string()),
+                None => service.model_snapshot_list().map(to_json).map_err(|e| e.to_string()),
+            }
         }
         "traffic_triage" => {
             #[derive(serde::Deserialize, Default)]

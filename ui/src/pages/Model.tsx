@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type Coverage, type ModelObject, type Operation } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, StatusCode, useAction, useLoad, useNav } from "../components";
 
@@ -23,6 +23,7 @@ export default function Model() {
 
   return (
     <div className="content">
+      <ChangesPanel />
       <CrawlPanel />
       <DiscoverPanel />
       <OpenApiPanel />
@@ -421,6 +422,67 @@ function DiscoverPanel() {
             </>
           )}
         </>
+      )}
+    </Panel>
+  );
+}
+
+interface Snapshot { id: number; name: string; created_ms: number; actor: string; operations: number }
+interface OpShape { method: string; template: string }
+interface RetestItem { operation: string; why: string; findings?: number[] }
+interface Changes { since: string; added: OpShape[]; removed: OpShape[]; changed: unknown[]; unchanged: number; retest: RetestItem[] }
+
+/** What changed since the last test: save model snapshots and compare with one. */
+function ChangesPanel() {
+  const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
+  const [name, setName] = useState("");
+  const [pick, setPick] = useState("");
+  const [c, setC] = useState<Changes | null>(null);
+  const action = useAction();
+  const load = () => api.get<Snapshot[]>("/model/snapshots").then((s) => { setSnaps(s); if (!pick && s[0]) setPick(String(s[0].id)); }).catch(() => setSnaps([]));
+  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const save = () => action.run(async () => { await api.post("/model/snapshots", { name }); setName(""); await load(); });
+  const compare = () => action.run(async () => setC(await api.get<Changes>(`/model/changes?snapshot=${pick}`)));
+  return (
+    <Panel title="Changes since the last test">
+      <p className="small muted">
+        Save a snapshot of the app model at the end of a test. Next time, compare with it to see new, changed and removed
+        endpoints, and the earlier findings on changed ones, so the retest starts there. Endpoints are matched by method
+        and path, so a staging snapshot compares with production.
+      </p>
+      <div className="row">
+        <input aria-label="Snapshot name" placeholder="snapshot name, e.g. Q3 test" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 220 }} />
+        <button className="btn" onClick={() => void save()} disabled={action.busy || !name.trim()} data-testid="snapshot-save">Save snapshot</button>
+        {snaps && snaps.length > 0 && (
+          <>
+            <select aria-label="Compare with" value={pick} onChange={(e) => setPick(e.target.value)}>
+              {snaps.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.operations} ops, {new Date(s.created_ms).toLocaleDateString()})</option>)}
+            </select>
+            <button className="btn primary" onClick={() => void compare()} disabled={action.busy || !pick} data-testid="changes-compare">Compare</button>
+          </>
+        )}
+      </div>
+      <ErrorBox error={action.error} />
+      {c && (
+        <div data-testid="changes-result">
+          <p className="small">
+            Since {c.since}: <b>{c.added.length}</b> new · <b>{c.changed.length}</b> changed · {c.removed.length} removed · {c.unchanged} unchanged
+          </p>
+          {c.retest.length === 0 ? <Empty>Nothing changed.</Empty> : (
+            <table className="grid">
+              <thead><tr><th>Operation</th><th>Why retest</th><th>Earlier findings</th></tr></thead>
+              <tbody>
+                {c.retest.map((r, i) => (
+                  <tr key={i}>
+                    <td className="mono small">{r.operation}</td>
+                    <td className="small">{r.why}</td>
+                    <td className="small">{(r.findings ?? []).map((f) => <a key={f} href={`#/findings/${f}`} style={{ marginRight: 6 }}>#{f}</a>)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       )}
     </Panel>
   );

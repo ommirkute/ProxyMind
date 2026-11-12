@@ -140,6 +140,22 @@ enum Command {
         #[command(subcommand)]
         action: RegressAction,
     },
+    /// What changed since the last test: save model snapshots and compare with one, or with an older project.
+    Changes {
+        /// Save the current model as a snapshot with this name (e.g. at the end of a test).
+        #[arg(long)]
+        save: Option<String>,
+        /// Compare with this snapshot (name or id; default: the newest).
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Compare with another project file instead (e.g. last year's engagement).
+        #[arg(long)]
+        since: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
     /// Check an evidence pack: signature, file hashes, audit chain, scope, evidence. Needs no project.
     Verify {
         pack: PathBuf,
@@ -894,6 +910,19 @@ enum AuthzAction {
         exchange: Option<i64>,
         #[arg(long)]
         json: bool,
+    },
+    /// Every readable operation as every identity: a role x endpoint grid with flagged cells.
+    Matrix {
+        /// Prove each flagged cell and record proven ones as findings.
+        #[arg(long)]
+        prove: bool,
+        /// Most operations to test (default 40).
+        #[arg(long)]
+        max: Option<usize>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "actor")]
+        actor: Option<String>,
     },
 }
 
@@ -1718,6 +1747,62 @@ async fn run() -> Result<()> {
             }
             if still > 0 || errors > 0 {
                 std::process::exit(1);
+            }
+        }
+        Command::Changes { save, snapshot, since, json, actor } => {
+            let service = open_service(&cli.project, None)?;
+            if let Some(name) = save {
+                let s = service.model_snapshot_save(&human_actor(actor.as_deref())?, name)?;
+                out!("✓ snapshot #{} \"{}\": {} operation(s)", s.id, s.name, s.operations);
+                return Ok(());
+            }
+            let c = match since {
+                Some(path) => {
+                    let other = pm_service::Service::new(
+                        pm_service::pm_store::Store::open(path)?,
+                        Policy::new((*service.policy().roe()).clone()),
+                    )?;
+                    service.model_changes_from(&format!("project {}", path.display()), &other.model_shapes()?)?
+                }
+                None => {
+                    let snaps = service.model_snapshot_list()?;
+                    let pick = match snapshot {
+                        Some(s) => snaps.iter().find(|x| x.name == *s || x.id.to_string() == *s),
+                        None => snaps.first(),
+                    };
+                    let Some(pick) = pick else {
+                        anyhow::bail!(
+                            "no such snapshot; save one with `proxymind changes --save NAME` or use --since OTHER.pmproj"
+                        )
+                    };
+                    service.model_changes(pick.id)?
+                }
+            };
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&c)?);
+            } else {
+                out!(
+                    "Since {}: {} new, {} changed, {} removed, {} unchanged",
+                    c.since,
+                    c.added.len(),
+                    c.changed.len(),
+                    c.removed.len(),
+                    c.unchanged
+                );
+                for r in &c.retest {
+                    let f = if r.findings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "  (findings {})",
+                            r.findings.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(", ")
+                        )
+                    };
+                    out!("  {:<48} {}{f}", r.operation, r.why);
+                }
+                for r in &c.removed {
+                    out!("  gone: {} {}", r.method, r.template);
+                }
             }
         }
         Command::Verify { pack, json } => {
@@ -3310,6 +3395,46 @@ async fn run() -> Result<()> {
                 Ok(())
             };
             match action {
+                AuthzAction::Matrix { prove, max, json, actor } => {
+                    let m = service
+                        .authz_matrix(
+                            &human_actor(actor.as_deref())?,
+                            pm_service::AuthzMatrixRequest { prove: *prove, max_operations: *max },
+                        )
+                        .await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&m)?);
+                    } else {
+                        let cols: Vec<&str> = m.identities.iter().map(|(n, _)| n.as_str()).collect();
+                        out!("{:<48} {}", "OPERATION", cols.iter().map(|c| format!("{c:<14}")).collect::<String>());
+                        for r in &m.rows {
+                            let cells: String = cols
+                                .iter()
+                                .map(|c| {
+                                    let v = r.cells.get(*c).map_or("-", |x| x.verdict.as_str());
+                                    format!(
+                                        "{:<14}",
+                                        v.replace("same_as_owner", "SAME DATA")
+                                            .replace("allowed_different", "own data")
+                                    )
+                                })
+                                .collect();
+                            out!("{:<48} {cells}", r.operation.chars().take(47).collect::<String>());
+                            for f in &r.flags {
+                                let proven = match (f.proven, f.finding_id) {
+                                    (Some(true), Some(id)) => format!(" — proven, finding #{id}"),
+                                    (Some(false), _) => " — not proven".into(),
+                                    _ => String::new(),
+                                };
+                                out!("    ! {} {}: {}{proven}", f.kind, f.identity, f.why);
+                            }
+                        }
+                        out!("{} operation(s), {} flagged, {} proven", m.rows.len(), m.flagged, m.proven);
+                        for s in &m.skipped {
+                            out!("  skipped {s}");
+                        }
+                    }
+                }
                 AuthzAction::Check { exchange_id, identities, no_anonymous, json } => {
                     let report = service
                         .authz_check(

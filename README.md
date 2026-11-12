@@ -154,6 +154,8 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - Proof oracles: differential authz, timing, OAST, XSS in headless Chromium
 - **Coverage proof**: every operation × vulnerability class, who tested it and how (scanner checks, authz checks, proofs), and what nobody tested
 - **Signed evidence packs** the client verifies themselves (`proxymind evidence`, `proxymind verify`)
+- **Authorization matrix**: every endpoint as every role, as one grid; IDOR, missing function-level checks and missing login flagged and proven automatically
+- **What changed since the last test**: model snapshots and a diff that points the retest at new and changed endpoints
 - **Findings as CI regression tests**: every proven finding exports as a test developers run against staging until it's fixed (`proxymind regress run`, JUnit output)
 - Issue library with CWE/OWASP mapping and fix advice
 - Reports in **HTML, Markdown, JSON and SARIF**; executive, technical, compliance or your own template

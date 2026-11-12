@@ -190,6 +190,7 @@ export default function Authz() {
 
   return (
     <div className="content">
+      <Matrix onDone={() => results.reload()} />
       <div className="split">
         <Panel title="Identities">
           <ErrorBox error={ids.error ?? checkAction.error} />
@@ -300,5 +301,89 @@ export default function Authz() {
         {results.data && <AuthzTable rows={results.data} />}
       </Panel>
     </div>
+  );
+}
+
+interface MatrixCell { verdict: string; status?: number; evidence_id?: number }
+interface MatrixFlag { identity: string; kind: string; why: string; proven?: boolean; finding_id?: number }
+interface MatrixRow { operation: string; exchange_id: number; owner?: string; cells: Record<string, MatrixCell>; flags: MatrixFlag[] }
+interface AuthzMatrixData { identities: [string, string][]; rows: MatrixRow[]; skipped: string[]; flagged: number; proven: number }
+
+const CELL: Record<string, { label: string; color: string }> = {
+  owner: { label: "owner", color: "var(--info-soft)" },
+  same_as_owner: { label: "SAME DATA", color: "var(--bad-soft)" },
+  allowed_different: { label: "own data", color: "var(--ok-soft)" },
+  denied: { label: "denied", color: "var(--ok-soft)" },
+};
+
+/** Every readable operation as every identity: a role x endpoint grid, flagged cells proven on request. */
+function Matrix({ onDone }: { onDone: () => void }) {
+  const [m, setM] = useState<AuthzMatrixData | null>(null);
+  const [prove, setProve] = useState(true);
+  const action = useAction();
+  const run = () =>
+    action.run(async () => {
+      setM(await api.post<AuthzMatrixData>("/authz/matrix", { prove }));
+      onDone();
+    });
+  return (
+    <Panel
+      title="Authorization matrix"
+      actions={<>
+        <label className="small"><input type="checkbox" checked={prove} onChange={(e) => setProve(e.target.checked)} /> prove flagged cells</label>
+        <button className="btn primary" onClick={() => void run()} disabled={action.busy} data-testid="authz-matrix-run">{action.busy ? "Testing…" : "Build matrix"}</button>
+      </>}
+    >
+      <p className="small muted">
+        Every readable (GET) operation in the app model, replayed as every identity and anonymously. A red cell means
+        that identity got the owner's data: flagged as a possible IDOR, a missing function-level check (a lower role gets
+        a privileged role's data) or missing authentication. With "prove" on, ProxyMind proves each flag with the
+        differential oracle and records proven ones as findings. Each request follows the rules of engagement.
+      </p>
+      <ErrorBox error={action.error} />
+      {m && (
+        <>
+          <p className="small" data-testid="authz-matrix-summary">
+            {m.rows.length} operation(s) · <b>{m.flagged}</b> flagged · <b>{m.proven}</b> proven
+            {m.skipped.length > 0 && <span className="muted"> · {m.skipped.length} skipped</span>}
+          </p>
+          {m.rows.length === 0 ? <Empty>No readable operations yet: browse the app as each identity first.</Empty> : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="grid" data-testid="authz-matrix">
+                <thead><tr><th>Operation</th>{m.identities.map(([n, r]) => <th key={n}>{n}{r && <div className="muted small">{r}</div>}</th>)}<th>Flags</th></tr></thead>
+                <tbody>
+                  {m.rows.map((row) => (
+                    <tr key={row.operation}>
+                      <td className="mono small" style={{ wordBreak: "break-all" }}>{row.operation} <ExchangeLink id={row.exchange_id} /></td>
+                      {m.identities.map(([n]) => {
+                        const c = row.cells[n];
+                        const look = c ? CELL[c.verdict] ?? { label: c.verdict.replace(/_/g, " "), color: "var(--panel-2)" } : null;
+                        return (
+                          <td key={n} className="small" style={{ background: look?.color, textAlign: "center" }}>
+                            {look ? <>{look.label}{c?.status ? <div className="muted">{c.status}</div> : null}</> : "–"}
+                          </td>
+                        );
+                      })}
+                      <td className="small">
+                        {row.flags.map((f, i) => (
+                          <div key={i}>
+                            <Chip value={f.kind} /> {f.why}
+                            {f.proven === true && f.finding_id && <> · <a href={`#/findings/${f.finding_id}`}>proven, finding #{f.finding_id}</a></>}
+                            {f.proven === false && <span className="muted"> · not proven</span>}
+                          </div>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {m.skipped.length > 0 && (
+            <details className="small"><summary>Skipped operations</summary><ul>{m.skipped.map((s, i) => <li key={i}>{s}</li>)}</ul></details>
+          )}
+        </>
+      )}
+    </Panel>
   );
 }
