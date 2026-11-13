@@ -474,6 +474,42 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         tool("scan_profiles", "Scan profiles (built-in and saved): their checks and limits.", json!({}), &[]),
         tool(
+            "custom_checks",
+            "The project's custom scan checks (YAML written by the tester): ids, titles, severities and what each \
+             sends and matches. Run them with custom_scan.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "custom_scan",
+            "Run custom scan checks on one recorded request: the saved ones (all, or `checks` by id), or a check you \
+             write as `yaml` without saving it. Sends a baseline, then each probe; every request is scope-checked and \
+             one approval covers the run. Returns the findings with their evidence exchanges.",
+            json!({
+                "exchange_id": {"type":"integer","description":"The recorded request to test"},
+                "checks": {"type":"array","items":{"type":"string"},"description":"Saved check ids (default: all)"},
+                "yaml": {"type":"string","description":"A check to try without saving it"},
+                "max_requests": {"type":"integer","description":"Most requests to send (default 200, max 2000)"},
+                "identity": {"type":"string","description":"Send as this test identity"},
+                "approval_id": {"type":"string"},
+                "hypothesis_id": {"type":"integer"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
+            "dom_test",
+            "DOM XSS on a recorded HTML page, offline: renders it with its own scripts from history (nothing is sent \
+             to the target) and reports which source (URL query and fragment, window.name, postMessage, named \
+             parameters, optionally storage) reaches which sink (innerHTML, document.write, eval, location…), \
+             exploitable ones first. `pollution` also tries prototype pollution through the URL.",
+            json!({
+                "exchange_id": {"type":"integer","description":"A recorded HTML page"},
+                "storage": {"type":"boolean","description":"Also seed localStorage and sessionStorage reads"},
+                "pollution": {"type":"boolean","description":"Also try prototype pollution (one render per technique)"},
+            }),
+            &["exchange_id"],
+        ),
+        tool(
             "collaborator_payload",
             "A new out-of-band payload to use by hand (an HTTP URL and/or DNS name with a unique token, from the \
              callback listener the person set up). Sends nothing. Put it where the target might fetch or resolve it \
@@ -769,9 +805,13 @@ pub fn tool_definitions() -> Vec<Value> {
              reflection (url or exchange_id + raw containing {{xss_url}} in a query/form value, {{xss}} unencoded, or \
              {{token}} inside your own payload that calls pmProof('{{token}}') or alert('{{token}}'): sends it, \
              renders the recorded response offline in headless Chromium and proves XSS only if the script ran). \
+             Four more work from a set of requests, and finding_prove builds them for a finding: sql_error, \
+             boolean_injection and path_traversal take `raws` (the requests, in the order the field describes), \
+             path_traversal also `markers`; marker takes `raw` with {{marker}} and a `marker_kind`. \
              Pass finding_id/hypothesis_id to update them when proven. Payload oracles may need human approval.",
             json!({
-                "oracle": {"type":"string","enum":["differential_authz","timing","oast","reflection"]},
+                "oracle": {"type":"string","enum":["differential_authz","timing","oast","reflection","sql_error",
+                    "boolean_injection","path_traversal","marker"]},
                 "exchange_id": {"type":"integer"},
                 "attacker": {"type":"string"},
                 "owner": {"type":"string"},
@@ -781,6 +821,9 @@ pub fn tool_definitions() -> Vec<Value> {
                 "samples": {"type":"integer","minimum":5,"maximum":30},
                 "min_effect_ms": {"type":"number"},
                 "raw": {"type":"string"},
+                "raws": {"type":"array","items":{"type":"string"},"description":"sql_error: baseline, the value with a quote, with a second quote, with a harmless change. boolean_injection: baseline, a true condition, a false condition. path_traversal: baseline, a made-up file name, then one request per known file"},
+                "markers": {"type":"array","items":{"type":"string"},"description":"path_traversal: text that shows each file request read its file, one per file request"},
+                "marker_kind": {"type":"string","enum":["redirect","crlf","host"],"description":"marker: where the fresh value must not land (the redirect target, a response header, a reflected URL)"},
                 "wait_seconds": {"type":"integer","minimum":1,"maximum":60},
                 "identity": {"type":"string"},
                 "finding_id": {"type":"integer"},

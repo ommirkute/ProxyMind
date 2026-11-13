@@ -70,4 +70,5 @@ step "6. Score against VulnShop's known bugs, verify the audit log, write the re
 "${P[@]}" report --out "$WORK/report.md"
 echo
 echo "Project: $WORK/demo.pmproj"
-echo "Next: connect an agent (docs/agents.md) and ask it to find the other two bugs (VS-3, VS-4)."
+echo "Next: run \`proxymind bench auto\` on this project to find and prove more of VulnShop's 38 planted bugs,"
+echo "or connect an agent (docs/agents.md) and ask it to look for the rest."

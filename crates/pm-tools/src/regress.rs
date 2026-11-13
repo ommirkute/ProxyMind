@@ -9,12 +9,27 @@
 //!   the environment variable `PM_AUTH_<NAME>` (e.g. `Cookie: sid=…`, several
 //!   lines separated by `\n`). Credentials never go in the file.
 //! - `{{xss}}`, `{{xss_url}}`, `{{token}}`: a fresh payload each run.
+//! - `{{marker}}`: a fresh random value each run (open redirect, header injection).
 //!
 //! The Host header and Content-Length are set at run time.
+//!
+//! "Fixed" must mean fixed. A run can also fail to tell: the credentials are
+//! no longer accepted (an expired token answers 401 whatever the bug), or the
+//! server fails. Those are errors, never "fixed": see [`credentials_rejected`]
+//! and [`AuthCheck`].
 
 use serde::{Deserialize, Serialize};
 
 pub const FORMAT: &str = "proxymind-regression-1";
+/// Tests that send several requests (`requests`) or a `{{marker}}`. A separate
+/// format so a runner that doesn't know them refuses them instead of judging
+/// the first request alone.
+pub const FORMAT_2: &str = "proxymind-regression-2";
+
+/// Whether this runner understands a test's format.
+pub fn supported(format: &str) -> bool {
+    format == FORMAT || format == FORMAT_2
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TestFinding {
@@ -46,15 +61,98 @@ pub struct VulnerableIf {
     pub slower_by_ms: Option<f64>,
 }
 
+/// How this app answers when credentials are not accepted, beyond the usual
+/// signs (401, a redirect to a login page). Any one part matching is enough.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggedOutLook {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<u16>,
+    /// Text in a redirect's Location.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub location_contains: String,
+    /// Text in the body.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub body_contains: String,
+}
+
+/// A request the test's identity is allowed to make. It is sent before a test
+/// is called fixed: if it fails, the credentials stopped working and the test
+/// can't tell (apps that answer 403 or a page for an expired session).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthCheck {
+    pub request: String,
+    /// Expected status (default: any 2xx).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_status: Option<u16>,
+    /// Text the response must contain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_contains: Option<String>,
+}
+
+impl AuthCheck {
+    pub fn passes(&self, status: u16, body: &str) -> bool {
+        let status_ok = match self.expect_status {
+            Some(s) => status == s,
+            None => (200..300).contains(&status),
+        };
+        status_ok && self.expect_contains.as_deref().is_none_or(|t| body.contains(t))
+    }
+}
+
+/// Whether a response says the credentials were not accepted: 401 (or 419,
+/// 440), a redirect to a login page, or the look learned for this app. Such a
+/// response says nothing about whether the finding is fixed.
+pub fn credentials_rejected(status: u16, location: Option<&str>, body: &str, look: Option<&LoggedOutLook>) -> bool {
+    if matches!(status, 401 | 419 | 440) {
+        return true;
+    }
+    let redirect = (300..400).contains(&status);
+    if redirect && let Some(loc) = location {
+        let l = loc.to_ascii_lowercase();
+        if ["login", "signin", "sign-in", "logon", "/auth", "sso"].iter().any(|w| l.contains(w)) {
+            return true;
+        }
+    }
+    look.is_some_and(|k| {
+        k.statuses.contains(&status)
+            || (redirect
+                && !k.location_contains.is_empty()
+                && location.is_some_and(|l| l.contains(&k.location_contains)))
+            || (!k.body_contains.is_empty() && body.contains(&k.body_contains))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegressionTest {
     pub format: String,
     pub finding: TestFinding,
     /// Where it was found (`scheme://host:port`); `--target` points it elsewhere.
     pub origin: String,
-    /// differential_authz, reflection or timing (the proof it comes from).
+    /// The proof it comes from: differential_authz, reflection, timing,
+    /// sql_error, boolean_injection, path_traversal or marker.
     pub oracle: String,
+    /// The request that shows the finding (for tests with `requests`, the
+    /// one carrying the payload, for people reading the file).
     pub request: String,
+    /// The requests the proof sends, in its order: sql_error `[baseline,
+    /// quote, second quote, benign change]`, boolean_injection `[baseline,
+    /// true condition, false condition]`, path_traversal `[baseline, bogus
+    /// name, file 1, …]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<String>,
+    /// path_traversal: what shows each file request read its file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<String>,
+    /// marker: redirect, crlf or host (where `{{marker}}` must not land).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_kind: Option<String>,
+    /// With `auth`: a request that shows the credentials still work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_check: Option<AuthCheck>,
+    /// With `auth`: how this app answers when the credentials are not accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_out: Option<LoggedOutLook>,
     /// timing: the same request without the delay payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
@@ -69,6 +167,28 @@ pub struct RegressionTest {
 
 fn default_samples() -> usize {
     1
+}
+
+impl RegressionTest {
+    /// A one-request test in the first format; set the other fields as needed.
+    pub fn new(finding: TestFinding, origin: String, oracle: &str, request: String) -> Self {
+        Self {
+            format: FORMAT.into(),
+            finding,
+            origin,
+            oracle: oracle.into(),
+            request,
+            requests: Vec::new(),
+            markers: Vec::new(),
+            marker_kind: None,
+            auth_check: None,
+            logged_out: None,
+            baseline: None,
+            auth: Vec::new(),
+            vulnerable_if: VulnerableIf::default(),
+            samples: 1,
+        }
+    }
 }
 
 /// The environment variable that holds an identity's credentials.
@@ -225,5 +345,38 @@ mod tests {
         assert!(!still_vulnerable(&r, 200, "x&lt;i&gt;y", Some("<i>")));
         assert!(still_slow(&[10, 12, 11], &[3010, 3020, 15], 2000.0));
         assert!(!still_slow(&[10, 12, 11], &[30, 20, 15], 2000.0));
+    }
+
+    #[test]
+    fn rejected_credentials_are_not_a_fix() {
+        // The usual signs.
+        assert!(credentials_rejected(401, None, "", None));
+        assert!(credentials_rejected(302, Some("/Login?next=/orders"), "", None));
+        assert!(credentials_rejected(303, Some("https://sso.corp.test/start"), "", None));
+        // What a fix looks like: refused, gone, or a redirect elsewhere.
+        for (status, loc) in [(403, None), (404, None), (302, Some("/orders")), (200, None)] {
+            assert!(!credentials_rejected(status, loc, "{}", None), "{status} {loc:?}");
+        }
+        // An app that answers 200 with a sign-in page, or 403 for an expired token.
+        let look = LoggedOutLook { statuses: vec![403], body_contains: "Please sign in".into(), ..Default::default() };
+        assert!(credentials_rejected(200, None, "<h1>Please sign in</h1>", Some(&look)));
+        assert!(credentials_rejected(403, None, "", Some(&look)));
+        assert!(!credentials_rejected(200, None, "{\"orders\":[]}", Some(&look)));
+
+        let check = AuthCheck { request: String::new(), expect_status: None, expect_contains: Some("bob@".into()) };
+        assert!(check.passes(200, "{\"email\":\"bob@shop.test\"}"));
+        assert!(!check.passes(200, "{}") && !check.passes(403, "bob@"));
+    }
+
+    #[test]
+    fn formats() {
+        assert!(supported(FORMAT) && supported(FORMAT_2) && !supported("proxymind-regression-3"));
+        // A first-format test written before the new fields existed still loads.
+        let old = r#"{"format":"proxymind-regression-1","finding":{"id":1,"title":"t","severity":"high","vuln_class":"idor","url":"u"},
+            "origin":"http://a:80","oracle":"differential_authz","request":"GET / HTTP/1.1\r\n\r\n","vulnerable_if":{}}"#;
+        let t: RegressionTest = serde_json::from_str(old).unwrap();
+        assert!(t.requests.is_empty() && t.auth_check.is_none() && t.samples == 1);
+        // And new fields stay out of files that don't use them.
+        assert!(!serde_json::to_string(&t).unwrap().contains("requests"));
     }
 }

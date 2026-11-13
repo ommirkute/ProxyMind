@@ -1020,7 +1020,8 @@ enum RegressAction {
         actor: Option<String>,
     },
     /// Run tests (files or directories of *.json) and say which findings are still there. Needs no project.
-    /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there.
+    /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there, or
+    /// if a test can't tell (credentials not accepted, the server failing): that is an error, never "fixed".
     Run {
         paths: Vec<PathBuf>,
         /// Send to this origin instead of the one each test was recorded on, e.g. https://staging.example.com.

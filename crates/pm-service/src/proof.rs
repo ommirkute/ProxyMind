@@ -18,7 +18,8 @@ pub const OAST_DNS_SETTING: &str = "oast_dns_domain";
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProofRequest {
-    /// differential_authz, timing, oast or reflection
+    /// differential_authz, timing, oast, reflection, sql_error,
+    /// boolean_injection, path_traversal or marker
     pub oracle: String,
     /// Recorded exchange to work from (the owner's request for
     /// differential_authz; the baseline for timing; the target for oast).
@@ -45,8 +46,9 @@ pub struct ProofRequest {
     pub raw: Option<String>,
     /// oast: how long to wait for a callback (default 10 s, max 60).
     pub wait_seconds: Option<u64>,
-    /// boolean_injection: [baseline, true-condition, false-condition] raw
-    /// requests. path_traversal: [baseline, control, file-1, file-2, …] where
+    /// sql_error: [baseline, quote, second quote, harmless change] raw
+    /// requests. boolean_injection: [baseline, true-condition,
+    /// false-condition]. path_traversal: [baseline, control, file-1, file-2, …] where
     /// each file-N request reads a known file; `markers[N]` is what proves it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raws: Vec<String>,
@@ -170,8 +172,8 @@ impl Service {
             "marker" => self.prove_marker(actor, &req).await?,
             other => {
                 return invalid(format!(
-                    "unknown oracle {other:?}; use differential_authz, timing, oast, reflection, boolean_injection, \
-                     path_traversal or marker"
+                    "unknown oracle {other:?}; use differential_authz, timing, oast, reflection, sql_error, \
+                     boolean_injection, path_traversal or marker"
                 ));
             }
         };
@@ -635,23 +637,10 @@ impl Service {
         for out in &outs {
             sends.push(self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?.0);
         }
-        // A database error signature in the (decoded) response body.
-        let db_error = |s: &crate::replay::Sent| {
-            let resp = s.response.clone().unwrap_or_default();
-            let body = String::from_utf8_lossy(pm_http::split_message(&resp).1).into_owned();
-            pm_scan::error_signature(&body).is_some_and(|(_, is_db, _)| is_db)
-        };
-        let verdict = pm_proof::sql_error(&pm_proof::SqlErrorInputs {
-            control_clean: !db_error(&sends[0]),
-            quote_error: db_error(&sends[1]),
-            second_quote_error: db_error(&sends[2]),
-            benign_clean: !db_error(&sends[3]),
-        });
+        let responses: Vec<Vec<u8>> = sends.iter().map(|s| s.response.clone().unwrap_or_default()).collect();
+        let (verdict, mut details) = judge_sql_error(&responses);
         let ids: Vec<i64> = sends.iter().map(|s| s.exchange_id).collect();
-        let details = json!({
-            "control_clean": !db_error(&sends[0]), "quote_error": db_error(&sends[1]),
-            "second_quote_error": db_error(&sends[2]), "benign_clean": !db_error(&sends[3]), "exchanges": ids,
-        });
+        details["exchanges"] = json!(ids);
         Ok(Ok((verdict, ids, details)))
     }
 
@@ -689,38 +678,16 @@ impl Service {
         let mut ids = Vec::new();
         let mut rounds = Vec::new();
         for _ in 0..2 {
-            let (b, _) = self.send_as(actor, &base, req.identity.as_deref(), true, "proof").await?;
-            let (t, _) = self.send_as(actor, &tcond, req.identity.as_deref(), true, "proof").await?;
-            let (f, _) = self.send_as(actor, &fcond, req.identity.as_deref(), true, "proof").await?;
-            ids.extend([b.exchange_id, t.exchange_id, f.exchange_id]);
-            rounds.push((b, t, f));
+            let mut round: [Vec<u8>; 3] = Default::default();
+            for (slot, out) in round.iter_mut().zip([&base, &tcond, &fcond]) {
+                let (sent, _) = self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?;
+                ids.push(sent.exchange_id);
+                *slot = sent.response.unwrap_or_default();
+            }
+            rounds.push(round);
         }
-        let sim = |a: &crate::replay::Sent, c: &crate::replay::Sent, noise: &pm_diff::NoiseMask| {
-            pm_diff::diff(&a.response.clone().unwrap_or_default(), &c.response.clone().unwrap_or_default(), noise)
-                .similarity
-        };
-        let split = |b: &crate::replay::Sent, t: &crate::replay::Sent, f: &crate::replay::Sent| {
-            let noise =
-                pm_diff::learn_noise(&b.response.clone().unwrap_or_default(), &t.response.clone().unwrap_or_default());
-            (sim(b, t, &noise), sim(b, f, &noise), sim(t, f, &noise))
-        };
-        let (ts1, fs1, tf1) = split(&rounds[0].0, &rounds[0].1, &rounds[0].2);
-        let (ts2, _fs2, tf2) = split(&rounds[1].0, &rounds[1].1, &rounds[1].2);
-        let repeated = ts1 >= 0.9 && ts2 >= 0.9 && tf1 <= 0.85 && tf2 <= 0.85;
-        let verdict = pm_proof::boolean_injection(&pm_proof::BooleanInputs {
-            true_similarity: ts1,
-            false_similarity: fs1,
-            true_false_similarity: tf1,
-            status_true: rounds[0].1.status,
-            status_false: rounds[0].2.status,
-            repeated_consistent: repeated,
-        });
-        let details = json!({
-            "true_similarity": ts1, "false_similarity": fs1, "true_false_similarity": tf1,
-            "round2": { "true_similarity": ts2, "true_false_similarity": tf2 },
-            "statuses": { "true": rounds[0].1.status, "false": rounds[0].2.status },
-            "exchanges": ids,
-        });
+        let (verdict, mut details) = judge_boolean(&rounds);
+        details["exchanges"] = json!(ids);
         Ok(Ok((verdict, ids, details)))
     }
 
@@ -759,42 +726,10 @@ impl Service {
         for out in &outs {
             sends.push(self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?.0);
         }
-        let body = |s: &crate::replay::Sent| {
-            String::from_utf8_lossy(pm_http::split_message(&s.response.clone().unwrap_or_default()).1).into_owned()
-        };
-        let baseline_body = body(&sends[0]);
-        let control_body = body(&sends[1]);
-        let mut markers_found = Vec::new();
-        let mut differs = false;
-        for (i, m) in req.markers.iter().enumerate() {
-            let fb = body(&sends[i + 2]);
-            if fb.contains(m.as_str()) && !baseline_body.contains(m.as_str()) {
-                markers_found.push(format!("{:?}: {m}", req.raws[i + 2].lines().next().unwrap_or_default()));
-                let noise = pm_diff::learn_noise(
-                    &sends[0].response.clone().unwrap_or_default(),
-                    &sends[0].response.clone().unwrap_or_default(),
-                );
-                if pm_diff::diff(
-                    &sends[0].response.clone().unwrap_or_default(),
-                    &sends[i + 2].response.clone().unwrap_or_default(),
-                    &noise,
-                )
-                .similarity
-                    < 0.9
-                {
-                    differs = true;
-                }
-            }
-        }
-        // The bogus name must not read any of the files back.
-        let control_clean = !req.markers.iter().any(|m| control_body.contains(m.as_str()));
-        let verdict = pm_proof::path_traversal(&pm_proof::TraversalInputs {
-            markers_found: markers_found.clone(),
-            control_clean,
-            differs_from_baseline: differs,
-        });
+        let responses: Vec<Vec<u8>> = sends.iter().map(|s| s.response.clone().unwrap_or_default()).collect();
+        let (verdict, mut details) = judge_traversal(&req.raws, &req.markers, &responses);
         let ids: Vec<i64> = sends.iter().map(|s| s.exchange_id).collect();
-        let details = json!({ "markers_found": markers_found, "control_clean": control_clean, "exchanges": ids });
+        details["exchanges"] = json!(ids);
         Ok(Ok((verdict, ids, details)))
     }
 
@@ -813,12 +748,9 @@ impl Service {
             return invalid("put {{marker}} in raw where a fresh random value should go");
         }
         let kind = req.marker_kind.clone().unwrap_or_default();
-        let (label, hit_kind) = match kind.as_str() {
-            "redirect" => ("open redirect", MarkerHit::RedirectHost),
-            "crlf" => ("CRLF header injection", MarkerHit::ResponseHeader),
-            "host" => ("Host-header injection", MarkerHit::Reflected),
-            _ => return invalid("marker_kind must be \"redirect\", \"crlf\" or \"host\""),
-        };
+        if !MARKER_KINDS.contains(&kind.as_str()) {
+            return invalid("marker_kind must be \"redirect\", \"crlf\" or \"host\"");
+        }
         let endpoint = self.proof_endpoint(req)?;
         let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
         let params = json!({ "raw": raw, "marker_kind": kind, "identity": req.identity });
@@ -841,16 +773,8 @@ impl Service {
         let out = self.outgoing(endpoint, filled.as_bytes(), true)?;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let resp = sent.response.clone().unwrap_or_default();
-        let (hit, detail) = marker_lands(&resp, &marker, hit_kind, &out.endpoint.host);
-        let verdict = pm_proof::marker(&pm_proof::MarkerInputs {
-            label: label.into(),
-            marker: marker.clone(),
-            hit,
-            control_hit: false,
-            detail: detail.clone(),
-        });
-        let details = json!({ "marker": marker, "marker_kind": kind, "hit": hit, "detail": detail,
-                              "exchange": sent.exchange_id });
+        let (verdict, mut details) = judge_marker(&kind, &marker, &resp, &out.endpoint.host);
+        details["exchange"] = json!(sent.exchange_id);
         Ok(Ok((verdict, vec![sent.exchange_id], details)))
     }
 
@@ -992,7 +916,7 @@ fn xss_token() -> Result<String> {
 
 /// A fresh, unguessable marker safe to use inside a host label (letters and
 /// digits only) so a reflected copy can only have come from our injection.
-fn marker_token() -> Result<String> {
+pub(crate) fn marker_token() -> Result<String> {
     use ring::rand::{SecureRandom, SystemRandom};
     let mut b = [0u8; 8];
     SystemRandom::new().fill(&mut b).map_err(|_| ServiceError::Invalid("no system randomness".into()))?;
@@ -1014,7 +938,7 @@ enum MarkerHit {
 /// response, and returns short printable evidence. `self_host` is the target's
 /// own host, so a redirect back to it is not counted.
 fn marker_lands(resp: &[u8], marker: &str, kind: MarkerHit, self_host: &str) -> (bool, String) {
-    let (head, body) = pm_http::split_message(resp);
+    let (head, _) = pm_http::split_message(resp);
     let Ok(parsed) = pm_http::parse_response_head(head) else {
         return (false, "could not parse the response".into());
     };
@@ -1050,12 +974,128 @@ fn marker_lands(resp: &[u8], marker: &str, kind: MarkerHit, self_host: &str) -> 
             if let Some(loc) = header("location").filter(|l| l.contains(marker)) {
                 return (true, format!("Location: {}", loc.chars().take(120).collect::<String>()));
             }
-            let body = String::from_utf8_lossy(body);
+            let body = body_text(resp);
             let needle = format!("//{marker}");
             let hit = body.contains(&needle) || body.contains(&format!("{marker}."));
             (hit, if hit { format!("marker reflected in an absolute URL ({marker})") } else { "not reflected".into() })
         }
     }
+}
+
+// The verdicts below work on raw responses, so a proof run and a regression
+// test (`regress.rs`) that re-sends a proof's requests judge them alike.
+
+/// The body of a raw response as text: de-chunked and decompressed.
+pub(crate) fn body_text(resp: &[u8]) -> String {
+    let (head, body) = pm_http::split_message(resp);
+    match pm_http::parse_response_head(head) {
+        Ok(h) => String::from_utf8_lossy(&pm_ai::body::decode(&h.headers, body).bytes).into_owned(),
+        Err(_) => String::from_utf8_lossy(body).into_owned(),
+    }
+}
+
+/// The status code of a raw response.
+pub(crate) fn status_of(resp: &[u8]) -> Option<u16> {
+    pm_http::parse_response_head(pm_http::split_message(resp).0).ok().map(|h| h.status)
+}
+
+/// Error-based SQL injection, from the responses to
+/// `[baseline, quote, second quote, benign change]`.
+pub(crate) fn judge_sql_error(responses: &[Vec<u8>]) -> (pm_proof::Verdict, Value) {
+    let db_error =
+        |i: usize| responses.get(i).is_some_and(|r| pm_scan::error_signature(&body_text(r)).is_some_and(|e| e.1));
+    let inputs = pm_proof::SqlErrorInputs {
+        control_clean: !db_error(0),
+        quote_error: db_error(1),
+        second_quote_error: db_error(2),
+        benign_clean: !db_error(3),
+    };
+    let details = json!({
+        "control_clean": inputs.control_clean, "quote_error": inputs.quote_error,
+        "second_quote_error": inputs.second_quote_error, "benign_clean": inputs.benign_clean,
+    });
+    (pm_proof::sql_error(&inputs), details)
+}
+
+/// Boolean-condition injection, from two rounds of responses to
+/// `[baseline, true condition, false condition]`.
+pub(crate) fn judge_boolean(rounds: &[[Vec<u8>; 3]]) -> (pm_proof::Verdict, Value) {
+    let split = |r: &[Vec<u8>; 3]| {
+        let noise = pm_diff::learn_noise(&r[0], &r[1]);
+        let sim = |a: &[u8], b: &[u8]| pm_diff::diff(a, b, &noise).similarity;
+        (sim(&r[0], &r[1]), sim(&r[0], &r[2]), sim(&r[1], &r[2]))
+    };
+    let empty: [Vec<u8>; 3] = Default::default();
+    let (first, second) = (rounds.first().unwrap_or(&empty), rounds.get(1).unwrap_or(&empty));
+    let (ts1, fs1, tf1) = split(first);
+    let (ts2, _, tf2) = split(second);
+    let inputs = pm_proof::BooleanInputs {
+        true_similarity: ts1,
+        false_similarity: fs1,
+        true_false_similarity: tf1,
+        status_true: status_of(&first[1]),
+        status_false: status_of(&first[2]),
+        repeated_consistent: rounds.len() >= 2 && ts1 >= 0.9 && ts2 >= 0.9 && tf1 <= 0.85 && tf2 <= 0.85,
+    };
+    let details = json!({
+        "true_similarity": ts1, "false_similarity": fs1, "true_false_similarity": tf1,
+        "round2": { "true_similarity": ts2, "true_false_similarity": tf2 },
+        "statuses": { "true": inputs.status_true, "false": inputs.status_false },
+    });
+    (pm_proof::boolean_injection(&inputs), details)
+}
+
+/// Path traversal, from the responses to `[baseline, bogus name, file 1, …]`
+/// (`raws` are the requests, `markers[n]` what proves file n was read).
+pub(crate) fn judge_traversal(
+    raws: &[String],
+    markers: &[String],
+    responses: &[Vec<u8>],
+) -> (pm_proof::Verdict, Value) {
+    let empty = Vec::new();
+    let resp = |i: usize| responses.get(i).unwrap_or(&empty);
+    let (baseline_body, control_body) = (body_text(resp(0)), body_text(resp(1)));
+    let noise = pm_diff::learn_noise(resp(0), resp(0));
+    let mut markers_found = Vec::new();
+    let mut differs = false;
+    for (i, m) in markers.iter().enumerate() {
+        if body_text(resp(i + 2)).contains(m.as_str()) && !baseline_body.contains(m.as_str()) {
+            let line = raws.get(i + 2).and_then(|r| r.lines().next()).unwrap_or_default();
+            markers_found.push(format!("{line:?}: {m}"));
+            differs |= pm_diff::diff(resp(0), resp(i + 2), &noise).similarity < 0.9;
+        }
+    }
+    // The bogus name must not read any of the files back.
+    let control_clean = !markers.iter().any(|m| control_body.contains(m.as_str()));
+    let details = json!({ "markers_found": markers_found, "control_clean": control_clean });
+    let inputs = pm_proof::TraversalInputs { markers_found, control_clean, differs_from_baseline: differs };
+    (pm_proof::path_traversal(&inputs), details)
+}
+
+/// The kinds the marker oracle knows.
+pub(crate) const MARKER_KINDS: &[&str] = &["redirect", "crlf", "host"];
+
+/// The marker oracle, from the response to the request that carried `marker`.
+/// `kind` is one of [`MARKER_KINDS`] (anything else is never a hit).
+pub(crate) fn judge_marker(kind: &str, marker: &str, resp: &[u8], self_host: &str) -> (pm_proof::Verdict, Value) {
+    let (label, place) = match kind {
+        "redirect" => ("open redirect", Some(MarkerHit::RedirectHost)),
+        "crlf" => ("CRLF header injection", Some(MarkerHit::ResponseHeader)),
+        "host" => ("Host-header injection", Some(MarkerHit::Reflected)),
+        _ => ("marker", None),
+    };
+    let (hit, detail) = match place {
+        Some(p) => marker_lands(resp, marker, p, self_host),
+        None => (false, format!("unknown marker kind {kind:?}")),
+    };
+    let verdict = pm_proof::marker(&pm_proof::MarkerInputs {
+        label: label.into(),
+        marker: marker.into(),
+        hit,
+        control_hit: false,
+        detail: detail.clone(),
+    });
+    (verdict, json!({ "marker": marker, "marker_kind": kind, "hit": hit, "detail": detail }))
 }
 
 /// For a template using {{token}} in a payload of the user's own, the

@@ -81,8 +81,12 @@ Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tes
 - Add oracles for the classes still suspected: header-based time SQLi (needs to add the insertion-point header to the
   request, e.g. User-Agent; VS-15), NoSQL operator injection (VS-21), GraphQL-over-POST IDOR (VS-12), blind XXE
   (VS-16), host-header injection (VS-19), and stored/DOM XSS (VS-23/VS-25, render a different exchange).
-- Confirm proven findings flow into evidence packs and `regress export` (they reuse the stored proofs; add an explicit
-  test if not already covered by `evidence.rs`/`regress.rs`).
+- Done 2026-11-13: every proof kind except out-of-band now exports as a CI regression test (9 of 9 proven findings
+  in a VulnShop run, it was 4), the runner no longer calls a test "fixed" when the credentials stopped working or
+  the server fails, and exported files never hold the recorded session. See the handoff's "Regression tests for CI".
+- Still open in the regression runner: a test whose credential variable is not set is `skipped` and the run exits 0.
+  A CI job that loses its secrets (a pull request from a fork) goes green having tested nothing. Consider a
+  `--require-all` flag, or failing when every test was skipped.
 
 ### 3.3 The last VulnShop misses, without fitting the scanner to VulnShop
 

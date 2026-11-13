@@ -15,8 +15,12 @@ version may change project files, APIs and the CLI.
   header. IDOR and BFLA reuse the differential oracle. It runs at the end of `proxymind bench auto` (skip with
   `--no-prove`), as `proxymind findings prove [id]`, over the API (`POST /api/v1/findings/{id}/prove`,
   `POST /api/v1/findings/prove`), as the MCP tool `finding_prove`, and from an **Auto-prove** button on the Findings
-  page. Also exposed as new `proof_run` oracles `boolean_injection`, `path_traversal` and `marker`. SDKs gain
-  `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
+  page. Also exposed as new `proof_run` oracles `sql_error`, `boolean_injection`, `path_traversal` and `marker`.
+  SDKs gain `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
+- **Regression tests for the new proofs.** Findings proven by error-based or boolean SQL injection, path traversal
+  or a marker (open redirect, header injection) now export as CI regression tests too: the test re-sends the
+  proof's requests and judges the answers the way the proof did. They use a second test format
+  (`proxymind-regression-2`) so an older runner refuses them instead of misjudging them.
 
 ### Fixed
 
@@ -38,6 +42,21 @@ version may change project files, APIs and the CLI.
   poll (a dropped connection or a server hiccup); it retries with backoff. Sessions and Network show "Loading…"
   instead of an empty page while they load.
 - **End-to-end test:** finds the newest preinstalled Chromium instead of one fixed build.
+- **Regression tests said "fixed" when they could not tell.** With credentials the app no longer accepted (an
+  expired token: 401, or a redirect to the login page), `proxymind regress run` printed "fixed" and exited 0, so a
+  CI job with a stale secret went green while the bug was still there. That is now an error (exit 1), and so is a
+  server that fails (5xx). Tests carry the identity's health check and send it before calling anything fixed, for
+  apps that answer an expired session with 403 or an ordinary page. Unknown test kinds are refused, not guessed at.
+- **Exported regression tests could hold a session cookie.** A proof made from a recorded request (as automatic
+  proving makes them) names no identity, so the request went into the test file with the session it was recorded
+  with. Credentials are now always replaced by an `{{auth:NAME}}` placeholder: the owning identity's, or
+  `{{auth:session}}`. If you exported tests from automatically proven findings before this, re-export them and
+  treat the sessions in the old files as exposed.
+- **Three MCP tools were never offered to agents.** `custom_checks`, `custom_scan` and `dom_test` had handlers and
+  documentation but no entry in `tools/list`, which is all a client shows a model. They are listed now (79 tools),
+  and a test keeps the list and the handlers in step.
+- Proofs for error-based SQL injection, path traversal and Host-header reflection read the response body after
+  de-chunking and decompressing it (a compressed response could hide the marker and miss a proof).
 
 ## 0.2.0 (2026-11-12)
 
