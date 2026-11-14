@@ -28,7 +28,7 @@ pm-ledger = { version = "0.2.0", path = "../pm-ledger" }
 pm-model = { version = "0.2.0", path = "../pm-model" }
 pm-oast = { version = "0.2.0", path = "../pm-oast" }
 pm-openapi = { version = "0.2.0", path = "../pm-openapi" }
-serde-saphyr = "1.1.0"
+serde-saphyr = "2.1.1"
 pm-policy = { version = "0.2.0", path = "../pm-policy" }
 pm-proof = { version = "0.2.0", path = "../pm-proof" }
 pm-proxy = { version = "0.2.0", path = "../pm-proxy" }
@@ -45,7 +45,7 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.53.3", features = ["full"] }
 url = "2.5.8"
-minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "macros", "multi_template", "json", "fuel", "serde"] }
+minijinja = { version = "3.1.0", default-features = false, features = ["builtins", "macros", "multi_template", "json", "fuel", "serde"] }
 
 [lints]
 workspace = true
