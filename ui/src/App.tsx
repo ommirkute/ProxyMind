@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, openBrowser, toast, type Counters, type Status } from "./api";
 import { NavContext, PageBoundary, usePref, type Page } from "./components";
 import { Icon } from "./icons";
+import { connectLive } from "./live";
 import Overview from "./pages/Overview";
 import Scans from "./pages/Scans";
 import Library from "./pages/Library";
@@ -162,16 +163,9 @@ export default function App() {
     return () => window.removeEventListener("pm-status-changed", load);
   }, []);
 
-  // Live updates: the server pushes counters when anything changes.
+  // Live updates: one event stream feeds the nav counters here and the pages' refetches (see live.ts).
   const signedIn = status != null;
-  useEffect(() => {
-    if (!signedIn) return;
-    const es = new EventSource("/api/v1/events");
-    es.addEventListener("counters", (e) => setCounters(JSON.parse((e as MessageEvent).data)));
-    es.onopen = () => setLive(true);
-    es.onerror = () => setLive(false);
-    return () => es.close();
-  }, [signedIn]);
+  useEffect(() => (signedIn ? connectLive(setCounters, setLive) : undefined), [signedIn]);
 
   // The header's sub-tabs scroll sideways when narrow: keep the current one in view.
   useEffect(() => {

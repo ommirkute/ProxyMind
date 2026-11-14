@@ -347,6 +347,8 @@ impl Service {
         let bus = std::sync::Arc::new(events::Bus::new(EVENT_BUFFER));
         let observer_bus = bus.clone();
         store.set_on_exchanges(Box::new(move |rows| observer_bus.publish_exchanges(rows)));
+        let ws_bus = bus.clone();
+        store.set_on_ws_messages(Box::new(move |rows| ws_bus.publish_ws(rows)));
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),

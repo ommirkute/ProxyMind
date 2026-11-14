@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use pm_policy::{Actor, ActorKind, Target};
-use pm_store::CommittedExchange;
+use pm_store::{CommittedExchange, CommittedWs};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -38,10 +38,11 @@ pub enum Topic {
     Approvals,
     Audit,
     Collaborator,
+    Websockets,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 8] = [
+    pub const ALL: [Topic; 9] = [
         Topic::Exchanges,
         Topic::Findings,
         Topic::Scans,
@@ -50,6 +51,7 @@ impl Topic {
         Topic::Approvals,
         Topic::Audit,
         Topic::Collaborator,
+        Topic::Websockets,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -62,6 +64,7 @@ impl Topic {
             Topic::Approvals => "approvals",
             Topic::Audit => "audit",
             Topic::Collaborator => "collaborator",
+            Topic::Websockets => "websockets",
         }
     }
 
@@ -120,6 +123,11 @@ pub enum Event {
     CollaboratorHit {
         id: i64,
     },
+    /// WebSocket messages were stored for this exchange (at most one event per exchange per write; fetch the
+    /// messages with `ws_messages`). Carries no target-derived text.
+    WsMessageRecorded {
+        exchange_id: i64,
+    },
 }
 
 impl Event {
@@ -133,6 +141,7 @@ impl Event {
             Event::ApprovalRequested { .. } | Event::ApprovalDecided { .. } => Topic::Approvals,
             Event::AuditAppended { .. } => Topic::Audit,
             Event::CollaboratorHit { .. } => Topic::Collaborator,
+            Event::WsMessageRecorded { .. } => Topic::Websockets,
         }
     }
 }
@@ -177,6 +186,13 @@ impl Bus {
             let event =
                 Event::ExchangeRecorded { id: r.id, host: r.host.clone(), method: r.method.clone(), status: r.status };
             self.publish(event, scope);
+        }
+    }
+
+    pub(crate) fn publish_ws(&self, rows: &[CommittedWs]) {
+        for r in rows {
+            let scope = Target::from_parts(&r.scheme, &r.host, r.port, &r.path).ok();
+            self.publish(Event::WsMessageRecorded { exchange_id: r.exchange_id }, scope);
         }
     }
 
@@ -273,7 +289,7 @@ impl Service {
     /// What `actor` may see of a published event, as JSON (`seq`, `topic`, `type` and the event's fields), or
     /// `None` when the event must not reach them. The single place for these rules (ADR-0018):
     /// - a topic the actor may not read is dropped;
-    /// - for an agent, an event about a request target (`ExchangeRecorded`, `FindingChanged`) is dropped when the
+    /// - for an agent, an event about a request target (`ExchangeRecorded`, `FindingChanged`, `WsMessageRecorded`) is dropped when the
     ///   target is out of scope, or when its scope could not be determined;
     /// - for an agent, strings pass through the redactor when the ROE asks for it (`json_for`), so a host
     ///   containing a secret is replaced by a placeholder. Humans see events as published.
@@ -282,7 +298,10 @@ impl Service {
             return None;
         }
         if actor.kind != ActorKind::Human {
-            let targeted = matches!(p.event, Event::ExchangeRecorded { .. } | Event::FindingChanged { .. });
+            let targeted = matches!(
+                p.event,
+                Event::ExchangeRecorded { .. } | Event::FindingChanged { .. } | Event::WsMessageRecorded { .. }
+            );
             match &p.scope {
                 Some(t) if self.policy.scope_check(t).is_err() => return None,
                 None if targeted => return None,

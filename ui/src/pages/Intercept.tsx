@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Chip, Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
+import { Chip, Empty, ErrorBox, Panel, useAction, useLoad } from "../components";
+import { useLiveTick } from "../live";
 
 interface Settings {
   enabled: boolean;
@@ -47,8 +48,9 @@ interface State {
 }
 
 export default function Intercept() {
-  const { counters } = useNav();
-  const state = useLoad(() => api.get<State>("/intercept"), [counters?.intercepted]);
+  // A held request arriving, or one being forwarded or dropped, is an `intercept` event: refetch the queue.
+  const tick = useLiveTick(["intercept"]);
+  const state = useLoad(() => api.get<State>("/intercept"), [tick]);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [text, setText] = useState("");
@@ -58,16 +60,6 @@ export default function Intercept() {
   const settings = draft ?? state.data?.settings ?? null;
   const held = state.data?.held ?? [];
   const current = held.find((h) => h.id === selected) ?? held[0];
-
-  // The live counter only says how many are held: a message forwarded and a
-  // new one arriving between two updates leave it unchanged, so poll while on.
-  const enabled = state.data?.settings.enabled ?? false;
-  useEffect(() => {
-    if (!enabled) return;
-    const t = setInterval(() => state.reload(), 1500);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled]);
 
   // Load the selected message into the editor when it changes.
   useEffect(() => {

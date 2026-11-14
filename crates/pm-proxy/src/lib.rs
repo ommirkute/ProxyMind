@@ -993,6 +993,9 @@ mod recorder_tests {
     fn shared_recorder_links_websocket_messages_across_and_within_batches() {
         let (path, dir) = project("ws");
         let handle = Arc::new(StoreHandle::new(Store::open(&path).unwrap()));
+        let reported = Arc::new(parking_lot::Mutex::new(Vec::<Vec<i64>>::new()));
+        let log = reported.clone();
+        handle.set_on_ws_messages(Box::new(move |rows| log.lock().push(rows.iter().map(|r| r.exchange_id).collect())));
         let (rec, join) = Recorder::spawn_shared(handle.clone());
         let msg = |tag: u8| NewWsMessage {
             exchange_id: -1,
@@ -1037,6 +1040,11 @@ mod recorder_tests {
             assert_eq!(payloads(id_of(0)), [1, 3, 5]);
             assert_eq!(payloads(id_of(2)), [2, 4]);
             assert!(payloads(id_of(1)).is_empty() && payloads(id_of(3)).is_empty());
+            // Seven messages were stored in several batches; each batch reports an exchange at most once.
+            let batches = reported.lock();
+            assert!(batches.iter().all(|b| b.len() == b.iter().collect::<std::collections::HashSet<_>>().len()));
+            let flat: std::collections::HashSet<i64> = batches.iter().flatten().copied().collect();
+            assert_eq!(flat, [id_of(0), id_of(2)].into_iter().collect());
         });
         let _ = std::fs::remove_dir_all(dir);
     }

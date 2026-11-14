@@ -9,12 +9,14 @@ version may change project files, APIs and the CLI.
 
 - **Typed events on the event stream.** `GET /api/v1/events?topics=exchanges,findings` streams `event: <topic>`,
   `id: <seq>`, `data: <json>` for the topics `exchanges`, `findings`, `scans`, `proofs`, `intercept`, `approvals`,
-  `audit` and `collaborator` (`topics=all` for every topic you may read; list `counters` to get the old event too).
+  `audit`, `collaborator` and `websockets` (`topics=all` for every topic you may read; list `counters` to get the old event too).
   Events carry ids and short summaries only, are sent after the change has been saved, and an agent only receives
   those for hosts in scope, with secrets in host names replaced. A client that falls behind gets one `resync` event
   and should refetch what it shows; an unknown topic is a 400. Without `topics` the stream is unchanged (a
   `counters` event), but it now follows the new events instead of querying the project every 700 ms, and `/status`
   counts rows instead of loading them.
+- **The UI updates from server events.** Intercept, Collaborator and WebSocket views no longer poll: a held
+  request, a callback or a new WebSocket message shows as soon as the server reports it.
 
 ### Performance
 
