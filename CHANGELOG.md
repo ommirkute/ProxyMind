@@ -5,6 +5,19 @@ version may change project files, APIs and the CLI.
 
 ## Unreleased
 
+### Performance
+
+- **Content search uses a full-text index.** History text search checks only the exchanges a trigram index
+  names as candidates, then verifies them as before, so results are unchanged: over 100,000 exchanges a search
+  that scanned 5,000 bodies (0.9 s) takes about 1 ms. New traffic is indexed in the background in batches, so
+  recording keeps its speed; exchanges not indexed yet are always checked. Existing projects are indexed in the
+  background after upgrading. Regex and inverted searches still scan.
+- **Creating findings no longer slows down as findings grow.** Each new finding listed every finding to look for a
+  duplicate (25 per second at 10,000 findings); it now looks up findings at the same URL through an index (about
+  2,000 per second). Duplicates older than the newest 1,000 findings, which were missed, now merge too.
+- A repeatable large-project benchmark (`crates/pm-service/tests/scale.rs`, sized by `PM_SCALE_EXCHANGES` and
+  `PM_SCALE_FINDINGS`) prints one machine-readable `SCALE` line.
+
 ### Proof
 
 - **Automatic proving.** A new step turns the scanner's *suspected* findings into *proven* ones: it picks the oracle
