@@ -2612,7 +2612,7 @@ mod tests {
     fn concurrent_writers_never_lose_exchanges() {
         // Two connections to one project, like the proxy's recorder and the
         // UI's service: every insert must land while the other one writes.
-        let dir = std::env::temp_dir().join(format!("pm-store-conc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pm-store-two-writers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("p.pmproj");
@@ -2739,8 +2739,12 @@ mod tests {
         assert_eq!(h.read(|s| s.get_setting("none").unwrap()), None);
     }
 
+    /// A fresh project path for one test. Unique per call (not only per name and process): tests run in parallel,
+    /// and two that shared a directory once deleted each other's database mid-test.
     fn temp_project(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("pm-store-{name}-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("pm-store-tp-{name}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("p.pmproj");
         let _ = std::fs::remove_file(&path);
