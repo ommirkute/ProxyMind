@@ -6,6 +6,7 @@ use pm_identity::Identity;
 use pm_ledger::{Coverage, Hypothesis, OperationInfo};
 use pm_model::{AppModel, AuthzCandidate, Observation};
 use pm_policy::Actor;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -14,7 +15,7 @@ use crate::{Result, Service, ServiceError, now_ms};
 /// How many recent exchanges the model is built from.
 pub(crate) const MODEL_WINDOW: usize = 20_000;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelFilter {
     /// Only operations whose key contains this text.

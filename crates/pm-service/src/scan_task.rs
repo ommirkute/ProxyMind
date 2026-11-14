@@ -12,14 +12,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pm_policy::{Actor, ActorKind};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ActiveFinding, ActiveScanRequest, ActiveScanResult, CrawlRequest, CrawlResult, Result, Service, ServiceError,
 };
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the service rejects an empty or unparsable url.
+#[schemars(extend("required" = ["url"]))]
 pub struct ScanTaskRequest {
     /// Where to start, e.g. https://app.example.com/ (its origin is audited).
     pub url: String,
@@ -29,11 +32,13 @@ pub struct ScanTaskRequest {
     /// Crawl first (default true); without it, only what history holds.
     pub crawl: Option<bool>,
     /// Most pages to crawl (default 30, max 500).
+    #[schemars(range(min = 1, max = 500))]
     pub max_pages: Option<usize>,
     /// Crawl in a headless browser that runs the app's JavaScript (default:
     /// yes when a Chromium is installed).
     pub browser: Option<bool>,
     /// Most operations to scan (default 30, max 200).
+    #[schemars(range(min = 1, max = 200))]
     pub max_targets: Option<usize>,
     /// Most requests per operation (default 150, max 2000).
     pub max_requests: Option<usize>,

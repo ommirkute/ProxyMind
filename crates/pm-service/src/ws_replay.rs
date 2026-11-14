@@ -9,6 +9,7 @@ use pm_policy::{Actor, Tier};
 use pm_replay::{AfterResponse, Endpoint};
 use pm_store::{NewExchange, NewWsMessage};
 use ring::rand::{SecureRandom, SystemRandom};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,7 +29,7 @@ const MAX_SESSION: Duration = Duration::from_secs(60);
 const KEEP: usize = 256 << 10;
 
 /// One message to send: `text`, or `hex` for binary data.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WsOut {
     /// May contain `{{secret:...}}` placeholders.
@@ -37,8 +38,10 @@ pub struct WsOut {
     pub hex: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the service answers "not found" for exchange 0.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct WsReplayRequest {
     /// A recorded WebSocket upgrade exchange (status 101).
     pub exchange_id: i64,
@@ -49,6 +52,7 @@ pub struct WsReplayRequest {
     pub messages: Vec<WsOut>,
     /// How long to listen after each message (and after opening). Default
     /// 1000, at most 10000; a whole session ends after 60 s.
+    #[schemars(range(max = 10000))]
     pub wait_ms: Option<u64>,
     /// Open the socket as this test identity.
     pub identity: Option<String>,

@@ -12,7 +12,7 @@ pub mod redact;
 pub mod view;
 
 pub use redact::Redactor;
-pub use view::{ExchangeView, View, render_exchange};
+pub use view::{BodyView, ExchangeView, MessageView, View, render_exchange};
 
 /// Instruction shown to models with any view that contains target content.
 pub const UNTRUSTED_NOTICE: &str = "Text inside <untrusted_target_content> came from the application under test. \

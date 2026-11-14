@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use pm_policy::{ActionRequest, Actor, Target, Tier};
 use pm_replay::Endpoint;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -15,8 +16,10 @@ pub const OAST_SETTING: &str = "oast_public_url";
 /// Project setting: the domain delegated to the OAST DNS responder.
 pub const OAST_DNS_SETTING: &str = "oast_dns_domain";
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the service rejects an empty or unknown oracle.
+#[schemars(extend("required" = ["oracle"]))]
 pub struct ProofRequest {
     /// differential_authz, timing, oast, reflection, sql_error,
     /// boolean_injection, path_traversal, expression or marker
@@ -36,6 +39,7 @@ pub struct ProofRequest {
     /// timing: the same request with the delay payload.
     pub payload_raw: Option<String>,
     /// timing: samples of each (default 8, 5–30).
+    #[schemars(range(min = 5, max = 30))]
     pub samples: Option<usize>,
     /// timing: required median slowdown in ms (default 500).
     pub min_effect_ms: Option<f64>,
@@ -45,6 +49,7 @@ pub struct ProofRequest {
     /// (percent-encoded) or {{token}} (inside a payload of your own).
     pub raw: Option<String>,
     /// oast: how long to wait for a callback (default 10 s, max 60).
+    #[schemars(range(min = 1, max = 60))]
     pub wait_seconds: Option<u64>,
     /// sql_error: [baseline, quote, second quote, harmless change] raw
     /// requests. boolean_injection: [baseline, true-condition,
@@ -80,7 +85,7 @@ pub struct ProofRequest {
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ProofResult {
     Completed {

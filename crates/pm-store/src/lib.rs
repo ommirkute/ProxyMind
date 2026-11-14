@@ -616,7 +616,7 @@ pub struct Exchange {
 }
 
 /// Filters for searching history. All set fields must match.
-#[derive(Debug, Clone, Default, serde::Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryFilter {
     /// Host contains this text (case-insensitive).
@@ -638,6 +638,7 @@ pub struct HistoryFilter {
     /// Only exchanges with an id less than this (for paging back).
     pub before_id: Option<i64>,
     /// Maximum rows (default 50, max 500).
+    #[schemars(range(min = 1, max = 500))]
     pub limit: Option<usize>,
     /// Status classes to show, e.g. "2,3" for 2xx and 3xx ("0" means no response).
     pub status_class: Option<String>,
@@ -2835,4 +2836,46 @@ mod tests {
         drop(h);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Golden wire test for the `/exchanges` query and the `history_search` tool input (ADR-0019).
+    #[test]
+    fn history_filter_wire_format() {
+        let sample = HistoryFilter {
+            host: Some("a.test".into()),
+            path: Some("/api".into()),
+            method: Some("POST".into()),
+            status: Some(200),
+            source: Some("replay".into()),
+            actor: Some("agent:x".into()),
+            hypothesis_id: Some(3),
+            identity: Some("alice".into()),
+            after_id: Some(10),
+            before_id: Some(20),
+            limit: Some(50),
+            status_class: Some("2,3".into()),
+            hide_ext: Some("png,css".into()),
+            annotated: Some(true),
+            in_scope: Some(false),
+            text: Some("t".into()),
+            q: Some("status:>=500".into()),
+            // Never on the wire in either direction.
+            ids: Some(vec![1, 2]),
+        };
+        assert_eq!(serde_json::to_string(&sample).unwrap(), EXPECTED_SAMPLE);
+        assert_eq!(serde_json::to_string(&HistoryFilter::default()).unwrap(), EXPECTED_EMPTY);
+        let parsed: HistoryFilter = serde_json::from_str(r#"{"host":"a","limit":5,"status":404}"#).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), EXPECTED_PARSED);
+        // `ids` is `#[serde(skip)]`: a client cannot set it.
+        let err = serde_json::from_str::<HistoryFilter>(r#"{"ids":[1]}"#).err().unwrap().to_string();
+        assert!(err.contains("unknown field `ids`"), "{err}");
+        assert!(serde_json::from_str::<HistoryFilter>(r#"{"nope":1}"#).is_err());
+        // ... and it stays out of the generated schema.
+        let schema = serde_json::to_value(schemars::schema_for!(HistoryFilter)).unwrap();
+        assert!(schema["properties"].get("ids").is_none());
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    const EXPECTED_SAMPLE: &str = r#"{"host":"a.test","path":"/api","method":"POST","status":200,"source":"replay","actor":"agent:x","hypothesis_id":3,"identity":"alice","after_id":10,"before_id":20,"limit":50,"status_class":"2,3","hide_ext":"png,css","annotated":true,"in_scope":false,"text":"t","q":"status:>=500"}"#;
+    const EXPECTED_EMPTY: &str = r#"{"host":null,"path":null,"method":null,"status":null,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":null,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
+    const EXPECTED_PARSED: &str = r#"{"host":"a","path":null,"method":null,"status":404,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":5,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
 }

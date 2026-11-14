@@ -5,6 +5,10 @@ version may change project files, APIs and the CLI.
 
 ## Unreleased
 
+### API contracts
+
+- An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+
 ### Live events
 
 - **Typed events on the event stream.** `GET /api/v1/events?topics=exchanges,findings` streams `event: <topic>`,

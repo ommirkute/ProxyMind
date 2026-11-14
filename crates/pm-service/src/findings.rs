@@ -7,6 +7,7 @@
 //! from the issue library (`pm_scan::library`) by its class.
 
 use pm_policy::{Actor, ActorKind};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -44,7 +45,7 @@ pub struct Retest {
     pub by: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewFinding {
     pub title: String,
@@ -63,7 +64,7 @@ pub struct NewFinding {
     pub hypothesis_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FindingUpdate {
     pub id: i64,

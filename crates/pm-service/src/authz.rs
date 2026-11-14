@@ -6,6 +6,7 @@ use pm_identity::ANONYMOUS;
 use pm_policy::{Actor, Tier};
 use pm_replay::Endpoint;
 use pm_store::AuthzRow;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{Authorization, Result, Service, ServiceError, now_ms};
@@ -13,7 +14,7 @@ use crate::{Authorization, Result, Service, ServiceError, now_ms};
 /// Responses at least this similar to the owner's count as "the same data".
 pub const SAME_DATA_THRESHOLD: f64 = 0.9;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthzCheckRequest {
     /// A recorded GET/HEAD/OPTIONS exchange, made by the data's owner.
