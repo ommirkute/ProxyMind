@@ -114,7 +114,7 @@ impl Service {
                     Ok::<_, crate::ServiceError>((s.exchange_id, text.unwrap_or_default()))
                 }
             };
-            let (_, as_owner) = ask(Some(owner.clone())).await?;
+            let (owner_id, as_owner) = ask(Some(owner.clone())).await?;
             let Some(owned) = answer(&as_owner, &op.op.name) else { continue };
             let (leak_id, as_other) = ask(Some(other.clone())).await?;
             let (_, as_anon) = ask(Some(pm_identity::ANONYMOUS.to_string())).await?;
@@ -138,7 +138,8 @@ impl Service {
                          Found by the automatic pass; not proven yet."
                     ),
                     url: Some(url.clone()),
-                    evidence: vec![leak_id],
+                    // The owner's request first: proofs take the first evidence as the owner's.
+                    evidence: vec![owner_id, leak_id],
                     hypothesis_id: None,
                 },
             )?;

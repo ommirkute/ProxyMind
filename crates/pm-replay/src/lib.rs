@@ -413,10 +413,21 @@ impl Sender {
                         .with_context(|| format!("cannot resolve the upstream proxy {}", p.host))?
                         .collect();
                 // SOCKS5 with local DNS tries each checked address in turn,
-                // like a direct connection; everything else makes one attempt.
+                // like a direct connection. So do HTTP CONNECT tunnels whose
+                // addresses were checked (unless `remote_dns` asks the proxy to
+                // resolve): a tunnel by name would let the proxy resolve again
+                // and reach an address the check never saw (DNS rebinding).
+                // TLS inside the tunnel still uses the name. Plain HTTP through
+                // an HTTP proxy can't be pinned like this (the proxy takes Host
+                // from the absolute-form target), so it goes by name.
+                let ips = || addrs.iter().map(|a| net::SocksTarget::Ip(a.ip())).collect();
+                let tunnel = ep.scheme == "https" || ep.scheme == "tcp";
                 let targets: Vec<net::SocksTarget<'_>> = match p.kind {
-                    ProxyKind::Socks5 if (!p.remote_dns || pinned.is_some()) && !addrs.is_empty() => {
-                        addrs.iter().map(|a| net::SocksTarget::Ip(a.ip())).collect()
+                    ProxyKind::Socks5 if (!p.remote_dns || pinned.is_some()) && !addrs.is_empty() => ips(),
+                    ProxyKind::Http
+                        if tunnel && !addrs.is_empty() && (pinned.is_some() || (check.is_some() && !p.remote_dns)) =>
+                    {
+                        ips()
                     }
                     _ => vec![net::SocksTarget::Name(&ep.host)],
                 };
@@ -427,8 +438,11 @@ impl Sender {
                         let mut tcp = self.tcp_any(&proxy_addrs).await.context("connecting to the upstream proxy")?;
                         match p.kind {
                             ProxyKind::Socks5 => net::socks5_connect(&mut tcp, p, target, ep.port).await?,
-                            ProxyKind::Http if ep.scheme == "https" || ep.scheme == "tcp" => {
-                                let host = pinned.map_or_else(|| ep.host.clone(), |ip| ip.to_string());
+                            ProxyKind::Http if tunnel => {
+                                let host = match target {
+                                    net::SocksTarget::Ip(ip) => ip.to_string(),
+                                    net::SocksTarget::Name(name) => name.to_string(),
+                                };
                                 net::http_connect(&mut tcp, p, &host, ep.port).await?
                             }
                             ProxyKind::Http => {} // plain HTTP: absolute-form requests

@@ -5,16 +5,20 @@
 #
 # Juice Shop: http://127.0.0.1:3000
 # crAPI:      see bench/README.md (uses its own compose file)
+#
+# Images come from Docker Hub unless BENCH_REGISTRY points at a mirror, e.g.
+# BENCH_REGISTRY=ghcr.io/ommirkute/bench-mirror (filled by the "Bench images"
+# workflow, so runs don't depend on Docker Hub's pull limits).
 
 services:
   juice-shop:
-    image: bkimminich/juice-shop:v20.3.0
+    image: ${BENCH_REGISTRY:-docker.io}/bkimminich/juice-shop:v20.3.0
     ports:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
   vampi:
-    image: erev0s/vampi@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
+    image: ${BENCH_REGISTRY:-docker.io}/erev0s/vampi@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
     environment:
       vulnerable: "1"
       tokentimetolive: "3600"

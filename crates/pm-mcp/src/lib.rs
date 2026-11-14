@@ -249,6 +249,46 @@ mod tests {
         assert!(text.contains("denied"), "{text}");
     }
 
+    /// A tool with a handler but no definition never reaches an agent: clients
+    /// only offer what `tools/list` names (custom_checks, custom_scan and
+    /// dom_test were handled, documented and unlisted).
+    #[tokio::test]
+    async fn every_handled_tool_is_listed_and_every_listed_tool_is_handled() {
+        let listed: Vec<String> =
+            tools::tool_definitions().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        let mut sorted = listed.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), listed.len(), "a tool is listed twice");
+
+        // Listed, so handled: with no arguments a call may fail, but not as unknown.
+        let s = server();
+        for name in &listed {
+            let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}});
+            let r = s.handle(call).await.unwrap();
+            let text = r["result"]["content"][0]["text"].as_str().unwrap_or_default();
+            assert!(!text.contains("unknown tool"), "{name} is listed but has no handler: {text}");
+        }
+
+        // Handled, so listed: the names on the match arms of `run` in tools.rs.
+        let src = include_str!("tools.rs");
+        let run = &src[src.find("async fn run(").expect("the dispatcher")..];
+        let run = &run[..run.find("\nfn ").unwrap_or(run.len())];
+        let mut handled = 0;
+        for line in run.lines() {
+            let Some(arm) = line.strip_prefix("        ").filter(|l| l.starts_with('"') || l.starts_with("| \""))
+            else {
+                continue;
+            };
+            let names = arm.split("=>").next().unwrap_or_default();
+            for name in names.split('|').map(|n| n.trim().trim_matches('"')).filter(|n| !n.is_empty()) {
+                handled += 1;
+                assert!(listed.iter().any(|l| l == name), "{name} has a handler but tools/list doesn't name it");
+            }
+        }
+        assert!(handled >= listed.len(), "found only {handled} handlers for {} tools", listed.len());
+    }
+
     #[tokio::test]
     async fn skills_are_prompts_and_tools() {
         let s = server();

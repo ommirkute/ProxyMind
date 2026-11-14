@@ -256,6 +256,59 @@ async fn address_checks_still_apply_through_a_proxy() {
     assert!(seen.lock().unwrap().is_empty(), "nothing reached the proxy");
 }
 
+/// A TLS server for `localhost` that answers every connection with `secure`.
+async fn tls_server(tag: &str) -> u16 {
+    let dir = std::env::temp_dir().join(format!("pm-upstream-{tag}-{}", std::process::id()));
+    let ca = pm_tls::CertAuthority::load_or_create(&dir).unwrap();
+    let acceptor = pm_tls::TlsAcceptor::from(ca.server_config("localhost").unwrap());
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (t, _) = l.accept().await.unwrap();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut t) = acceptor.accept(t).await else { return };
+                let mut b = vec![0u8; 1024];
+                let _ = t.read(&mut b).await;
+                let _ = t.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecure").await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn checked_tunnels_connect_to_the_checked_address() {
+    let tls_port = tls_server("pin").await;
+    let (proxy, seen) = http_proxy("Basic dXNlcjpwYXNz").await;
+    let up = UpstreamProxy {
+        host: "127.0.0.1".into(),
+        port: proxy,
+        username: "user".into(),
+        password: "pass".into(),
+        ..Default::default()
+    };
+    let allow = |_: &[IpAddr]| -> Result<(), String> { Ok(()) };
+    let ep = Endpoint::new("https", "localhost", tls_port);
+
+    // With an address check, the tunnel names the address that was checked,
+    // so the proxy can't resolve the name to somewhere else.
+    let s = sender(NetConfig { upstream: Some(up.clone()), ..Default::default() });
+    assert_eq!(body(&s.send(&ep, GET, "GET", Some(&allow)).await.unwrap()), "secure");
+    let connects: Vec<String> =
+        seen.lock().unwrap().iter().filter_map(|h| h.lines().next().map(String::from)).collect();
+    assert!(connects.iter().all(|l| !l.starts_with("CONNECT localhost")), "{connects:?}");
+    // `localhost` may resolve to ::1 first; the IPv4 address answers.
+    assert!(connects.iter().any(|l| l.starts_with(&format!("CONNECT 127.0.0.1:{tls_port} "))), "{connects:?}");
+
+    // `remote_dns` lets the proxy resolve the name (proxies that only allow named hosts).
+    seen.lock().unwrap().clear();
+    let named = sender(NetConfig { upstream: Some(UpstreamProxy { remote_dns: true, ..up }), ..Default::default() });
+    assert_eq!(body(&named.send(&ep, GET, "GET", Some(&allow)).await.unwrap()), "secure");
+    assert!(seen.lock().unwrap()[0].starts_with(&format!("CONNECT localhost:{tls_port} ")));
+}
+
 #[tokio::test]
 async fn client_certificates_for_mutual_tls() {
     // A client CA, a client certificate it signed, and a server that demands one.

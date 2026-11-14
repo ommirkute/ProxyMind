@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AttackGraph } from "../AttackGraph";
-import { api, cweUrl, fmtDateTime, toast, type Finding, type IdentityInfo, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
+import { api, cweUrl, fmtDateTime, toast, type Finding, type FindingProve, type IdentityInfo, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
@@ -137,6 +137,13 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
       f.reload();
       onChange();
     });
+  const autoProve = () =>
+    action.run(async () => {
+      const r = await api.post<FindingProve>(`/findings/${id}/prove`);
+      toast(r.proven ? `Proven by ${r.oracle}` : `Not proven: ${r.reasons[0] ?? ""}`, r.proven ? "ok" : "bad");
+      f.reload();
+      onChange();
+    });
   const rerun = (proofId: number) =>
     action.run(async () => {
       setResult(await api.post<ProofResult>(`/proofs/${proofId}/rerun`));
@@ -162,6 +169,11 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         <button className="btn" disabled={action.busy} onClick={retest} data-testid="retest">
           {action.busy ? "Retesting…" : "Retest"}
         </button>
+        {d.status !== "proven" && (
+          <button className="btn" disabled={action.busy} onClick={autoProve} data-testid="auto-prove" title="Pick the oracle that fits this issue's class and try to prove it">
+            {action.busy ? "Proving…" : "Auto-prove"}
+          </button>
+        )}
         {d.retest ? (
           <span className="small" data-testid="retest-result">
             <Chip value={d.retest.reproduced === null ? "not checked" : d.retest.reproduced ? "reproduced" : "not reproduced"} />{" "}

@@ -87,7 +87,7 @@ export default function Sessions() {
   const [notice, setNotice] = useState<string | null>(null);
   const action = useAction();
   const cfg = draft ?? (saved.data ? { macros: saved.data.macros, rules: saved.data.rules } : null);
-  if (!cfg) return <div className="content"><ErrorBox error={saved.error} /></div>;
+  if (!cfg) return <div className="content">{saved.error ? <ErrorBox error={saved.error} /> : <span className="muted">Loading…</span>}</div>;
 
   const edit = (patch: Partial<typeof cfg>) => {
     setNotice(null);

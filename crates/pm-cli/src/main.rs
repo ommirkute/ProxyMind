@@ -578,6 +578,9 @@ enum BenchAction {
         /// Skip the active-scanner sweep
         #[arg(long)]
         no_scan: bool,
+        /// Skip the automatic prove step (pick an oracle per suspected finding and prove it)
+        #[arg(long)]
+        no_prove: bool,
         /// Also run the write checks last: the API description's write operations on a
         /// test user's object, as the owner (ReDoS) and as another user (authorization).
         /// They change data and can slow the server; destructive tier (approval).
@@ -612,6 +615,9 @@ enum FindingAction {
     },
     /// Show one finding with its proofs.
     Show { id: i64 },
+    /// Try to prove a finding (an id), or every suspected finding, with the
+    /// oracle that fits its class; proven ones get a stored proof.
+    Prove { id: Option<i64> },
     /// Mark a finding confirmed.
     Confirm { id: i64 },
     /// Mark a finding as a false positive.
@@ -1014,7 +1020,9 @@ enum RegressAction {
         actor: Option<String>,
     },
     /// Run tests (files or directories of *.json) and say which findings are still there. Needs no project.
-    /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there.
+    /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there, or
+    /// if a test can't tell (credentials not accepted, the server failing): that is an error, never "fixed".
+    /// Exits 2 if a test was skipped (a credential variable is not set), unless --allow-skipped.
     Run {
         paths: Vec<PathBuf>,
         /// Send to this origin instead of the one each test was recorded on, e.g. https://staging.example.com.
@@ -1029,6 +1037,10 @@ enum RegressAction {
         /// Print the results as JSON.
         #[arg(long)]
         json: bool,
+        /// Let tests whose credential variable is not set be skipped without failing the run (local runs).
+        /// In CI a missing secret would otherwise pass silently.
+        #[arg(long)]
+        allow_skipped: bool,
     },
 }
 
@@ -1693,7 +1705,7 @@ async fn run() -> Result<()> {
                 out!("  no test for #{} {}: {}", s.finding_id, s.title, s.reason);
             }
         }
-        Command::Regress { action: RegressAction::Run { paths, target, junit, insecure, json } } => {
+        Command::Regress { action: RegressAction::Run { paths, target, junit, insecure, json, allow_skipped } } => {
             let mut files = Vec::new();
             for p in paths {
                 if p.is_dir() {
@@ -1733,6 +1745,7 @@ async fn run() -> Result<()> {
             }
             let still = results.iter().filter(|r| r.outcome == "vulnerable").count();
             let errors = results.iter().filter(|r| r.outcome == "error").count();
+            let skipped = results.iter().filter(|r| r.outcome == "skipped").count();
             if *json {
                 out!("{}", serde_json::to_string_pretty(&results)?);
             } else {
@@ -1741,12 +1754,20 @@ async fn run() -> Result<()> {
                     results.len(),
                     still,
                     results.iter().filter(|r| r.outcome == "fixed").count(),
-                    results.iter().filter(|r| r.outcome == "skipped").count(),
+                    skipped,
                     errors
                 );
             }
-            if still > 0 || errors > 0 {
-                std::process::exit(1);
+            match regress_exit_code(still, errors, skipped, *allow_skipped) {
+                0 => {}
+                2 => {
+                    eprintln!(
+                        "{skipped} test(s) skipped because a credential variable is not set; they say nothing about \
+                         whether the findings are fixed. Set the PM_AUTH_* variables, or pass --allow-skipped."
+                    );
+                    std::process::exit(2);
+                }
+                code => std::process::exit(code),
             }
         }
         Command::Changes { save, snapshot, since, json, actor } => {
@@ -2222,6 +2243,33 @@ async fn run() -> Result<()> {
                     }
                 }
                 FindingAction::Show { id } => out!("{}", serde_json::to_string_pretty(&service.finding_get(*id)?)?),
+                FindingAction::Prove { id } => match id {
+                    Some(id) => {
+                        let r = service.finding_prove(&me, *id).await?;
+                        out!(
+                            "{} finding #{} ({}){}",
+                            if r.proven { "✓ proven" } else { "✗ not proven" },
+                            r.finding_id,
+                            r.vuln_class,
+                            r.oracle.map(|o| format!(" by {o}")).unwrap_or_default()
+                        );
+                        for reason in &r.reasons {
+                            out!("  {reason}");
+                        }
+                    }
+                    None => {
+                        let sweep = service.auto_prove(&me).await?;
+                        out!("{} attempted, {} proven", sweep.attempted, sweep.proven);
+                        for p in sweep.results.iter().filter(|p| p.proven) {
+                            out!(
+                                "  ✓ proven {} (finding #{}) by {}",
+                                p.vuln_class,
+                                p.finding_id,
+                                p.oracle.as_deref().unwrap_or("?")
+                            );
+                        }
+                    }
+                },
                 FindingAction::Confirm { id } => out!("finding {} is now {}", id, set(*id, "confirmed")?["status"]),
                 FindingAction::FalsePositive { id } => {
                     out!("finding {} is now {}", id, set(*id, "false_positive")?["status"])
@@ -2889,7 +2937,7 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, write_checks, json } } => {
+        Command::Bench { action: BenchAction::Auto { no_discover, no_scan, no_prove, write_checks, json } } => {
             let service = open_service(&cli.project, None)?;
             let me = human_actor(None)?;
             let disc = if *no_discover { None } else { Some(service.auto_discover(&me).await?) };
@@ -2897,12 +2945,14 @@ async fn run() -> Result<()> {
             let graphql = service.graphql_object_access(&me).await?;
             let sweep = if *no_scan { None } else { Some(service.auto_active_sweep(&me).await?) };
             let writes = if *write_checks { Some(service.auto_write_checks(&me).await?) } else { None };
+            // Prove last, once every suspected finding the other passes recorded exists.
+            let proven = if *no_prove { None } else { Some(service.auto_prove(&me).await?) };
             if *json {
                 out!(
                     "{}",
                     serde_json::to_string_pretty(
                         &serde_json::json!({ "discover": disc, "access_control": r, "graphql": graphql, "scan": sweep,
-                            "writes": writes })
+                            "writes": writes, "prove": proven })
                     )?
                 );
             } else {
@@ -2982,6 +3032,17 @@ async fn run() -> Result<()> {
                     }
                     for n in &w.notes {
                         out!("  {n}");
+                    }
+                }
+                if let Some(pr) = &proven {
+                    out!("prove: {} attempted, {} proven", pr.attempted, pr.proven);
+                    for p in pr.results.iter().filter(|p| p.proven) {
+                        out!(
+                            "  ✓ proven {} (finding #{}) by {}",
+                            p.vuln_class,
+                            p.finding_id,
+                            p.oracle.as_deref().unwrap_or("?")
+                        );
                     }
                 }
             }
@@ -3654,4 +3715,31 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
 fn chrono_like(ms: i64) -> String {
     let secs = ms.div_euclid(1000).rem_euclid(86_400);
     format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// Exit code of `regress run`: 1 if a finding is still there or a test can't
+/// tell, 2 if only skipped tests stand between the run and a pass (a missing
+/// secret in CI must not look like "all fixed"), else 0.
+fn regress_exit_code(still: usize, errors: usize, skipped: usize, allow_skipped: bool) -> i32 {
+    if still > 0 || errors > 0 {
+        1
+    } else if skipped > 0 && !allow_skipped {
+        2
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::regress_exit_code;
+
+    #[test]
+    fn skipped_regression_tests_fail_the_run_unless_allowed() {
+        assert_eq!(regress_exit_code(0, 0, 0, false), 0);
+        assert_eq!(regress_exit_code(0, 0, 3, false), 2, "an unset credential variable must not pass in CI");
+        assert_eq!(regress_exit_code(0, 0, 3, true), 0);
+        assert_eq!(regress_exit_code(1, 0, 3, true), 1, "a finding still there wins over skipped");
+        assert_eq!(regress_exit_code(0, 2, 0, false), 1);
+    }
 }

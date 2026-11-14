@@ -113,10 +113,9 @@ impl Service {
         };
         // The same issue at the same place: add to the open finding instead.
         let key = issue_key(&f.vuln_class);
-        let open = self.finding_list(None)?.into_iter().find(|o| {
+        let open = self.findings_at_url(&url)?.into_iter().find(|o| {
             !CLOSED.contains(&o["status"].as_str().unwrap_or(""))
                 && issue_key(o["vuln_class"].as_str().unwrap_or("")) == key
-                && url_key(o["url"].as_str().unwrap_or("")) == url_key(&url)
         });
         if let Some(o) = open {
             let id = o["id"].as_i64().unwrap_or(0);
@@ -182,6 +181,13 @@ impl Service {
         let mut v = decode(&row);
         v["proofs"] = json!(self.proofs_for_finding(id)?);
         Ok(v)
+    }
+
+    /// Findings at the same place as `url` (same URL without query and fragment), newest first. Uses an index,
+    /// so it stays fast however many findings there are.
+    pub(crate) fn findings_at_url(&self, url: &str) -> Result<Vec<Value>> {
+        let rows = self.store.lock().findings_at_url(url_key(url))?;
+        Ok(rows.iter().map(decode).collect())
     }
 
     pub fn finding_list(&self, status: Option<&str>) -> Result<Vec<Value>> {

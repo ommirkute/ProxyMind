@@ -326,6 +326,15 @@ export interface ReportTemplate {
   builtin: boolean;
 }
 
+export interface FindingProve {
+  finding_id: number;
+  vuln_class: string;
+  proven: boolean;
+  reasons: string[];
+  oracle: string | null;
+  proof_id: number | null;
+}
+
 export const cweUrl = (n: number) => `https://cwe.mitre.org/data/definitions/${n}.html`;
 
 export type ProofResult =

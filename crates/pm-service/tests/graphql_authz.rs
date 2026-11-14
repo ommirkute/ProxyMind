@@ -7,7 +7,7 @@ use pm_demo::VulnShop;
 use pm_service::pm_identity::{AuthMaterial, Identity, LoginRecipe, LoginStep};
 use pm_service::pm_policy::{Actor, Policy, Roe};
 use pm_service::pm_store::Store;
-use pm_service::{ReplayRequest, ReplayResult, Service};
+use pm_service::{ProofRequest, ProofResult, ReplayRequest, ReplayResult, Service};
 
 fn agent() -> Actor {
     Actor::parse("agent:test").unwrap()
@@ -19,7 +19,9 @@ fn human() -> Actor {
 async fn setup() -> (Arc<Service>, String) {
     let addr = VulnShop::start_local().await.unwrap();
     let url = format!("http://127.0.0.1:{}", addr.port());
-    let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");
+    let roe = format!(
+        "version: 1\nscope:\n  include: [\"{url}/\"]\ntiers:\n  human:\n    active_intrusive: allow\n    destructive: allow\n"
+    );
     let s = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap());
     for (user, role) in [("alice", "user"), ("bob", "user"), ("admin", "admin")] {
         let body = format!("{{\"username\":\"{user}\",\"password\":\"{user}123\"}}");
@@ -92,4 +94,46 @@ async fn graphql_resolver_without_ownership_check() {
     assert!(leads[0].evidence.contains("bob asked for alice's Invoice 5001"), "{}", leads[0].evidence);
     let f = s.finding_get(leads[0].finding_id).unwrap();
     assert_eq!(f["vuln_class"], "idor");
+}
+
+async fn post_graphql_as(s: &Service, url: &str, query: &str, who: &str) -> i64 {
+    let body = serde_json::json!({ "query": query }).to_string();
+    let raw = format!(
+        "POST /graphql HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let req = ReplayRequest { url: Some(url.into()), raw: Some(raw), identity: Some(who.into()), ..Default::default() };
+    match s.replay_send(&human(), req).await.unwrap() {
+        ReplayResult::Sent { exchange_id, .. } => exchange_id,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn differential(exchange_id: i64) -> ProofRequest {
+    ProofRequest {
+        oracle: "differential_authz".into(),
+        exchange_id: Some(exchange_id),
+        attacker: Some("bob".into()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn differential_authz_proves_a_graphql_query_sent_by_post() {
+    let (s, url) = setup().await;
+    let ex = post_graphql_as(&s, &url, "{ invoice(id: 5001) { id total } }", "alice").await;
+    match s.proof_run(&human(), differential(ex)).await.unwrap() {
+        ProofResult::Completed { proven, reasons, .. } => assert!(proven, "{reasons:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn differential_authz_refuses_a_graphql_mutation_and_sends_nothing() {
+    let (s, url) = setup().await;
+    let ex = post_graphql_as(&s, &url, "mutation { deleteInvoice(id: 5001) { id } }", "alice").await;
+    let before = s.history_mark().unwrap();
+    let err = s.proof_run(&human(), differential(ex)).await.unwrap_err().to_string();
+    assert!(err.contains("mutation"), "{err}");
+    assert_eq!(before, s.history_mark().unwrap(), "nothing may be re-sent");
 }

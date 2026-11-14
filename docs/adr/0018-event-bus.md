@@ -1,0 +1,50 @@
+# ADR-0018: Typed events from the service layer
+
+**Status:** Proposed (roadmap work package 1.2)
+
+## Context
+The only live channel today is `GET /api/v1/events` (`events` in `crates/pm-api/src/routes.rs`). Each connection runs its own loop: call `Service::counters()` (`crates/pm-service/src/lib.rs`), and if the result differs from the last one sent, emit one SSE event named `counters`; otherwise sleep 700 ms and repeat. The payload is the `Counters` struct: `exchanges`, `last_exchange_id`, `pending_approvals`, `findings`, `audit_records`, `intercepted`. There are no topics, no event ids and no way to say what changed.
+
+`counters()` is not cheap. It takes the `store: Mutex<Store>` lock and, per tick and per open stream, counts exchanges, searches for the newest exchange, lists up to 1,000 approvals, loads up to 10,000 `findings` rows just to take `.len()`, and reads the last audit record. That is the one-connection store bottleneck of work package 1.1, hit by a timer.
+
+The UI (`ui/src/App.tsx`) opens one `EventSource("/api/v1/events")`, keeps the latest `Counters` in React state and exposes it through `NavContext`. Pages then use counter fields as refetch triggers in `useLoad` dependency lists: Findings (`findings`, `audit_records`), Approvals (`pending_approvals`, `audit_records`), Audit (`audit_records`), Issues (`exchanges`), and the nav badges. A counter can only say "something changed", so each page refetches whole lists. A change that leaves the count unchanged is invisible, and three pages therefore keep their own timers: `Intercept.tsx` polls every 1.5 s (its comment says a forward plus a new arrival leaves `intercepted` unchanged), `Collaborator.tsx` every 2 s, and the WebSocket frames view in `History.tsx` every 3 s.
+
+Other change sources are not observable at all. `pm-service` has no `broadcast`, `watch` or `Notify`. The only `tokio::sync` use is a `Mutex` for `session_lock`. `InterceptQueue` (`crates/pm-proxy/src/intercept.rs`) keeps a `Mutex<BTreeMap>` of held items and uses a `oneshot` per item for the decision, so nothing can subscribe to arrivals. Scan, fuzzer and AI-scan progress (`ai_scan_log` and `ai_scan_progress` in `ai_scan.rs`, progress in `fuzzer.rs`) are written to the store and only visible by polling a REST route. Phase 3 needs more consumers: webhooks (3.5) and presence and comments (3.4).
+
+## Decision
+- **A typed `Event` enum in `pm-service`**, a small serde-tagged value with ids and short summaries only: `ExchangeRecorded { id, host, method, status }`, `FindingChanged { id, status }`, `ScanProgress { task, done, total }`, `ProofCompleted { finding_id, verdict }`, `InterceptQueued { id }`, `InterceptResolved { id }`, `ApprovalRequested { id }`, `ApprovalDecided { id, decision }`, `AuditAppended { seq }`, `CollaboratorHit { id }`. Events never carry bodies, headers, evidence text or secrets: a consumer fetches the row through the normal, actor-checked service call.
+- **Published on a `tokio::sync::broadcast` channel owned by `Service`**, after the store write has committed. With the writer task of ADR-0017 this means the writer publishes once its transaction commits, so a subscriber that receives an event can immediately read the row. Batched recorder writes publish after the batch commits, one event per row. Intercept arrivals and decisions publish from the queue's callers in `pm-service`, which removes the need for `pm-proxy` to know about the bus (lower crates never import higher ones).
+- **Each event gets a monotonically increasing `seq`** (u64, per process) assigned at publish time and sent as the SSE `id:` field. The wire format is `event: <topic>`, `id: <seq>`, `data: {json}`, with topics `exchanges`, `findings`, `scans`, `proofs`, `intercept`, `approvals`, `audit`, `collaborator`.
+- **SSE takes topics**: `GET /api/v1/events?topics=exchanges,findings` (default: all topics the actor may read). The existing `counters` event stays during migration.
+- **Lag means resync, not loss.** The broadcast channel has a bounded capacity. When a subscriber falls behind (`RecvError::Lagged(n)`), the stream sends one `resync` event (`{missed: n}`, topics unchanged) and carries on. The client treats it as "refetch what you show". Reconnects with `Last-Event-ID` older than the oldest buffered event get `resync` as well. No replay log is kept.
+- **Events are filtered per actor, like the API.** Each stream is bound to the actor of its token (ADR-0005) and each event is checked against the same scope and role rules as the corresponding read before it is sent: an event for a host out of scope for that actor is dropped, and topics the actor may not read are refused with 403 when the stream opens. Summaries that carry target-derived text (`host`) pass through `redactor_for(actor)` when the actor is an agent (`redacts_for` in `lib.rs`), and any free-text field is wrapped as untrusted target content as `json_for` does. Agent-facing consumers (MCP notifications, webhooks, the assistant) use the same function, so there is one place that decides what an event may show.
+- **The UI stops polling.** A small client store subscribes to topics and invalidates only the queries that depend on them (an `ExchangeRecorded` patches the History head; `FindingChanged` refetches one finding). The 700 ms counter loop, the Intercept, Collaborator and WebSocket-view timers all go. Webhooks (3.5) and presence (3.4) subscribe to the same bus; they add event variants, not a second mechanism.
+
+## Migration
+1. Add `Event`, the broadcast channel and `Service::subscribe()`. No behaviour change. Publish from the existing write paths (`insert_exchange` callers, findings, approvals, audit append, intercept, scan progress), behind the writer task once ADR-0017 lands.
+2. Add topic SSE next to the old stream. Reimplement the old `counters` event on top of the bus: keep running totals in memory, send a fresh `Counters` when a relevant event arrives, coalesced to at most one per 250 ms, and drop the per-connection `counters()` loop. Old clients keep working unchanged.
+3. Move the UI page by page (Intercept first, since it has the worst polling), then delete the timers and finally the `counters` event once `ui/tests/e2e.mjs` no longer needs it.
+4. Keep `/status` returning `counters` (it is the initial load) but compute them from cheap `COUNT` queries rather than loading rows.
+
+## Tests
+- Service: an event is published only after commit (a subscriber that gets `ExchangeRecorded` finds the row); a rolled-back write publishes nothing; `seq` is strictly increasing.
+- Lag: a subscriber with a tiny capacity that is not drained gets exactly one `resync`, then live events.
+- Authorization and redaction: an agent actor sees no event for an out-of-scope host, and a host string containing a planted secret is redacted; a human sees it.
+- API: `?topics=` filters; unknown topics return 400; an old client still receives `counters` (extends the `/events` check in `crates/pm-api/tests/api.rs`).
+- UI e2e: no `setInterval` in the live pages; the Intercept page shows a new held request within one second without a timer.
+- Load: 2,000 recorded requests a second with 20 subscribers: recorder throughput and p99 latency stay within the 1.1 targets, subscriber memory stays bounded.
+
+## Alternatives
+- **Keep polling, only make it cheaper.** Cheaper `COUNT`s help (and step 4 does it), but counters still cannot say what changed, miss same-count changes, and every consumer would run its own timer. Webhooks would need a diff loop.
+- **WebSockets instead of SSE.** The traffic is server to client only, SSE reconnects and resumes with `Last-Event-ID` for free, and it already works through the auth and Host checks in `pm-api`. Commands already go through REST. WebSockets add framing and ping code for nothing. Nothing stops adding them later on top of the same bus.
+- **An external broker (Redis, NATS).** ProxyMind is a single local process with a single project file; a broker adds a dependency, a port to secure and a second place where scope rules would need enforcing. Revisit only if the team mode (3.x) is split across processes.
+- **A `watch` channel of the latest state.** Coalesces for free but drops intermediate ids, which webhooks and presence need.
+
+## Consequences
+- The store is read only when something happened, which removes the biggest idle load on the single connection.
+- Events can be lost to lag or restart by design; every consumer must be able to resync from REST, and the UI already can.
+- **Event storms.** A scan or fuzz run can record thousands of exchanges a second. Mitigations: per-subscriber coalescing of `ExchangeRecorded` into batches (`{from_id, to_id, count}`) at most every 250 ms for the UI; scan progress rate-limited per task; broadcast capacity sized so slow subscribers resync rather than back-pressure the writer. Publishing never blocks a write.
+- **Ordering.** `seq` is assigned inside the writer after commit, so order matches commit order. Events from different sources (intercept versus store) are ordered only by `seq`, not by wall clock.
+- **Memory.** One ring buffer shared by all subscribers (capacity times a small event, roughly tens of KB) plus one cursor per subscriber; per-stream state is a topic set and an actor id. A stream limit per actor stops a client from opening unbounded connections.
+- The `Event` enum becomes part of the public contract: it must be covered by the generated schemas of work package 1.3 and may only grow by adding variants and fields.
+- Variants that are added later must say what they redact, since a new variant with free text is a new leak path to agents.

@@ -1,14 +1,18 @@
 //! Proven findings as regression tests a developer's CI runs: see
 //! `pm_tools::regress` for the format. Export builds a test per proven
-//! finding (differential authorization, reflection, timing); the runner
-//! sends them to the origin they came from or a `--target`, with
-//! credentials from the environment, and says which findings are still
-//! there. The runner needs no project and sends only to that one origin.
+//! finding (differential authorization, reflection, timing, error-based and
+//! boolean SQL injection, path traversal, open redirect and header
+//! injection); the runner sends them to the origin they came from or a
+//! `--target`, with credentials from the environment, and says which
+//! findings are still there. The runner needs no project and sends only to
+//! that one origin. Test files never hold credentials, and a run that can't
+//! tell (credentials not accepted, the server failing) is an error, never
+//! "fixed".
 
 use std::time::Duration;
 
 use pm_policy::{Actor, ActorKind};
-use pm_tools::regress::{self, FORMAT, RegressionTest, TestFinding, VulnerableIf};
+use pm_tools::regress::{self, RegressionTest, TestFinding, VulnerableIf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -44,25 +48,77 @@ fn origin_of(url: &str) -> Option<String> {
     Some(format!("{}://{}:{port}", u.scheme(), u.host_str()?))
 }
 
+/// The header names that can carry credentials: the usual ones, plus the
+/// ones this identity uses.
+fn credential_headers(identity: Option<&pm_identity::Identity>) -> Vec<String> {
+    let mut names: Vec<String> = pm_identity::AUTH_HEADERS.iter().map(|h| h.to_string()).collect();
+    names.extend(identity.iter().flat_map(|i| i.auth.headers.iter().map(|(h, _)| h.to_ascii_lowercase())));
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The environment variable name for credentials no saved identity owns.
+const SESSION: &str = "session";
+
 impl Service {
-    /// The credential headers an identity uses (to strip from recorded requests).
-    fn auth_header_names(&self, identity: &str) -> Vec<String> {
-        let Ok(id) = self.load_identity(identity) else { return vec!["cookie".into(), "authorization".into()] };
-        let mut names: Vec<String> = id.auth.headers.iter().map(|(h, _)| h.to_ascii_lowercase()).collect();
-        if !id.auth.cookies.is_empty() {
-            names.push("cookie".into());
-        }
-        names.push("authorization".into());
-        names.sort();
-        names.dedup();
-        names
+    /// The saved identity whose credentials a request carries, if any.
+    fn identity_carrying(&self, carried: &pm_identity::AuthMaterial) -> Option<pm_identity::Identity> {
+        let same =
+            |a: &(String, String), b: &(String, String)| a.1.len() >= 8 && a.0.eq_ignore_ascii_case(&b.0) && a.1 == b.1;
+        let rows = self.store.lock().list_identities().ok()?;
+        rows.iter().filter_map(|r| serde_json::from_str::<pm_identity::Identity>(&r.data).ok()).find(|i| {
+            i.auth.cookies.iter().any(|c| carried.cookies.iter().any(|x| same(c, x)))
+                || i.auth.headers.iter().any(|h| carried.headers.iter().any(|x| same(h, x)))
+        })
     }
 
-    fn with_identity(&self, raw: &str, identity: Option<&str>) -> (String, Vec<String>) {
-        match identity.filter(|i| !i.is_empty() && *i != pm_identity::ANONYMOUS) {
-            Some(i) => (regress::strip_auth(raw, &self.auth_header_names(i), i), vec![i.to_string()]),
-            None => (raw.to_string(), vec![]),
+    /// A request as it goes into a test file: without credentials. Whoever's
+    /// they are (the named identity's, or the session the request was
+    /// recorded with) becomes an `{{auth:NAME}}` line filled from the
+    /// environment at run time. Credentials never go in the file.
+    fn portable(&self, raw: &str, identity: Option<&str>) -> (String, Vec<String>) {
+        match identity.filter(|i| !i.is_empty()) {
+            // Sent without credentials: the test sends it the same way.
+            Some(pm_identity::ANONYMOUS) => {
+                let bare = pm_identity::apply(raw.as_bytes(), &pm_identity::AuthMaterial::default());
+                (String::from_utf8_lossy(&bare).into_owned(), vec![])
+            }
+            Some(name) => {
+                let id = self.load_identity(name).ok();
+                (regress::strip_auth(raw, &credential_headers(id.as_ref()), name), vec![name.to_string()])
+            }
+            None => {
+                let carried = pm_identity::auth_from_request(raw.as_bytes());
+                if carried.is_empty() {
+                    return (raw.to_string(), vec![]);
+                }
+                let owner = self.identity_carrying(&carried);
+                let name = owner.as_ref().map_or(SESSION.to_string(), |i| i.name.clone());
+                (regress::strip_auth(raw, &credential_headers(owner.as_ref()), &name), vec![name])
+            }
         }
+    }
+
+    /// What lets a test tell "fixed" from "the credentials stopped working":
+    /// the identity's health check (when it is for this origin) and how the
+    /// app looks when logged out.
+    fn with_auth_checks(&self, mut t: RegressionTest) -> RegressionTest {
+        let Some(id) = t.auth.first().and_then(|name| self.load_identity(name).ok()) else { return t };
+        t.logged_out = id.logged_out.as_ref().map(|l| regress::LoggedOutLook {
+            statuses: l.statuses.clone(),
+            location_contains: l.location_contains.clone(),
+            body_contains: l.body_contains.clone(),
+        });
+        t.auth_check =
+            id.health.as_ref().filter(|h| origin_of(&h.url).as_deref() == Some(t.origin.as_str())).map(|h| {
+                regress::AuthCheck {
+                    request: regress::strip_auth(&h.request, &credential_headers(Some(&id)), &id.name),
+                    expect_status: h.expect_status,
+                    expect_contains: h.expect_contains.clone(),
+                }
+            });
+        t
     }
 
     /// A regression test for each proven finding, and why the others have none.
@@ -97,13 +153,20 @@ impl Service {
                 ))
             };
             let identity = inputs["identity"].as_str();
-            let test = match p["oracle"].as_str().unwrap_or_default() {
+            // Where a proof made from request templates was sent.
+            let template_origin = || {
+                exchange(inputs["exchange_id"].as_i64())
+                    .map(|x| x.1)
+                    .or_else(|| inputs["url"].as_str().and_then(origin_of))
+            };
+            let oracle = p["oracle"].as_str().unwrap_or_default();
+            let test = match oracle {
                 "differential_authz" => {
                     let attacker = d["attacker"].as_str().unwrap_or_default();
                     match exchange(d["exchanges"]["attacker"].as_i64()) {
                         None => Err("the attacker's exchange is no longer in the project"),
                         Some((raw, origin)) => {
-                            let (request, auth) = self.with_identity(&raw, Some(attacker));
+                            let (request, auth) = self.portable(&raw, Some(attacker));
                             let markers: Vec<String> = d["markers_found"]
                                 .as_array()
                                 .into_iter()
@@ -112,12 +175,6 @@ impl Service {
                                 .map(str::to_string)
                                 .collect();
                             Ok(RegressionTest {
-                                format: FORMAT.into(),
-                                finding,
-                                origin,
-                                oracle: "differential_authz".into(),
-                                request,
-                                baseline: None,
                                 auth,
                                 vulnerable_if: VulnerableIf {
                                     status_min: Some(200),
@@ -125,24 +182,22 @@ impl Service {
                                     body_contains_any: markers,
                                     ..Default::default()
                                 },
-                                samples: 1,
+                                ..RegressionTest::new(finding, origin, oracle, request)
                             })
                         }
                     }
                 }
+                // Stored XSS shows on another page; the runner only reads the answer to the request it sends.
+                "reflection" if inputs["view_raw"].is_string() => {
+                    Err("stored XSS (shown on another page) can't run as a one-request test: retest it in ProxyMind")
+                }
                 "reflection" => match (inputs["raw"].as_str(), d["url"].as_str().and_then(origin_of)) {
                     (Some(raw), Some(origin)) => {
-                        let (request, auth) = self.with_identity(raw, identity);
+                        let (request, auth) = self.portable(raw, identity);
                         Ok(RegressionTest {
-                            format: FORMAT.into(),
-                            finding,
-                            origin,
-                            oracle: "reflection".into(),
-                            request,
-                            baseline: None,
                             auth,
                             vulnerable_if: VulnerableIf { reflects_payload: true, ..Default::default() },
-                            samples: 1,
+                            ..RegressionTest::new(finding, origin, oracle, request)
                         })
                     }
                     _ => Err("the proof's request template is missing"),
@@ -154,14 +209,9 @@ impl Service {
                     let baseline = inputs["baseline_raw"].as_str().map(str::to_string).or(from_ex.map(|x| x.0));
                     match (inputs["payload_raw"].as_str(), baseline, origin) {
                         (Some(payload), Some(baseline), Some(origin)) => {
-                            let (request, auth) = self.with_identity(payload, identity);
-                            let (baseline, _) = self.with_identity(&baseline, identity);
+                            let (request, auth) = self.portable(payload, identity);
+                            let (baseline, _) = self.portable(&baseline, identity);
                             Ok(RegressionTest {
-                                format: FORMAT.into(),
-                                finding,
-                                origin,
-                                oracle: "timing".into(),
-                                request,
                                 baseline: Some(baseline),
                                 auth,
                                 vulnerable_if: VulnerableIf {
@@ -169,16 +219,65 @@ impl Service {
                                     ..Default::default()
                                 },
                                 samples: 5,
+                                ..RegressionTest::new(finding, origin, oracle, request)
                             })
                         }
                         _ => Err("the proof's requests are missing"),
                     }
                 }
+                // Proofs that send a fixed set of requests: the test re-sends
+                // them and judges the answers the way the proof did.
+                "sql_error" | "boolean_injection" | "path_traversal" | "expression" => {
+                    let raws: Vec<&str> =
+                        inputs["raws"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let markers: Vec<String> = inputs["markers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    // The request that carries the payload, and whether the set is whole.
+                    let (shown, whole) = match oracle {
+                        "sql_error" => (1, raws.len() == 4),
+                        "boolean_injection" => (1, raws.len() == 3),
+                        _ => (2, raws.len() >= 3 && markers.len() == raws.len() - 2),
+                    };
+                    match template_origin().filter(|_| whole) {
+                        None => Err("the proof's requests are missing"),
+                        Some(origin) => {
+                            let made: Vec<(String, Vec<String>)> =
+                                raws.iter().map(|r| self.portable(r, identity)).collect();
+                            let auth = made.iter().find(|m| !m.1.is_empty()).map(|m| m.1.clone()).unwrap_or_default();
+                            let requests: Vec<String> = made.into_iter().map(|m| m.0).collect();
+                            let payload_request = requests[shown].clone();
+                            Ok(RegressionTest {
+                                format: regress::FORMAT_2.into(),
+                                requests,
+                                markers,
+                                auth,
+                                ..RegressionTest::new(finding, origin, oracle, payload_request)
+                            })
+                        }
+                    }
+                }
+                "marker" => match (inputs["raw"].as_str(), inputs["marker_kind"].as_str(), template_origin()) {
+                    (Some(raw), Some(kind), Some(origin)) => {
+                        let (request, auth) = self.portable(raw, identity);
+                        Ok(RegressionTest {
+                            format: regress::FORMAT_2.into(),
+                            marker_kind: Some(kind.to_string()),
+                            auth,
+                            ..RegressionTest::new(finding, origin, oracle, request)
+                        })
+                    }
+                    _ => Err("the proof's request template is missing"),
+                },
                 "oast" => Err("needs an out-of-band callback server: retest it in ProxyMind instead"),
                 _ => Err("this kind of proof can't run outside ProxyMind"),
             };
             match test {
-                Ok(t) => out.tests.push(t),
+                Ok(t) => out.tests.push(self.with_auth_checks(t)),
                 Err(why) => out.skipped.push(skip(why)),
             }
         }
@@ -221,9 +320,14 @@ impl Service {
             format!(
                 "# ProxyMind regression tests\n\nOne test per proven finding. Run them against a test environment:\n\n\
                  ```\nproxymind regress run tests/ --target https://staging.example.com --junit results.xml\n```\n\n\
-                 A test fails while the finding is still there and passes once it is fixed (the exit code is 1 if any \
-                 finding is still there). The runner sends requests only to the target (or the origin in each test), \
-                 needs no ProxyMind project, and reads credentials from the environment:\n\n{env_lines}\n\n\
+                 A test fails while the finding is still there and passes once it is fixed. A test that can't tell is \
+                 an error, not a pass: the credentials were not accepted (an expired token), or the server failed. The \
+                 exit code is 1 if any finding is still there or any test had an error, and 2 if a test was \
+                 skipped because its credential variable is not set (`--allow-skipped` lets that pass). The runner \
+                 sends requests only to the target (or the origin in each test), needs no ProxyMind project, and reads credentials from \
+                 the environment:\n\n{env_lines}\n\n\
+                 The test files hold no credentials: each `{{{{auth:NAME}}}}` line is filled from `PM_AUTH_<NAME>` \
+                 when the test runs. If the page a test requests needs no login, delete that line from the test.\n\n\
                  Only run these against systems you are allowed to test.\n{skipped}"
             )
             .into_bytes(),
@@ -265,8 +369,28 @@ impl Service {
     }
 }
 
+/// One answer from the target.
+struct Reply {
+    status: u16,
+    location: Option<String>,
+    /// De-chunked, decompressed.
+    body: String,
+    raw: Vec<u8>,
+    ms: u64,
+}
+
+/// What a test's answers say.
+enum Judged {
+    Vulnerable(String),
+    Fixed(String),
+    /// The run can't say (outcome, why): never reported as fixed.
+    Stop(&'static str, String),
+}
+
 /// Runs one test against `target` (`scheme://host[:port]`, default: the
-/// test's origin), reading credentials from `env`.
+/// test's origin), reading credentials from `env`. A test is `fixed` only
+/// when the answers show it: credentials that are not accepted, or a server
+/// that fails, are an `error`.
 pub async fn run_regression(
     t: &RegressionTest,
     target: Option<&str>,
@@ -287,8 +411,8 @@ pub async fn run_regression(
         r.elapsed_ms = started.elapsed().as_millis() as u64;
         r
     };
-    if t.format != FORMAT {
-        return done(r, "error", format!("unknown format {:?}", t.format));
+    if !regress::supported(&t.format) {
+        return done(r, "error", format!("unknown format {:?}: this test needs a newer ProxyMind", t.format));
     }
     let Some(base) = url::Url::parse(target.unwrap_or(&t.origin)).ok() else {
         return done(r, "error", "bad target URL".into());
@@ -309,55 +433,192 @@ pub async fn run_regression(
         async move {
             let method = raw.split(' ').next().unwrap_or("GET").to_string();
             let resp = sender.send(ep, raw.as_bytes(), &method, None).await.map_err(|e| format!("{e:#}"))?;
-            let body = pm_http::split_message(&resp.raw).1;
-            let body = pm_http::decode_chunked(body).unwrap_or_else(|| body.to_vec());
-            Ok::<_, String>((
-                resp.head.status,
-                String::from_utf8_lossy(&body).into_owned(),
-                resp.elapsed.as_millis() as u64,
-            ))
+            Ok::<_, String>(Reply {
+                status: resp.head.status,
+                location: pm_http::header(&resp.head.headers, "location")
+                    .map(|l| String::from_utf8_lossy(l).into_owned()),
+                body: crate::proof::body_text(&resp.raw),
+                ms: resp.elapsed.as_millis() as u64,
+                raw: resp.raw,
+            })
         }
     };
-    match t.oracle.as_str() {
-        "timing" => {
-            let Some(baseline) = &t.baseline else { return done(r, "error", "the test has no baseline".into()) };
+    let envs = t.auth.iter().map(|a| regress::auth_env(a)).collect::<Vec<_>>().join(", ");
+    // Why an answer can't show whether the finding is fixed, if it can't:
+    // the credentials were not accepted, or (`must_work`: a request that has
+    // no reason to fail) the server failed.
+    let cant_tell = |reply: &Reply, must_work: bool| -> Option<String> {
+        let rejected = !t.auth.is_empty()
+            && regress::credentials_rejected(
+                reply.status,
+                reply.location.as_deref(),
+                &reply.body,
+                t.logged_out.as_ref(),
+            );
+        if rejected {
+            return Some(format!(
+                "{}: the credentials in {envs} were not accepted (expired?), so this can't tell whether the finding is fixed",
+                reply.status
+            ));
+        }
+        (must_work && reply.status >= 500)
+            .then(|| format!("{}: the server failed, so this can't tell whether the finding is fixed", reply.status))
+    };
+    // Sends each template in turn. `Err` is the outcome to report.
+    let send_all = |templates: Vec<String>| {
+        let (send, authority) = (&send, &authority);
+        async move {
+            let mut replies = Vec::new();
+            for tpl in templates {
+                let raw = regress::fill(&tpl, authority, None, env).map_err(|e| ("skipped", e))?;
+                replies.push(send(raw).await.map_err(|e| ("error", e))?);
+            }
+            Ok::<_, (&'static str, String)>(replies)
+        }
+    };
+    let reason = |v: &pm_proof::Verdict| v.reasons.last().cloned().unwrap_or_default();
+
+    let judged = match t.oracle.as_str() {
+        "timing" => 'timing: {
+            let Some(baseline) = &t.baseline else {
+                break 'timing Judged::Stop("error", "the test has no baseline".into());
+            };
             let min = t.vulnerable_if.slower_by_ms.unwrap_or(500.0);
             let (mut b, mut p) = (Vec::new(), Vec::new());
             for _ in 0..t.samples.clamp(1, 15) {
-                for (tpl, out) in [(baseline, &mut b), (&t.request, &mut p)] {
-                    let raw = match regress::fill(tpl, &authority, None, env) {
-                        Ok(x) => x,
-                        Err(e) => return done(r, "skipped", e),
-                    };
-                    match send(raw).await {
-                        Ok((_, _, ms)) => out.push(ms),
-                        Err(e) => return done(r, "error", e),
+                match send_all(vec![baseline.clone(), t.request.clone()]).await {
+                    Ok(mut pair) => {
+                        p.extend(pair.pop());
+                        b.extend(pair.pop());
+                    }
+                    Err((outcome, why)) => break 'timing Judged::Stop(outcome, why),
+                }
+            }
+            let ms = |x: &[Reply]| x.iter().map(|r| r.ms).collect::<Vec<u64>>();
+            let detail =
+                format!("baseline {:?} ms, with the delay payload {:?} ms (needs {min} ms slower)", ms(&b), ms(&p));
+            if regress::still_slow(&ms(&b), &ms(&p), min) {
+                Judged::Vulnerable(detail)
+            } else if let Some(why) =
+                b.iter().find_map(|x| cant_tell(x, true)).or_else(|| p.iter().find_map(|x| cant_tell(x, false)))
+            {
+                Judged::Stop("error", why)
+            } else {
+                Judged::Fixed(detail)
+            }
+        }
+        // The proof's own requests, judged the way the proof judged them.
+        "sql_error" | "boolean_injection" | "path_traversal" | "expression" => 'multi: {
+            let n = t.requests.len();
+            let whole = match t.oracle.as_str() {
+                "sql_error" => n == 4,
+                "boolean_injection" => n == 3,
+                _ => n >= 3 && t.markers.len() == n - 2,
+            };
+            if !whole {
+                break 'multi Judged::Stop("error", "the test's requests are missing".into());
+            }
+            // The true/false split has to repeat, as in the proof.
+            let rounds = if t.oracle == "boolean_injection" { 2 } else { 1 };
+            let mut replies: Vec<Vec<Reply>> = Vec::new();
+            for _ in 0..rounds {
+                match send_all(t.requests.clone()).await {
+                    Ok(x) => replies.push(x),
+                    Err((outcome, why)) => break 'multi Judged::Stop(outcome, why),
+                }
+            }
+            let raws = |round: &[Reply]| round.iter().map(|x| x.raw.clone()).collect::<Vec<Vec<u8>>>();
+            let (verdict, _) = match t.oracle.as_str() {
+                "sql_error" => crate::proof::judge_sql_error(&raws(&replies[0])),
+                "boolean_injection" => {
+                    let rounds: Vec<[Vec<u8>; 3]> =
+                        replies.iter().map(|x| [x[0].raw.clone(), x[1].raw.clone(), x[2].raw.clone()]).collect();
+                    crate::proof::judge_boolean(&rounds, &t.requests)
+                }
+                "expression" => crate::proof::judge_expression(&t.markers, &raws(&replies[0])),
+                _ => crate::proof::judge_traversal(&t.requests, &t.markers, &raws(&replies[0])),
+            };
+            let first = &replies[0];
+            if verdict.proven {
+                Judged::Vulnerable(reason(&verdict))
+            } else if let Some(why) =
+                cant_tell(&first[0], true).or_else(|| first.iter().skip(1).find_map(|x| cant_tell(x, false)))
+            {
+                Judged::Stop("error", why)
+            } else {
+                Judged::Fixed(verdict.reasons.first().cloned().unwrap_or_default())
+            }
+        }
+        "marker" => 'marker: {
+            let marker = match crate::proof::marker_token() {
+                Ok(m) => m,
+                Err(e) => break 'marker Judged::Stop("error", e.to_string()),
+            };
+            let kind = t.marker_kind.as_deref().unwrap_or_default();
+            if !crate::proof::MARKER_KINDS.contains(&kind) || !t.request.contains("{{marker}}") {
+                break 'marker Judged::Stop("error", "the test has no {{marker}} or an unknown marker_kind".into());
+            }
+            match send_all(vec![t.request.replace("{{marker}}", &marker)]).await {
+                Err((outcome, why)) => Judged::Stop(outcome, why),
+                Ok(replies) => {
+                    let (verdict, _) = crate::proof::judge_marker(kind, &marker, &replies[0].raw, &host);
+                    if verdict.proven {
+                        Judged::Vulnerable(reason(&verdict))
+                    } else if let Some(why) = cant_tell(&replies[0], true) {
+                        Judged::Stop("error", why)
+                    } else {
+                        Judged::Fixed(reason(&verdict))
                     }
                 }
             }
-            let slow = regress::still_slow(&b, &p, min);
-            let detail = format!("baseline {b:?} ms, with the delay payload {p:?} ms (needs {min} ms slower)");
-            done(r, if slow { "vulnerable" } else { "fixed" }, detail)
         }
-        _ => {
+        "differential_authz" | "reflection" => {
             let token = format!("pmr{:x}", rand_u64());
             let payload = format!("<img src=x onerror=pmRegression('{token}')>");
-            let raw = match regress::fill(&t.request, &authority, Some((&payload, &token)), env) {
-                Ok(x) => x,
-                Err(e) => return done(r, "skipped", e),
-            };
-            match send(raw).await {
-                Err(e) => done(r, "error", e),
-                Ok((status, body, _)) => {
-                    let vuln = regress::still_vulnerable(&t.vulnerable_if, status, &body, Some(&payload));
-                    let why = match (vuln, t.oracle.as_str()) {
-                        (true, "reflection") => format!("{status}: the payload still comes back unencoded"),
-                        (true, _) => format!("{status}: the response still shows what the proof showed"),
-                        (false, _) => format!("{status}: no longer shows the finding"),
-                    };
-                    done(r, if vuln { "vulnerable" } else { "fixed" }, why)
+            match regress::fill(&t.request, &authority, Some((&payload, &token)), env) {
+                Err(e) => Judged::Stop("skipped", e),
+                Ok(raw) => match send(raw).await {
+                    Err(e) => Judged::Stop("error", e),
+                    Ok(reply) => {
+                        let status = reply.status;
+                        if regress::still_vulnerable(&t.vulnerable_if, status, &reply.body, Some(&payload)) {
+                            Judged::Vulnerable(if t.oracle == "reflection" {
+                                format!("{status}: the payload still comes back unencoded")
+                            } else {
+                                format!("{status}: the response still shows what the proof showed")
+                            })
+                        } else if let Some(why) = cant_tell(&reply, true) {
+                            Judged::Stop("error", why)
+                        } else {
+                            Judged::Fixed(format!("{status}: no longer shows the finding"))
+                        }
+                    }
+                },
+            }
+        }
+        other => Judged::Stop("error", format!("unknown kind of test {other:?}: this test needs a newer ProxyMind")),
+    };
+    match judged {
+        Judged::Vulnerable(detail) => done(r, "vulnerable", detail),
+        Judged::Stop(outcome, detail) => done(r, outcome, detail),
+        Judged::Fixed(detail) => {
+            // Apps that answer an expired session with 403 or an ordinary page
+            // look fixed: ask for something these credentials may do.
+            if let (false, Some(check)) = (t.auth.is_empty(), &t.auth_check) {
+                match send_all(vec![check.request.clone()]).await {
+                    Err((outcome, why)) => return done(r, outcome, why),
+                    Ok(replies) if !check.passes(replies[0].status, &replies[0].body) => {
+                        let why = format!(
+                            "the credentials in {envs} no longer work ({} on the check request), so this can't tell \
+                             whether the finding is fixed",
+                            replies[0].status
+                        );
+                        return done(r, "error", why);
+                    }
+                    Ok(_) => {}
                 }
             }
+            done(r, "fixed", detail)
         }
     }
 }

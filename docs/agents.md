@@ -130,7 +130,8 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `hypothesis_create` / `hypothesis_update` / `hypothesis_list` | The shared ledger of what is being tested and what was ruled out |
 | `coverage` | Each operation × relevant vulnerability class, untested and high-priority first |
 | `finding_create` / `finding_update` / `finding_list` | Record findings with evidence; agents can't mark them proven or confirmed |
-| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast` or `reflection` |
+| `finding_prove` | Pick the oracle that fits a finding's class and prove it: boolean/time-based (SQLi), out-of-band (SSRF), the browser (XSS), two-file reads (path traversal), a fresh marker (open redirect/CRLF), the differential oracle (IDOR/BFLA) |
+| `proof_run` / `proof_get` | Have ProxyMind verify a finding: `differential_authz`, `timing`, `oast`, `reflection`, `sql_error`, `boolean_injection`, `path_traversal`, `expression` (template injection) or `marker` (open redirect, CRLF, Host header, CORS) |
 | `approval_status` | Check whether a human approved a pending action |
 
 Also available: the `proxymind://roe` resource and the `start_engagement` prompt.
@@ -221,9 +222,10 @@ export PM_AUTH_BOB="Cookie: session=…"        # credentials, from CI secrets
 proxymind regress run tests/ --target https://staging.example.com --junit results.xml
 ```
 
-- **What becomes a test:** findings proven by differential authorization (another user's request still returns the owner's data), reflection (a fresh payload still comes back unencoded) or timing (the delay payload is still slower than the baseline). Out-of-band proofs need a callback server, and unproven findings have nothing to re-check; the export lists them with the reason.
-- **Results:** each test reports still vulnerable, fixed, skipped (e.g. a credential variable isn't set) or error. The exit code is 1 if any finding is still there or a test errored. `--junit` writes a report for CI dashboards, `--json` prints the results.
-- **Safety:** credentials never go in the files (`{{auth:NAME}}` lines are filled from `PM_AUTH_NAME`). The runner needs no project and sends only to `--target` (or the origin each test was recorded on). `--insecure` accepts self-signed test certificates. Only run tests against systems you are allowed to test.
+- **What becomes a test:** findings proven by differential authorization (another user's request still returns the owner's data), reflection (a fresh payload still comes back unencoded), timing (the delay payload is still slower than the baseline), error-based or boolean SQL injection, path traversal, and a marker (open redirect, header injection): those four re-send the proof's own requests and judge the answers as the proof did. Out-of-band proofs need a callback server, and unproven findings have nothing to re-check; the export lists them with the reason.
+- **Results:** each test reports still vulnerable, fixed, skipped (e.g. a credential variable isn't set) or error. The exit code is 1 if any finding is still there or a test errored, and 2 if a test was skipped because its credential variable is not set (so a CI job that lost a secret fails; `--allow-skipped` lets local runs pass). `--junit` writes a report for CI dashboards, `--json` prints the results.
+- **Fixed means fixed:** a test that can't tell is an error, never "fixed". That covers credentials the app no longer accepts (an expired token answers 401, or a redirect to the login page, whatever the bug) and a server that fails (5xx). When the identity has a health check, the test carries it and sends it before calling anything fixed, for apps that answer an expired session with 403 or an ordinary page.
+- **Safety:** credentials never go in the files (`{{auth:NAME}}` lines are filled from `PM_AUTH_NAME`): that holds for the session a request was recorded with too, which becomes its identity's placeholder (or `{{auth:session}}` when no saved identity owns it). Delete the line from a test whose page needs no login. The runner needs no project and sends only to `--target` (or the origin each test was recorded on). `--insecure` accepts self-signed test certificates. Only run tests against systems you are allowed to test.
 
 ## Authorization matrix
 

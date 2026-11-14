@@ -198,8 +198,11 @@ pub fn classify_text(text: &str) -> PayloadClass {
     let n = normalise(text);
     let squeezed: String = n.chars().filter(|c| !c.is_whitespace()).collect();
     let mut c = PayloadClass::none();
+    // A pattern with spaces also matches with the spaces taken out
+    // (`drop/**/table` normalises to `droptable`), but only when it is long
+    // enough not to match ordinary words.
     let has =
-        |pat: &str| n.contains(pat) || (pat.contains(' ') && squeezed.contains(&pat.replace(' ', ""))) && pat.len() > 6;
+        |pat: &str| n.contains(pat) || (pat.contains(' ') && pat.len() > 6 && squeezed.contains(&pat.replace(' ', "")));
     for (pat, name) in SQL_DESTRUCTIVE {
         if has(pat) {
             c.raise(Tier::Destructive, format!("destructive SQL: {name}"));

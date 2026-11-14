@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, openBrowser, toast, type Counters, type Status } from "./api";
-import { NavContext, usePref, type Page } from "./components";
+import { NavContext, PageBoundary, usePref, type Page } from "./components";
 import { Icon } from "./icons";
 import Overview from "./pages/Overview";
 import Scans from "./pages/Scans";
@@ -172,6 +172,11 @@ export default function App() {
     es.onerror = () => setLive(false);
     return () => es.close();
   }, [signedIn]);
+
+  // The header's sub-tabs scroll sideways when narrow: keep the current one in view.
+  useEffect(() => {
+    document.querySelector(".subtab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [route.page, signedIn]);
 
   const nav = useMemo(
     () => ({
@@ -385,7 +390,9 @@ export default function App() {
             </div>
           </header>
           <main className="main">
-            <PageView />
+            <PageBoundary resetKey={route.page}>
+              <PageView />
+            </PageBoundary>
           </main>
           {notice && (
             <div className={`toast ${notice.kind}`} role="status" data-testid="toast">

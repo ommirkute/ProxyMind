@@ -48,7 +48,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 - Proxy core: HTTP/1.1 and HTTP/2 (to browsers and servers, downgrading when a server lacks it; ADR-0009), CONNECT + TLS interception, byte-exact forwarding, history in a SQLite project file
 - WebSocket message logging: frames decoded from a copy of the relayed bytes (fragmentation, masking, permessage-deflate), shown in the UI and to agents (`ws_messages`, redacted and tagged as untrusted); WebSocket replay on a new connection through the policy gate (`ws_send`, History → WebSocket tab); WebSocket intercept (hold, edit or drop messages both ways on connections opened while it's on; those open without compression so edits can't break the stream)
 - Policy gate: ROE file, scope with bypass-resistant matching, dates and windows, tiers, rate limits, DNS-rebinding check, persistent single-use approvals, hash-chained audit log
-- Agent interface: MCP server (39 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
+- Agent interface: MCP server (79 tools), token-budgeted views, secret redaction with placeholders, untrusted-content tagging
 - Identities with health checks and automatic re-login; replay as any identity; semantic diff with learned noise
 - Authorization checks; app model (operations, objects, ownership) with suggested tests
 - Hypothesis ledger and coverage map
@@ -57,7 +57,7 @@ PortSwigger's Burp AT (public beta, July 2026) already offers agents inside Burp
 
 - REST API with live events, hardened for browsers; web UI (history, viewer, Replay, approvals, identities and authz, model and coverage, findings and proofs, audit) built into the binary and tested in Chromium in CI (ADR-0008)
 - Intercept-and-edit queue: hold requests and responses by scope, host, path and type; edit, forward or drop from the UI; edits and drops are audited, and the project keeps the server's original responses. Humans only: agents use Replay through the policy gate
-- Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Replay, agents and proofs; policy address checks still apply
+- Upstream proxy (HTTP CONNECT / absolute-form, SOCKS5 with optional remote DNS, login, bypass list) and client certificates per host (mutual TLS), shared live by proxy, Replay, agents and proofs; policy address checks still apply, and checked HTTPS tunnels CONNECT to the checked address (opt out with `remote_dns`)
 - Extra proxy listeners (more ports or interfaces, invisible clients, per-listener redirect with force TLS), hostname resolution overrides and TLS pass-through hosts
 - Active scanner step 1 (docs/scanner-matrix.md): blind SQL injection (boolean and time based) and OS command injection (output and time based), headers and cookies as insertion points, more template engines, confirmation of every hit, fast-to-slow ordering
 - Active scanner step 3a: NoSQL (errors and operator differential), LDAP and XPath errors, CRLF, Host header injection, active CORS, auth bypass on 401/403 with controls, hidden parameter mining

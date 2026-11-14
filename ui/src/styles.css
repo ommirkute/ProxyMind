@@ -379,8 +379,9 @@ pre.raw {
 }
 .vhead:hover { background: var(--panel-2); }
 .detail { overflow: auto; padding: 18px 20px; min-height: 0; background: var(--bg); }
-.tabs { display: inline-flex; gap: 2px; margin: 10px 0; padding: 3px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; }
-.tab { border: 0; background: none; height: 26px; padding: 0 12px; border-radius: 6px; cursor: pointer; color: var(--muted); font-weight: 500; font-size: 12.5px; }
+/* Wraps onto more rows when narrow, so no tab is ever cut off by its panel. */
+.tabs { display: inline-flex; flex-wrap: wrap; max-width: 100%; gap: 2px; margin: 10px 0; padding: 3px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; }
+.tab { border: 0; background: none; height: 26px; padding: 0 12px; border-radius: 6px; cursor: pointer; color: var(--muted); font-weight: 500; font-size: 12.5px; white-space: nowrap; }
 .tab:hover { color: var(--text); }
 .tab.active { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm), 0 0 0 1px var(--border); }
 .status-2 { color: var(--ok); font-weight: 600; }

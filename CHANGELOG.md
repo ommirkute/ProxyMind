@@ -3,6 +3,88 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
+## Unreleased
+
+### Proof
+
+- **Automatic proving.** A new step turns the scanner's *suspected* findings into *proven* ones: it picks the oracle
+  that fits each finding's class, rebuilds the request from its evidence and runs it through the policy gate. SQL
+  injection is proven by a boolean true/false split (or the timing oracle), command injection by timing, SSRF by an
+  out-of-band callback, reflected XSS in the headless browser, path traversal by reading known files while a bogus
+  name reads nothing, and open redirect and CRLF by a fresh random marker reaching the redirect target or a response
+  header. IDOR and BFLA reuse the differential oracle. It runs at the end of `proxymind bench auto` (skip with
+  `--no-prove`), as `proxymind findings prove [id]`, over the API (`POST /api/v1/findings/{id}/prove`,
+  `POST /api/v1/findings/prove`), as the MCP tool `finding_prove`, and from an **Auto-prove** button on the Findings
+  page. Also exposed as new `proof_run` oracles `sql_error`, `boolean_injection`, `path_traversal` and `marker`.
+  SDKs gain `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
+- **Five more classes proven automatically,** each with a control that rules out a look-alike:
+  - **Template injection** by a new `expression` oracle: arithmetic on two fresh pairs of random numbers comes back
+    as the products, while the same numbers without template syntax do not (so a page that computes from any input
+    is not mistaken for a template engine).
+  - **NoSQL operator injection** by a true/false split: `$eq` of the original value answers like the original,
+    `$ne` of it does not (also `$in`/`$nin`).
+  - **XXE** by an external entity that reads a known file into an element's text while a bogus file reads nothing,
+    or by an out-of-band callback from a parameter entity (blind XXE).
+  - **CORS** by a new `cors` marker kind: an `Origin` carrying a fresh random host is echoed in
+    `Access-Control-Allow-Origin` with credentials allowed. Reflection without credentials is not counted.
+  - **Host-header injection** by the `host` marker sent in `X-Forwarded-Host`, `X-Host` or a forged `Host` (the
+    request still goes to the target's address).
+  - **Stored XSS** in the headless browser: the payload is stored by the submission and must run on the page that
+    shows it (the reflection oracle's new `view_raw`).
+  - **DOM XSS** in the headless browser: the XSS proof now renders the page with its own same-origin scripts, so a
+    value a script writes into the page counts.
+  - **SQL injection in a header the recorded request lacks** (e.g. `User-Agent`): the header is added to the
+    baseline too, so only the payload differs.
+  - **IDOR in a GraphQL query sent by POST:** the differential oracle re-sends a POST only when it is a GraphQL
+    query (no mutation or subscription), and counts a 2xx answer with only errors as refused.
+
+  The `host` marker kind is stricter: the marker must come back in an absolute URL (`//marker`) or a redirect, not
+  just anywhere in the page, so a debug page that prints request headers is no longer a proof. Template-injection
+  and CORS proofs export as regression tests too.
+- **Regression tests for the new proofs.** Findings proven by error-based or boolean SQL injection, path traversal
+  or a marker (open redirect, header injection) now export as CI regression tests too: the test re-sends the
+  proof's requests and judges the answers the way the proof did. They use a second test format
+  (`proxymind-regression-2`) so an older runner refuses them instead of misjudging them.
+
+### Fixed
+
+- **The UI went blank after leaving the Assistant page, or when a chat reply arrived,** in current Chrome and
+  Chromium. An effect returned `scrollIntoView()`'s value, which these browsers now make a Promise, and React called
+  it as the effect's cleanup. A page error now also stays inside the page area (with "Try again") instead of
+  blanking the whole UI.
+- **Denied networks could be bypassed through an upstream HTTP proxy for HTTPS.** Tunnels went by host name, so the
+  proxy resolved the name again and could reach an address ProxyMind never checked (DNS rebinding). Checked
+  tunnels now `CONNECT` to the checked address; TLS still uses the name. Proxies that only allow named hosts can
+  turn on "let the proxy resolve names" (`remote_dns`), now offered for HTTP proxies too. Plain HTTP through an
+  HTTP proxy still goes by name (the proxy takes the Host from the target).
+- **Network settings:** the "Connect directly to" list dropped new lines while typing, so a second host couldn't be
+  entered; it now keeps them and drops empty lines when you leave the field or save.
+- **Narrow windows:** tab strips (Engagement tools, Fuzzer, HTTP history) wrapped past their panel and the last tabs
+  could not be clicked; they now wrap onto a second row. The header keeps the current sub-tab in view, and the
+  scanner issue tables no longer let one long URL or payload squeeze the other columns.
+- **Live progress** for crawl-and-audit tasks, Fuzzer attacks and AI scans no longer stops for good after one failed
+  poll (a dropped connection or a server hiccup); it retries with backoff. Sessions and Network show "Loading…"
+  instead of an empty page while they load.
+- **End-to-end test:** finds the newest preinstalled Chromium instead of one fixed build.
+- **Regression tests said "fixed" when they could not tell.** With credentials the app no longer accepted (an
+  expired token: 401, or a redirect to the login page), `proxymind regress run` printed "fixed" and exited 0, so a
+  CI job with a stale secret went green while the bug was still there. That is now an error (exit 1), and so is a
+  server that fails (5xx). Tests carry the identity's health check and send it before calling anything fixed, for
+  apps that answer an expired session with 403 or an ordinary page. Unknown test kinds are refused, not guessed at.
+- **A regression run with a missing secret passed.** A test whose `PM_AUTH_*` variable was not set was skipped and
+  the run exited 0, so a CI job that lost a secret looked like "all fixed". Skipped tests now make the run exit 2
+  with a message naming the cause; `proxymind regress run --allow-skipped` keeps the old behaviour for local runs.
+- **Exported regression tests could hold a session cookie.** A proof made from a recorded request (as automatic
+  proving makes them) names no identity, so the request went into the test file with the session it was recorded
+  with. Credentials are now always replaced by an `{{auth:NAME}}` placeholder: the owning identity's, or
+  `{{auth:session}}`. If you exported tests from automatically proven findings before this, re-export them and
+  treat the sessions in the old files as exposed.
+- **Three MCP tools were never offered to agents.** `custom_checks`, `custom_scan` and `dom_test` had handlers and
+  documentation but no entry in `tools/list`, which is all a client shows a model. They are listed now (79 tools),
+  and a test keeps the list and the handlers in step.
+- Proofs for error-based SQL injection, path traversal and Host-header reflection read the response body after
+  de-chunking and decompressing it (a compressed response could hide the marker and miss a proof).
+
 ## 0.2.0 (2026-11-12)
 
 ### AI testing

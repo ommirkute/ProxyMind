@@ -1,5 +1,15 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import type { Counters } from "./api";
+import { Component, createContext, useCallback, useContext, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
+import { ApiError, type Counters } from "./api";
+
+/**
+ * How long to wait before polling again after a failed poll, or null to stop.
+ * A blip (no connection, a 5xx, 429) shouldn't freeze a live progress view
+ * while the task keeps running; "gone" or "not allowed" (other 4xx) should.
+ */
+export function pollRetryDelay(e: unknown, failures: number): number | null {
+  if (e instanceof ApiError && e.status < 500 && e.status !== 429) return null;
+  return Math.min(1000 * 2 ** failures, 15_000);
+}
 
 export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
 
@@ -55,6 +65,43 @@ export function useAction() {
 
 export function ErrorBox({ error }: { error: string | null | undefined }) {
   return error ? <div className="error" role="alert">{error}</div> : null;
+}
+
+/**
+ * Keeps one page's error from blanking the whole app: the page area shows the
+ * error and the rest of the UI keeps working. It stays mounted across pages
+ * (errors in a page's cleanup reach the nearest boundary still mounted) and
+ * clears itself when you go to another page.
+ */
+export class PageBoundary extends Component<{ resetKey: string; children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("page error:", error, info.componentStack);
+  }
+
+  componentDidUpdate(prev: { resetKey: string }) {
+    if (prev.resetKey !== this.props.resetKey && this.state.error) this.setState({ error: null });
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="content">
+        <div className="error" role="alert" data-testid="page-error">
+          This page ran into a problem: {this.state.error.message || String(this.state.error)}
+        </div>
+        <div className="row">
+          <button className="btn" onClick={() => this.setState({ error: null })}>Try again</button>
+          <button className="btn" onClick={() => window.location.reload()}>Reload ProxyMind</button>
+        </div>
+      </div>
+    );
+  }
 }
 
 export function Empty({ children }: { children: ReactNode }) {

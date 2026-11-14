@@ -8,6 +8,11 @@ name: Nightly
 #     - cron: "17 3 * * 0"   # weekly, Sunday 03:17 UTC
 on:
   workflow_dispatch:
+    inputs:
+      only_bench:
+        description: "Run only the benchmarks (skips fuzzing and the image build, about 15 minutes instead of 90)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,6 +20,7 @@ permissions:
 jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
+    if: ${{ !inputs.only_bench }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -48,6 +54,7 @@ jobs:
           path: fuzz/artifacts
 
   image:
+    if: ${{ !inputs.only_bench }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -73,6 +80,19 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo build --release -p pm-cli
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Use the GHCR image mirror when it has been filled
+        run: |
+          mirror="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bench-mirror"
+          if docker manifest inspect "$mirror/bkimminich/juice-shop:v20.3.0" >/dev/null 2>&1; then
+            echo "BENCH_REGISTRY=$mirror" >> "$GITHUB_ENV"
+          else
+            echo "No mirror yet (run the Bench images workflow); pulling from Docker Hub."
+          fi
       - name: Start Juice Shop and VAmPI
         run: docker compose -f bench/docker-compose.yml up -d juice-shop vampi
       - name: Run benchmarks
@@ -89,3 +109,6 @@ jobs:
         with:
           name: bench-results
           path: ${{ runner.temp }}/bench
+    permissions:
+      contents: read
+      packages: read

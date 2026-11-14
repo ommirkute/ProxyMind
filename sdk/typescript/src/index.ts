@@ -214,6 +214,16 @@ export class Client {
     return this.get(`/proofs/${id}`);
   }
 
+  /** Try to prove a finding with the oracle that fits its class. */
+  findingProve(id: number): Promise<Json> {
+    return this.post(`/findings/${id}/prove`);
+  }
+
+  /** Prove every suspected finding whose class has an oracle. */
+  findingsProveAll(): Promise<Json> {
+    return this.post("/findings/prove");
+  }
+
   /** Approvals, all by default; status: pending, approved, denied, used. */
   approvals(status = "all"): Promise<Json[]> {
     return this.get("/approvals", { status });

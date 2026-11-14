@@ -349,6 +349,276 @@ pub fn reflection(i: &ReflectionInputs) -> Verdict {
     Verdict { proven: false, confidence: "low", reasons }
 }
 
+// ------------------------------------------------------- boolean inject --
+
+/// Inputs for the boolean-condition oracle (blind SQL/NoSQL injection).
+///
+/// The service sends, twice, a request whose injected value asserts a
+/// tautology (true) and one that asserts a contradiction (false), plus the
+/// untouched baseline, and measures response similarity with noise ignored
+/// (`pm_diff`). Injection is proven when the true condition returns the
+/// normal page while the false condition returns a clearly different one,
+/// and the pattern repeats.
+#[derive(Debug, Clone, Default)]
+pub struct BooleanInputs {
+    /// Similarity of the true-condition response to the baseline.
+    pub true_similarity: f64,
+    /// Similarity of the false-condition response to the baseline.
+    pub false_similarity: f64,
+    /// Similarity of the true-condition response to the false-condition one.
+    pub true_false_similarity: f64,
+    pub status_true: Option<u16>,
+    pub status_false: Option<u16>,
+    /// A second round produced the same true/false split.
+    pub repeated_consistent: bool,
+}
+
+/// Proven when a tautology returns the baseline page (the query ran and
+/// matched) while a contradiction returns a clearly different page (it ran
+/// and did not), consistently across two rounds. A page that echoes its
+/// input but does not evaluate it fails: true and false then look alike.
+pub fn boolean_injection(i: &BooleanInputs) -> Verdict {
+    let mut reasons = Vec::new();
+    let fail = |r: String, reasons: &mut Vec<String>| {
+        reasons.push(r);
+        false
+    };
+    let mut proven = true;
+    if !ok(i.status_true) {
+        proven =
+            fail(format!("the true-condition request did not succeed ({})", status_text(i.status_true)), &mut reasons);
+    }
+    if i.true_similarity < 0.9 {
+        proven = fail(
+            format!("the true condition did not return the normal page ({:.0}% similar)", i.true_similarity * 100.0),
+            &mut reasons,
+        );
+    }
+    if i.true_false_similarity > 0.85 {
+        proven = fail(
+            format!(
+                "true and false conditions returned near-identical pages ({:.0}% similar); the input is not evaluated",
+                i.true_false_similarity * 100.0
+            ),
+            &mut reasons,
+        );
+    }
+    if !i.repeated_consistent {
+        proven = fail("the true/false split did not repeat; likely noise".into(), &mut reasons);
+    }
+    if proven {
+        reasons.push(format!(
+            "a tautology returned the normal page ({:.0}% similar to baseline) while a contradiction returned a \
+             different page ({:.0}% similar to the tautology, noise ignored); repeated",
+            i.true_similarity * 100.0,
+            i.true_false_similarity * 100.0
+        ));
+    }
+    let confidence = if !proven {
+        "low"
+    } else if i.true_false_similarity <= 0.6 && i.false_similarity < 0.9 {
+        "high"
+    } else {
+        "medium"
+    };
+    Verdict { proven, confidence, reasons }
+}
+
+// ----------------------------------------------------- error-based inject --
+
+/// Inputs for the error-based SQL-injection oracle. The service sends the
+/// baseline, two different quote payloads and one benign (quote-free) change,
+/// and reports whether each response carried a database error signature.
+#[derive(Debug, Clone, Default)]
+pub struct SqlErrorInputs {
+    /// The untouched baseline shows no database error.
+    pub control_clean: bool,
+    /// A single quote produced a database error.
+    pub quote_error: bool,
+    /// A second, different quote payload also produced one (consistency).
+    pub second_quote_error: bool,
+    /// A benign, quote-free change did NOT: the error is tied to the quote,
+    /// not to any change — so the endpoint does not just fail on everything.
+    pub benign_clean: bool,
+}
+
+/// Proven when a quote (and only a quote) breaks the query into a database
+/// error, consistently, while the baseline and a benign change stay clean.
+pub fn sql_error(i: &SqlErrorInputs) -> Verdict {
+    let mut reasons = Vec::new();
+    let fail = |r: String, reasons: &mut Vec<String>| {
+        reasons.push(r);
+        false
+    };
+    let mut proven = true;
+    if !i.control_clean {
+        proven =
+            fail("the baseline already shows a database error; the endpoint errors on its own".into(), &mut reasons);
+    }
+    if !(i.quote_error && i.second_quote_error) {
+        proven = fail("a quote did not consistently produce a database error".into(), &mut reasons);
+    }
+    if !i.benign_clean {
+        proven = fail("a quote-free change also errored; the error is not tied to the quote".into(), &mut reasons);
+    }
+    if proven {
+        reasons.push(
+            "a single quote broke the query into a database error (twice), while the baseline and a quote-free change \
+             did not: the input is used inside a SQL statement"
+                .into(),
+        );
+    }
+    Verdict { proven, confidence: if proven { "high" } else { "low" }, reasons }
+}
+
+// --------------------------------------------------------- path traversal --
+
+/// Inputs for the path-traversal oracle.
+#[derive(Debug, Clone, Default)]
+pub struct TraversalInputs {
+    /// Known files whose expected marker appeared, e.g. "/etc/passwd: root:".
+    pub markers_found: Vec<String>,
+    /// A bogus file name (same request shape) did NOT return a file: the
+    /// endpoint does not just echo whatever it is given.
+    pub control_clean: bool,
+    /// The traversal responses differ from the untouched baseline.
+    pub differs_from_baseline: bool,
+}
+
+/// Proven when at least one known file is read back by its marker, a bogus
+/// name reads nothing (so the endpoint is not echoing its input), and the
+/// traversal response differs from the baseline. Two files raise confidence.
+pub fn path_traversal(i: &TraversalInputs) -> Verdict {
+    let mut reasons = Vec::new();
+    let fail = |r: String, reasons: &mut Vec<String>| {
+        reasons.push(r);
+        false
+    };
+    let mut proven = true;
+    if i.markers_found.is_empty() {
+        proven = fail("no known file was read back".into(), &mut reasons);
+    }
+    if !i.control_clean {
+        proven = fail(
+            "a bogus file name also \"worked\"; the endpoint echoes its input, not file contents".into(),
+            &mut reasons,
+        );
+    }
+    if !i.differs_from_baseline {
+        proven = fail("the traversal response matches the untouched baseline".into(), &mut reasons);
+    }
+    if proven {
+        reasons.push(format!(
+            "reading {} worked while a bogus file name did not: {}",
+            if i.markers_found.len() == 1 { "a known file" } else { "two known files" },
+            i.markers_found.join("; ")
+        ));
+    }
+    let confidence = if !proven {
+        "low"
+    } else if i.markers_found.len() >= 2 {
+        "high"
+    } else {
+        "medium"
+    };
+    Verdict { proven, confidence, reasons }
+}
+
+// ----------------------------------------------------------- expression ---
+
+/// Inputs for the expression oracle (server-side template injection and
+/// other code evaluation): the input is sent as an arithmetic expression on
+/// fresh random numbers, and only the product proves it was evaluated.
+#[derive(Debug, Clone, Default)]
+pub struct ExpressionInputs {
+    /// Template syntax tried, e.g. `{{A*B}}` (for the reasons only).
+    pub syntax: String,
+    /// One entry per payload request: did its product come back?
+    pub products_found: Vec<bool>,
+    /// The products were not on the untouched page.
+    pub baseline_clean: bool,
+    /// The same numbers without the template delimiters did not produce the
+    /// product: the page does not compute it from any input it is given.
+    pub control_clean: bool,
+}
+
+/// Proven when every payload's product comes back (two fresh pairs of random
+/// numbers, so a coincidence is out), neither product is on the baseline
+/// page, and the bare expression does not produce it.
+pub fn expression(i: &ExpressionInputs) -> Verdict {
+    let mut reasons = Vec::new();
+    let all = !i.products_found.is_empty() && i.products_found.iter().all(|f| *f);
+    let mut proven = true;
+    if !all {
+        proven = false;
+        let n = i.products_found.iter().filter(|f| **f).count();
+        reasons.push(format!("{}: {n} of {} expressions were evaluated (needs all)", i.syntax, i.products_found.len()));
+    }
+    if !i.baseline_clean {
+        proven = false;
+        reasons.push("the expected result was already on the untouched page; inconclusive".into());
+    }
+    if !i.control_clean {
+        proven = false;
+        reasons.push("the bare expression (no template delimiters) also produced the result; inconclusive".into());
+    }
+    if proven {
+        reasons.push(format!(
+            "the server evaluated {} on {} fresh pairs of random numbers and returned each product, while the bare \
+             expression and the untouched page did not show it: input reaches a template or code evaluator",
+            i.syntax,
+            i.products_found.len()
+        ));
+    }
+    let confidence = if !proven {
+        "low"
+    } else if i.products_found.len() >= 2 {
+        "high"
+    } else {
+        "medium"
+    };
+    Verdict { proven, confidence, reasons }
+}
+
+// --------------------------------------------------------------- marker ---
+
+/// Inputs for the marker oracle: a fresh random value is injected and the
+/// service decides whether it landed in the one dangerous place (the
+/// redirect target's host, an injected response header, a reflected
+/// absolute URL), and that it was not already there before injection.
+#[derive(Debug, Clone, Default)]
+pub struct MarkerInputs {
+    /// What is being proven, e.g. "open redirect", "CRLF header injection".
+    pub label: String,
+    pub marker: String,
+    /// The marker reached the dangerous place (service-decided).
+    pub hit: bool,
+    /// The marker was present without being injected (false-positive guard).
+    pub control_hit: bool,
+    /// Short, printable evidence from the target (untrusted).
+    pub detail: String,
+}
+
+/// Proven when a fresh unique marker reaches the dangerous place and was not
+/// already there in the control. Covers open redirect, CRLF header
+/// injection and Host-header injection.
+pub fn marker(i: &MarkerInputs) -> Verdict {
+    let detail: String = i.detail.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(160).collect();
+    if i.hit && !i.control_hit {
+        return Verdict {
+            proven: true,
+            confidence: "high",
+            reasons: vec![format!("{}: the unique marker {} reached the target: {detail}", i.label, i.marker)],
+        };
+    }
+    let reason = if !i.hit {
+        format!("{}: the marker {} did not reach the dangerous place ({detail})", i.label, i.marker)
+    } else {
+        format!("{}: the marker was already present without injection; inconclusive", i.label)
+    };
+    Verdict { proven: false, confidence: "low", reasons: vec![reason] }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +716,98 @@ mod tests {
         // A token prefix is not the token.
         let prefix = ReflectionInputs { binding_calls: vec!["to".into()], ..base };
         assert!(!reflection(&prefix).proven);
+    }
+
+    #[test]
+    fn boolean_injection_needs_a_consistent_split() {
+        let base = BooleanInputs {
+            true_similarity: 0.99,
+            false_similarity: 0.4,
+            true_false_similarity: 0.4,
+            status_true: Some(200),
+            status_false: Some(200),
+            repeated_consistent: true,
+        };
+        assert!(boolean_injection(&base).proven);
+        assert_eq!(boolean_injection(&base).confidence, "high");
+        // Echoes its input: true and false look alike → not evaluated.
+        let echo = BooleanInputs { true_false_similarity: 0.98, false_similarity: 0.98, ..base.clone() };
+        assert!(!boolean_injection(&echo).proven);
+        // Did not repeat → noise.
+        let flaky = BooleanInputs { repeated_consistent: false, ..base.clone() };
+        assert!(!boolean_injection(&flaky).proven);
+        // True condition did not return the normal page.
+        let broken = BooleanInputs { true_similarity: 0.3, ..base };
+        assert!(!boolean_injection(&broken).proven);
+    }
+
+    #[test]
+    fn sql_error_needs_a_quote_specific_consistent_error() {
+        let good =
+            SqlErrorInputs { control_clean: true, quote_error: true, second_quote_error: true, benign_clean: true };
+        assert!(sql_error(&good).proven);
+        assert_eq!(sql_error(&good).confidence, "high");
+        // Errors on its own.
+        assert!(!sql_error(&SqlErrorInputs { control_clean: false, ..good.clone() }).proven);
+        // Errors on a quote-free change too → not quote-specific.
+        assert!(!sql_error(&SqlErrorInputs { benign_clean: false, ..good.clone() }).proven);
+        // The quote didn't error consistently.
+        assert!(!sql_error(&SqlErrorInputs { second_quote_error: false, ..good }).proven);
+    }
+
+    #[test]
+    fn path_traversal_needs_a_file_and_a_clean_control() {
+        let one = TraversalInputs {
+            markers_found: vec!["/etc/passwd: root:".into()],
+            control_clean: true,
+            differs_from_baseline: true,
+        };
+        assert!(path_traversal(&one).proven);
+        assert_eq!(path_traversal(&one).confidence, "medium");
+        let two = TraversalInputs {
+            markers_found: vec!["/etc/passwd: root:".into(), "/etc/hostname: host".into()],
+            ..one.clone()
+        };
+        assert_eq!(path_traversal(&two).confidence, "high");
+        // Echoes anything → control also "found".
+        let echoes = TraversalInputs { control_clean: false, ..one.clone() };
+        assert!(!path_traversal(&echoes).proven);
+        // Nothing read back.
+        let none = TraversalInputs { markers_found: vec![], ..one };
+        assert!(!path_traversal(&none).proven);
+    }
+
+    #[test]
+    fn marker_needs_a_fresh_hit() {
+        let hit = MarkerInputs {
+            label: "open redirect".into(),
+            marker: "pmabc".into(),
+            hit: true,
+            control_hit: false,
+            detail: "Location: http://pmabc.example/".into(),
+        };
+        assert!(marker(&hit).proven);
+        assert_eq!(marker(&hit).confidence, "high");
+        // Already present → inconclusive.
+        let already = MarkerInputs { control_hit: true, ..hit.clone() };
+        assert!(!marker(&already).proven);
+        // Did not land anywhere dangerous.
+        let miss = MarkerInputs { hit: false, ..hit };
+        assert!(!marker(&miss).proven);
+    }
+    #[test]
+    fn expression_needs_every_product_and_clean_controls() {
+        let ok = ExpressionInputs {
+            syntax: "{{A*B}}".into(),
+            products_found: vec![true, true],
+            baseline_clean: true,
+            control_clean: true,
+        };
+        assert!(expression(&ok).proven);
+        assert_eq!(expression(&ok).confidence, "high");
+        assert!(!expression(&ExpressionInputs { products_found: vec![true, false], ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { products_found: vec![], ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { baseline_clean: false, ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { control_clean: false, ..ok }).proven);
     }
 }
