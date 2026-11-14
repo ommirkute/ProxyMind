@@ -113,6 +113,7 @@ pub use scan_schedule::{Every, ScanSchedule, next_run_after};
 pub use scan_task::{ScanTaskIssue, ScanTaskRequest, ScanTaskStatus, ScanTaskView};
 pub use search::{
     MAX_SCAN, SearchHit, SearchRequest, SearchResult, SiteView, WsSearchHit, WsSearchRequest, WsSearchResult,
+    searchable,
 };
 pub use session::{
     ExtractKind, Extraction, JarCookie, Macro, MacroRun, MacroStep, RunWhen, SESSION_SETTING, SessionConfig,
@@ -205,12 +206,47 @@ pub struct Service {
     record_in_scope_only: std::sync::atomic::AtomicBool,
 }
 
+/// Indexes exchanges recorded before the full-text index existed: in the background on
+/// its own connection for a project file, at once for an in-memory one. Errors only
+/// leave search on the slower path.
+fn start_text_backfill(store: &mut Store) {
+    const BATCH: usize = 500;
+    match store.text_index_complete() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!("full-text index state unreadable: {e:#}");
+            return;
+        }
+    }
+    let Some(path) = store.path() else {
+        while !matches!(store.text_index_backfill(BATCH), Ok(true) | Err(_)) {}
+        return;
+    };
+    let spawned = std::thread::Builder::new().name("text-index-backfill".into()).spawn(move || {
+        let run = || -> anyhow::Result<()> {
+            let mut own = Store::open(&path)?;
+            own.set_text_extractor(search::searchable);
+            while !own.text_index_backfill(BATCH)? {}
+            Ok(())
+        };
+        if let Err(e) = run() {
+            tracing::warn!("full-text index backfill stopped: {e:#}");
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("full-text index backfill not started: {e}");
+    }
+}
+
 impl Service {
     pub fn new(store: Store, policy: Policy) -> Result<Self> {
         Self::with_sender(store, policy, Sender::new(false)?)
     }
 
-    pub fn with_sender(store: Store, policy: Policy, sender: Sender) -> Result<Self> {
+    pub fn with_sender(mut store: Store, policy: Policy, sender: Sender) -> Result<Self> {
+        store.set_text_extractor(search::searchable);
+        start_text_backfill(&mut store);
         let limits = policy.roe().limits;
         // Saved network settings apply from the start; a bad entry (say, a
         // moved certificate file) is reported but doesn't stop the project opening.

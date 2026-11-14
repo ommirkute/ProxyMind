@@ -343,7 +343,36 @@ CREATE TABLE model_snapshots (
 -- Finding de-duplication looks up findings by URL (see Store::findings_at_url).
 CREATE INDEX findings_url ON findings(url);
 "#,
+    r#"
+-- Full-text index that pre-filters plain-text content search (Store::text_candidates).
+-- Contentless trigram index of the decoded request text, a newline, then the response
+-- text; rowid = exchange id. It only narrows candidates; every candidate is verified.
+CREATE VIRTUAL TABLE exchange_text USING fts5(
+    text, content='', contentless_delete=1, tokenize='trigram', detail='none'
+);
+-- Every exchange with id >= indexed_from is indexed; older ones wait for a backfill.
+CREATE TABLE text_index_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    indexed_from INTEGER NOT NULL
+);
+INSERT INTO text_index_state VALUES (1, (SELECT COALESCE(MAX(id), 0) + 1 FROM exchanges));
+-- Exchanges whose indexed text may be incomplete (cut at the size cap, or written
+-- without a text extractor): always returned as candidates, so they are verified.
+CREATE TABLE text_index_truncated (id INTEGER PRIMARY KEY);
+"#,
 ];
+
+/// Most bytes of one message's text that go into the full-text index.
+const INDEX_TEXT_CAP: usize = 256 * 1024;
+/// Most distinct trigrams in one index query (FTS5 limits expression depth).
+const MAX_QUERY_TRIGRAMS: usize = 100;
+/// More candidates than this and the index isn't worth using.
+const MAX_CANDIDATES: usize = 200_000;
+
+/// Text of a raw message by default: the bytes as recorded.
+fn raw_text(raw: &[u8]) -> Vec<u8> {
+    raw.to_vec()
+}
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
 /// proofs, findings, OAST interactions): column name → value.
@@ -602,10 +631,17 @@ pub struct HistoryFilter {
     pub text: Option<String>,
     /// A history query (`pm_tools::hql`), applied by the service.
     pub q: Option<String>,
+    /// Only these exchange ids (set by the service, never by clients).
+    #[serde(skip)]
+    pub ids: Option<Vec<i64>>,
 }
 
 pub struct Store {
     conn: Connection,
+    /// Turns a raw message into the text that is indexed for content search.
+    text_of: fn(&[u8]) -> Vec<u8>,
+    /// Whether `text_of` was set; without it, new rows are marked for verification.
+    extractor_set: bool,
 }
 
 /// The highlight stored in an exchange's tags (`["highlight:red"]`).
@@ -656,9 +692,129 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let mut store = Self { conn };
+        let mut store = Self { conn, text_of: raw_text, extractor_set: false };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Sets how messages become indexed text (decoding bodies needs crates above this one).
+    /// Rows written before this is called are marked, so search still verifies them.
+    pub fn set_text_extractor(&mut self, f: fn(&[u8]) -> Vec<u8>) {
+        self.text_of = f;
+        self.extractor_set = true;
+    }
+
+    /// The database file, if the project is one (None for in-memory).
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        self.conn.path().filter(|p| !p.is_empty()).map(std::path::PathBuf::from)
+    }
+
+    /// Writes an exchange's row in the full-text index: both messages' text, cut at the cap.
+    fn index_exchange(
+        tx: &rusqlite::Transaction<'_>,
+        text_of: fn(&[u8]) -> Vec<u8>,
+        extractor_set: bool,
+        id: i64,
+        req: &[u8],
+        resp: Option<&[u8]>,
+    ) -> Result<()> {
+        let mut cut = false;
+        let mut one = |raw: &[u8]| -> String {
+            let bytes = text_of(raw);
+            let s = String::from_utf8_lossy(&bytes);
+            if s.len() <= INDEX_TEXT_CAP {
+                return s.into_owned();
+            }
+            cut = true;
+            let mut end = INDEX_TEXT_CAP;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            s[..end].to_string()
+        };
+        let mut text = one(req);
+        if let Some(r) = resp {
+            text.push('\n');
+            text.push_str(&one(r));
+        }
+        tx.execute("INSERT OR REPLACE INTO exchange_text (rowid, text) VALUES (?1, ?2)", params![id, text])?;
+        if cut || !extractor_set {
+            tx.execute("INSERT OR IGNORE INTO text_index_truncated (id) VALUES (?1)", [id])?;
+        }
+        Ok(())
+    }
+
+    /// True when every exchange is in the full-text index.
+    pub fn text_index_complete(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT indexed_from <= COALESCE((SELECT MIN(id) FROM exchanges), indexed_from) FROM text_index_state",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Indexes up to `batch` older exchanges (highest id first). Returns true when
+    /// the index is complete. One transaction per call.
+    pub fn text_index_backfill(&mut self, batch: usize) -> Result<bool> {
+        let (text_of, extractor_set) = (self.text_of, self.extractor_set);
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let from: i64 = tx.query_row("SELECT indexed_from FROM text_index_state", [], |r| r.get(0))?;
+        let rows: Vec<(i64, Vec<u8>, Option<Vec<u8>>)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, req_hash, resp_hash FROM exchanges WHERE id < ?1 ORDER BY id DESC LIMIT ?2")?;
+            stmt.query_map(params![from, batch.max(1) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let Some(lowest) = rows.last().map(|r| r.0) else {
+            tx.commit()?;
+            return Ok(true);
+        };
+        for (id, req_hash, resp_hash) in &rows {
+            let blob = |hash: &[u8]| -> Result<Vec<u8>> {
+                let data: Vec<u8> =
+                    tx.query_row("SELECT zstd_data FROM blobs WHERE hash = ?1", [hash], |r| r.get(0))?;
+                Ok(zstd::decode_all(data.as_slice())?)
+            };
+            let req = blob(req_hash)?;
+            let resp = resp_hash.as_deref().map(blob).transpose()?;
+            Self::index_exchange(&tx, text_of, extractor_set, *id, &req, resp.as_deref())?;
+        }
+        tx.execute("UPDATE text_index_state SET indexed_from = ?1", [lowest])?;
+        tx.commit()?;
+        self.text_index_complete()
+    }
+
+    /// Ids of exchanges that may contain `needle` (a superset of those that do), newest
+    /// first. None when the index can't help: needle under 3 characters, index not
+    /// complete, or too many candidates.
+    pub fn text_candidates(&self, needle: &str) -> Result<Option<Vec<i64>>> {
+        let lowered = needle.to_ascii_lowercase();
+        let chars: Vec<char> = lowered.chars().collect();
+        if chars.len() < 3 || lowered.contains('\0') || !self.text_index_complete()? {
+            return Ok(None);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut terms = Vec::new();
+        for w in chars.windows(3) {
+            let g: String = w.iter().collect();
+            if terms.len() < MAX_QUERY_TRIGRAMS && seen.insert(g.clone()) {
+                terms.push(format!("\"{}\"", g.replace('"', "\"\"")));
+            }
+        }
+        let query = terms.join(" AND ");
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid FROM exchange_text WHERE exchange_text MATCH ?1
+             UNION SELECT id FROM text_index_truncated ORDER BY 1 DESC",
+        )?;
+        let mut rows = stmt.query([query])?;
+        let mut ids = Vec::new();
+        while let Some(r) = rows.next()? {
+            if ids.len() >= MAX_CANDIDATES {
+                return Ok(None);
+            }
+            ids.push(r.get(0)?);
+        }
+        Ok(Some(ids))
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -696,6 +852,7 @@ impl Store {
     }
 
     pub fn insert_exchange(&mut self, ex: &NewExchange) -> Result<i64> {
+        let (text_of, extractor_set) = (self.text_of, self.extractor_set);
         // IMMEDIATE takes the write lock up front (waiting on busy_timeout). A
         // deferred one reads first and fails at once (SQLITE_BUSY_SNAPSHOT)
         // if another connection commits in between, losing the exchange.
@@ -727,6 +884,7 @@ impl Store {
             ],
         )?;
         let id = tx.last_insert_rowid();
+        Self::index_exchange(&tx, text_of, extractor_set, id, &ex.request, ex.response.as_deref())?;
         tx.commit()?;
         Ok(id)
     }
@@ -825,6 +983,10 @@ impl Store {
                     );
                 }
             }
+        }
+        if let Some(ids) = &f.ids {
+            let json = serde_json::to_string(ids)?;
+            add("id IN (SELECT value FROM json_each(@))", V::Text(json));
         }
         if f.annotated == Some(true) {
             conds.push("(tags != '[]' OR coalesce(notes, '') != '')".into());
@@ -1647,6 +1809,81 @@ mod tests {
             identity: None,
             hypothesis_id: None,
         }
+    }
+
+    fn upper(raw: &[u8]) -> Vec<u8> {
+        raw.to_ascii_uppercase()
+    }
+
+    #[test]
+    fn text_candidates_are_a_superset_of_matches() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_text_extractor(|raw| raw.to_vec());
+        let a = s.insert_exchange(&sample("/a", b"HTTP/1.1 200 OK\r\n\r\nuser996@shop.test")).unwrap();
+        let b = s.insert_exchange(&sample("/b", b"HTTP/1.1 200 OK\r\n\r\nUSER996@SHOP.TEST")).unwrap();
+        // Same trigrams, different order: a candidate, but not a match (verification removes it).
+        let c = s.insert_exchange(&sample("/c", b"HTTP/1.1 200 OK\r\n\r\nuser996@shop and shop.test")).unwrap();
+        let d = s.insert_exchange(&sample("/d", b"HTTP/1.1 200 OK\r\n\r\nnothing here")).unwrap();
+        let got = s.text_candidates("user996@shop.test").unwrap().expect("index complete");
+        assert_eq!(got, [c, b, a], "newest first, d excluded: {d}");
+        assert_eq!(s.text_candidates("us").unwrap(), None, "two characters are too short");
+        assert_eq!(s.text_candidates("héé").unwrap(), Some(vec![]), "no match, and no error on non-ASCII");
+        assert_eq!(s.text_candidates("say \"hi\"").unwrap(), Some(vec![]), "quotes are escaped");
+    }
+
+    #[test]
+    fn extractor_text_is_what_gets_indexed() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_text_extractor(upper);
+        let a = s.insert_exchange(&sample("/a", b"HTTP/1.1 200 OK\r\n\r\nsecretvalue")).unwrap();
+        assert_eq!(s.text_candidates("SecretValue").unwrap(), Some(vec![a]), "folded case");
+    }
+
+    #[test]
+    fn truncated_and_unextracted_rows_are_always_candidates() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_text_extractor(|raw| raw.to_vec());
+        let mut body = vec![b'x'; INDEX_TEXT_CAP + 1000];
+        body.extend_from_slice(b"needle-past-the-cap");
+        let huge = s.insert_exchange(&sample("/huge", &body)).unwrap();
+        let small = s.insert_exchange(&sample("/small", b"HTTP/1.1 200 OK\r\n\r\nabc")).unwrap();
+        let got = s.text_candidates("needle-past-the-cap").unwrap().unwrap();
+        assert_eq!(got, [huge], "{small} is not a candidate");
+
+        // A writer that never set an extractor can't be trusted to have indexed decoded text.
+        let mut raw = Store::open_in_memory().unwrap();
+        let id = raw.insert_exchange(&sample("/raw", b"HTTP/1.1 200 OK\r\n\r\nabc")).unwrap();
+        assert_eq!(raw.text_candidates("zzzzzz").unwrap(), Some(vec![id]));
+    }
+
+    #[test]
+    fn backfill_indexes_old_rows() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_text_extractor(|raw| raw.to_vec());
+        let ids: Vec<i64> = (0..5)
+            .map(|i| {
+                s.insert_exchange(&sample(&format!("/{i}"), format!("HTTP/1.1 200 OK\r\n\r\nmarker{i}").as_bytes()))
+                    .unwrap()
+            })
+            .collect();
+        assert!(s.text_index_complete().unwrap());
+        // Pretend these rows predate the index.
+        s.conn.execute_batch("DELETE FROM exchange_text; UPDATE text_index_state SET indexed_from = 6").unwrap();
+        assert!(!s.text_index_complete().unwrap());
+        assert_eq!(s.text_candidates("marker3").unwrap(), None, "not usable until complete");
+        assert!(!s.text_index_backfill(2).unwrap());
+        assert_eq!(s.text_candidates("marker3").unwrap(), None);
+        assert!(!s.text_index_backfill(2).unwrap());
+        assert!(s.text_index_backfill(2).unwrap());
+        assert!(s.text_index_complete().unwrap());
+        assert_eq!(s.text_candidates("marker3").unwrap(), Some(vec![ids[3]]));
+        assert!(s.text_index_backfill(2).unwrap(), "nothing left is still complete");
+        // An exchange written after the index existed is indexed on insert.
+        let late = s.insert_exchange(&sample("/late", b"HTTP/1.1 200 OK\r\n\r\nmarker3 again")).unwrap();
+        assert_eq!(s.text_candidates("marker3").unwrap(), Some(vec![late, ids[3]]));
+        // The ids filter narrows history.
+        let f = HistoryFilter { ids: Some(vec![ids[1], ids[3]]), ..Default::default() };
+        assert_eq!(s.search_exchanges(&f).unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [ids[3], ids[1]]);
     }
 
     #[test]

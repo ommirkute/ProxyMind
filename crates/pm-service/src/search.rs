@@ -1,7 +1,7 @@
 //! Searching the contents of history, and history as a site map. Both only
 //! read the project; nothing is sent.
 
-use pm_ai::wrap_untrusted;
+use pm_ai::{Redactor, wrap_untrusted};
 use pm_policy::{Actor, Target};
 use pm_store::{ExchangeSummary, HistoryFilter};
 use pm_tools::search::{Matcher, Snippet, snippet};
@@ -62,7 +62,7 @@ pub struct SiteView {
 }
 
 /// Head as recorded plus the body decoded (chunked, gzip…), for searching.
-pub(crate) fn searchable(raw: &[u8]) -> Vec<u8> {
+pub fn searchable(raw: &[u8]) -> Vec<u8> {
     let (head, body) = pm_http::split_message(raw);
     let headers = pm_http::parse_request_head(head)
         .map(|h| h.headers)
@@ -110,6 +110,65 @@ fn haystack(raw: &[u8], part: Part) -> Vec<u8> {
         Part::Headers => all[..head_len.min(all.len())].to_vec(),
         Part::Body => all.get(head_len..).unwrap_or_default().to_vec(),
     }
+}
+
+/// What one search looks for in each exchange.
+struct Probe<'a> {
+    matcher: &'a Matcher,
+    want_req: Option<Part>,
+    want_resp: Option<Part>,
+    invert: bool,
+    redactor: Option<&'a Redactor>,
+}
+
+impl Probe<'_> {
+    /// The hits one exchange gives: a hit per matching part, or one "none" hit with `invert`.
+    fn hits(&self, summary: &ExchangeSummary, request: &[u8], response: Option<&[u8]>) -> Vec<SearchHit> {
+        let redactor = self.redactor;
+        let parts = [("request", self.want_req, Some(request)), ("response", self.want_resp, response)];
+        let mut found_parts = Vec::new();
+        for (name, want, raw) in parts {
+            let (Some(part), Some(raw)) = (want, raw) else { continue };
+            let mut hay = haystack(raw, part);
+            // Agents search what they would see: secrets are already replaced.
+            if let Some(r) = redactor {
+                hay = r.redact(&String::from_utf8_lossy(&hay)).into_bytes();
+            }
+            let found = self.matcher.find(&hay, 100);
+            if found.is_empty() {
+                continue;
+            }
+            found_parts.push((name, hay, found));
+        }
+        if self.invert {
+            if found_parts.is_empty() {
+                return vec![SearchHit { exchange: summary.clone(), part: "none", matches: 0, snippets: vec![] }];
+            }
+            return Vec::new();
+        }
+        found_parts
+            .into_iter()
+            .map(|(name, hay, found)| {
+                let snippets = found
+                    .iter()
+                    .take(3)
+                    .map(|&m| {
+                        let s = snippet(&hay, m, 60);
+                        if redactor.is_some() { Snippet { text: wrap_untrusted(&s.text), start: 0, end: 0 } } else { s }
+                    })
+                    .collect();
+                SearchHit { exchange: summary.clone(), part: name, matches: found.len(), snippets }
+            })
+            .collect()
+    }
+}
+
+/// Whether a literal query could match text a redactor inserts (`{{secret:kind_1}}`), which
+/// the full-text index never saw. A match inside a placeholder uses only its characters
+/// (lowercase letters, digits, `_`, `:`); one across its edge includes a brace.
+fn may_match_placeholder(query: &str, case_sensitive: bool) -> bool {
+    let q = if case_sensitive { query.to_string() } else { query.to_ascii_lowercase() };
+    q.contains(['{', '}']) || q.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
 }
 
 /// A search through WebSocket messages.
@@ -165,6 +224,10 @@ impl Service {
         let max_hits = req.filter.limit.unwrap_or(50).clamp(1, 500);
         let max_scan = req.max_scan.unwrap_or(5000).clamp(1, MAX_SCAN);
         let redactor = self.redactor_for(actor);
+        let probe = Probe { matcher: &matcher, want_req, want_resp, invert: req.invert, redactor };
+        if let Some(candidates) = self.index_candidates(req, redactor.is_some())? {
+            return self.search_candidates(actor, req, &probe, candidates, max_hits, max_scan);
+        }
         let mut filter = req.filter.clone();
         let mut hits = Vec::new();
         let mut scanned = 0;
@@ -185,45 +248,7 @@ impl Service {
                 let Some(ex) = self.store.lock().get_exchange(summary.id)? else { continue };
                 scanned += 1;
                 last_id = Some(summary.id);
-                let parts =
-                    [("request", want_req, Some(&ex.request[..])), ("response", want_resp, ex.response.as_deref())];
-                let mut any = false;
-                let mut found_parts = Vec::new();
-                for (name, want, raw) in parts {
-                    let (Some(part), Some(raw)) = (want, raw) else { continue };
-                    let mut hay = haystack(raw, part);
-                    // Agents search what they would see: secrets are already replaced.
-                    if let Some(r) = redactor {
-                        hay = r.redact(&String::from_utf8_lossy(&hay)).into_bytes();
-                    }
-                    let found = matcher.find(&hay, 100);
-                    if found.is_empty() {
-                        continue;
-                    }
-                    any = true;
-                    found_parts.push((name, hay, found));
-                }
-                if req.invert {
-                    if !any {
-                        hits.push(SearchHit { exchange: summary.clone(), part: "none", matches: 0, snippets: vec![] });
-                    }
-                } else {
-                    for (name, hay, found) in found_parts {
-                        let snippets = found
-                            .iter()
-                            .take(3)
-                            .map(|&m| {
-                                let s = snippet(&hay, m, 60);
-                                if redactor.is_some() {
-                                    Snippet { text: wrap_untrusted(&s.text), start: 0, end: 0 }
-                                } else {
-                                    s
-                                }
-                            })
-                            .collect();
-                        hits.push(SearchHit { exchange: summary.clone(), part: name, matches: found.len(), snippets });
-                    }
-                }
+                hits.extend(probe.hits(&summary, &ex.request, ex.response.as_deref()));
                 if hits.len() >= max_hits || scanned >= max_scan {
                     break 'pages;
                 }
@@ -234,6 +259,58 @@ impl Service {
         }
         let next_before_id = if exhausted && scanned < max_scan && hits.len() < max_hits { None } else { last_id };
         Ok(SearchResult { hits, scanned, next_before_id })
+    }
+
+    /// Ids (newest first) that may contain the query, from the full-text index; None when
+    /// the search has to look at everything: regex, invert, a needle the index can't
+    /// narrow, or (for agents) one that could match a redaction placeholder.
+    fn index_candidates(&self, req: &SearchRequest, redacted: bool) -> Result<Option<Vec<i64>>> {
+        if req.regex || req.invert || (redacted && may_match_placeholder(&req.query, req.case_sensitive)) {
+            return Ok(None);
+        }
+        let Some(mut ids) = self.store.lock().text_candidates(&req.query)? else { return Ok(None) };
+        let (before, after) = (req.filter.before_id, req.filter.after_id);
+        ids.retain(|&id| before.is_none_or(|b| id < b) && after.is_none_or(|a| id > a));
+        Ok(Some(ids))
+    }
+
+    /// Verifies index candidates (newest first) with the same filters and matching as a full scan.
+    fn search_candidates(
+        &self,
+        actor: &Actor,
+        req: &SearchRequest,
+        probe: &Probe<'_>,
+        candidates: Vec<i64>,
+        max_hits: usize,
+        max_scan: usize,
+    ) -> Result<SearchResult> {
+        let mut filter = req.filter.clone();
+        filter.before_id = None;
+        filter.after_id = None;
+        let (mut hits, mut scanned) = (Vec::new(), 0usize);
+        for chunk in candidates.chunks(500) {
+            let mut remaining = chunk.to_vec();
+            while !remaining.is_empty() {
+                filter.ids = Some(remaining.clone());
+                filter.limit = Some(500);
+                // The same filtering as a full scan: scope, query, fields, redacted paths.
+                let page = self.history_search(actor, &filter)?;
+                for summary in page.exchanges {
+                    let Some(ex) = self.store.lock().get_exchange(summary.id)? else { continue };
+                    scanned += 1;
+                    hits.extend(probe.hits(&summary, &ex.request, ex.response.as_deref()));
+                    if hits.len() >= max_hits || scanned >= max_scan {
+                        return Ok(SearchResult { hits, scanned, next_before_id: Some(summary.id) });
+                    }
+                }
+                // A page cut short (limit or time budget) continues below its last id.
+                match page.next_before_id {
+                    Some(b) => remaining.retain(|&id| id < b),
+                    None => break,
+                }
+            }
+        }
+        Ok(SearchResult { hits, scanned, next_before_id: None })
     }
 
     /// Finds text in recorded WebSocket messages (a read; not audited).
