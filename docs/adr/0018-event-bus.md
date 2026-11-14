@@ -1,6 +1,6 @@
 # ADR-0018: Typed events from the service layer
 
-**Status:** Proposed (roadmap work package 1.2)
+**Status:** Accepted (2026-11-14, roadmap work package 1.2)
 
 ## Context
 The only live channel today is `GET /api/v1/events` (`events` in `crates/pm-api/src/routes.rs`). Each connection runs its own loop: call `Service::counters()` (`crates/pm-service/src/lib.rs`), and if the result differs from the last one sent, emit one SSE event named `counters`; otherwise sleep 700 ms and repeat. The payload is the `Counters` struct: `exchanges`, `last_exchange_id`, `pending_approvals`, `findings`, `audit_records`, `intercepted`. There are no topics, no event ids and no way to say what changed.

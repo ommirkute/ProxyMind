@@ -1,6 +1,6 @@
 # ADR-0017: Store concurrency: a read pool and one writer
 
-**Status:** Proposed
+**Status:** Accepted (2026-11-14, roadmap work package 1.1)
 
 ## Context
 Roadmap work package 1.1 removes the "one database connection per process" gap. What the code does today:
