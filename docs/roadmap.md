@@ -97,6 +97,15 @@ No new features: this removes the limits that would block Phases 2 and 3. Write 
 | 1.5 Service split | Domains (scanning, proof, regress, sessions, AI) in their own crates behind the facade | Facade API unchanged; one domain rebuilds in under 30 s |
 | 1.6 Large-project benchmark | 1M exchanges, 10k issues: ingest, search, UI first paint, memory | Numbers in the docs, tracked weekly |
 
+**Baseline (2026-11-14, debug build, 100k exchanges, 10k findings; `crates/pm-service/tests/scale.rs`):** inserts
+2,172/s; recording while a content search runs 2,241/s with the worst insert stall 20.6 ms (p99 1.3 ms), already under
+the 1.1 target because the recorder writes on its own connection; slowest metadata query 1.5 s (a response-content
+term); one content search over 5,000 bodies 0.9 s; RSS 27 MB after loading. **Finding creation is quadratic** (every
+create lists all findings to check duplicates): 10,000 findings took 393 s, 25/s. So the order changes: fix finding
+creation first, then full-text search (1.4); the store split (1.1) matters most for service-path writes (imports,
+replay, races, audit) that share the service lock, which the next benchmark round must measure. Real numbers need a
+release build and 1M exchanges.
+
 **Gate:** the 1M-exchange benchmark meets the targets, and the byte-exact traffic tests still pass.
 
 ## Phase 2: protocols, capture and scripting
