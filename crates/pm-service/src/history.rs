@@ -117,6 +117,9 @@ impl Service {
     /// Rows matching a query (and the other filters), newest first. Stops
     /// after `limit` matches or the time budget; `next_before_id` then says
     /// where to continue.
+    ///
+    /// Content terms use the full-text index as a pre-filter (`query_candidates`): only rows it
+    /// names are loaded and evaluated, and `Query::matches` still decides each of them.
     fn query_rows(
         &self,
         actor: &Actor,
@@ -128,25 +131,55 @@ impl Service {
         let mut f = filter.clone();
         f.q = None;
         f.limit = Some(500);
+        let candidates = self.query_candidates(actor, filter, query)?;
         let (mut out, mut scanned, mut last, mut more) = (Vec::new(), 0usize, None, true);
-        'pages: while more {
-            let page = self.store.read(|db| db.search_exchanges(&f))?;
-            more = page.len() == 500 && filter.after_id.is_none();
-            for row in &page {
-                scanned += 1;
-                last = Some(row.id);
-                let mut lazy = Lazy { svc: self, actor, row, loaded: None, scope: None };
-                let ok = (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy))
-                    && query.matches(&meta(row), &mut lazy);
-                if ok {
-                    out.push(row.clone());
-                }
-                if out.len() >= limit || std::time::Instant::now() > deadline {
-                    more = !(out.len() < limit && Some(row.id) == page.last().map(|r| r.id) && !more);
-                    break 'pages;
+        let eval = |row: &ExchangeSummary| {
+            let mut lazy = Lazy { svc: self, actor, row, loaded: None, scope: None };
+            (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy)) && query.matches(&meta(row), &mut lazy)
+        };
+        match candidates {
+            // Paging back: fetch the candidates' summaries, 500 at a time, newest first.
+            Some(ids) if filter.after_id.is_none() => {
+                more = false;
+                let chunks: Vec<&[i64]> = ids.chunks(500).collect();
+                'chunks: for (i, chunk) in chunks.iter().enumerate() {
+                    f.ids = Some(chunk.to_vec());
+                    let page = self.store.read(|db| db.search_exchanges(&f))?;
+                    for row in &page {
+                        scanned += 1;
+                        last = Some(row.id);
+                        if eval(row) {
+                            out.push(row.clone());
+                        }
+                        if out.len() >= limit || std::time::Instant::now() > deadline {
+                            let at_end = i + 1 == chunks.len() && Some(row.id) == page.last().map(|r| r.id);
+                            more = !(out.len() < limit && at_end);
+                            break 'chunks;
+                        }
+                    }
                 }
             }
-            f.before_id = last;
+            // Otherwise pages of 500 rows by metadata. With `after_id` that is one page (as always);
+            // rows the index rules out are skipped without loading them.
+            _ => {
+                let only: Option<std::collections::HashSet<i64>> = candidates.map(|ids| ids.into_iter().collect());
+                'pages: while more {
+                    let page = self.store.read(|db| db.search_exchanges(&f))?;
+                    more = page.len() == 500 && filter.after_id.is_none();
+                    for row in &page {
+                        scanned += 1;
+                        last = Some(row.id);
+                        if only.as_ref().is_none_or(|s| s.contains(&row.id)) && eval(row) {
+                            out.push(row.clone());
+                        }
+                        if out.len() >= limit || std::time::Instant::now() > deadline {
+                            more = !(out.len() < limit && Some(row.id) == page.last().map(|r| r.id) && !more);
+                            break 'pages;
+                        }
+                    }
+                    f.before_id = last;
+                }
+            }
         }
         if let Some(r) = self.redactor_for(actor) {
             for row in &mut out {
@@ -155,6 +188,28 @@ impl Service {
         }
         let next_before_id = if more { last } else { None };
         Ok(ExchangePage { exchanges: out, next_before_id, scanned: Some(scanned) })
+    }
+
+    /// Ids (newest first, within `before_id`/`after_id`) that may match the query, from the full-text
+    /// index; None when every row has to be looked at: the query has no content term every match needs,
+    /// the caller already limited `ids`, a needle is too short or too common for the index, or (for
+    /// agents) one could match a redaction placeholder, which the index never saw.
+    fn query_candidates(&self, actor: &Actor, filter: &HistoryFilter, query: &hql::Query) -> Result<Option<Vec<i64>>> {
+        let Some(needles) = query.required_literals().filter(|_| filter.ids.is_none()) else { return Ok(None) };
+        if self.redactor_for(actor).is_some() && needles.iter().any(|n| crate::search::may_match_placeholder(n, false))
+        {
+            return Ok(None);
+        }
+        let mut ids: Vec<i64> = Vec::new();
+        for n in &needles {
+            let Some(found) = self.store.read(|db| db.text_candidates(n))? else { return Ok(None) };
+            ids.extend(found);
+        }
+        ids.sort_unstable_by(|a, b| b.cmp(a));
+        ids.dedup();
+        let (before, after) = (filter.before_id, filter.after_id);
+        ids.retain(|&id| before.is_none_or(|b| id < b) && after.is_none_or(|a| id > a));
+        Ok(Some(ids))
     }
 
     /// Rows whose targets are in scope, reading pages until `limit` are found

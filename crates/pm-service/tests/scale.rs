@@ -153,6 +153,17 @@ fn history_at_scale() {
         None => println!("memory after loading: n/a"),
     }
 
+    // The recorder doesn't index; the Service's background thread does. Wait for it to drain the tail
+    // so the content-search and HQL content-term timings measure the index, not the tail fallback.
+    let t = Instant::now();
+    {
+        let probe = Store::open(&path).unwrap();
+        while probe.text_candidates("nothing-matches").unwrap().is_none_or(|ids| !ids.is_empty()) {
+            assert!(t.elapsed() < Duration::from_secs(300), "indexer did not catch up");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    println!("{:<48} {:>8.1} ms", "background indexer caught up (after loading)", t.elapsed().as_secs_f64() * 1000.0);
     let mut meta_max = 0f64;
     let mut meta = |label: &str, ms: f64| {
         println!("{label:<48} {ms:>8.1} ms");
@@ -213,17 +224,6 @@ fn history_at_scale() {
         let _ = svc.counters().unwrap();
     });
     timed("site map", &mut || drop(svc.site_map(&me, None).unwrap()));
-    // The recorder doesn't index; the Service's background thread does. Wait for it to drain the tail
-    // so the content-search timings below measure the index, not the tail fallback.
-    let t = Instant::now();
-    {
-        let probe = Store::open(&path).unwrap();
-        while probe.text_candidates("nothing-matches").unwrap().is_none_or(|ids| !ids.is_empty()) {
-            assert!(t.elapsed() < Duration::from_secs(300), "indexer did not catch up");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    println!("{:<48} {:>8.1} ms", "background indexer caught up (after loading)", t.elapsed().as_secs_f64() * 1000.0);
     let search_req = SearchRequest { query: "nothing-matches".into(), ..Default::default() };
     let t = Instant::now();
     svc.history_search_text(&me, &search_req).unwrap();
