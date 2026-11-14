@@ -1,15 +1,5 @@
 import { Component, createContext, useCallback, useContext, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
-import { ApiError, type Counters } from "./api";
-
-/**
- * How long to wait before polling again after a failed poll, or null to stop.
- * A blip (no connection, a 5xx, 429) shouldn't freeze a live progress view
- * while the task keeps running; "gone" or "not allowed" (other 4xx) should.
- */
-export function pollRetryDelay(e: unknown, failures: number): number | null {
-  if (e instanceof ApiError && e.status < 500 && e.status !== 429) return null;
-  return Math.min(1000 * 2 ** failures, 15_000);
-}
+import type { Counters } from "./api";
 
 export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
 
