@@ -69,7 +69,7 @@ impl Service {
 
     /// Current settings, with the proxy password hidden.
     pub fn network_get(&self) -> Result<NetConfig> {
-        Ok(load_network(&self.store.lock())?.masked())
+        Ok(self.store.read(load_network)?.masked())
     }
 
     /// Replaces the settings. Humans only. A password of `********` keeps
@@ -78,7 +78,7 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change network settings".into()));
         }
-        let saved = load_network(&self.store.lock())?;
+        let saved = self.store.read(load_network)?;
         if let (Some(new), Some(old)) = (cfg.upstream.as_mut(), saved.upstream.as_ref())
             && new.password == "********"
         {
@@ -86,7 +86,7 @@ impl Service {
         }
         self.network().set(cfg.clone()).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(NETWORK_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(NETWORK_SETTING, &text))?;
         self.audit(&actor.id(), "network_settings", json!(cfg.masked()), "allow")?;
         Ok(cfg.masked())
     }
@@ -156,13 +156,13 @@ pub fn watch_project(
 impl Service {
     /// Lets the service start, stop and report the proxy's extra listeners.
     pub fn attach_listeners(&self, l: Arc<Listeners>) -> Result<()> {
-        sync_listeners(&self.store.lock(), &l)?;
+        self.store.read(|db| sync_listeners(db, &l))?;
         let _ = self.listeners.set(l);
         Ok(())
     }
 
     pub fn listeners_get(&self) -> Result<ListenersView> {
-        let listeners = load_listeners(&self.store.lock())?;
+        let listeners = self.store.read(load_listeners)?;
         let (primary, status) = match self.listeners.get() {
             Some(l) => (l.primary().map(str::to_string), l.status()),
             None => (None, vec![]),
@@ -178,7 +178,7 @@ impl Service {
         }
         pm_proxy::listeners::validate(&list).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&list).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(LISTENERS_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(LISTENERS_SETTING, &text))?;
         if let Some(l) = self.listeners.get() {
             l.sync(&list);
         }
@@ -208,7 +208,7 @@ fn load_recording(store: &Store) -> Result<RecordingSettings> {
 
 impl Service {
     pub fn recording_get(&self) -> Result<RecordingSettings> {
-        load_recording(&self.store.lock())
+        self.store.read(load_recording)
     }
 
     /// Changes what the proxy records. Humans only.
@@ -217,7 +217,7 @@ impl Service {
             return Err(ServiceError::Invalid("only humans can change what is recorded".into()));
         }
         let text = serde_json::to_string(&s).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(RECORDING_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(RECORDING_SETTING, &text))?;
         self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
         self.audit(&actor.id(), "history_recording", json!(s), "allow")?;
         Ok(s)
@@ -225,7 +225,7 @@ impl Service {
 
     /// Re-reads the recording settings (changes from another process).
     pub fn sync_recording(&self) -> Result<()> {
-        let s = load_recording(&self.store.lock())?;
+        let s = self.store.read(load_recording)?;
         self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }

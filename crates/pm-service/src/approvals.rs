@@ -40,16 +40,16 @@ impl Service {
             decided_by: None,
             decided_ms: None,
         };
-        self.store.lock().insert_approval(&row)?;
+        self.store.write(|db| db.insert_approval(&row))?;
         Ok(row.id)
     }
 
     pub fn approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
-        Ok(self.store.lock().get_approval(id)?)
+        Ok(self.store.read(|db| db.get_approval(id))?)
     }
 
     pub fn approvals(&self, status: Option<&str>, limit: usize) -> Result<Vec<ApprovalRow>> {
-        Ok(self.store.lock().list_approvals(status, limit)?)
+        Ok(self.store.read(|db| db.list_approvals(status, limit))?)
     }
 
     /// A human approves or denies a pending action. Audited, including refusals.
@@ -58,7 +58,8 @@ impl Service {
             Err("only humans can approve actions".to_string())
         } else {
             let to = if approve { "approved" } else { "denied" };
-            match self.store.lock().transition_approval(id, "pending", to, Some(&approver.id()), None, now_ms()) {
+            match self.store.write(|db| db.transition_approval(id, "pending", to, Some(&approver.id()), None, now_ms()))
+            {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(format!("approval {id} does not exist or was already decided")),
                 Err(e) => Err(format!("{e:#}")),
@@ -99,8 +100,9 @@ impl Service {
             )));
         }
         let hash = pm_policy::params_hash(params);
-        let consumed =
-            self.store.lock().transition_approval(approval_id, "approved", "used", None, Some(&hash), now_ms())?;
+        let consumed = self
+            .store
+            .write(|db| db.transition_approval(approval_id, "approved", "used", None, Some(&hash), now_ms()))?;
         let row = self.approval(approval_id)?;
         let Some(row) = row.filter(|_| consumed) else {
             let actor = self.approval(approval_id)?.map(|a| a.actor).unwrap_or_default();

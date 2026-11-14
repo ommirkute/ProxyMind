@@ -93,20 +93,22 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("agent_memory", &row)?;
+        let id = self.store.write(|db| db.insert_row("agent_memory", &row))?;
         self.audit(&actor.id(), "memory_save", json!({ "id": id, "host": host, "kind": kind }), "allow")?;
         if let Some(scan) = scan_of(actor) {
             let _ =
                 self.ai_scan_log(scan, "memory", &format!("{kind}: {}", text.chars().take(160).collect::<String>()));
         }
-        Ok(decode(&self.store.lock().row("agent_memory", id)?.unwrap_or_default()))
+        Ok(decode(&self.store.read(|db| db.row("agent_memory", id))?.unwrap_or_default()))
     }
 
     /// Notes, newest first; only one host's when given.
     pub fn memory_list(&self, host: Option<&str>) -> Result<Vec<Memory>> {
         let rows = match host {
-            Some(h) => self.store.lock().rows("agent_memory", Some(("host", &json!(h.to_ascii_lowercase()))), 1000)?,
-            None => self.store.lock().rows("agent_memory", None, 1000)?,
+            Some(h) => {
+                self.store.read(|db| db.rows("agent_memory", Some(("host", &json!(h.to_ascii_lowercase()))), 1000))?
+            }
+            None => self.store.read(|db| db.rows("agent_memory", None, 1000))?,
         };
         Ok(rows.iter().map(decode).collect())
     }
@@ -116,7 +118,7 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only people delete memory".into()));
         }
-        if !self.store.lock().delete_row("agent_memory", id)? {
+        if !self.store.write(|db| db.delete_row("agent_memory", id))? {
             return Err(ServiceError::NotFound(format!("memory {id}")));
         }
         self.audit(&actor.id(), "memory_delete", json!({ "id": id }), "allow")

@@ -63,8 +63,7 @@ impl Service {
             (None, Some(id)) => {
                 let ex = self
                     .store
-                    .lock()
-                    .get_exchange(id)?
+                    .read(|db| db.get_exchange(id))?
                     .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
                 let resp =
                     ex.response.ok_or_else(|| ServiceError::Invalid(format!("exchange {id} has no response")))?;
@@ -164,7 +163,7 @@ impl Service {
         let stored = json!({
             "title": spec.title, "version": spec.version, "base_url": base_url, "operations": operations,
         });
-        self.store.lock().set_setting(OPENAPI_SETTING, &stored.to_string())?;
+        self.store.write(|db| db.set_setting(OPENAPI_SETTING, &stored.to_string()))?;
         self.audit(
             &actor.id(),
             "openapi_import",
@@ -186,8 +185,7 @@ impl Service {
     pub fn openapi_get(&self) -> Result<Value> {
         Ok(self
             .store
-            .lock()
-            .get_setting(OPENAPI_SETTING)?
+            .read(|db| db.get_setting(OPENAPI_SETTING))?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null))
     }

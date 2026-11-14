@@ -58,17 +58,15 @@ impl Service {
             None => Severity::Info,
         };
         let limit = filter.limit.unwrap_or(2000).clamp(1, 20_000);
-        let summaries = self.store.lock().search_exchanges(&HistoryFilter {
-            host: filter.host.clone(),
-            limit: Some(limit),
-            ..Default::default()
+        let summaries = self.store.read(|db| {
+            db.search_exchanges(&HistoryFilter { host: filter.host.clone(), limit: Some(limit), ..Default::default() })
         })?;
         let mut groups: BTreeMap<(String, String, String, String), ScanIssue> = BTreeMap::new();
         let mut lines: Vec<pm_plugin::ExchangeLine> = Vec::new();
         let mut where_of: std::collections::HashMap<i64, (String, String)> = std::collections::HashMap::new();
         let plugins = self.enabled_plugins();
         for s in summaries {
-            let Some(ex) = self.store.lock().get_exchange(s.id)? else { continue };
+            let Some(ex) = self.store.read(|db| db.get_exchange(s.id))? else { continue };
             let Some(resp) = ex.response.as_deref() else { continue };
             let converted;
             let resp = if pm_http::h2text::is_http2_response(resp) {
@@ -427,7 +425,7 @@ impl Service {
                 limit: Some(200),
                 ..Default::default()
             };
-            rows.extend(self.store.lock().search_exchanges(&f)?);
+            rows.extend(self.store.read(|db| db.search_exchanges(&f))?);
         }
         rows.sort_by_key(|r| std::cmp::Reverse(r.id));
         let mut out: Vec<(String, Vec<u8>)> = Vec::new();
@@ -439,7 +437,7 @@ impl Service {
             if !paths.insert(r.path.split('?').next().unwrap_or("").to_string()) {
                 continue;
             }
-            let Some(e) = self.store.lock().get_exchange(r.id)? else { continue };
+            let Some(e) = self.store.read(|db| db.get_exchange(r.id))? else { continue };
             let html = seen_of(e.response.as_deref()).content_type.is_some_and(|c| c.contains("html"));
             if html {
                 out.push((r.path.clone(), self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes()));
@@ -468,8 +466,7 @@ impl Service {
         };
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| crate::ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
         // Work on what the actor may see: secrets stay placeholders until sent.
@@ -656,8 +653,8 @@ impl Service {
         // Out-of-band probes, when an OAST listener is configured.
         // One lock at a time: in one struct literal both guards would live
         // to the end of the statement and deadlock.
-        let url = self.store.lock().get_setting(crate::proof::OAST_SETTING)?;
-        let domain = self.store.lock().get_setting(crate::proof::OAST_DNS_SETTING)?;
+        let url = self.store.read(|db| db.get_setting(crate::proof::OAST_SETTING))?;
+        let domain = self.store.read(|db| db.get_setting(crate::proof::OAST_DNS_SETTING))?;
         let callback = pm_scan::oob::Callback { url, domain };
         let oob = pm_scan::oob::probes(&raw, &req.checks, &callback, &id_segments, limit, pm_oast::new_token);
         if !callback.is_set() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
@@ -760,7 +757,7 @@ impl Service {
                 let mut ok = 0;
                 let mut status = None;
                 for id in &exchange_ids {
-                    let got = seen_of(self.store.lock().get_exchange(*id)?.and_then(|e| e.response).as_deref());
+                    let got = seen_of(self.store.read(|db| db.get_exchange(*id))?.and_then(|e| e.response).as_deref());
                     // Same 2xx status as the recorded success (bodies carry counters and times).
                     if got.status.is_some_and(|x| (200..300).contains(&x)) && got.status == recorded.status {
                         ok += 1;
@@ -1419,11 +1416,13 @@ impl Service {
                             let reads: Vec<Vec<u8>> = if account.is_empty() {
                                 Vec::new()
                             } else {
-                                let rows = self.store.lock().search_exchanges(&HistoryFilter {
-                                    host: Some(ex.summary.host.clone()),
-                                    method: Some("GET".into()),
-                                    limit: Some(500),
-                                    ..Default::default()
+                                let rows = self.store.read(|db| {
+                                    db.search_exchanges(&HistoryFilter {
+                                        host: Some(ex.summary.host.clone()),
+                                        method: Some("GET".into()),
+                                        limit: Some(500),
+                                        ..Default::default()
+                                    })
                                 })?;
                                 let mut out = Vec::new();
                                 for row in rows.iter().filter(|x| {
@@ -1434,7 +1433,7 @@ impl Service {
                                     if out.len() >= 3 {
                                         break;
                                     }
-                                    let Some(e) = self.store.lock().get_exchange(row.id)? else { continue };
+                                    let Some(e) = self.store.read(|db| db.get_exchange(row.id))? else { continue };
                                     if pm_scan::advanced::lists_privileges(&seen_of(e.response.as_deref()).body) {
                                         out.push(
                                             self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes(),
@@ -1798,12 +1797,12 @@ impl Service {
             tokio::time::sleep_until(oob_deadline.into()).await;
             // Looked up by token: unrelated callbacks can't push these out of view.
             let mut hits = Vec::new();
-            {
-                let store = self.store.lock();
+            self.store.read(|store| -> Result<()> {
                 for t in tokens {
                     hits.extend(store.rows("oast_interactions", Some(("token", &serde_json::json!(t))), 20)?);
                 }
-            }
+                Ok(())
+            })?;
             for (p, exchange_id) in &oob_sent {
                 let mine: Vec<_> =
                     hits.iter().filter(|h| h.get("token").and_then(|t| t.as_str()) == Some(p.token.as_str())).collect();

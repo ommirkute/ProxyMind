@@ -75,8 +75,7 @@ impl Service {
             (None, Some(id), false) => {
                 let ex = self
                     .store
-                    .lock()
-                    .get_exchange(id)?
+                    .read(|db| db.get_exchange(id))?
                     .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
                 let resp =
                     ex.response.ok_or_else(|| ServiceError::Invalid(format!("exchange {id} has no response")))?;
@@ -157,7 +156,7 @@ impl Service {
             "url": url, "query_type": schema.query_type, "mutation_type": schema.mutation_type,
             "types": schema.types, "operations": operations,
         });
-        self.store.lock().set_setting(GRAPHQL_SETTING, &stored.to_string())?;
+        self.store.write(|db| db.set_setting(GRAPHQL_SETTING, &stored.to_string()))?;
         self.audit(
             &actor.id(),
             "graphql_import",
@@ -179,8 +178,7 @@ impl Service {
     pub fn graphql_get(&self) -> Result<Value> {
         Ok(self
             .store
-            .lock()
-            .get_setting(GRAPHQL_SETTING)?
+            .read(|db| db.get_setting(GRAPHQL_SETTING))?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null))
     }

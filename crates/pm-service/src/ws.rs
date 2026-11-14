@@ -58,13 +58,12 @@ impl Service {
         max_chars: usize,
     ) -> Result<WsPage> {
         let limit = limit.clamp(1, 500);
-        let (rows, total) = {
-            let store = self.store.lock();
+        let (rows, total) = self.store.read(|store| -> Result<_> {
             if store.get_exchange(exchange_id)?.is_none() {
                 return Err(ServiceError::NotFound(format!("exchange {exchange_id}")));
             }
-            (store.ws_messages(exchange_id, after_id, limit)?, store.ws_message_count(exchange_id)?)
-        };
+            Ok((store.ws_messages(exchange_id, after_id, limit)?, store.ws_message_count(exchange_id)?))
+        })?;
         let agent = actor.kind != pm_policy::ActorKind::Human;
         let redactor = self.redactor_for(actor);
         let next_after_id = (rows.len() == limit).then(|| rows.last().map(|r| r.id)).flatten();
@@ -122,7 +121,7 @@ impl Service {
         max_chars: usize,
     ) -> Result<WsHistoryPage> {
         let limit = limit.clamp(1, 1000);
-        let rows = self.store.lock().ws_history(host, before_id, limit)?;
+        let rows = self.store.read(|db| db.ws_history(host, before_id, limit))?;
         let agent = actor.kind != pm_policy::ActorKind::Human;
         let redactor = self.redactor_for(actor);
         let next_before_id = (rows.len() == limit).then(|| rows.last().map(|r| r.message.id)).flatten();

@@ -115,7 +115,7 @@ fn valid_key_name(name: &str) -> Result<()> {
 
 impl Service {
     pub fn assistant_config(&self) -> Result<AssistantConfig> {
-        match self.store.lock().get_setting(ASSISTANT_SETTING)? {
+        match self.store.read(|db| db.get_setting(ASSISTANT_SETTING))? {
             Some(t) => serde_json::from_str(&t)
                 .map_err(|e| ServiceError::Invalid(format!("saved assistant settings are unreadable: {e}"))),
             None => Ok(AssistantConfig::default()),
@@ -145,7 +145,7 @@ impl Service {
             ..cfg
         };
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(ASSISTANT_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(ASSISTANT_SETTING, &text))?;
         self.audit(&actor.id(), "assistant_settings", json!(cfg), "allow")?;
         Ok(cfg)
     }
@@ -265,16 +265,16 @@ impl Service {
 
     pub fn chat_create(&self, title: &str) -> Result<i64> {
         let title: String = title.chars().take(80).collect();
-        Ok(self.store.lock().create_chat(&title, now_ms())?)
+        Ok(self.store.write(|db| db.create_chat(&title, now_ms()))?)
     }
 
     pub fn chat_save(&self, id: i64, messages: &Value) -> Result<()> {
-        Ok(self.store.lock().save_chat(id, &messages.to_string(), now_ms())?)
+        Ok(self.store.write(|db| db.save_chat(id, &messages.to_string(), now_ms()))?)
     }
 
     pub fn chat_get(&self, id: i64) -> Result<Chat> {
         let (title, messages, created_ms, updated_ms) =
-            self.store.lock().get_chat(id)?.ok_or_else(|| ServiceError::NotFound(format!("chat {id}")))?;
+            self.store.read(|db| db.get_chat(id))?.ok_or_else(|| ServiceError::NotFound(format!("chat {id}")))?;
         let messages = serde_json::from_str(&messages).unwrap_or(Value::Array(vec![]));
         Ok(Chat { id, title, created_ms, updated_ms, messages })
     }
@@ -282,8 +282,7 @@ impl Service {
     pub fn chat_list(&self, limit: usize) -> Result<Vec<ChatSummary>> {
         Ok(self
             .store
-            .lock()
-            .list_chats(limit)?
+            .read(|db| db.list_chats(limit))?
             .into_iter()
             .map(|(id, title, updated_ms)| ChatSummary { id, title, updated_ms })
             .collect())

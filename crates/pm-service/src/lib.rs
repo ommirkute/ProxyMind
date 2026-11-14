@@ -127,12 +127,11 @@ pub use write_checks::WriteSweep;
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
 
-use parking_lot::Mutex;
 use pm_ai::Redactor;
 use pm_core::now_ms;
 use pm_policy::{ActionRequest, Actor, Decision, Policy, RateLimiter, Verdict, audit};
 use pm_replay::Sender;
-use pm_store::Store;
+use pm_store::{Store, StoreHandle};
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -173,7 +172,7 @@ pub enum Authorization {
 pub struct Service {
     /// Shared with the proxy's scope checks, so ROE changes reach them too.
     policy: std::sync::Arc<Policy>,
-    store: Mutex<Store>,
+    store: StoreHandle,
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
@@ -274,7 +273,7 @@ impl Service {
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
-            store: Mutex::new(store),
+            store: StoreHandle::new(store),
             sender,
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
@@ -349,11 +348,13 @@ impl Service {
     }
 
     fn audit(&self, actor: &str, action: &str, detail: Value, decision: &str) -> Result<()> {
-        let mut store = self.store.lock();
-        let prev = store.last_audit()?;
-        let rec = audit::next_record(prev.as_ref(), now_ms(), actor, action, &detail, decision);
-        store.append_audit(&rec)?;
-        Ok(())
+        // One write closure: the read of the last record and the append must not interleave with another audit.
+        self.store.write(|store| {
+            let prev = store.last_audit()?;
+            let rec = audit::next_record(prev.as_ref(), now_ms(), actor, action, &detail, decision);
+            store.append_audit(&rec)?;
+            Ok(())
+        })
     }
 
     fn detail(req: &ActionRequest, params: &Value, verdict: &Verdict) -> Value {
@@ -418,33 +419,34 @@ pub struct Counters {
 
 impl Service {
     pub fn counters(&self) -> Result<Counters> {
-        let store = self.store.lock();
-        let last = store.search_exchanges(&pm_store::HistoryFilter { limit: Some(1), ..Default::default() })?;
-        Ok(Counters {
-            exchanges: store.count_exchanges()?,
-            last_exchange_id: last.first().map_or(0, |e| e.id),
-            pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
-            findings: store.rows("findings", None, 10_000)?.len(),
-            audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
-            intercepted: self.intercept_held_count(),
+        self.store.read(|store| {
+            let last = store.search_exchanges(&pm_store::HistoryFilter { limit: Some(1), ..Default::default() })?;
+            Ok(Counters {
+                exchanges: store.count_exchanges()?,
+                last_exchange_id: last.first().map_or(0, |e| e.id),
+                pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
+                findings: store.rows("findings", None, 10_000)?.len(),
+                audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
+                intercepted: self.intercept_held_count(),
+            })
         })
     }
 
     /// Audit records, newest first.
     pub fn audit_list(&self, limit: usize) -> Result<Vec<pm_store::AuditRecord>> {
-        let mut r = self.store.lock().audit_records()?;
+        let mut r = self.store.read(|db| db.audit_records())?;
         r.reverse();
         r.truncate(limit);
         Ok(r)
     }
 
     pub fn audit_verify(&self) -> Result<usize> {
-        verify_audit(&self.store.lock())
+        self.store.read(verify_audit)
     }
 
     /// The raw bytes of an exchange as text, for humans (no redaction).
     pub fn exchange_raw(&self, id: i64) -> Result<pm_store::Exchange> {
-        self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
+        self.store.read(|db| db.get_exchange(id))?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
     }
 }
 
@@ -508,10 +510,9 @@ scope:
         // Single use.
         assert!(s.run_approved(&agent_a, "replay_send", &approval_id, &params).is_err());
 
-        let store = s.store.lock();
         // authorize, run(not approved), decide(rejected), decide(approved), run(other actor), run(other action),
         // run(mismatch), run(ok), run(used)
-        assert_eq!(verify_audit(&store).unwrap(), 9);
+        assert_eq!(s.store.read(verify_audit).unwrap(), 9);
     }
 
     #[test]
@@ -534,7 +535,7 @@ scope:
         assert!(matches!(auth, Authorization::Denied { .. }));
         let auth = s.authorize(req("agent:a", Tier::Destructive, "https://app.example.com/x"), &json!({})).unwrap();
         assert!(matches!(auth, Authorization::Denied { .. }));
-        let records = s.store.lock().audit_records().unwrap();
+        let records = s.store.read(|db| db.audit_records()).unwrap();
         assert_eq!(records.iter().map(|r| r.decision.as_str()).collect::<Vec<_>>(), ["deny", "deny"]);
     }
 
@@ -547,7 +548,7 @@ scope:
             for url in ["https://app.example.com/a", "https://evil.com/", "https://app.example.com/b"] {
                 s.authorize(req("agent:a", Tier::ActiveSafe, url), &json!({})).unwrap();
             }
-            assert_eq!(verify_audit(&s.store.lock()).unwrap(), 3);
+            assert_eq!(s.store.read(verify_audit).unwrap(), 3);
         }
         // Someone edits the file outside ProxyMind: removes the guard
         // triggers and flips the denial to an allow.

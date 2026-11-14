@@ -119,7 +119,7 @@ impl Service {
         let hyps = self.hypothesis_list(None)?;
         let findings: Vec<Value> =
             self.finding_list(None)?.into_iter().filter(|f| f["status"] != "false_positive").collect();
-        let records = self.store.lock().audit_records()?;
+        let records = self.store.read(|db| db.audit_records())?;
         let all_active: BTreeSet<String> =
             pm_scan::active::CHECKS.iter().chain(pm_scan::oob::CHECKS).map(|c| issue_key(c)).collect();
         // What each allowed, targeted action tested: (origin+path, classes, how, actor).
@@ -274,7 +274,7 @@ impl Service {
         for p in self.attack_path_list(None)? {
             wanted.extend(p.steps.iter().filter_map(|s| s.exchange_id));
         }
-        let listed = self.store.lock().list_exchanges(MAX_LISTED, None)?;
+        let listed = self.store.read(|db| db.list_exchanges(MAX_LISTED, None))?;
         if all_in_scope {
             for s in &listed {
                 if wanted.len() >= MAX_INCLUDED {
@@ -292,7 +292,7 @@ impl Service {
             let mut e = json!({ "id": s.id, "ts_ms": s.ts_ms, "source": s.source, "actor": s.actor_id,
                                 "method": s.method, "url": url, "status": s.status });
             if wanted.contains(&s.id)
-                && let Some(ex) = self.store.lock().get_exchange(s.id)?
+                && let Some(ex) = self.store.read(|db| db.get_exchange(s.id))?
             {
                 let req = format!("exchanges/{}.request.http", s.id);
                 files.push((req.clone(), ex.request));
@@ -306,7 +306,7 @@ impl Service {
             exchanges.push(e);
         }
 
-        let records = self.store.lock().audit_records()?;
+        let records = self.store.read(|db| db.audit_records())?;
         let audit_lines: Vec<String> = records.iter().map(|r| serde_json::to_string(r).unwrap_or_default()).collect();
         let head = records.last().map(|r| r.hash.iter().map(|b| format!("{b:02x}")).collect::<String>());
         let coverage = self.coverage_proof()?;

@@ -69,7 +69,7 @@ pub fn summarize(roe: &Roe) -> Value {
 impl Service {
     /// The rules in force and their saved text.
     pub fn roe_get(&self) -> Result<RoeView> {
-        let text = self.store.lock().get_setting(ROE_SETTING)?;
+        let text = self.store.read(|db| db.get_setting(ROE_SETTING))?;
         Ok(RoeView { text, summary: summarize(&self.policy.roe()) })
     }
 
@@ -88,8 +88,8 @@ impl Service {
             return Err(ServiceError::Invalid("ROE larger than 1 MB".into()));
         }
         let roe = Roe::parse(text).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        let old = self.store.lock().get_setting(ROE_SETTING)?.unwrap_or_default();
-        self.store.lock().set_setting(ROE_SETTING, text)?;
+        let old = self.store.read(|db| db.get_setting(ROE_SETTING))?.unwrap_or_default();
+        self.store.write(|db| db.set_setting(ROE_SETTING, text))?;
         self.apply_roe(roe, text);
         self.audit(
             &actor.id(),
@@ -109,7 +109,7 @@ impl Service {
     /// Applies the saved ROE if another process changed it. Returns whether it changed.
     /// A saved ROE that no longer parses is ignored (the rules in force stay).
     pub fn sync_roe(&self) -> Result<bool> {
-        let Some(text) = self.store.lock().get_setting(ROE_SETTING)? else { return Ok(false) };
+        let Some(text) = self.store.read(|db| db.get_setting(ROE_SETTING))? else { return Ok(false) };
         if self.roe_text.lock().as_deref() == Some(text.as_str()) {
             return Ok(false);
         }

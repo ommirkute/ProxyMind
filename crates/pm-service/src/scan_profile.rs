@@ -149,7 +149,7 @@ impl Service {
     /// Built-in profiles first, then saved ones.
     pub fn scan_profiles(&self) -> Result<Vec<ScanProfile>> {
         let mut all = builtin_profiles();
-        all.extend(load_saved(&self.store.lock())?);
+        all.extend(self.store.read(load_saved)?);
         Ok(all)
     }
 
@@ -168,9 +168,8 @@ impl Service {
         p.name = p.name.trim().to_string();
         p.builtin = false;
         p.validate().map_err(ServiceError::Invalid)?;
-        {
-            let mut store = self.store.lock();
-            let mut saved = load_saved(&store)?;
+        self.store.write(|store| -> Result<()> {
+            let mut saved = load_saved(store)?;
             saved.retain(|s| !s.name.eq_ignore_ascii_case(&p.name));
             saved.push(p.clone());
             if saved.len() > 50 {
@@ -178,7 +177,8 @@ impl Service {
             }
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(PROFILES_SETTING, &text)?;
-        }
+            Ok(())
+        })?;
         self.audit(&actor.id(), "scan_profile_save", json!(p), "allow")?;
         self.scan_profiles()
     }
@@ -187,15 +187,14 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change scan profiles".into()));
         }
-        let removed = {
-            let mut store = self.store.lock();
-            let mut saved = load_saved(&store)?;
+        let removed = self.store.write(|store| -> Result<bool> {
+            let mut saved = load_saved(store)?;
             let before = saved.len();
             saved.retain(|s| !s.name.eq_ignore_ascii_case(name));
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(PROFILES_SETTING, &text)?;
-            saved.len() < before
-        };
+            Ok(saved.len() < before)
+        })?;
         self.audit(
             &actor.id(),
             "scan_profile_delete",

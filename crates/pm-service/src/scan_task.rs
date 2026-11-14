@@ -269,7 +269,7 @@ impl Service {
             created_ms: saved.view.created_ms,
             updated_ms: pm_core::now_ms(),
         };
-        if let Err(e) = self.store.lock().upsert_scan_task(&row) {
+        if let Err(e) = self.store.write(|db| db.upsert_scan_task(&row)) {
             tracing::warn!(task = %task.id, error = %e, "scan task not saved");
         }
     }
@@ -277,7 +277,7 @@ impl Service {
     /// Loads recent tasks when the project opens. Tasks that were running
     /// when ProxyMind stopped come back paused.
     pub(crate) fn load_scan_tasks(&self) {
-        let rows = match self.store.lock().list_scan_tasks(KEEP_TASKS) {
+        let rows = match self.store.read(|db| db.list_scan_tasks(KEEP_TASKS)) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("scan tasks not loaded: {e}");

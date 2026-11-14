@@ -66,7 +66,7 @@ impl Service {
     fn identity_carrying(&self, carried: &pm_identity::AuthMaterial) -> Option<pm_identity::Identity> {
         let same =
             |a: &(String, String), b: &(String, String)| a.1.len() >= 8 && a.0.eq_ignore_ascii_case(&b.0) && a.1 == b.1;
-        let rows = self.store.lock().list_identities().ok()?;
+        let rows = self.store.read(|db| db.list_identities()).ok()?;
         rows.iter().filter_map(|r| serde_json::from_str::<pm_identity::Identity>(&r.data).ok()).find(|i| {
             i.auth.cookies.iter().any(|c| carried.cookies.iter().any(|x| same(c, x)))
                 || i.auth.headers.iter().any(|h| carried.headers.iter().any(|x| same(h, x)))
@@ -145,7 +145,8 @@ impl Service {
             };
             let (d, inputs) = (&p["details"], &p["inputs"]);
             let exchange = |eid: Option<i64>| -> Option<(String, String)> {
-                let ex = self.store.lock().get_exchange(eid?).ok()??;
+                let eid = eid?;
+                let ex = self.store.read(|db| db.get_exchange(eid)).ok()??;
                 let s = &ex.summary;
                 Some((
                     String::from_utf8_lossy(&ex.request).into_owned(),

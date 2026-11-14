@@ -147,19 +147,19 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("attack_paths", &row)?;
+        let id = self.store.write(|db| db.insert_row("attack_paths", &row))?;
         self.audit(&actor.id(), "attack_path_create", json!({ "id": id, "steps": steps.len() }), "allow")?;
         if let Some(scan) = scan_of(actor) {
             let _ = self.ai_scan_log(scan, "chain", &format!("attack path #{id}: {}", clip(&p.title, 160)));
         }
-        Ok(decode(&self.store.lock().row("attack_paths", id)?.unwrap_or_default()))
+        Ok(decode(&self.store.read(|db| db.row("attack_paths", id))?.unwrap_or_default()))
     }
 
     /// Paths, newest first; only one scan's when `scan_id` is given.
     pub fn attack_path_list(&self, scan_id: Option<i64>) -> Result<Vec<AttackPath>> {
         let rows = match scan_id {
-            Some(s) => self.store.lock().rows("attack_paths", Some(("scan_id", &json!(s))), 1000)?,
-            None => self.store.lock().rows("attack_paths", None, 1000)?,
+            Some(s) => self.store.read(|db| db.rows("attack_paths", Some(("scan_id", &json!(s))), 1000))?,
+            None => self.store.read(|db| db.rows("attack_paths", None, 1000))?,
         };
         Ok(rows.iter().map(decode).collect())
     }
@@ -169,7 +169,7 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only people delete attack paths".into()));
         }
-        if !self.store.lock().delete_row("attack_paths", id)? {
+        if !self.store.write(|db| db.delete_row("attack_paths", id))? {
             return Err(ServiceError::NotFound(format!("attack path {id}")));
         }
         self.audit(&actor.id(), "attack_path_delete", json!({ "id": id }), "allow")

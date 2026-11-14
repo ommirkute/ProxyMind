@@ -1641,6 +1641,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",

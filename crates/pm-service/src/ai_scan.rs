@@ -113,8 +113,7 @@ fn n(r: &serde_json::Map<String, Value>, k: &str) -> i64 {
 impl Service {
     fn ai_row(&self, id: i64) -> Result<serde_json::Map<String, Value>> {
         self.store
-            .lock()
-            .rows("ai_scans", Some(("id", &json!(id))), 1)?
+            .read(|db| db.rows("ai_scans", Some(("id", &json!(id))), 1))?
             .into_iter()
             .next()
             .ok_or_else(|| ServiceError::NotFound(format!("AI scan {id}")))
@@ -126,7 +125,7 @@ impl Service {
             m.insert(k.into(), v);
         }
         m.insert("updated_ms".into(), json!(pm_core::now_ms()));
-        self.store.lock().update_row("ai_scans", id, &m)?;
+        self.store.write(|db| db.update_row("ai_scans", id, &m))?;
         Ok(())
     }
 
@@ -168,7 +167,8 @@ impl Service {
         };
         let t = pm_policy::Target::from_url(&target).map_err(|e| ServiceError::Invalid(format!("target: {e}")))?;
         self.policy.scope_check(&t).map_err(|e| ServiceError::Invalid(format!("target out of scope: {e}")))?;
-        let running = self.store.lock().rows("ai_scans", Some(("status", &json!("running"))), 1)?.into_iter().next();
+        let running =
+            self.store.read(|db| db.rows("ai_scans", Some(("status", &json!("running"))), 1))?.into_iter().next();
         if let Some(r) = running {
             return Err(ServiceError::Invalid(format!("AI scan {} is still running; stop it first", n(&r, "id"))));
         }
@@ -196,7 +196,7 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("ai_scans", &row)?;
+        let id = self.store.write(|db| db.insert_row("ai_scans", &row))?;
         self.audit(
             &actor.id(),
             "ai_scan_start",
@@ -211,8 +211,7 @@ impl Service {
     fn scan_findings(&self, id: i64) -> Result<Vec<serde_json::Map<String, Value>>> {
         Ok(self
             .store
-            .lock()
-            .rows("findings", None, 10_000)?
+            .read(|db| db.rows("findings", None, 10_000))?
             .into_iter()
             .filter(|r| of_scan(&s(r, "actor"), id))
             .collect())
@@ -252,7 +251,7 @@ impl Service {
     /// Scans, newest first, without their logs and reports.
     pub fn ai_scan_list(&self, limit: usize) -> Result<Vec<AiScan>> {
         let ids: Vec<i64> =
-            self.store.lock().rows("ai_scans", None, limit.clamp(1, 200))?.iter().map(|r| n(r, "id")).collect();
+            self.store.read(|db| db.rows("ai_scans", None, limit.clamp(1, 200)))?.iter().map(|r| n(r, "id")).collect();
         let mut out = Vec::new();
         for id in ids {
             let mut sc = self.ai_scan_get(id)?;
@@ -420,7 +419,7 @@ impl Service {
 
     /// Runs left `running` by a process that ended (marked failed on open).
     pub fn ai_scan_recover(&self) -> Result<()> {
-        let stale = self.store.lock().rows("ai_scans", Some(("status", &json!("running"))), 100)?;
+        let stale = self.store.read(|db| db.rows("ai_scans", Some(("status", &json!("running"))), 100))?;
         for r in stale {
             // A run updates its row every step; one quiet for 10 minutes has no process behind it.
             if pm_core::now_ms() - n(&r, "updated_ms") > 10 * 60_000 {

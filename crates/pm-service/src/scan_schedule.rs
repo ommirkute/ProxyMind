@@ -119,7 +119,7 @@ fn from_row(row: pm_store::ScheduleRow) -> Option<ScanSchedule> {
 
 impl Service {
     pub fn schedule_list(&self) -> Result<Vec<ScanSchedule>> {
-        Ok(self.store.lock().list_schedules()?.into_iter().filter_map(from_row).collect())
+        Ok(self.store.read(|db| db.list_schedules())?.into_iter().filter_map(from_row).collect())
     }
 
     fn schedule_get(&self, id: i64) -> Result<ScanSchedule> {
@@ -137,7 +137,7 @@ impl Service {
             enabled: s.enabled,
             next_run_ms: s.next_run_ms,
         };
-        Ok(self.store.lock().save_schedule(&row)?)
+        Ok(self.store.write(|db| db.save_schedule(&row))?)
     }
 
     /// Adds a schedule (id 0) or changes one. It will run as `actor`.
@@ -161,7 +161,7 @@ impl Service {
             s.last_run_ms = old.last_run_ms;
             s.last_task = old.last_task;
             s.last_error = old.last_error;
-        } else if self.store.lock().list_schedules()?.len() >= 50 {
+        } else if self.store.read(|db| db.list_schedules())?.len() >= 50 {
             return Err(ServiceError::Invalid("at most 50 schedules".into()));
         }
         // The approval in a request is single-use: never replay it.
@@ -175,7 +175,7 @@ impl Service {
 
     pub fn schedule_delete(&self, actor: &Actor, id: i64) -> Result<bool> {
         humans_only(actor)?;
-        let deleted = self.store.lock().delete_schedule(id)?;
+        let deleted = self.store.write(|db| db.delete_schedule(id))?;
         self.audit(&actor.id(), "scan_schedule_delete", json!({ "id": id }), if deleted { "allow" } else { "noop" })?;
         Ok(deleted)
     }
@@ -218,7 +218,7 @@ impl Service {
                 continue;
             }
             let next = next_run_after(&s.every, now_ms);
-            if !self.store.lock().claim_schedule(s.id, s.next_run_ms, next)? {
+            if !self.store.write(|db| db.claim_schedule(s.id, s.next_run_ms, next))? {
                 continue; // another process got there first
             }
             s.next_run_ms = next;

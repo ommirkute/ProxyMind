@@ -104,8 +104,7 @@ impl Service {
             (None, Some(id)) => {
                 let ex = self
                     .store
-                    .lock()
-                    .get_exchange(*id)?
+                    .read(|db| db.get_exchange(*id))?
                     .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
                 pm_core::url(&ex.summary.scheme, &ex.summary.host, ex.summary.port, &ex.summary.path)
             }
@@ -133,7 +132,7 @@ impl Service {
                 changes.insert("severity".into(), json!(severity));
             }
             changes.insert("updated_ms".into(), json!(now_ms()));
-            self.store.lock().update_row("findings", id, &changes)?;
+            self.store.write(|db| db.update_row("findings", id, &changes))?;
             self.audit(
                 &actor.id(),
                 "finding_merge",
@@ -161,7 +160,7 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("findings", &row)?;
+        let id = self.store.write(|db| db.insert_row("findings", &row))?;
         self.audit(&actor.id(), "finding_create", json!({ "id": id, "title": f.title }), "allow")?;
         let mut v = self.finding_get(id)?;
         // Learn from people's verdicts: say so when they rejected the same issue here before.
@@ -176,8 +175,10 @@ impl Service {
     }
 
     pub fn finding_get(&self, id: i64) -> Result<Value> {
-        let row =
-            self.store.lock().row("findings", id)?.ok_or_else(|| ServiceError::NotFound(format!("finding {id}")))?;
+        let row = self
+            .store
+            .read(|db| db.row("findings", id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("finding {id}")))?;
         let mut v = decode(&row);
         v["proofs"] = json!(self.proofs_for_finding(id)?);
         Ok(v)
@@ -186,13 +187,13 @@ impl Service {
     /// Findings at the same place as `url` (same URL without query and fragment), newest first. Uses an index,
     /// so it stays fast however many findings there are.
     pub(crate) fn findings_at_url(&self, url: &str) -> Result<Vec<Value>> {
-        let rows = self.store.lock().findings_at_url(url_key(url))?;
+        let rows = self.store.read(|db| db.findings_at_url(url_key(url)))?;
         Ok(rows.iter().map(decode).collect())
     }
 
     pub fn finding_list(&self, status: Option<&str>) -> Result<Vec<Value>> {
         let filter = status.map(|s| json!(s));
-        let rows = self.store.lock().rows("findings", filter.as_ref().map(|v| ("status", v)), 1000)?;
+        let rows = self.store.read(|db| db.rows("findings", filter.as_ref().map(|v| ("status", v)), 1000))?;
         Ok(rows.iter().map(decode).collect())
     }
 
@@ -243,7 +244,7 @@ impl Service {
             changes.insert("evidence".into(), json!(serde_json::to_string(&ev).unwrap_or_default()));
         }
         changes.insert("updated_ms".into(), json!(now_ms()));
-        self.store.lock().update_row("findings", u.id, &changes)?;
+        self.store.write(|db| db.update_row("findings", u.id, &changes))?;
         self.audit(&actor.id(), "finding_update", json!(u), "allow")?;
         self.finding_get(u.id)
     }
@@ -263,7 +264,7 @@ impl Service {
         let mut ch = serde_json::Map::new();
         ch.insert("explanation".into(), json!(markdown.chars().take(20_000).collect::<String>()));
         ch.insert("updated_ms".into(), json!(now_ms()));
-        self.store.lock().update_row("findings", id, &ch)?;
+        self.store.write(|db| db.update_row("findings", id, &ch))?;
         self.audit(&actor.id(), "finding_explain", json!({ "id": id, "chars": markdown.len() }), "allow")?;
         self.finding_get(id)
     }
@@ -338,7 +339,7 @@ impl Service {
         let mut ch = serde_json::Map::new();
         ch.insert("retest".into(), json!(serde_json::to_string(&r).unwrap_or_default()));
         ch.insert("updated_ms".into(), json!(now_ms()));
-        self.store.lock().update_row("findings", id, &ch)?;
+        self.store.write(|db| db.update_row("findings", id, &ch))?;
         self.audit(
             &actor.id(),
             "finding_retest",
@@ -455,7 +456,7 @@ impl Service {
                 md.push_str("\n### Evidence\n");
             }
             for ex_id in shown {
-                let Some(ex) = self.store.lock().get_exchange(ex_id)? else { continue };
+                let Some(ex) = self.store.read(|db| db.get_exchange(ex_id))? else { continue };
                 let who = ex.summary.identity.clone().map(|i| format!(" (as {i})")).unwrap_or_default();
                 md.push_str(&format!("\nExchange {ex_id}{who}:\n\n```http\n{}\n```\n", excerpt(&ex.request, 1500)));
                 if let Some(r) = &ex.response {
@@ -463,7 +464,7 @@ impl Service {
                 }
             }
         }
-        let audit = crate::verify_audit(&self.store.lock());
+        let audit = self.store.read(crate::verify_audit);
         md.push_str(&format!(
             "\n---\n\nAudit log: {}. Every request in this engagement was checked against the rules of engagement and recorded.\n",
             match audit {

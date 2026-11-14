@@ -275,7 +275,7 @@ impl Service {
     /// Built-in templates first, then saved ones.
     pub fn report_templates(&self) -> Result<Vec<ReportTemplate>> {
         let mut all = builtin_templates();
-        all.extend(load_saved(&self.store.lock())?);
+        all.extend(self.store.read(load_saved)?);
         Ok(all)
     }
 
@@ -300,9 +300,8 @@ impl Service {
             return Err(ServiceError::Invalid(format!("a template body is 1 to {MAX_BODY} bytes")));
         }
         render_body(&t.body, &t.format, &sample_report()).map_err(ServiceError::Invalid)?;
-        {
-            let mut store = self.store.lock();
-            let mut saved = load_saved(&store)?;
+        self.store.write(|store| -> Result<()> {
+            let mut saved = load_saved(store)?;
             saved.retain(|s| !(s.name.eq_ignore_ascii_case(&t.name) && s.format == t.format));
             saved.push(t.clone());
             if saved.len() > 50 {
@@ -310,7 +309,8 @@ impl Service {
             }
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(TEMPLATES_SETTING, &text)?;
-        }
+            Ok(())
+        })?;
         self.audit(&actor.id(), "report_template_save", json!({ "name": t.name, "format": t.format }), "allow")?;
         self.report_templates()
     }
@@ -319,15 +319,14 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change report templates".into()));
         }
-        let removed = {
-            let mut store = self.store.lock();
-            let mut saved = load_saved(&store)?;
+        let removed = self.store.write(|store| -> Result<bool> {
+            let mut saved = load_saved(store)?;
             let before = saved.len();
             saved.retain(|s| !s.name.eq_ignore_ascii_case(name));
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(TEMPLATES_SETTING, &text)?;
-            saved.len() < before
-        };
+            Ok(saved.len() < before)
+        })?;
         self.audit(
             &actor.id(),
             "report_template_delete",

@@ -56,7 +56,7 @@ impl Service {
         let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         let n = |k: &str| row.get(k).and_then(Value::as_i64).unwrap_or_default();
         let exchange_id = n("exchange_id");
-        let mut exchange = self.store.lock().get_exchange(exchange_id).ok().flatten().map(|e| e.summary);
+        let mut exchange = self.store.read(|db| db.get_exchange(exchange_id)).ok().flatten().map(|e| e.summary);
         if let (Some(r), Some(e)) = (self.redactor_for(actor), exchange.as_mut()) {
             e.path = r.redact(&e.path);
         }
@@ -75,10 +75,10 @@ impl Service {
     /// Puts an exchange in the Organizer (audited).
     pub fn organizer_add(&self, actor: &Actor, exchange_id: i64, note: &str) -> Result<OrganizerItem> {
         check_note(note)?;
-        if self.store.lock().get_exchange(exchange_id)?.is_none() {
+        if self.store.read(|db| db.get_exchange(exchange_id))?.is_none() {
             return Err(ServiceError::NotFound(format!("exchange {exchange_id}")));
         }
-        if self.store.lock().count_rows("organizer", None)? >= MAX_ITEMS {
+        if self.store.read(|db| db.count_rows("organizer", None))? >= MAX_ITEMS {
             return Err(ServiceError::Invalid(format!("the Organizer holds at most {MAX_ITEMS} items")));
         }
         let now = now_ms();
@@ -89,7 +89,7 @@ impl Service {
         row.insert("actor".into(), json!(actor.id()));
         row.insert("created_ms".into(), json!(now));
         row.insert("updated_ms".into(), json!(now));
-        let id = self.store.lock().insert_row("organizer", &row)?;
+        let id = self.store.write(|db| db.insert_row("organizer", &row))?;
         self.audit(&actor.id(), "organizer_add", json!({ "id": id, "exchange_id": exchange_id }), "allow")?;
         row.insert("id".into(), json!(id));
         Ok(self.organizer_item(&row, actor))
@@ -101,7 +101,8 @@ impl Service {
             check_status(s)?;
         }
         let filter = status.map(|s| json!(s));
-        let rows = self.store.lock().rows("organizer", filter.as_ref().map(|v| ("status", v)), MAX_ITEMS as usize)?;
+        let rows =
+            self.store.read(|db| db.rows("organizer", filter.as_ref().map(|v| ("status", v)), MAX_ITEMS as usize))?;
         Ok(rows.iter().map(|r| self.organizer_item(r, actor)).collect())
     }
 
@@ -117,21 +118,20 @@ impl Service {
             changes.insert("note".into(), json!(n));
         }
         changes.insert("updated_ms".into(), json!(now_ms()));
-        if !self.store.lock().update_row("organizer", id, &changes)? {
+        if !self.store.write(|db| db.update_row("organizer", id, &changes))? {
             return Err(ServiceError::NotFound(format!("organizer item {id}")));
         }
         self.audit(&actor.id(), "organizer_update", json!({ "id": id, "status": u.status }), "allow")?;
         let row = self
             .store
-            .lock()
-            .row("organizer", id)?
+            .read(|db| db.row("organizer", id))?
             .ok_or_else(|| ServiceError::NotFound(format!("organizer item {id}")))?;
         Ok(self.organizer_item(&row, actor))
     }
 
     /// Removes an item (the exchange stays in history; audited).
     pub fn organizer_delete(&self, actor: &Actor, id: i64) -> Result<()> {
-        if !self.store.lock().delete_row("organizer", id)? {
+        if !self.store.write(|db| db.delete_row("organizer", id))? {
             return Err(ServiceError::NotFound(format!("organizer item {id}")));
         }
         self.audit(&actor.id(), "organizer_delete", json!({ "id": id }), "allow")?;

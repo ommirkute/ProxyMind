@@ -1848,6 +1848,72 @@ impl Store {
     }
 }
 
+/// Shared access to one [`Store`] (ADR-0017). Today this is a single mutex; later steps move `read` onto a pool of
+/// read-only connections and `write` onto a writer thread, so callers must pick the right method now.
+///
+/// The lock is held for the duration of the closure only. Do not call `read` or `write` from inside another
+/// closure: that deadlocks on the mutex, and debug builds panic with a clear message instead.
+pub struct StoreHandle {
+    inner: parking_lot::Mutex<Store>,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static IN_STORE_CLOSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Debug-only re-entrancy guard: set on entry, cleared on drop (also when the closure panics).
+struct Reentrancy;
+
+impl Reentrancy {
+    #[cfg(debug_assertions)]
+    fn enter() -> Self {
+        IN_STORE_CLOSURE.with(|c| {
+            assert!(
+                !c.replace(true),
+                "StoreHandle::read/write called from inside another read/write closure on the same thread \
+                 (this would deadlock on the store mutex); finish the first call before starting the next"
+            );
+        });
+        Reentrancy
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn enter() -> Self {
+        Reentrancy
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Reentrancy {
+    fn drop(&mut self) {
+        IN_STORE_CLOSURE.with(|c| c.set(false));
+    }
+}
+
+impl StoreHandle {
+    pub fn new(store: Store) -> Self {
+        Self { inner: parking_lot::Mutex::new(store) }
+    }
+
+    /// Run `f` with shared access to the store. Use this for a call that only needs `&Store` methods. Step 2 of
+    /// ADR-0017 moves these onto a read-only connection pool, so `f` must not rely on seeing uncommitted state
+    /// of a transaction that is open on the writer connection.
+    pub fn read<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
+        let _reentrancy = Reentrancy::enter();
+        let guard = self.inner.lock();
+        f(&guard)
+    }
+
+    /// Run `f` with exclusive access to the store. Use this for anything that needs a `&mut Store` method
+    /// (inserts, updates, settings, audit appends) and for a read-then-write sequence that must be atomic.
+    pub fn write<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
+        let _reentrancy = Reentrancy::enter();
+        let mut guard = self.inner.lock();
+        f(&mut guard)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,5 +2219,22 @@ mod tests {
         assert!(s.append_audit(&rec).is_err(), "duplicate seq");
         assert!(s.conn.execute("UPDATE audit_log SET decision = 'deny'", []).is_err());
         assert!(s.conn.execute("DELETE FROM audit_log", []).is_err());
+    }
+
+    #[test]
+    fn store_handle_runs_closures_and_releases_the_lock() {
+        let h = StoreHandle::new(Store::open_in_memory().unwrap());
+        h.write(|s| s.set_setting("k", "v").unwrap());
+        assert_eq!(h.read(|s| s.get_setting("k").unwrap()), Some("v".to_string()));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn store_handle_reentry_panics_in_debug_and_recovers() {
+        let h = StoreHandle::new(Store::open_in_memory().unwrap());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.read(|_| h.read(|_| ()))));
+        assert!(r.is_err());
+        // The guard was reset by unwinding, so the handle still works afterwards.
+        assert_eq!(h.read(|s| s.get_setting("none").unwrap()), None);
     }
 }

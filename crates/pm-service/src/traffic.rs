@@ -62,8 +62,7 @@ impl Service {
         let actor_id = actor.id();
         let mut ids = Vec::new();
         let mut imported = 0;
-        {
-            let mut store = self.store.lock();
+        self.store.write(|store| {
             for e in entries {
                 let error = e.response.is_none().then(|| "no response in the HAR file".to_string());
                 let row = NewExchange {
@@ -93,7 +92,7 @@ impl Service {
                     Err(e) => skipped.push(format!("{} {}: {e:#}", row.method, row.path)),
                 }
             }
-        }
+        });
         self.audit(&actor_id, "import_har", json!({ "imported": imported, "skipped": skipped.len() }), "ok")?;
         Ok(ImportResult { imported, exchange_ids: ids, skipped })
     }
@@ -120,12 +119,12 @@ impl Service {
             }
         };
         let mut rows = Vec::with_capacity(ids.len());
-        {
-            let store = self.store.lock();
+        self.store.read(|store| -> Result<()> {
             for id in ids {
                 rows.push(store.get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?);
             }
-        }
+            Ok(())
+        })?;
         let redactor = self.redactor_for(actor);
         let redact = |b: &[u8]| -> Vec<u8> {
             match redactor {
@@ -153,7 +152,10 @@ impl Service {
 
     /// A curl command that sends the same request as a recorded exchange.
     pub fn exchange_curl(&self, actor: &Actor, id: i64) -> Result<String> {
-        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let ex = self
+            .store
+            .read(|db| db.get_exchange(id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         let s = &ex.summary;
         let url = pm_core::url(&s.scheme, &s.host, s.port, &s.path);
         let raw = match self.redactor_for(actor) {
@@ -166,7 +168,10 @@ impl Service {
     /// A recorded request as a Python, JavaScript or PowerShell snippet
     /// (secrets replaced for agents). Sends nothing.
     pub fn exchange_code(&self, actor: &Actor, id: i64, lang: pm_tools::codegen::Lang) -> Result<String> {
-        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let ex = self
+            .store
+            .read(|db| db.get_exchange(id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         let s = &ex.summary;
         let url = pm_core::url(&s.scheme, &s.host, s.port, &s.path);
         let raw = match self.redactor_for(actor) {

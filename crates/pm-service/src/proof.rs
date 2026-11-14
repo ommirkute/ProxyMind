@@ -108,15 +108,17 @@ fn invalid<T>(msg: impl Into<String>) -> Result<T> {
 
 impl Service {
     fn exchange_outgoing(&self, id: i64) -> Result<(Outgoing, Option<String>)> {
-        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let ex = self
+            .store
+            .read(|db| db.get_exchange(id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         let s = &ex.summary;
         let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
         let out = self.outgoing(Endpoint::new(&s.scheme, &s.host, s.port), raw.as_bytes(), false)?;
         let who = s.identity.clone().or_else(|| {
             let ids: Vec<pm_identity::Identity> = self
                 .store
-                .lock()
-                .list_identities()
+                .read(|db| db.list_identities())
                 .ok()?
                 .iter()
                 .filter_map(|r| serde_json::from_str(&r.data).ok())
@@ -211,20 +213,20 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let proof_id = self.store.lock().insert_row("proofs", &row)?;
+        let proof_id = self.store.write(|db| db.insert_row("proofs", &row))?;
         if verdict.proven {
             if let Some(f) = req.finding_id {
                 let mut ch = serde_json::Map::new();
                 ch.insert("status".into(), json!("proven"));
                 ch.insert("proof_id".into(), json!(proof_id));
                 ch.insert("updated_ms".into(), json!(now_ms()));
-                self.store.lock().update_row("findings", f, &ch)?;
+                self.store.write(|db| db.update_row("findings", f, &ch))?;
             }
             if let Some(h) = req.hypothesis_id {
                 let mut ch = serde_json::Map::new();
                 ch.insert("status".into(), json!("confirmed"));
                 ch.insert("updated_ms".into(), json!(now_ms()));
-                self.store.lock().update_row("hypotheses", h, &ch)?;
+                self.store.write(|db| db.update_row("hypotheses", h, &ch))?;
             }
         }
         self.audit(
@@ -248,8 +250,7 @@ impl Service {
     pub async fn proof_rerun(&self, actor: &Actor, proof_id: i64) -> Result<ProofResult> {
         let row = self
             .store
-            .lock()
-            .row("proofs", proof_id)?
+            .read(|db| db.row("proofs", proof_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("proof {proof_id}")))?;
         let inputs: ProofRequest = serde_json::from_str(row.get("inputs").and_then(Value::as_str).unwrap_or("{}"))
             .map_err(|e| ServiceError::Invalid(format!("stored inputs unreadable: {e}")))?;
@@ -261,20 +262,19 @@ impl Service {
     pub(crate) fn link_proof(&self, proof_id: i64, finding_id: i64) -> Result<()> {
         let mut p = serde_json::Map::new();
         p.insert("finding_id".into(), json!(finding_id));
-        self.store.lock().update_row("proofs", proof_id, &p)?;
+        self.store.write(|db| db.update_row("proofs", proof_id, &p))?;
         let mut f = serde_json::Map::new();
         f.insert("status".into(), json!("proven"));
         f.insert("proof_id".into(), json!(proof_id));
         f.insert("updated_ms".into(), json!(now_ms()));
-        self.store.lock().update_row("findings", finding_id, &f)?;
+        self.store.write(|db| db.update_row("findings", finding_id, &f))?;
         Ok(())
     }
 
     pub fn proof_get(&self, proof_id: i64) -> Result<Value> {
         let row = self
             .store
-            .lock()
-            .row("proofs", proof_id)?
+            .read(|db| db.row("proofs", proof_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("proof {proof_id}")))?;
         Ok(decode_proof(&row))
     }
@@ -282,8 +282,7 @@ impl Service {
     pub fn proofs_for_finding(&self, finding_id: i64) -> Result<Vec<Value>> {
         Ok(self
             .store
-            .lock()
-            .rows("proofs", Some(("finding_id", &json!(finding_id))), 100)?
+            .read(|db| db.rows("proofs", Some(("finding_id", &json!(finding_id))), 100))?
             .iter()
             .map(decode_proof)
             .collect())
@@ -453,8 +452,8 @@ impl Service {
                 "put {{oast}} in raw where the callback URL should go, or {{oast_dns}} where a host name goes",
             );
         }
-        let public = self.store.lock().get_setting(OAST_SETTING)?;
-        let dns_domain = self.store.lock().get_setting(OAST_DNS_SETTING)?;
+        let public = self.store.read(|db| db.get_setting(OAST_SETTING))?;
+        let dns_domain = self.store.read(|db| db.get_setting(OAST_DNS_SETTING))?;
         if wants_http && public.is_none() {
             return invalid("no OAST listener configured: run `proxymind oast-server` or start mcp with --oast-listen");
         }
@@ -503,7 +502,7 @@ impl Service {
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let deadline = std::time::Instant::now() + Duration::from_secs(wait);
         let hits = loop {
-            let hits = self.store.lock().rows("oast_interactions", Some(("token", &json!(token))), 20)?;
+            let hits = self.store.read(|db| db.rows("oast_interactions", Some(("token", &json!(token))), 20))?;
             if !hits.is_empty() || std::time::Instant::now() >= deadline {
                 break hits;
             }
@@ -592,7 +591,7 @@ impl Service {
             None => (sent, out.url()),
         };
         // Render exactly what was recorded.
-        let recorded = self.store.lock().get_exchange(shown.exchange_id)?.and_then(|e| e.response);
+        let recorded = self.store.read(|db| db.get_exchange(shown.exchange_id))?.and_then(|e| e.response);
         let payload = pm_proof::xss_payload(&token);
         let mut inputs =
             pm_proof::ReflectionInputs { token: token.clone(), status: shown.status, ..Default::default() };
@@ -913,7 +912,7 @@ impl Service {
     /// Where payloads should send callbacks (the OAST listener's public URL).
     pub fn set_oast_public_url(&self, url: &str) -> Result<()> {
         url::Url::parse(url).map_err(|e| ServiceError::Invalid(format!("bad OAST url: {e}")))?;
-        self.store.lock().set_setting(OAST_SETTING, url)?;
+        self.store.write(|db| db.set_setting(OAST_SETTING, url))?;
         Ok(())
     }
 
@@ -928,7 +927,7 @@ impl Service {
         if !ok {
             return invalid(format!("{domain:?} is not a valid domain name"));
         }
-        self.store.lock().set_setting(OAST_DNS_SETTING, &d)?;
+        self.store.write(|db| db.set_setting(OAST_DNS_SETTING, &d))?;
         Ok(())
     }
 
@@ -938,20 +937,19 @@ impl Service {
     /// blind bugs (queued jobs, log processors, nightly imports) often call
     /// back minutes or hours later.
     pub fn record_oast(&self, i: &pm_oast::Interaction) -> Result<()> {
-        let late = {
-            let mut store = self.store.lock();
-            if !record_oast_in(&mut store, i)? {
-                return Ok(());
+        let late = self.store.write(|store| -> Result<_> {
+            if !record_oast_in(store, i)? {
+                return Ok(None);
             }
             let first = store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? == 1;
             let probe = store.rows("oast_probes", Some(("token", &json!(i.token))), 1)?.into_iter().next();
-            probe.filter(|p| {
+            Ok(probe.filter(|p| {
                 first
                     && p.get("finding_id").is_none_or(Value::is_null)
                     // At or after the deadline: the scan has stopped waiting by then.
                     && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms >= d)
-            })
-        };
+            }))
+        })?;
         let Some(p) = late else { return Ok(()) };
         let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         let after = (i.ts_ms - p.get("deadline_ms").and_then(Value::as_i64).unwrap_or(i.ts_ms)) / 1000;
@@ -985,7 +983,7 @@ impl Service {
         if let (Some(row), Some(fid)) = (p.get("id").and_then(Value::as_i64), id) {
             let mut changes = serde_json::Map::new();
             changes.insert("finding_id".into(), json!(fid));
-            self.store.lock().update_row("oast_probes", row, &changes)?;
+            self.store.write(|db| db.update_row("oast_probes", row, &changes))?;
         }
         self.audit(&actor.id(), "oast_late_callback", json!({ "token": i.token, "finding_id": id }), "ok")?;
         Ok(())
@@ -1000,32 +998,33 @@ impl Service {
         deadline_ms: i64,
         sent: &[(&pm_scan::oob::OobProbe, i64)],
     ) -> Result<()> {
-        let mut store = self.store.lock();
-        if store.count_rows("oast_probes", None)? >= 200_000 {
-            return Ok(());
-        }
-        for (p, exchange_id) in sent {
-            let issue = pm_scan::oob::issue(p, "");
-            let mut row = serde_json::Map::new();
-            for (k, v) in [
-                ("token", json!(p.token)),
-                ("check_name", json!(p.probe.check)),
-                ("vuln_class", json!(pm_scan::oob::class(p.probe.check))),
-                ("title", json!(issue.title)),
-                ("severity", json!(issue.severity)),
-                ("url", json!(url)),
-                ("point", json!(issue.point)),
-                ("payload", json!(p.probe.payload)),
-                ("exchange_id", json!(exchange_id)),
-                ("actor", json!(actor.id())),
-                ("deadline_ms", json!(deadline_ms)),
-                ("created_ms", json!(pm_core::now_ms())),
-            ] {
-                row.insert(k.into(), v);
+        self.store.write(|store| -> Result<()> {
+            if store.count_rows("oast_probes", None)? >= 200_000 {
+                return Ok(());
             }
-            store.insert_row("oast_probes", &row)?;
-        }
-        Ok(())
+            for (p, exchange_id) in sent {
+                let issue = pm_scan::oob::issue(p, "");
+                let mut row = serde_json::Map::new();
+                for (k, v) in [
+                    ("token", json!(p.token)),
+                    ("check_name", json!(p.probe.check)),
+                    ("vuln_class", json!(pm_scan::oob::class(p.probe.check))),
+                    ("title", json!(issue.title)),
+                    ("severity", json!(issue.severity)),
+                    ("url", json!(url)),
+                    ("point", json!(issue.point)),
+                    ("payload", json!(p.probe.payload)),
+                    ("exchange_id", json!(exchange_id)),
+                    ("actor", json!(actor.id())),
+                    ("deadline_ms", json!(deadline_ms)),
+                    ("created_ms", json!(pm_core::now_ms())),
+                ] {
+                    row.insert(k.into(), v);
+                }
+                store.insert_row("oast_probes", &row)?;
+            }
+            Ok(())
+        })
     }
 }
 

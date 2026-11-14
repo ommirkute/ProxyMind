@@ -156,8 +156,7 @@ impl Service {
             Some(id) => {
                 let ex = self
                     .store
-                    .lock()
-                    .get_exchange(id)?
+                    .read(|db| db.get_exchange(id))?
                     .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
                 let s = ex.summary;
                 (Endpoint::new(&s.scheme, &s.host, s.port), ex.request)
@@ -323,7 +322,7 @@ impl Service {
             }
         };
         let response = record.response.clone();
-        let exchange_id = self.store.lock().insert_exchange(&record)?;
+        let exchange_id = self.store.write(|db| db.insert_exchange(&record))?;
         Ok(Sent { exchange_id, response, status, error, elapsed_ms })
     }
 
@@ -395,8 +394,7 @@ impl Service {
         }
         let ex = self
             .store
-            .lock()
-            .get_exchange(sent.exchange_id)?
+            .read(|db| db.get_exchange(sent.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(sent.exchange_id.to_string()))?;
         let view = render_exchange(
             &ex,

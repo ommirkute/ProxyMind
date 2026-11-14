@@ -111,17 +111,18 @@ fn i(row: &serde_json::Map<String, Value>, k: &str) -> i64 {
 
 impl Service {
     fn oast_settings(&self) -> Result<(Option<String>, Option<String>)> {
-        let st = self.store.lock();
-        Ok((st.get_setting(crate::proof::OAST_SETTING)?, st.get_setting(crate::proof::OAST_DNS_SETTING)?))
+        self.store.read(|st| -> Result<_> {
+            Ok((st.get_setting(crate::proof::OAST_SETTING)?, st.get_setting(crate::proof::OAST_DNS_SETTING)?))
+        })
     }
 
     fn smtp_setting(&self) -> Result<Option<String>> {
-        Ok(self.store.lock().get_setting(SMTP_SETTING)?)
+        Ok(self.store.read(|db| db.get_setting(SMTP_SETTING))?)
     }
 
     /// Records where an SMTP listener takes mail (`host:port`), for payload addresses.
     pub fn set_oast_smtp(&self, addr: &str) -> Result<()> {
-        Ok(self.store.lock().set_setting(SMTP_SETTING, addr)?)
+        Ok(self.store.write(|db| db.set_setting(SMTP_SETTING, addr))?)
     }
 
     /// Starts the SMTP listener in this process (once). People only: it opens a port.
@@ -155,20 +156,21 @@ impl Service {
 
     pub fn collaborator_status(&self) -> Result<CollaboratorStatus> {
         let (public_url, dns_domain) = self.oast_settings()?;
-        let st = self.store.lock();
-        Ok(CollaboratorStatus {
-            public_url,
-            dns_domain,
-            listening: self.oast_listening.get().map(ToString::to_string),
-            smtp: st.get_setting(SMTP_SETTING)?,
-            payloads: st.count_rows("oast_payloads", None)?,
-            interactions: st.count_rows("oast_interactions", None)?,
-            probes: st.count_rows("oast_probes", None)?,
-            late_findings: st
-                .rows("oast_probes", None, 10_000)?
-                .iter()
-                .filter(|r| r.get("finding_id").is_some_and(|v| !v.is_null()))
-                .count() as u64,
+        self.store.read(|st| -> Result<_> {
+            Ok(CollaboratorStatus {
+                public_url,
+                dns_domain,
+                listening: self.oast_listening.get().map(ToString::to_string),
+                smtp: st.get_setting(SMTP_SETTING)?,
+                payloads: st.count_rows("oast_payloads", None)?,
+                interactions: st.count_rows("oast_interactions", None)?,
+                probes: st.count_rows("oast_probes", None)?,
+                late_findings: st
+                    .rows("oast_probes", None, 10_000)?
+                    .iter()
+                    .filter(|r| r.get("finding_id").is_some_and(|v| !v.is_null()))
+                    .count() as u64,
+            })
         })
     }
 
@@ -228,7 +230,7 @@ impl Service {
                     .into(),
             ));
         }
-        if self.store.lock().count_rows("oast_payloads", None)? >= MAX_PAYLOADS {
+        if self.store.read(|db| db.count_rows("oast_payloads", None))? >= MAX_PAYLOADS {
             return Err(ServiceError::Invalid(format!("at most {MAX_PAYLOADS} payloads per project")));
         }
         let token = pm_oast::new_token();
@@ -238,7 +240,7 @@ impl Service {
         row.insert("note".into(), json!(note));
         row.insert("actor".into(), json!(actor.id()));
         row.insert("created_ms".into(), json!(now_ms()));
-        self.store.lock().insert_row("oast_payloads", &row)?;
+        self.store.write(|db| db.insert_row("oast_payloads", &row))?;
         self.audit(&actor.id(), "collaborator_payload", json!({ "token": token, "note": note }), "allow")?;
         Ok(CollaboratorPayload {
             email: email_for(&token, dns_domain.as_deref(), smtp.as_deref()),
@@ -256,83 +258,86 @@ impl Service {
     pub fn collaborator_payloads(&self, limit: usize) -> Result<Vec<CollaboratorPayload>> {
         let (public_url, dns_domain) = self.oast_settings()?;
         let smtp = self.smtp_setting()?;
-        let st = self.store.lock();
-        let rows = st.rows("oast_payloads", None, limit.clamp(1, 1000))?;
-        rows.iter()
-            .map(|r| {
-                let token = s(r, "token");
-                Ok(CollaboratorPayload {
-                    email: email_for(&token, dns_domain.as_deref(), smtp.as_deref()),
-                    http_url: public_url.as_ref().map(|u| format!("{}/{token}", u.trim_end_matches('/'))),
-                    dns_name: dns_domain.as_ref().map(|d| format!("{token}.{d}")),
-                    interactions: st.count_rows("oast_interactions", Some(("token", &json!(token))))?,
-                    note: s(r, "note"),
-                    actor: s(r, "actor"),
-                    created_ms: i(r, "created_ms"),
-                    token,
+        self.store.read(|st| -> Result<_> {
+            let rows = st.rows("oast_payloads", None, limit.clamp(1, 1000))?;
+            rows.iter()
+                .map(|r| {
+                    let token = s(r, "token");
+                    Ok(CollaboratorPayload {
+                        email: email_for(&token, dns_domain.as_deref(), smtp.as_deref()),
+                        http_url: public_url.as_ref().map(|u| format!("{}/{token}", u.trim_end_matches('/'))),
+                        dns_name: dns_domain.as_ref().map(|d| format!("{token}.{d}")),
+                        interactions: st.count_rows("oast_interactions", Some(("token", &json!(token))))?,
+                        note: s(r, "note"),
+                        actor: s(r, "actor"),
+                        created_ms: i(r, "created_ms"),
+                        token,
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
     }
 
     /// Interactions, newest first: for one token, or all of them.
     pub fn collaborator_interactions(&self, token: Option<&str>, limit: usize) -> Result<Vec<CollaboratorInteraction>> {
-        let st = self.store.lock();
-        let filter = token.map(|t| json!(t.trim().to_ascii_lowercase()));
-        let rows = st.rows("oast_interactions", filter.as_ref().map(|t| ("token", t)), limit.clamp(1, 1000))?;
-        let mut notes = std::collections::HashMap::new();
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let token = s(r, "token");
-                let (note, finding_id) = notes
-                    .entry(token.clone())
-                    .or_insert_with(|| {
-                        let payload = st
-                            .rows("oast_payloads", Some(("token", &json!(token))), 1)
-                            .ok()
-                            .and_then(|v| v.first().map(|p| s(p, "note")));
-                        let probe = st
-                            .rows("oast_probes", Some(("token", &json!(token))), 1)
-                            .ok()
-                            .and_then(|v| v.into_iter().next());
-                        let finding = probe.as_ref().and_then(|p| p.get("finding_id").and_then(Value::as_i64));
-                        let described = probe.map(|p| {
-                            format!("scanner: {} on {} ({})", s(&p, "check_name"), s(&p, "url"), s(&p, "point"))
-                        });
-                        (payload.or(described), finding)
-                    })
-                    .clone();
-                CollaboratorInteraction {
-                    id: i(r, "id"),
-                    protocol: s(r, "protocol"),
-                    remote: s(r, "remote"),
-                    method: s(r, "method"),
-                    path: s(r, "path"),
-                    ts_ms: i(r, "ts_ms"),
-                    raw: s(r, "raw"),
-                    note,
-                    finding_id,
-                    token,
-                }
-            })
-            .collect())
+        self.store.read(|st| -> Result<_> {
+            let filter = token.map(|t| json!(t.trim().to_ascii_lowercase()));
+            let rows = st.rows("oast_interactions", filter.as_ref().map(|t| ("token", t)), limit.clamp(1, 1000))?;
+            let mut notes = std::collections::HashMap::new();
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    let token = s(r, "token");
+                    let (note, finding_id) = notes
+                        .entry(token.clone())
+                        .or_insert_with(|| {
+                            let payload = st
+                                .rows("oast_payloads", Some(("token", &json!(token))), 1)
+                                .ok()
+                                .and_then(|v| v.first().map(|p| s(p, "note")));
+                            let probe = st
+                                .rows("oast_probes", Some(("token", &json!(token))), 1)
+                                .ok()
+                                .and_then(|v| v.into_iter().next());
+                            let finding = probe.as_ref().and_then(|p| p.get("finding_id").and_then(Value::as_i64));
+                            let described = probe.map(|p| {
+                                format!("scanner: {} on {} ({})", s(&p, "check_name"), s(&p, "url"), s(&p, "point"))
+                            });
+                            (payload.or(described), finding)
+                        })
+                        .clone();
+                    CollaboratorInteraction {
+                        id: i(r, "id"),
+                        protocol: s(r, "protocol"),
+                        remote: s(r, "remote"),
+                        method: s(r, "method"),
+                        path: s(r, "path"),
+                        ts_ms: i(r, "ts_ms"),
+                        raw: s(r, "raw"),
+                        note,
+                        finding_id,
+                        token,
+                    }
+                })
+                .collect())
+        })
     }
 
     /// Out-of-band probes the scanner sent, newest first.
     pub fn collaborator_probes(&self, limit: usize) -> Result<Vec<CollaboratorProbe>> {
-        let st = self.store.lock();
-        Ok(st
-            .rows("oast_probes", None, limit.clamp(1, 1000))?
-            .iter()
-            .map(|r| CollaboratorProbe {
-                token: s(r, "token"),
-                check: s(r, "check_name"),
-                url: s(r, "url"),
-                point: s(r, "point"),
-                created_ms: i(r, "created_ms"),
-                finding_id: r.get("finding_id").and_then(Value::as_i64),
-            })
-            .collect())
+        self.store.read(|st| -> Result<_> {
+            Ok(st
+                .rows("oast_probes", None, limit.clamp(1, 1000))?
+                .iter()
+                .map(|r| CollaboratorProbe {
+                    token: s(r, "token"),
+                    check: s(r, "check_name"),
+                    url: s(r, "url"),
+                    point: s(r, "point"),
+                    created_ms: i(r, "created_ms"),
+                    finding_id: r.get("finding_id").and_then(Value::as_i64),
+                })
+                .collect())
+        })
     }
 }

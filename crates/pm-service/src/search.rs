@@ -245,7 +245,7 @@ impl Service {
                 last_id = page.next_before_id.or(last_id);
             }
             for summary in page.exchanges {
-                let Some(ex) = self.store.lock().get_exchange(summary.id)? else { continue };
+                let Some(ex) = self.store.read(|db| db.get_exchange(summary.id))? else { continue };
                 scanned += 1;
                 last_id = Some(summary.id);
                 hits.extend(probe.hits(&summary, &ex.request, ex.response.as_deref()));
@@ -268,7 +268,7 @@ impl Service {
         if req.regex || req.invert || (redacted && may_match_placeholder(&req.query, req.case_sensitive)) {
             return Ok(None);
         }
-        let Some(mut ids) = self.store.lock().text_candidates(&req.query)? else { return Ok(None) };
+        let Some(mut ids) = self.store.read(|db| db.text_candidates(&req.query))? else { return Ok(None) };
         let (before, after) = (req.filter.before_id, req.filter.after_id);
         ids.retain(|&id| before.is_none_or(|b| id < b) && after.is_none_or(|a| id > a));
         Ok(Some(ids))
@@ -296,7 +296,7 @@ impl Service {
                 // The same filtering as a full scan: scope, query, fields, redacted paths.
                 let page = self.history_search(actor, &filter)?;
                 for summary in page.exchanges {
-                    let Some(ex) = self.store.lock().get_exchange(summary.id)? else { continue };
+                    let Some(ex) = self.store.read(|db| db.get_exchange(summary.id))? else { continue };
                     scanned += 1;
                     hits.extend(probe.hits(&summary, &ex.request, ex.response.as_deref()));
                     if hits.len() >= max_hits || scanned >= max_scan {
@@ -334,7 +334,7 @@ impl Service {
         let (mut hits, mut scanned, mut last_id, mut exhausted) = (Vec::new(), 0usize, None, false);
         let mut scope_cache: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
         'pages: while scanned < max_scan && hits.len() < max_hits {
-            let page = self.store.lock().ws_history(host, before, 1000)?;
+            let page = self.store.read(|db| db.ws_history(host, before, 1000))?;
             if page.len() < 1000 {
                 exhausted = true;
             }
@@ -347,7 +347,7 @@ impl Service {
                 let dir_ok = dir.is_none_or(|c| c == m.from_client);
                 let scope_ok = !in_scope
                     || *scope_cache.entry(m.exchange_id).or_insert_with(|| {
-                        self.store.lock().get_exchange(m.exchange_id).ok().flatten().is_some_and(|e| {
+                        self.store.read(|db| db.get_exchange(m.exchange_id)).ok().flatten().is_some_and(|e| {
                             let s = &e.summary;
                             pm_policy::Target::from_parts(&s.scheme, &s.host, s.port, &s.path)
                                 .is_ok_and(|t| self.policy.scope_check(&t).is_ok())
@@ -403,7 +403,7 @@ impl Service {
 
     /// History as a tree per origin (a read; not audited).
     pub fn site_map(&self, actor: &Actor, host: Option<&str>) -> Result<Vec<SiteView>> {
-        let mut rows = self.store.lock().site_rows(host, MAX_SITE_ROWS)?;
+        let mut rows = self.store.read(|db| db.site_rows(host, MAX_SITE_ROWS))?;
         if let Some(r) = self.redactor_for(actor) {
             for row in &mut rows {
                 row.path = r.redact(&row.path);
