@@ -179,11 +179,11 @@ impl Service {
     /// same place, if any: (id, title).
     pub(crate) fn similar_false_positive(&self, key: &str, url_key: &str) -> Result<Option<(i64, String)>> {
         Ok(self
-            .finding_list(Some("false_positive"))?
+            .findings_at_url(url_key)?
             .into_iter()
             .find(|f| {
-                crate::findings::issue_key(f["vuln_class"].as_str().unwrap_or("")) == key
-                    && crate::findings::url_key(f["url"].as_str().unwrap_or("")) == url_key
+                f["status"].as_str() == Some("false_positive")
+                    && crate::findings::issue_key(f["vuln_class"].as_str().unwrap_or("")) == key
             })
             .map(|f| (f["id"].as_i64().unwrap_or(0), f["title"].as_str().unwrap_or_default().to_string())))
     }

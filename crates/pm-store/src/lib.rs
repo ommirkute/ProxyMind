@@ -339,6 +339,10 @@ CREATE TABLE model_snapshots (
     data        TEXT NOT NULL
 );
 "#,
+    r#"
+-- Finding de-duplication looks up findings by URL (see Store::findings_at_url).
+CREATE INDEX findings_url ON findings(url);
+"#,
 ];
 
 /// A stored row of one of the JSON-ish engagement tables (hypotheses,
@@ -1519,8 +1523,7 @@ impl Store {
 
     pub fn rows(&self, table: &str, filter: Option<(&str, &serde_json::Value)>, limit: usize) -> Result<Vec<Row>> {
         let cols = Self::table_columns(table).ok_or_else(|| anyhow::anyhow!("unknown table {table}"))?;
-        let mut all: Vec<&str> = vec!["id"];
-        all.extend_from_slice(cols);
+        let all = Self::select_columns(cols);
         let (where_sql, params): (String, Vec<rusqlite::types::Value>) = match filter {
             Some((col, v)) => {
                 if col != "id" && !cols.contains(&col) {
@@ -1532,7 +1535,18 @@ impl Store {
         };
         let sql =
             format!("SELECT {} FROM {table} {where_sql} ORDER BY id DESC LIMIT {}", all.join(", "), limit.min(10_000));
-        let mut stmt = self.conn.prepare(&sql)?;
+        self.query_rows(&sql, params, &all)
+    }
+
+    /// `id` plus a table's columns, in the order `query_rows` reads them.
+    fn select_columns(cols: &[&'static str]) -> Vec<&'static str> {
+        let mut all: Vec<&str> = vec!["id"];
+        all.extend_from_slice(cols);
+        all
+    }
+
+    fn query_rows(&self, sql: &str, params: Vec<rusqlite::types::Value>, all: &[&str]) -> Result<Vec<Row>> {
+        let mut stmt = self.conn.prepare_cached(sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             let mut m = Row::new();
             for (i, c) in all.iter().enumerate() {
@@ -1549,6 +1563,21 @@ impl Store {
             Ok(m)
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Findings whose URL, cut at the first `?` or `#`, equals `url_key` (which must not contain either),
+    /// newest first. Uses the `findings_url` index: the URL is either exactly `url_key` or `url_key` followed
+    /// by `?` or `#` (the ranges below cover every string starting with `url_key?` / `url_key#`).
+    pub fn findings_at_url(&self, url_key: &str) -> Result<Vec<Row>> {
+        let all = Self::select_columns(Self::table_columns("findings").unwrap_or(&[]));
+        let sql = format!(
+            "SELECT {} FROM findings WHERE url = ?1 \
+             OR (url >= ?1 || '?' AND url < ?1 || '@') \
+             OR (url >= ?1 || '#' AND url < ?1 || '$') \
+             ORDER BY id DESC",
+            all.join(", ")
+        );
+        self.query_rows(&sql, vec![rusqlite::types::Value::Text(url_key.to_string())], &all)
     }
 
     /// Deletes one row of an engagement table. Returns false if there was none.

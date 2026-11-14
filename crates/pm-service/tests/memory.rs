@@ -92,6 +92,34 @@ fn notes_and_verdicts_brief_the_next_scan() {
     assert_eq!(s.memory_list(Some("shop.test")).unwrap().len(), 1);
 }
 
+#[test]
+fn same_issue_at_same_place_merges_into_the_open_finding() {
+    let s = service("http://shop.test/");
+    let first = s.finding_create(&agent(), finding("XSS", "http://shop.test/search?q=1")).unwrap();
+    let id = first["id"].as_i64().unwrap();
+    // Same class and URL without query/fragment: merged, duplicates counted.
+    let m1 = s.finding_create(&agent(), finding("XSS 2", "http://shop.test/search?q=2#x")).unwrap();
+    assert_eq!((m1["id"].as_i64().unwrap(), m1["merged"] == true, m1["duplicates"].as_i64()), (id, true, Some(1)));
+    let m2 = s.finding_create(&agent(), finding("XSS 3", "http://shop.test/search")).unwrap();
+    assert_eq!((m2["id"].as_i64().unwrap(), m2["duplicates"].as_i64()), (id, Some(2)));
+    // Different path (even one that extends the same prefix) or class: a new finding.
+    let other = s.finding_create(&agent(), finding("XSS", "http://shop.test/search2")).unwrap();
+    assert_ne!(other["id"].as_i64().unwrap(), id);
+    let mut sqli = finding("SQLi", "http://shop.test/search");
+    sqli.vuln_class = "sqli".into();
+    assert_ne!(s.finding_create(&agent(), sqli).unwrap()["id"].as_i64().unwrap(), id);
+    // A closed finding is not merged into: a new one is opened.
+    s.finding_update(
+        &human(),
+        FindingUpdate { id, status: Some("fixed".into()), severity: None, description: None, add_evidence: vec![] },
+    )
+    .unwrap();
+    let reopened = s.finding_create(&agent(), finding("XSS again", "http://shop.test/search?q=9")).unwrap();
+    assert_ne!(reopened["id"].as_i64().unwrap(), id);
+    assert!(reopened.get("merged").is_none());
+    assert_eq!(s.finding_list(None).unwrap().len(), 4);
+}
+
 #[tokio::test]
 async fn triage_ranks_recorded_requests() {
     let addr = VulnShop::start_local().await.unwrap();
