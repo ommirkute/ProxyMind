@@ -167,7 +167,8 @@ function Regressions() {
         Every proven finding as a small test the development team runs in CI against a test environment:
         <code> proxymind regress run tests/ --target https://staging.example.com --junit results.xml</code>. It fails
         while the finding is still there and passes once it is fixed; a test that can't tell (credentials no longer
-        accepted, the server failing) is an error, never a pass. The ZIP has a README and an example GitHub Actions
+        accepted, the server failing) is an error, never a pass, and a test skipped for a missing credential variable
+        fails the run too. The ZIP has a README and an example GitHub Actions
         workflow. Credentials stay out of the files: the runner reads them from environment variables (CI secrets).
       </p>
       <ErrorBox error={error} />

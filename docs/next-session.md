@@ -84,9 +84,9 @@ Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tes
 - Done 2026-11-13: every proof kind except out-of-band now exports as a CI regression test (9 of 9 proven findings
   in a VulnShop run, it was 4), the runner no longer calls a test "fixed" when the credentials stopped working or
   the server fails, and exported files never hold the recorded session. See the handoff's "Regression tests for CI".
-- Still open in the regression runner: a test whose credential variable is not set is `skipped` and the run exits 0.
-  A CI job that loses its secrets (a pull request from a fork) goes green having tested nothing. Consider a
-  `--require-all` flag, or failing when every test was skipped.
+- Done 2026-11-14: a test whose credential variable is not set is still `skipped`, but the run now exits 2 (a CI
+  job that loses its secrets no longer goes green having tested nothing); `--allow-skipped` keeps exit 0 for local
+  runs.
 
 ### 3.3 The last VulnShop misses, without fitting the scanner to VulnShop
 

@@ -318,8 +318,9 @@ impl Service {
                  ```\nproxymind regress run tests/ --target https://staging.example.com --junit results.xml\n```\n\n\
                  A test fails while the finding is still there and passes once it is fixed. A test that can't tell is \
                  an error, not a pass: the credentials were not accepted (an expired token), or the server failed. The \
-                 exit code is 1 if any finding is still there or any test had an error. The runner sends requests only \
-                 to the target (or the origin in each test), needs no ProxyMind project, and reads credentials from \
+                 exit code is 1 if any finding is still there or any test had an error, and 2 if a test was \
+                 skipped because its credential variable is not set (`--allow-skipped` lets that pass). The runner \
+                 sends requests only to the target (or the origin in each test), needs no ProxyMind project, and reads credentials from \
                  the environment:\n\n{env_lines}\n\n\
                  The test files hold no credentials: each `{{{{auth:NAME}}}}` line is filled from `PM_AUTH_<NAME>` \
                  when the test runs. If the page a test requests needs no login, delete that line from the test.\n\n\

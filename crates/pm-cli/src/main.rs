@@ -1022,6 +1022,7 @@ enum RegressAction {
     /// Run tests (files or directories of *.json) and say which findings are still there. Needs no project.
     /// Credentials come from PM_AUTH_<IDENTITY> environment variables. Exits 1 if any finding is still there, or
     /// if a test can't tell (credentials not accepted, the server failing): that is an error, never "fixed".
+    /// Exits 2 if a test was skipped (a credential variable is not set), unless --allow-skipped.
     Run {
         paths: Vec<PathBuf>,
         /// Send to this origin instead of the one each test was recorded on, e.g. https://staging.example.com.
@@ -1036,6 +1037,10 @@ enum RegressAction {
         /// Print the results as JSON.
         #[arg(long)]
         json: bool,
+        /// Let tests whose credential variable is not set be skipped without failing the run (local runs).
+        /// In CI a missing secret would otherwise pass silently.
+        #[arg(long)]
+        allow_skipped: bool,
     },
 }
 
@@ -1700,7 +1705,7 @@ async fn run() -> Result<()> {
                 out!("  no test for #{} {}: {}", s.finding_id, s.title, s.reason);
             }
         }
-        Command::Regress { action: RegressAction::Run { paths, target, junit, insecure, json } } => {
+        Command::Regress { action: RegressAction::Run { paths, target, junit, insecure, json, allow_skipped } } => {
             let mut files = Vec::new();
             for p in paths {
                 if p.is_dir() {
@@ -1740,6 +1745,7 @@ async fn run() -> Result<()> {
             }
             let still = results.iter().filter(|r| r.outcome == "vulnerable").count();
             let errors = results.iter().filter(|r| r.outcome == "error").count();
+            let skipped = results.iter().filter(|r| r.outcome == "skipped").count();
             if *json {
                 out!("{}", serde_json::to_string_pretty(&results)?);
             } else {
@@ -1748,12 +1754,20 @@ async fn run() -> Result<()> {
                     results.len(),
                     still,
                     results.iter().filter(|r| r.outcome == "fixed").count(),
-                    results.iter().filter(|r| r.outcome == "skipped").count(),
+                    skipped,
                     errors
                 );
             }
-            if still > 0 || errors > 0 {
-                std::process::exit(1);
+            match regress_exit_code(still, errors, skipped, *allow_skipped) {
+                0 => {}
+                2 => {
+                    eprintln!(
+                        "{skipped} test(s) skipped because a credential variable is not set; they say nothing about \
+                         whether the findings are fixed. Set the PM_AUTH_* variables, or pass --allow-skipped."
+                    );
+                    std::process::exit(2);
+                }
+                code => std::process::exit(code),
             }
         }
         Command::Changes { save, snapshot, since, json, actor } => {
@@ -3701,4 +3715,31 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
 fn chrono_like(ms: i64) -> String {
     let secs = ms.div_euclid(1000).rem_euclid(86_400);
     format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// Exit code of `regress run`: 1 if a finding is still there or a test can't
+/// tell, 2 if only skipped tests stand between the run and a pass (a missing
+/// secret in CI must not look like "all fixed"), else 0.
+fn regress_exit_code(still: usize, errors: usize, skipped: usize, allow_skipped: bool) -> i32 {
+    if still > 0 || errors > 0 {
+        1
+    } else if skipped > 0 && !allow_skipped {
+        2
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::regress_exit_code;
+
+    #[test]
+    fn skipped_regression_tests_fail_the_run_unless_allowed() {
+        assert_eq!(regress_exit_code(0, 0, 0, false), 0);
+        assert_eq!(regress_exit_code(0, 0, 3, false), 2, "an unset credential variable must not pass in CI");
+        assert_eq!(regress_exit_code(0, 0, 3, true), 0);
+        assert_eq!(regress_exit_code(1, 0, 3, true), 1, "a finding still there wins over skipped");
+        assert_eq!(regress_exit_code(0, 2, 0, false), 1);
+    }
 }

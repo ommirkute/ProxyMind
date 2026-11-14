@@ -47,6 +47,9 @@ version may change project files, APIs and the CLI.
   CI job with a stale secret went green while the bug was still there. That is now an error (exit 1), and so is a
   server that fails (5xx). Tests carry the identity's health check and send it before calling anything fixed, for
   apps that answer an expired session with 403 or an ordinary page. Unknown test kinds are refused, not guessed at.
+- **A regression run with a missing secret passed.** A test whose `PM_AUTH_*` variable was not set was skipped and
+  the run exited 0, so a CI job that lost a secret looked like "all fixed". Skipped tests now make the run exit 2
+  with a message naming the cause; `proxymind regress run --allow-skipped` keeps the old behaviour for local runs.
 - **Exported regression tests could hold a session cookie.** A proof made from a recorded request (as automatic
   proving makes them) names no identity, so the request went into the test file with the session it was recorded
   with. Credentials are now always replaced by an `{{auth:NAME}}` placeholder: the owning identity's, or
