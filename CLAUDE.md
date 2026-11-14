@@ -5,6 +5,11 @@ Starting a new session? Read `docs/handoff.md` first: architecture, what's done,
 Read `docs/roadmap.md` for the current plan (phases, gates, owner decisions), `docs/plan.md` for the earlier roadmap
 and `docs/adr/` for decisions before changing architecture.
 
+## Working with subagents
+
+Owner's standing instruction: whenever you start subagents, run them on the **Sonnet** model. Give each one a
+self-contained brief (files, constraints, tests to run, what to report) and review its diff before committing.
+
 ## Commands
 
 ```bash

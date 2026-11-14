@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use pm_policy::{Actor, ActorKind, Target};
 use pm_proxy::intercept::{Decision, Held, Kind};
-use pm_proxy::{InterceptQueue, InterceptSettings};
+use pm_proxy::{InterceptQueue, InterceptSettings, QueueChange};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{Result, Service, ServiceError};
+use crate::{Event, Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InterceptState {
@@ -24,6 +24,18 @@ impl Service {
         let policy = self.policy.clone();
         q.set_scope(Arc::new(move |scheme, host, port, path| {
             Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
+        }));
+        // Arrivals and releases reach the event bus from here, so pm-proxy needs no knowledge of it. A message can
+        // be held or released by the proxy at any time, so this is the only place that sees both.
+        let bus = self.bus.clone();
+        q.set_observer(Arc::new(move |change| {
+            bus.publish(
+                match change {
+                    QueueChange::Held(id) => Event::InterceptQueued { id },
+                    QueueChange::Resolved(id) => Event::InterceptResolved { id },
+                },
+                None,
+            );
         }));
         let _ = self.intercept.set(q);
     }

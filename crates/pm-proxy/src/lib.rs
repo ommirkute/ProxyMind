@@ -26,7 +26,7 @@ use pm_http::{BodyKind, RequestHead, ResponseHead};
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
 use intercept::{Decision, Kind};
-pub use intercept::{InterceptQueue, InterceptSettings};
+pub use intercept::{InterceptQueue, InterceptSettings, QueueChange, QueueObserver};
 pub use listeners::{ListenerConfig, ListenerStatus, Listeners, Redirect};
 pub use pm_store::NewExchange as RecordedExchange;
 use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, WsTarget};

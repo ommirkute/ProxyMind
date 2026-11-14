@@ -5,6 +5,17 @@ version may change project files, APIs and the CLI.
 
 ## Unreleased
 
+### Live events
+
+- **Typed events on the event stream.** `GET /api/v1/events?topics=exchanges,findings` streams `event: <topic>`,
+  `id: <seq>`, `data: <json>` for the topics `exchanges`, `findings`, `scans`, `proofs`, `intercept`, `approvals`,
+  `audit` and `collaborator` (`topics=all` for every topic you may read; list `counters` to get the old event too).
+  Events carry ids and short summaries only, are sent after the change has been saved, and an agent only receives
+  those for hosts in scope, with secrets in host names replaced. A client that falls behind gets one `resync` event
+  and should refetch what it shows; an unknown topic is a 400. Without `topics` the stream is unchanged (a
+  `counters` event), but it now follows the new events instead of querying the project every 700 ms, and `/status`
+  counts rows instead of loading them.
+
 ### Performance
 
 - **Content search uses a full-text index.** History text search checks only the exchanges a trigram index

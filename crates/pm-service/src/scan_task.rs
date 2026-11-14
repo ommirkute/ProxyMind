@@ -269,8 +269,13 @@ impl Service {
             created_ms: saved.view.created_ms,
             updated_ms: pm_core::now_ms(),
         };
-        if let Err(e) = self.store.write(|db| db.upsert_scan_task(&row)) {
-            tracing::warn!(task = %task.id, error = %e, "scan task not saved");
+        match self.store.write(|db| db.upsert_scan_task(&row)) {
+            Ok(()) => {
+                let v = &saved.view;
+                // At most one update per 250 ms per task, but the one that ends the task always goes out.
+                self.publish_scan_progress(&task.id, v.targets_done, v.targets_total, !v.status.running());
+            }
+            Err(e) => tracing::warn!(task = %task.id, error = %e, "scan task not saved"),
         }
     }
 

@@ -452,6 +452,17 @@ function followTarget(url: string, raw: string, response: string | null | undefi
   return { url: next.origin, raw: lines.join("\n") + "\n\n" };
 }
 
+/**
+ * One editable value. Defined at module level: a component declared inside another is a new type on every render,
+ * so React would replace the input (and lose what was typed) whenever the page re-renders, e.g. on a live update.
+ */
+function Field({ value, label, set }: { value: string; label: string; set: (v: string) => void }) {
+  return (
+    <input aria-label={label} className="mono" defaultValue={value} key={value} onBlur={(e) => e.target.value !== value && set(e.target.value)}
+      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+  );
+}
+
 /** Parameters, cookies and headers of the request, editable in place. */
 function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string) => void; url: string }) {
   const p = parseRequest(raw);
@@ -461,10 +472,6 @@ function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string
   const form = formParams(p);
   const json = jsonParams(p);
   const cs = cookies(p);
-  const Field = ({ value, label, set }: { value: string; label: string; set: (v: string) => void }) => (
-    <input aria-label={label} className="mono" defaultValue={value} key={value} onBlur={(e) => e.target.value !== value && set(e.target.value)}
-      onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
-  );
   const section = (title: string, rows: { name: string; value: string; set: (v: string) => void; decoded?: string }[]) =>
     rows.length > 0 && (
       <details open key={title}>
