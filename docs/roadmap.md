@@ -75,10 +75,10 @@ automation](https://www.zaproxy.org/docs/automate/), [mitmproxy modes](https://d
 | Work package | What | Status |
 | --- | --- | --- |
 | 0.1 Regress hardening | A test skipped for an unset `PM_AUTH_*` variable makes `regress run` exit 2; `--allow-skipped` for local runs | Done 2026-11-14 |
-| 0.2 More proof kinds | Template injection (`expression` oracle), NoSQL operator injection (boolean split), XXE (entity file read, or blind via OAST), CORS (`cors` marker kind), Host-header injection (`host` marker in `X-Forwarded-Host`) | Done 2026-11-14. Still open: stored and DOM XSS, header-based time SQLi, GraphQL IDOR over POST |
+| 0.2 More proof kinds | Template injection (`expression` oracle), NoSQL operator injection (boolean split), XXE (entity file read, or blind via OAST), CORS (`cors` marker kind), Host-header injection (`host` marker in `X-Forwarded-Host`) ; also stored and DOM XSS (headless browser), SQL injection in a header the recorded request lacks, IDOR in GraphQL queries sent by POST | Done 2026-11-14 |
 | 0.3 False-proof guard | Every automatic class tried on every endpoint of a fixed app proves nothing (`crates/pm-service/tests/prove_more.rs`); found and fixed a boolean-SQLi false proof on pages that echo their input | Done 2026-11-14 for the test app; crAPI and the VAmPI/Juice Shop runs still to do in CI |
-| 0.4 End-to-end isolation | Each section of `ui/tests/e2e.mjs` runs on its own: a failure is counted with a screenshot and the next section runs | Done 2026-11-14. Sections share state, so they run in order, not in parallel |
-| 0.5 Benchmark images | "Bench images" workflow copies the images to GHCR; `BENCH_REGISTRY` selects the mirror; the nightly job uses it once filled | Done 2026-11-14; run the workflow once |
+| 0.4 End-to-end isolation | Each section of `ui/tests/e2e.mjs` runs on its own: a failure is counted with a screenshot and the next section runs | Done 2026-11-14. Sections share state (identities, findings, settings made earlier), so they run in order; running them in parallel would need each section to build its own state, which costs more than the 6 minutes it would save |
+| 0.5 Benchmark images | "Bench images" workflow copies the images to GHCR; `BENCH_REGISTRY` selects the mirror; the nightly job uses it once filled | Done 2026-11-14. Nightly can also run only the benchmarks (about 15 minutes). Both need PR #25 on `main` before they can be started |
 | 0.6 Docs | Version, licensing and certificate decisions recorded; this file | Done 2026-11-14 |
 
 **Gate:** VulnShop at 15 or more of 38 findings proven, no false proofs on three apps, all checks green. Status

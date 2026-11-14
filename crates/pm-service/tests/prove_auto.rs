@@ -129,6 +129,18 @@ async fn auto_prove_sweeps_suspected_findings() {
 }
 
 #[tokio::test]
+async fn proves_time_based_sqli_in_a_header_the_baseline_lacks() {
+    let (s, url) = setup().await;
+    // VS-15: the User-Agent goes into SQL. The recorded request has no User-Agent.
+    let products = record(&s, &url, "/api/products").await;
+    let f = suspect(&s, "sqli", "SQL injection (time-based blind) in GET /api/products (header user-agent)", products)
+        .await;
+    let r = s.finding_prove(&human(), f).await.unwrap();
+    assert!(r.proven, "{:?}", r.reasons);
+    assert_eq!(r.oracle.as_deref(), Some("timing"));
+}
+
+#[tokio::test]
 async fn proves_host_header_injection_from_a_forged_host() {
     let (s, url) = setup().await;
     // VS-19: share links are built from the Host header.
@@ -137,4 +149,76 @@ async fn proves_host_header_injection_from_a_forged_host() {
     let r = s.finding_prove(&human(), f).await.unwrap();
     assert!(r.proven, "{:?}", r.reasons);
     assert_eq!(r.oracle.as_deref(), Some("marker"));
+}
+
+#[tokio::test]
+async fn proves_stored_and_dom_xss_in_a_browser() {
+    if pm_service::pm_browser::find_chromium().is_none() {
+        eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
+        return;
+    }
+    let (s, url) = setup().await;
+    // VS-25: welcome.js writes the name parameter with innerHTML.
+    let welcome = record(&s, &url, "/welcome?name=guest").await;
+    let f = suspect(&s, "dom_xss", "DOM-based XSS in GET /welcome (query name)", welcome).await;
+    let r = s.finding_prove(&human(), f).await.unwrap();
+    assert!(r.proven, "DOM XSS: {:?}", r.reasons);
+
+    // VS-23: guestbook messages are shown unencoded on /guestbook (names are encoded).
+    let body = "name=alice&message=hello";
+    let sign = s
+        .replay_send(
+            &human(),
+            ReplayRequest {
+                url: Some(url.clone()),
+                raw: Some(format!(
+                    "POST /api/guestbook HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+                     Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ReplayResult::Sent { exchange_id: sign, .. } = sign else { panic!("{sign:?}") };
+    let page = record(&s, &url, "/guestbook").await;
+    let stored = |field: &str| NewFinding {
+        title: format!(
+            "Stored input shown unencoded on another page (stored XSS) in POST /api/guestbook (form {field})"
+        ),
+        vuln_class: "stored_xss".into(),
+        severity: "high".into(),
+        description: "suspected by the scanner".into(),
+        url: None,
+        evidence: vec![sign, page],
+        hypothesis_id: None,
+    };
+    let f = s.finding_create(&human(), stored("message")).unwrap()["id"].as_i64().unwrap();
+    let r = s.finding_prove(&human(), f).await.unwrap();
+    assert!(r.proven, "stored XSS: {:?}", r.reasons);
+    // The name is stored too, but shown encoded: never run. (A fresh project: the
+    // same class and URL would merge into the finding just proven.)
+    let (s2, url2) = setup().await;
+    let sign2 = s2
+        .replay_send(
+            &human(),
+            ReplayRequest {
+                url: Some(url2.clone()),
+                raw: Some(format!(
+                    "POST /api/guestbook HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+                     Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ReplayResult::Sent { exchange_id: sign2, .. } = sign2 else { panic!("{sign2:?}") };
+    let page2 = record(&s2, &url2, "/guestbook").await;
+    let name = NewFinding { evidence: vec![sign2, page2], ..stored("name") };
+    let f = s2.finding_create(&human(), name).unwrap()["id"].as_i64().unwrap();
+    let r = s2.finding_prove(&human(), f).await.unwrap();
+    assert!(!r.proven, "the encoded name must not prove: {:?}", r.reasons);
 }

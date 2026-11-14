@@ -38,10 +38,12 @@ pub struct ProveSweep {
 const SENTINEL: &str = "pmproofzz";
 
 /// Classes `auto_prove` tries. IDOR/BFLA/authn come from the matrix; a few
-/// classes (stored/DOM XSS, mass assignment, cache poisoning, …) have no
-/// automatic oracle yet and stay suspected.
+/// classes (mass assignment, cache poisoning, …) have no automatic oracle yet
+/// and stay suspected.
 pub(crate) const AUTO_PROVE_CLASSES: &[&str] = &[
     "xss",
+    "dom_xss",
+    "stored_xss",
     "sqli",
     "command_injection",
     "rce",
@@ -123,11 +125,28 @@ impl Service {
             out.reasons = vec![format!("evidence exchange {baseline} is gone")];
             return Ok(out);
         };
-        let raw = String::from_utf8_lossy(&ex.request).into_owned();
-        let all_points = points(&raw);
+        let mut raw = String::from_utf8_lossy(&ex.request).into_owned();
+        let mut all_points = points(&raw);
         // The exact point from the finding's title "(… (query q))", else a few
         // likely candidates the class can use.
         let label = f["title"].as_str().and_then(parse_point_label);
+        // A header the scanner added (e.g. User-Agent) is not in the recorded
+        // request, so there is no point for it. Add it with a benign value and
+        // use that request as the baseline too, so baseline and payload differ
+        // only in the payload. `points()` only emits Header points for the
+        // headers in its HEADERS list (user-agent, referer, x-forwarded-for),
+        // so for any other header name nothing matches and we fall through.
+        if let Some(name) = label.as_deref().and_then(|l| l.strip_prefix("header "))
+            && label.as_deref().and_then(|l| find_point(&all_points, l)).is_none()
+        {
+            let value = if name == "user-agent" { "Mozilla/5.0 (X11; Linux x86_64)" } else { "1" };
+            let with = with_header(&raw, name, value);
+            let pts = points(&with);
+            if label.as_deref().and_then(|l| find_point(&pts, l)).is_some() {
+                raw = with;
+                all_points = pts;
+            }
+        }
         let targeted: Vec<Point> = match label.as_deref().and_then(|l| find_point(&all_points, l)) {
             Some(p) => vec![p],
             None => candidate_points(&all_points),
@@ -135,6 +154,19 @@ impl Service {
 
         let attempts: Vec<ProofRequest> = if WHOLE_REQUEST_CLASSES.contains(&class.as_str()) {
             whole_request_proofs(&class, baseline, &raw, &all_points)
+        } else if class == "stored_xss" {
+            // The scanner's evidence: the submission, then the page that showed the value.
+            let view = evidence.get(1).and_then(|id| self.exchange_raw(*id).ok());
+            let Some(view) = view else {
+                out.reasons = vec!["the finding doesn't name the page that shows the stored value".into()];
+                return Ok(out);
+            };
+            let view_raw = String::from_utf8_lossy(&view.request).into_owned();
+            targeted
+                .iter()
+                .flat_map(|point| prove_requests("xss", baseline, &raw, point))
+                .map(|r| ProofRequest { view_raw: Some(view_raw.clone()), ..r })
+                .collect()
         } else {
             targeted.iter().flat_map(|point| prove_requests(&class, baseline, &raw, point)).collect()
         };
@@ -223,7 +255,7 @@ fn prove_requests(class: &str, baseline: i64, raw: &str, point: &Point) -> Vec<P
     let mut out = Vec::new();
     let orig = &point.original;
     match class {
-        "xss" | "reflected_input" => {
+        "xss" | "reflected_input" | "dom_xss" => {
             let placeholder = match point.kind {
                 PointKind::Query | PointKind::Form | PointKind::Cookie | PointKind::Nested | PointKind::Name => {
                     "{{xss_url}}"
@@ -503,8 +535,9 @@ const BOOLEAN_PAIRS: &[(&str, &str)] = &[
     ("' AND '1'='1", "' AND '1'='2"),
 ];
 /// Time-based payloads (suffixes); SLEEP(3) delays a vulnerable query ~3 s.
+/// The concatenation form runs even when the WHERE clause matches no row.
 const SQL_SLEEPS: &[&str] =
-    &["%' AND SLEEP(3) -- ", "' AND SLEEP(3) -- ", " AND SLEEP(3) -- ", "';SELECT SLEEP(3) -- "];
+    &["%' AND SLEEP(3) -- ", "' AND SLEEP(3) -- ", " AND SLEEP(3) -- ", "';SELECT SLEEP(3) -- ", "'||SLEEP(3)||'"];
 const CMD_SLEEPS: &[&str] = &["; sleep 3", "| sleep 3", "`sleep 3`", "$(sleep 3)", "& sleep 3"];
 
 /// Injects a value at `point` and returns the request as a string (the value
@@ -524,9 +557,23 @@ fn tmpl(raw: &str, point: &Point, placeholder: &str) -> Option<String> {
 /// "SQL injection in GET /x (query id)" → "query id". Spans nested parens too,
 /// e.g. "(nested ctx.category (base64))" → "nested ctx.category (base64)".
 fn parse_point_label(title: &str) -> Option<String> {
+    // The last parenthesized group, matched from the end (earlier groups like
+    // "(time-based blind)" belong to the title text).
     let close = title.rfind(')')?;
-    let open = title.find('(')?;
-    (open < close).then(|| title[open + 1..close].to_ascii_lowercase())
+    let mut depth = 0usize;
+    for (i, c) in title[..=close].char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(title[i + 1..close].to_ascii_lowercase());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The point whose "kind name" matches `label`.

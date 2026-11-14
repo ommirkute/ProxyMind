@@ -172,12 +172,16 @@ fn xml_order(body: &str, expand: bool) -> String {
 async fn app(fixed: bool) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
+    // Guestbook entries, shared by every connection.
+    let board: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     tokio::spawn(async move {
         while let Ok((mut c, _)) = l.accept().await {
+            let board = board.clone();
             tokio::spawn(async move {
                 let Some(r) = read_request(&mut c).await else { return };
                 let q = |k: &str| r.query.iter().find(|(qk, _)| qk == k).map(|(_, v)| v.clone()).unwrap_or_default();
                 let mut extra = String::new();
+                let mut ctype = "text/html";
                 let body = match r.path.as_str() {
                     "/tpl" if !fixed => format!("<p>Hello {}</p>", render_braces(&q("name"))),
                     "/tpl" => format!("<p>Hello {}</p>", q("name").replace('<', "&lt;")),
@@ -205,6 +209,34 @@ async fn app(fixed: bool) -> String {
                         };
                         format!("<p>We sent a link: <a href=\"https://{host}/reset?t=91c2\">reset</a></p>")
                     }
+                    // Stored XSS: entries are shown on /board, unencoded unless fixed.
+                    "/sign" => {
+                        let msg = r.body.split('&').find_map(|p| p.strip_prefix("message=")).map(decode);
+                        board.lock().unwrap().push(msg.unwrap_or_default());
+                        "<p>Thanks for signing.</p>".into()
+                    }
+                    "/board" => {
+                        let rows: Vec<String> = board
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|m| if fixed { m.replace('&', "&amp;").replace('<', "&lt;") } else { m.clone() })
+                            .map(|m| format!("<li>{m}</li>"))
+                            .collect();
+                        format!("<!doctype html><html><body><ul>{}</ul></body></html>", rows.join(""))
+                    }
+                    // DOM XSS: a same-origin script writes the URL's name into the page.
+                    "/hi" => {
+                        "<!doctype html><html><body><p id=msg></p><script src=/hi.js></script></body></html>".into()
+                    }
+                    "/hi.js" => {
+                        ctype = "application/javascript";
+                        let sink = if fixed { "textContent" } else { "innerHTML" };
+                        format!(
+                            "const n = new URLSearchParams(location.search).get('name') || 'guest';\n\
+                             document.getElementById('msg').{sink} = 'Hi ' + n;"
+                        )
+                    }
                     "/share" => {
                         let host = if fixed {
                             "shop.example".to_string()
@@ -222,7 +254,7 @@ async fn app(fixed: bool) -> String {
                     _ => "not found".into(),
                 };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = c.write_all(resp.as_bytes()).await;
@@ -373,9 +405,17 @@ async fn no_class_is_proven_anywhere_on_the_fixed_app() {
     let s = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
     let xml = "<?xml version=\"1.0\"?>\n<order><item>Coffee</item><qty>2</qty></order>";
     let mut evidence = Vec::new();
-    for path in
-        ["/tpl?name=guest", "/calc?name=guest", "/items?q=apple", "/api/me", "/api/public", "/reset", "/share", "/echo"]
-    {
+    for path in [
+        "/tpl?name=guest",
+        "/calc?name=guest",
+        "/items?q=apple",
+        "/api/me",
+        "/api/public",
+        "/reset",
+        "/share",
+        "/echo",
+        "/hi?name=guest",
+    ] {
         evidence.push((path.to_string(), get(&s, &fixed, path).await));
     }
     let raw = format!(
@@ -385,6 +425,7 @@ async fn no_class_is_proven_anywhere_on_the_fixed_app() {
     evidence.push(("POST /order".into(), record(&s, &fixed, raw).await));
     let classes = [
         "xss",
+        "dom_xss",
         "sqli",
         "command_injection",
         "path_traversal",
@@ -408,4 +449,77 @@ async fn no_class_is_proven_anywhere_on_the_fixed_app() {
         }
     }
     assert!(proven.is_empty(), "false proofs on the fixed app:\n{}", proven.join("\n"));
+}
+
+fn chromium() -> bool {
+    let found = pm_service::pm_browser::find_chromium().is_some();
+    if !found {
+        eprintln!("no Chromium found; set PROXYMIND_CHROMIUM to run this test");
+    }
+    found
+}
+
+/// A suspected stored XSS: the submission, then the page that shows it (the scanner's evidence order).
+async fn stored_finding(s: &Service, url: &str) -> i64 {
+    let body = "name=alice&message=hello";
+    let raw = format!(
+        "POST /sign HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let sign = record(s, url, raw).await;
+    let board = get(s, url, "/board").await;
+    let f = NewFinding {
+        title: "Stored input shown unencoded on another page (stored XSS) in POST /sign (form message)".into(),
+        vuln_class: "stored_xss".into(),
+        severity: "high".into(),
+        description: "suspected by the scanner".into(),
+        url: None,
+        evidence: vec![sign, board],
+        hypothesis_id: None,
+    };
+    s.finding_create(&human(), f).unwrap()["id"].as_i64().unwrap()
+}
+
+#[tokio::test]
+async fn stored_xss_is_proven_when_the_stored_script_runs_on_the_page_that_shows_it() {
+    if !chromium() {
+        return;
+    }
+    let (s, url) = setup().await;
+    let id = stored_finding(&s, &url).await;
+    let r = s.finding_prove(&human(), id).await.unwrap();
+    assert!(r.proven, "{:?}", r.reasons);
+    assert_eq!(r.oracle.as_deref(), Some("reflection"));
+
+    // The fixed app encodes what it shows: stored, shown, but never run.
+    let fixed = app(true).await;
+    let roe = format!(
+        "version: 1\nscope:\n  include: [\"{fixed}/\"]\ntiers:\n  human:\n    active_intrusive: allow\n    destructive: allow\n"
+    );
+    let s2 = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
+    let id = stored_finding(&s2, &fixed).await;
+    let r = s2.finding_prove(&human(), id).await.unwrap();
+    assert!(!r.proven, "{:?}", r.reasons);
+}
+
+#[tokio::test]
+async fn dom_xss_is_proven_when_the_page_script_runs_the_url_value() {
+    if !chromium() {
+        return;
+    }
+    let (s, url) = setup().await;
+    let hi = get(&s, &url, "/hi?name=guest").await;
+    let r = prove(&s, "dom_xss", "DOM-based XSS in GET /hi (query name)", hi).await;
+    assert!(r.proven, "{:?}", r.reasons);
+    assert_eq!(r.oracle.as_deref(), Some("reflection"));
+
+    // The fixed page writes the value as text.
+    let fixed = app(true).await;
+    let roe = format!(
+        "version: 1\nscope:\n  include: [\"{fixed}/\"]\ntiers:\n  human:\n    active_intrusive: allow\n    destructive: allow\n"
+    );
+    let s2 = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
+    let hi = get(&s2, &fixed, "/hi?name=guest").await;
+    let r = prove(&s2, "dom_xss", "DOM-based XSS in GET /hi (query name)", hi).await;
+    assert!(!r.proven, "{:?}", r.reasons);
 }

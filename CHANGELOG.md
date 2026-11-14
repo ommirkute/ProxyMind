@@ -29,6 +29,14 @@ version may change project files, APIs and the CLI.
     `Access-Control-Allow-Origin` with credentials allowed. Reflection without credentials is not counted.
   - **Host-header injection** by the `host` marker sent in `X-Forwarded-Host`, `X-Host` or a forged `Host` (the
     request still goes to the target's address).
+  - **Stored XSS** in the headless browser: the payload is stored by the submission and must run on the page that
+    shows it (the reflection oracle's new `view_raw`).
+  - **DOM XSS** in the headless browser: the XSS proof now renders the page with its own same-origin scripts, so a
+    value a script writes into the page counts.
+  - **SQL injection in a header the recorded request lacks** (e.g. `User-Agent`): the header is added to the
+    baseline too, so only the payload differs.
+  - **IDOR in a GraphQL query sent by POST:** the differential oracle re-sends a POST only when it is a GraphQL
+    query (no mutation or subscription), and counts a 2xx answer with only errors as refused.
 
   The `host` marker kind is stricter: the marker must come back in an absolute URL (`//marker`) or a redirect, not
   just anywhere in the page, so a debug page that prints request headers is no longer a proof. Template-injection

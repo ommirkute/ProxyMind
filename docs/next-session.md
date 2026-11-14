@@ -87,9 +87,9 @@ Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tes
 
 **Follow-ups to push past 12 toward 15+ (and to finish the measurement):**
 - Re-measure VAmPI and Juice Shop in CI and fill `bench/README.md` (this sandbox was Docker-Hub rate-limited).
-- Add oracles for the classes still suspected: header-based time SQLi (needs to add the insertion-point header to the
-  request, e.g. User-Agent; VS-15), GraphQL-over-POST IDOR (VS-12) and stored/DOM XSS (VS-23/VS-25, render a
-  different exchange). Done 2026-11-14 (roadmap Phase 0.2): template injection (`expression` oracle), NoSQL operator
+- Done 2026-11-14, second round: header-based time SQLi (the header is added to the baseline; VS-15), IDOR in GraphQL
+  queries sent by POST (VS-12), stored XSS (reflection oracle with `view_raw`; VS-23) and DOM XSS (the page's
+  scripts are rendered; VS-25). Earlier the same day (roadmap Phase 0.2): template injection (`expression` oracle), NoSQL operator
   injection (boolean split with `$eq`/`$ne`), XXE (entity file read, or blind via OAST), CORS (`cors` marker kind)
   and Host-header injection (`host` marker in `X-Forwarded-Host`, `X-Host` or `Host`); VulnShop 15/38 proven; tests in `crates/pm-service/tests/prove_more.rs`
   against a purpose-built app with fixed versions and traps.
