@@ -19,6 +19,7 @@ mod custom_checks;
 mod discover;
 mod dom_test;
 mod engage;
+mod events;
 mod evidence;
 mod findings;
 mod fuzzer;
@@ -74,6 +75,7 @@ pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, Save
 pub use discover::{DiscoverRequest, DiscoverResult, Found};
 pub use dom_test::{DomTestRequest, DomTestResult};
 pub use engage::{EngageFilter, FoundComment, FoundEndpoint, FoundScript, LogicReport, TargetAnalysis, TriageItem};
+pub use events::{CounterTracker, Delivery, EVENT_BUFFER, Event, Published, Subscription, Topic};
 pub use evidence::{Check, CoverageCellProof, CoverageProof, EvidenceVerification, PACK_FORMAT, verify_evidence};
 pub use findings::{FindingUpdate, HUMAN_STATUSES, NewFinding, Retest};
 pub use fuzzer::{AttackStatus, AttackSummary, AttackView, FuzzerRequest, FuzzerResult, FuzzerRow, FuzzerStart};
@@ -203,6 +205,8 @@ pub struct Service {
     relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
+    /// Typed events published after writes commit (ADR-0018).
+    bus: std::sync::Arc<events::Bus>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -338,6 +342,11 @@ impl Service {
         } else if !file_project {
             start_text_indexer(&store, false);
         }
+        // Exchanges committed through the shared handle (service inserts and the proxy recorder) publish one event
+        // per row, in commit order. The observer only touches the bus, which never blocks.
+        let bus = std::sync::Arc::new(events::Bus::new(EVENT_BUFFER));
+        let observer_bus = bus.clone();
+        store.set_on_exchanges(Box::new(move |rows| observer_bus.publish_exchanges(rows)));
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
@@ -359,6 +368,7 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
+            bus,
         };
         svc.load_scan_tasks();
         Ok(svc)
@@ -424,12 +434,15 @@ impl Service {
 
     fn audit(&self, actor: &str, action: &str, detail: Value, decision: &str) -> Result<()> {
         // One write closure: the read of the last record and the append must not interleave with another audit.
-        self.store.write(|store| {
+        // Published after the write returned, i.e. after COMMIT.
+        let seq = self.store.write(|store| {
             let prev = store.last_audit()?;
             let rec = audit::next_record(prev.as_ref(), now_ms(), actor, action, &detail, decision);
             store.append_audit(&rec)?;
-            Ok(())
-        })
+            Ok::<u64, anyhow::Error>(rec.seq as u64)
+        })?;
+        self.publish(Event::AuditAppended { seq });
+        Ok(())
     }
 
     fn detail(req: &ActionRequest, params: &Value, verdict: &Verdict) -> Value {
@@ -494,14 +507,14 @@ pub struct Counters {
 
 impl Service {
     pub fn counters(&self) -> Result<Counters> {
+        // COUNT and MAX queries only: no rows are loaded.
         self.store.read(|store| {
-            let last = store.search_exchanges(&pm_store::HistoryFilter { limit: Some(1), ..Default::default() })?;
             Ok(Counters {
                 exchanges: store.count_exchanges()?,
-                last_exchange_id: last.first().map_or(0, |e| e.id),
-                pending_approvals: store.list_approvals(Some("pending"), 1000)?.len(),
-                findings: store.rows("findings", None, 10_000)?.len(),
-                audit_records: store.last_audit()?.map_or(0, |r| r.seq as usize),
+                last_exchange_id: store.last_exchange_id()?,
+                pending_approvals: store.count_approvals(Some("pending"))? as usize,
+                findings: store.count_rows("findings", None)? as usize,
+                audit_records: store.last_audit_seq()? as usize,
                 intercepted: self.intercept_held_count(),
             })
         })

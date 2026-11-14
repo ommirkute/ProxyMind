@@ -221,6 +221,7 @@ impl Service {
                 ch.insert("proof_id".into(), json!(proof_id));
                 ch.insert("updated_ms".into(), json!(now_ms()));
                 self.store.write(|db| db.update_row("findings", f, &ch))?;
+                self.finding_proven(f);
             }
             if let Some(h) = req.hypothesis_id {
                 let mut ch = serde_json::Map::new();
@@ -235,6 +236,11 @@ impl Service {
             json!({ "proof_id": proof_id, "oracle": req.oracle, "proven": verdict.proven }),
             if verdict.proven { "proven" } else { "not_proven" },
         )?;
+        self.publish(crate::Event::ProofCompleted {
+            proof_id,
+            finding_id: req.finding_id,
+            verdict: if verdict.proven { "proven" } else { "not_proven" }.into(),
+        });
         Ok(ProofResult::Completed {
             proof_id,
             oracle: req.oracle,
@@ -268,7 +274,15 @@ impl Service {
         f.insert("proof_id".into(), json!(proof_id));
         f.insert("updated_ms".into(), json!(now_ms()));
         self.store.write(|db| db.update_row("findings", finding_id, &f))?;
+        self.finding_proven(finding_id);
         Ok(())
+    }
+
+    /// Tells subscribers a proof made this finding `proven` (after the update committed).
+    fn finding_proven(&self, id: i64) {
+        let url = self.store.read(|db| db.row("findings", id)).ok().flatten();
+        let url = url.as_ref().and_then(|r| r.get("url")).and_then(Value::as_str).unwrap_or_default();
+        self.finding_changed(id, "proven", url);
     }
 
     pub fn proof_get(&self, proof_id: i64) -> Result<Value> {
@@ -938,18 +952,23 @@ impl Service {
     /// back minutes or hours later.
     pub fn record_oast(&self, i: &pm_oast::Interaction) -> Result<()> {
         let late = self.store.write(|store| -> Result<_> {
-            if !record_oast_in(store, i)? {
-                return Ok(None);
-            }
+            let Some(hit) = record_oast_in(store, i)? else { return Ok((None, None)) };
             let first = store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? == 1;
             let probe = store.rows("oast_probes", Some(("token", &json!(i.token))), 1)?.into_iter().next();
-            Ok(probe.filter(|p| {
-                first
-                    && p.get("finding_id").is_none_or(Value::is_null)
-                    // At or after the deadline: the scan has stopped waiting by then.
-                    && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms >= d)
-            }))
+            Ok((
+                Some(hit),
+                probe.filter(|p| {
+                    first
+                        && p.get("finding_id").is_none_or(Value::is_null)
+                        // At or after the deadline: the scan has stopped waiting by then.
+                        && p.get("deadline_ms").and_then(Value::as_i64).is_some_and(|d| i.ts_ms >= d)
+                }),
+            ))
         })?;
+        let (hit, late) = late;
+        if let Some(id) = hit {
+            self.publish(crate::Event::CollaboratorHit { id });
+        }
         let Some(p) = late else { return Ok(()) };
         let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         let after = (i.ts_ms - p.get("deadline_ms").and_then(Value::as_i64).unwrap_or(i.ts_ms)) / 1000;
@@ -1402,12 +1421,12 @@ pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Doc
 const OAST_PER_TOKEN: u64 = 20;
 const OAST_TOTAL: u64 = 100_000;
 
-/// Stores a callback; `false` when it was dropped (over a cap).
-pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<bool> {
+/// Stores a callback; the new row's id, or `None` when it was dropped (over a cap).
+pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> Result<Option<i64>> {
     if store.count_rows("oast_interactions", Some(("token", &json!(i.token))))? >= OAST_PER_TOKEN
         || store.count_rows("oast_interactions", None)? >= OAST_TOTAL
     {
-        return Ok(false);
+        return Ok(None);
     }
     let mut row = serde_json::Map::new();
     for (k, v) in [
@@ -1421,8 +1440,7 @@ pub fn record_oast_in(store: &mut pm_store::Store, i: &pm_oast::Interaction) -> 
     ] {
         row.insert(k.into(), v);
     }
-    store.insert_row("oast_interactions", &row)?;
-    Ok(true)
+    Ok(Some(store.insert_row("oast_interactions", &row)?))
 }
 
 fn collect_markers(v: &Value, owner: &str, out: &mut Vec<String>) {

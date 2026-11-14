@@ -10,7 +10,6 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use futures_util::Stream;
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
@@ -262,19 +261,188 @@ async fn status(State(st): State<AppState>) -> ApiResult {
     }))
 }
 
-/// Server-sent events: `counters` whenever anything the UI shows changes.
-async fn events(State(st): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = futures_util::stream::unfold((st, None), |(st, prev)| async move {
-        loop {
-            let now = st.service.counters().ok();
-            if now.is_some() && now != prev {
-                let ev = Event::default().event("counters").data(serde_json::to_string(&now).unwrap_or_default());
-                return Some((Ok(ev), (st, now)));
+#[derive(Deserialize)]
+struct EventsQuery {
+    topics: Option<String>,
+}
+
+/// The legacy `counters` event's coalescing window and how often it re-reads the store for changes made by other
+/// processes (they publish nothing on this process's bus).
+const COUNTERS_EVERY: Duration = Duration::from_millis(250);
+const COUNTERS_RELOAD: Duration = Duration::from_secs(5);
+
+fn bad_topics(msg: String) -> Response {
+    ApiError::Service(ServiceError::Invalid(msg)).into_response()
+}
+
+/// Server-sent events (ADR-0018).
+///
+/// - No `topics`: the legacy stream, one `counters` event (the `Counters` JSON, unchanged) now and whenever a
+///   relevant event arrives, at most every 250 ms.
+/// - `?topics=exchanges,findings`: typed events as `event: <topic>`, `id: <seq>`, `data: <json>`. `topics=all` means
+///   every topic this actor may read, and `counters` may be listed to get the legacy event too. An unknown topic is
+///   a 400, a topic the actor may not read a 403.
+/// - A subscriber that falls behind gets one `resync` event (`{"missed": n}`) and the stream goes on; so does a
+///   reconnect whose `Last-Event-ID` is not the newest seq (nothing is replayed).
+///
+/// What each event shows is decided by `Service::event_for` for this process's actor.
+async fn events(
+    State(st): State<AppState>,
+    Query(q): Query<EventsQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    use pm_service::Topic;
+    let mut topics: Vec<Topic> = Vec::new();
+    let (mut counters, typed) = (false, q.topics.is_some());
+    match q.topics.as_deref() {
+        None => counters = true,
+        Some(list) => {
+            for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                match name {
+                    "counters" => counters = true,
+                    "all" => topics.extend(Topic::ALL.into_iter().filter(|t| st.service.may_read_topic(&st.actor, *t))),
+                    other => match Topic::parse(other) {
+                        Some(t) if st.service.may_read_topic(&st.actor, t) => topics.push(t),
+                        Some(t) => {
+                            let msg = format!("{} may not read topic {}", st.actor.id(), t.as_str());
+                            return Ok((StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response());
+                        }
+                        None => {
+                            let known: Vec<_> = Topic::ALL.iter().map(|t| t.as_str()).collect();
+                            return Ok(bad_topics(format!(
+                                "unknown topic {other:?}; use counters, all or any of {}",
+                                known.join(", ")
+                            )));
+                        }
+                    },
+                }
             }
-            tokio::time::sleep(Duration::from_millis(700)).await;
+            if topics.is_empty() && !counters {
+                return Ok(bad_topics("topics is empty".into()));
+            }
         }
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    }
+    // Subscribe before reading the counters, so nothing published in between is missed.
+    let sub = st.service.subscribe();
+    let tracker = if counters { Some(st.service.counter_tracker()?) } else { None };
+    let mut queue = std::collections::VecDeque::new();
+    if typed
+        && let Some(last) =
+            headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
+        && last != sub.latest_seq()
+    {
+        queue.push_back(resync_event(sub.latest_seq().saturating_sub(last).max(1)));
+    }
+    let state = EventStream {
+        st,
+        sub,
+        topics,
+        tracker,
+        queue,
+        last_sent: None,
+        sent: None,
+        dirty: true,
+        reload_at: tokio::time::Instant::now() + COUNTERS_RELOAD,
+    };
+    let stream = futures_util::stream::unfold(state, EventStream::next);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+}
+
+fn resync_event(missed: u64) -> Event {
+    Event::default().event("resync").data(json!({ "missed": missed }).to_string())
+}
+
+struct EventStream {
+    st: AppState,
+    sub: pm_service::Subscription,
+    topics: Vec<pm_service::Topic>,
+    /// Some when this stream sends `counters`.
+    tracker: Option<pm_service::CounterTracker>,
+    queue: std::collections::VecDeque<Event>,
+    /// When `counters` last went out, for the 250 ms window.
+    last_sent: Option<tokio::time::Instant>,
+    /// The counters last sent (an unchanged snapshot is not sent again).
+    sent: Option<pm_service::Counters>,
+    /// Counters may have changed since they were last sent.
+    dirty: bool,
+    reload_at: tokio::time::Instant,
+}
+
+impl EventStream {
+    async fn next(mut self) -> Option<(Result<Event, Infallible>, Self)> {
+        use pm_service::Delivery;
+        use tokio::time::{Instant, sleep_until};
+        loop {
+            if let Some(ev) = self.queue.pop_front() {
+                return Some((Ok(ev), self));
+            }
+            let Some(tracker) = self.tracker.as_mut() else {
+                // Typed events only.
+                match self.sub.recv().await? {
+                    Delivery::Resync { missed } => self.queue.push_back(resync_event(missed)),
+                    Delivery::Event(p) => self.typed(&p),
+                }
+                continue;
+            };
+            let now = Instant::now();
+            if now >= self.reload_at {
+                self.reload_at = now + COUNTERS_RELOAD;
+                if tracker.reload(&self.st.service).is_ok() {
+                    self.dirty = true;
+                }
+            }
+            if self.dirty && self.last_sent.is_none_or(|t| now >= t + COUNTERS_EVERY) {
+                self.dirty = false;
+                if let Ok(c) = tracker.snapshot(&self.st.service)
+                    && self.sent != Some(c)
+                {
+                    self.sent = Some(c);
+                    self.last_sent = Some(now);
+                    let data = serde_json::to_string(&c).unwrap_or_default();
+                    return Some((Ok(Event::default().event("counters").data(data)), self));
+                }
+                continue;
+            }
+            // Wake for the next delivery, the end of the coalescing window, or the next reload.
+            let wake = match (self.dirty, self.last_sent) {
+                (true, Some(t)) => (t + COUNTERS_EVERY).min(self.reload_at),
+                _ => self.reload_at,
+            };
+            tokio::select! {
+                d = self.sub.recv() => match d? {
+                    Delivery::Resync { missed } => {
+                        // Counters are state: a fresh snapshot is the resync. Typed clients are told.
+                        if let Some(t) = self.tracker.as_mut() {
+                            let _ = t.reload(&self.st.service);
+                        }
+                        self.dirty = true;
+                        if !self.topics.is_empty() {
+                            self.queue.push_back(resync_event(missed));
+                        }
+                    }
+                    Delivery::Event(p) => {
+                        if let Some(t) = self.tracker.as_mut()
+                            && t.apply(&p)
+                        {
+                            self.dirty = true;
+                        }
+                        self.typed(&p);
+                    }
+                },
+                () = sleep_until(wake) => {}
+            }
+        }
+    }
+
+    /// Queues a typed event if the client asked for its topic and the actor may see it.
+    fn typed(&mut self, p: &pm_service::Published) {
+        if !self.topics.contains(&p.topic) {
+            return;
+        }
+        if let Some(v) = self.st.service.event_for(&self.st.actor, p) {
+            self.queue.push_back(Event::default().event(p.topic.as_str()).id(p.seq.to_string()).data(v.to_string()));
+        }
+    }
 }
 
 async fn exchanges(State(st): State<AppState>, Query(f): Query<HistoryFilter>) -> ApiResult {

@@ -133,6 +133,7 @@ impl Service {
             }
             changes.insert("updated_ms".into(), json!(now_ms()));
             self.store.write(|db| db.update_row("findings", id, &changes))?;
+            self.finding_changed(id, o["status"].as_str().unwrap_or(""), &url);
             self.audit(
                 &actor.id(),
                 "finding_merge",
@@ -161,6 +162,7 @@ impl Service {
             row.insert(k.into(), v);
         }
         let id = self.store.write(|db| db.insert_row("findings", &row))?;
+        self.finding_changed(id, "suspected", &url);
         self.audit(&actor.id(), "finding_create", json!({ "id": id, "title": f.title }), "allow")?;
         let mut v = self.finding_get(id)?;
         // Learn from people's verdicts: say so when they rejected the same issue here before.
@@ -245,6 +247,11 @@ impl Service {
         }
         changes.insert("updated_ms".into(), json!(now_ms()));
         self.store.write(|db| db.update_row("findings", u.id, &changes))?;
+        self.finding_changed(
+            u.id,
+            u.status.as_deref().or(current["status"].as_str()).unwrap_or(""),
+            current["url"].as_str().unwrap_or(""),
+        );
         self.audit(&actor.id(), "finding_update", json!(u), "allow")?;
         self.finding_get(u.id)
     }
@@ -260,11 +267,12 @@ impl Service {
         if actor.kind != pm_policy::ActorKind::Human {
             return Err(ServiceError::Invalid("only people save a finding explanation".into()));
         }
-        self.finding_get(id)?;
+        let current = self.finding_get(id)?;
         let mut ch = serde_json::Map::new();
         ch.insert("explanation".into(), json!(markdown.chars().take(20_000).collect::<String>()));
         ch.insert("updated_ms".into(), json!(now_ms()));
         self.store.write(|db| db.update_row("findings", id, &ch))?;
+        self.finding_changed(id, current["status"].as_str().unwrap_or(""), current["url"].as_str().unwrap_or(""));
         self.audit(&actor.id(), "finding_explain", json!({ "id": id, "chars": markdown.len() }), "allow")?;
         self.finding_get(id)
     }
@@ -340,6 +348,10 @@ impl Service {
         ch.insert("retest".into(), json!(serde_json::to_string(&r).unwrap_or_default()));
         ch.insert("updated_ms".into(), json!(now_ms()));
         self.store.write(|db| db.update_row("findings", id, &ch))?;
+        // The proof re-run above may have changed the status, so say what it is now.
+        if let Ok(now) = self.finding_get(id) {
+            self.finding_changed(id, now["status"].as_str().unwrap_or(""), now["url"].as_str().unwrap_or(""));
+        }
         self.audit(
             &actor.id(),
             "finding_retest",

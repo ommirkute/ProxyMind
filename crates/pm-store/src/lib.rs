@@ -665,7 +665,26 @@ pub struct Store {
     /// Whether `insert_exchange` writes the full-text index in its own transaction (in-memory
     /// stores) or leaves new rows to the background indexer (file stores).
     index_inline: bool,
+    /// Exchanges committed since `StoreHandle::write` last drained this (None = nobody observes, nothing is kept).
+    committed: Option<Vec<CommittedExchange>>,
 }
+
+/// What a commit observer is told about a stored exchange: ids and short summary fields only, never bodies.
+/// `scheme`, `port` and `path` are there so a consumer can do the same scope check as the proxy; they are
+/// not meant to be forwarded to clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedExchange {
+    pub id: i64,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub method: String,
+    pub path: String,
+    pub status: Option<u16>,
+}
+
+/// Called with the exchanges a `StoreHandle::write` committed, in commit order (see [`StoreHandle::set_on_exchanges`]).
+pub type ExchangeObserver = Box<dyn Fn(&[CommittedExchange]) + Send + Sync>;
 
 /// The highlight stored in an exchange's tags (`["highlight:red"]`).
 fn highlight_of(tags: &str) -> Option<String> {
@@ -722,7 +741,7 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "query_only", "ON")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false })
+        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false, committed: None })
     }
 
     /// Opens a connection for WAL checkpoints only (ADR-0017): no migration, no pragmas that write. A PASSIVE
@@ -735,7 +754,7 @@ impl Store {
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("opening project {} for checkpoints", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false })
+        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false, committed: None })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -749,7 +768,7 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let index_inline = conn.path().is_none_or(str::is_empty);
-        let mut store = Self { conn, text_of: raw_text, extractor_set: false, index_inline };
+        let mut store = Self { conn, text_of: raw_text, extractor_set: false, index_inline, committed: None };
         store.migrate()?;
         Ok(store)
     }
@@ -993,7 +1012,23 @@ impl Store {
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let id = Self::insert_exchange_in(&tx, text_of, extractor_set, index_inline, ex)?;
         tx.commit()?;
+        self.note_committed(std::slice::from_ref(ex), &[id]);
         Ok(id)
+    }
+
+    /// Remembers committed rows for the `StoreHandle` observer. Called only after `COMMIT` succeeded.
+    fn note_committed(&mut self, exchanges: &[NewExchange], ids: &[i64]) {
+        if let Some(list) = self.committed.as_mut() {
+            list.extend(exchanges.iter().zip(ids).map(|(ex, id)| CommittedExchange {
+                id: *id,
+                scheme: ex.scheme.clone(),
+                host: ex.host.clone(),
+                port: ex.port,
+                method: ex.method.clone(),
+                path: ex.path.clone(),
+                status: ex.status,
+            }));
+        }
     }
 
     /// Inserts several exchanges in one IMMEDIATE transaction (one commit). Stores exactly what
@@ -1022,6 +1057,7 @@ impl Store {
             Self::insert_ws_in(&tx, exchange_id, m)?;
         }
         tx.commit()?;
+        self.note_committed(exchanges, &ids);
         Ok(ids)
     }
 
@@ -1951,6 +1987,27 @@ impl Store {
     pub fn count_exchanges(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT count(*) FROM exchanges", [], |r| r.get(0))?)
     }
+
+    /// The newest exchange id (0 when there is none).
+    pub fn last_exchange_id(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM exchanges", [], |r| r.get(0))?)
+    }
+
+    /// How many approvals have this status (all of them when `None`).
+    pub fn count_approvals(&self, status: Option<&str>) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM approvals WHERE (?1 IS NULL OR status = ?1)",
+            params![status],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// The sequence number of the newest audit record (0 when the log is empty).
+    pub fn last_audit_seq(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM audit_log", [], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    }
 }
 
 /// Shared access to one [`Store`] (ADR-0017). A file project reads on a pool of read-only connections (`read`) and
@@ -1963,6 +2020,7 @@ impl Store {
 pub struct StoreHandle {
     inner: parking_lot::Mutex<Store>,
     readers: Option<Pool>,
+    on_exchanges: std::sync::OnceLock<ExchangeObserver>,
 }
 
 /// Read-only connections for one project file, opened lazily up to a cap.
@@ -2090,7 +2148,7 @@ impl StoreHandle {
     /// Wraps `store`. A file project gets a read pool (opened lazily); an in-memory one stays on one connection.
     pub fn new(store: Store) -> Self {
         let readers = store.path().map(|p| Pool::new(std::path::absolute(&p).unwrap_or(p)));
-        Self { inner: parking_lot::Mutex::new(store), readers }
+        Self { inner: parking_lot::Mutex::new(store), readers, on_exchanges: std::sync::OnceLock::new() }
     }
 
     /// Run `f` with shared access to the store. Use this for a call that only needs `&Store` methods. On a file
@@ -2110,7 +2168,30 @@ impl StoreHandle {
     pub fn write<T>(&self, f: impl FnOnce(&mut Store) -> T) -> T {
         let _reentrancy = Reentrancy::enter();
         let mut guard = self.inner.lock();
-        f(&mut guard)
+        let out = f(&mut guard);
+        if let Some(observer) = self.on_exchanges.get() {
+            let batch = guard.committed.as_mut().map(std::mem::take).unwrap_or_default();
+            if !batch.is_empty() {
+                // Deliberately still under the write lock: observers then see batches in commit order, which is
+                // what gives the event bus a `seq` that matches commit order (ADR-0018). The rows are committed
+                // already, so a subscriber that reacts can read them. The observer must not block or call back
+                // into this handle (the debug re-entrancy guard panics if it tries).
+                observer(&batch);
+            }
+        }
+        out
+    }
+
+    /// Installs the commit observer, once (a second call is ignored and returns false). After every `write` in
+    /// which `insert_exchange`, `insert_exchanges` or `insert_batch` committed rows, `observer` gets those rows in
+    /// commit order, one call per `write`, after `COMMIT`. Because it runs inside `write`, it covers every writer
+    /// that shares this handle (service inserts and the proxy recorder's `spawn_shared`). A process with a
+    /// standalone `Store` has no handle and nothing to observe. Rows from a failed insert are never reported
+    /// (they were rolled back); rows committed earlier in a closure that later fails still are, since they stay.
+    pub fn set_on_exchanges(&self, observer: ExchangeObserver) -> bool {
+        // Enable collection first, so no row is missed once the observer is visible.
+        self.inner.lock().committed.get_or_insert_with(Vec::new);
+        self.on_exchanges.set(observer).is_ok()
     }
 }
 
@@ -2134,6 +2215,41 @@ mod tests {
         }
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_commit_observer_sees_committed_rows_in_order_and_nothing_from_a_rollback() {
+        use std::sync::{Arc, Mutex};
+        let h = StoreHandle::new(Store::open_in_memory().unwrap());
+        let seen: Arc<Mutex<Vec<Vec<_>>>> = Arc::default();
+        let log = seen.clone();
+        assert!(h.set_on_exchanges(Box::new(move |rows| {
+            log.lock().unwrap().push(rows.iter().map(|r| (r.id, r.path.clone())).collect());
+        })));
+        assert!(!h.set_on_exchanges(Box::new(|_| {})), "installed once");
+        let bad = NewWsMessage {
+            exchange_id: 0,
+            ts_ms: 1,
+            from_client: true,
+            opcode: 1,
+            len: 0,
+            payload: vec![],
+            truncated: false,
+            compressed: false,
+        };
+        assert!(h.write(|s| s.insert_batch(&[sample("/lost", b"x")], &[(WsTarget::InBatch(3), bad)])).is_err());
+        h.write(|s| s.set_setting("k", "v")).unwrap();
+        assert!(seen.lock().unwrap().is_empty(), "no rows committed, no call");
+        let ids = h.write(|s| s.insert_exchanges(&[sample("/a", b"x"), sample("/b", b"x")])).unwrap();
+        let one = h.write(|s| s.insert_exchange(&sample("/c", b"x"))).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [vec![(ids[0], "/a".to_string()), (ids[1], "/b".to_string())], vec![(one, "/c".to_string())]]
+        );
+        // Without an observer a store keeps nothing.
+        let mut plain = Store::open_in_memory().unwrap();
+        plain.insert_exchange(&sample("/p", b"x")).unwrap();
+        assert!(plain.committed.is_none());
     }
 
     #[test]

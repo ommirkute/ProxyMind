@@ -99,6 +99,18 @@ pub enum Decision {
 /// Returns whether a target is in scope (supplied by the service layer).
 pub type ScopeFn = Arc<dyn Fn(&str, &str, u16, &str) -> bool + Send + Sync>;
 
+/// What happened to the queue, for whoever watches it (the service layer's event bus).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueChange {
+    /// A message was held under this id.
+    Held(u64),
+    /// A held message was released (forwarded, dropped, or let through when interception was turned off).
+    Resolved(u64),
+}
+
+/// Must not block or call back into the queue (arrivals are reported while its lock is held).
+pub type QueueObserver = Arc<dyn Fn(QueueChange) + Send + Sync>;
+
 struct Waiting {
     held: Held,
     tx: oneshot::Sender<Decision>,
@@ -110,6 +122,7 @@ pub struct InterceptQueue {
     scope: RwLock<Option<ScopeFn>>,
     waiting: Mutex<BTreeMap<u64, Waiting>>,
     next: AtomicU64,
+    observer: RwLock<Option<QueueObserver>>,
 }
 
 impl InterceptQueue {
@@ -134,6 +147,18 @@ impl InterceptQueue {
         *self.scope.write() = Some(f);
     }
 
+    /// Reports arrivals and releases to `f` (one observer; a later call replaces it).
+    pub fn set_observer(&self, f: QueueObserver) {
+        *self.observer.write() = Some(f);
+    }
+
+    fn notify(&self, c: QueueChange) {
+        let f = self.observer.read().clone();
+        if let Some(f) = f {
+            f(c);
+        }
+    }
+
     pub fn held(&self) -> Vec<Held> {
         self.waiting.lock().values().map(|w| w.held.clone()).collect()
     }
@@ -153,8 +178,13 @@ impl InterceptQueue {
     /// Delivers a decision. Returns false if nothing with this id is held
     /// (already decided, or the client went away).
     pub fn decide(&self, id: u64, d: Decision) -> bool {
-        match self.waiting.lock().remove(&id) {
-            Some(w) => w.tx.send(d).is_ok(),
+        let removed = self.waiting.lock().remove(&id);
+        match removed {
+            Some(w) => {
+                let sent = w.tx.send(d).is_ok();
+                self.notify(QueueChange::Resolved(id));
+                sent
+            }
             None => false,
         }
     }
@@ -162,8 +192,9 @@ impl InterceptQueue {
     pub fn forward_all(&self) -> usize {
         let all = std::mem::take(&mut *self.waiting.lock());
         let n = all.len();
-        for (_, w) in all {
+        for (id, w) in all {
             let _ = w.tx.send(Decision::Forward(None));
+            self.notify(QueueChange::Resolved(id));
         }
         n
     }
@@ -240,7 +271,12 @@ impl InterceptQueue {
             editable: text.is_ok(),
             held_ms: pm_core::now_ms(),
         };
-        self.waiting.lock().insert(id, Waiting { held, tx });
+        {
+            // Notified under the lock, so a fast decision cannot be reported before the arrival.
+            let mut waiting = self.waiting.lock();
+            waiting.insert(id, Waiting { held, tx });
+            self.notify(QueueChange::Held(id));
+        }
         // If the queue is dropped or the decision sender vanishes, let the
         // message through rather than hanging the browser.
         rx.await.unwrap_or(Decision::Forward(None))

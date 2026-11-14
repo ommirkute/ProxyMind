@@ -5,7 +5,7 @@ use pm_policy::{ActionRequest, Actor, ActorKind, Decision, Target, Tier};
 use pm_store::ApprovalRow;
 use serde_json::{Value, json};
 
-use crate::{Authorization, Result, Service, ServiceError};
+use crate::{Authorization, Event, Result, Service, ServiceError};
 
 /// An unguessable id (OS randomness, mixed with time and a counter in case
 /// randomness is unavailable).
@@ -41,6 +41,7 @@ impl Service {
             decided_ms: None,
         };
         self.store.write(|db| db.insert_approval(&row))?;
+        self.publish(Event::ApprovalRequested { id: row.id.clone() });
         Ok(row.id)
     }
 
@@ -60,7 +61,10 @@ impl Service {
             let to = if approve { "approved" } else { "denied" };
             match self.store.write(|db| db.transition_approval(id, "pending", to, Some(&approver.id()), None, now_ms()))
             {
-                Ok(true) => Ok(()),
+                Ok(true) => {
+                    self.publish(Event::ApprovalDecided { id: id.to_string(), decision: to.to_string() });
+                    Ok(())
+                }
                 Ok(false) => Err(format!("approval {id} does not exist or was already decided")),
                 Err(e) => Err(format!("{e:#}")),
             }

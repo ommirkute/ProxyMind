@@ -151,6 +151,107 @@ async fn replay_history_findings_and_events() {
         got.push_str(&String::from_utf8_lossy(&buf[..n]));
     }
     assert!(got.contains("\"findings\":1"), "{got}");
+    // The old contract, byte for byte: the event name and exactly these keys (the UI reads them).
+    let data = got.lines().find_map(|l| l.strip_prefix("data: ")).expect("a data line");
+    let c: Value = serde_json::from_str(data).unwrap();
+    let mut keys: Vec<_> = c.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["audit_records", "exchanges", "findings", "intercepted", "last_exchange_id", "pending_approvals"]
+    );
+    assert!(!got.contains("\nid:"), "the legacy stream has no ids: {got}");
+}
+
+async fn open_events(port: u16, query: &str, extra: &str) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(
+        format!(
+            "GET /api/v1/events{query} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n{extra}\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    s
+}
+
+/// Reads until `needle` appears (or fails after 5 s), appending to `got`.
+async fn read_until(s: &mut TcpStream, got: &mut String, needle: &str) {
+    let mut buf = vec![0u8; 4096];
+    while !got.contains(needle) {
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("no {needle:?} in {got}"))
+            .unwrap();
+        assert!(n > 0, "stream ended before {needle:?}: {got}");
+        got.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+}
+
+fn new_finding(evidence: i64) -> Value {
+    json!({"title":"t","vuln_class":"idor","severity":"low","description":"d","evidence":[evidence]})
+}
+
+#[tokio::test]
+async fn event_topics_filter_resync_and_keep_the_counters_live() {
+    let (port, shop) = start().await;
+    // Unknown topics are refused before the stream opens; so is an empty list.
+    let (st, _, body) = http(port, "GET", "/api/v1/events?topics=findings,nope", &[AUTH], None).await;
+    assert_eq!(st, 400, "{body}");
+    assert!(body.contains("nope"), "{body}");
+    assert_eq!(http(port, "GET", "/api/v1/events?topics=", &[AUTH], None).await.0, 400);
+
+    let mut typed = open_events(port, "?topics=findings,audit", "").await;
+    let mut legacy = open_events(port, "", "").await;
+    let (mut got_typed, mut got_legacy) = (String::new(), String::new());
+    read_until(&mut legacy, &mut got_legacy, "\"findings\":0").await;
+
+    // A replay records an exchange (topic exchanges, not subscribed to by `typed`) ...
+    let r = http(
+        port,
+        "POST",
+        "/api/v1/replay",
+        &[AUTH, CHANGE],
+        Some(json!({"url": format!("http://127.0.0.1:{shop}"), "raw": "GET /api/products HTTP/1.1\nHost: x\n\n"})),
+    )
+    .await;
+    let ex = serde_json::from_str::<Value>(&r.2).unwrap()["exchange_id"].as_i64().unwrap();
+    // ... and a finding changes (topic findings), which the audit log also records.
+    let (st, _, body) = http(port, "POST", "/api/v1/findings", &[AUTH, CHANGE], Some(new_finding(ex))).await;
+    assert_eq!(st, 200, "{body}");
+    let fid = serde_json::from_str::<Value>(&body).unwrap()["id"].as_i64().unwrap();
+
+    read_until(&mut typed, &mut got_typed, "event: findings").await;
+    read_until(&mut typed, &mut got_typed, "event: audit").await;
+    assert!(!got_typed.contains("event: exchanges") && !got_typed.contains("event: counters"), "{got_typed}");
+    let block = got_typed.split("\n\n").find(|b| b.contains("event: findings")).unwrap();
+    assert!(block.lines().any(|l| l.starts_with("id: ") && l[4..].parse::<u64>().is_ok()), "{block}");
+    let data: Value = serde_json::from_str(block.lines().find_map(|l| l.strip_prefix("data: ")).unwrap()).unwrap();
+    assert_eq!(
+        (data["type"].as_str(), data["id"].as_i64(), data["status"].as_str()),
+        (Some("finding_changed"), Some(fid), Some("suspected"))
+    );
+    assert_eq!(data["topic"], "findings");
+
+    // The old client sees the new totals through the bus (a fresh counters event, no polling).
+    read_until(&mut legacy, &mut got_legacy, "\"findings\":1").await;
+    assert!(got_legacy.matches("event: counters").count() >= 2, "{got_legacy}");
+
+    // A reconnect that missed events gets one resync, then the live stream; the exchange is not replayed.
+    let mut again = open_events(port, "?topics=exchanges", "Last-Event-ID: 0\r\n").await;
+    let mut got_again = String::new();
+    read_until(&mut again, &mut got_again, "event: resync").await;
+    assert!(got_again.contains("\"missed\":"), "{got_again}");
+    assert!(!got_again.contains("event: exchanges"), "{got_again}");
+
+    // `all` means every topic this actor may read, counters excluded.
+    let mut all = open_events(port, "?topics=all", "").await;
+    let mut got_all = String::new();
+    let (st, _, _) = http(port, "POST", "/api/v1/findings", &[AUTH, CHANGE], Some(new_finding(ex))).await;
+    assert_eq!(st, 200);
+    read_until(&mut all, &mut got_all, "event: audit").await;
+    assert!(!got_all.contains("event: counters"), "{got_all}");
 }
 
 #[tokio::test]
