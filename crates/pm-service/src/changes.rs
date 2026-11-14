@@ -123,7 +123,7 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("model_snapshots", &row)?;
+        let id = self.store.write(|db| db.insert_row("model_snapshots", &row))?;
         self.audit(&actor.id(), "model_snapshot", json!({ "id": id, "name": name, "operations": shapes.len() }), "ok")?;
         Ok(SnapshotInfo {
             id,
@@ -137,8 +137,7 @@ impl Service {
     pub fn model_snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
         Ok(self
             .store
-            .lock()
-            .rows("model_snapshots", None, 200)?
+            .read(|db| db.rows("model_snapshots", None, 200))?
             .iter()
             .map(|r| {
                 let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
@@ -157,8 +156,7 @@ impl Service {
     fn snapshot_shapes(&self, id: i64) -> Result<(String, Vec<OpShape>)> {
         let r = self
             .store
-            .lock()
-            .row("model_snapshots", id)?
+            .read(|db| db.row("model_snapshots", id))?
             .ok_or_else(|| ServiceError::NotFound(format!("snapshot {id}")))?;
         let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         Ok((s("name"), serde_json::from_str(&s("data")).unwrap_or_default()))

@@ -172,8 +172,7 @@ impl Service {
 
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         if ex.summary.status != Some(101) && req.raw.is_none() {
             return Err(ServiceError::Invalid(format!(
@@ -262,27 +261,29 @@ impl Service {
             Err(e) => {
                 record.error = Some(format!("{e:#}"));
                 let error = record.error.clone();
-                let exchange_id = self.store.lock().insert_exchange(&record)?;
+                let exchange_id = self.store.write(|db| db.insert_exchange(&record))?;
                 return Ok(WsReplayResult::NotUpgraded { exchange_id, http_status: None, error });
             }
         };
         record.status = Some(resp.head.status);
         record.response = Some(resp.raw.clone());
-        let exchange_id = self.store.lock().insert_exchange(&record)?;
+        let exchange_id = self.store.write(|db| db.insert_exchange(&record))?;
         let AfterResponse::Upgraded(mut conn) = resp.conn else {
             return Ok(WsReplayResult::NotUpgraded { exchange_id, http_status: Some(resp.head.status), error: None });
         };
 
         let save = |from_client: bool, opcode: u8, len: u64, payload: &[u8], truncated: bool| {
-            self.store.lock().insert_ws_message(&NewWsMessage {
-                exchange_id,
-                ts_ms: now_ms(),
-                from_client,
-                opcode,
-                len,
-                payload: payload[..payload.len().min(KEEP)].to_vec(),
-                truncated: truncated || payload.len() > KEEP,
-                compressed: false,
+            self.store.write(|db| {
+                db.insert_ws_message(&NewWsMessage {
+                    exchange_id,
+                    ts_ms: now_ms(),
+                    from_client,
+                    opcode,
+                    len,
+                    payload: payload[..payload.len().min(KEEP)].to_vec(),
+                    truncated: truncated || payload.len() > KEEP,
+                    compressed: false,
+                })
             })
         };
         let mut dec = Decoder::new(KEEP);

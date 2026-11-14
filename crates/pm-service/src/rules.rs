@@ -41,7 +41,7 @@ impl Service {
         r.set_scope(Arc::new(move |scheme, host, port, path| {
             Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
         }));
-        sync_rules(&self.store.lock(), &r)?;
+        self.store.read(|db| sync_rules(db, &r))?;
         let _ = self.rewriter.set(r);
         Ok(())
     }
@@ -52,7 +52,7 @@ impl Service {
     }
 
     pub fn match_replace_rules(&self) -> Result<Vec<Rule>> {
-        load_rules(&self.store.lock())
+        self.store.read(load_rules)
     }
 
     /// Replaces the rules. Humans only: rules change every request the
@@ -63,7 +63,7 @@ impl Service {
         }
         rewrite::validate(&rules).map_err(ServiceError::Invalid)?;
         let text = serde_json::to_string(&rules).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(RULES_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(RULES_SETTING, &text))?;
         self.audit(&actor.id(), "match_replace_rules", json!({ "rules": rules }), "allow")?;
         if let Some(r) = self.rewriter.get() {
             r.set_rules(rules.clone()).map_err(ServiceError::Invalid)?;

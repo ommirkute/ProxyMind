@@ -37,14 +37,16 @@ impl Service {
     pub(crate) fn recorded_for_url(&self, url: &str) -> Option<Vec<u8>> {
         let u = url::Url::parse(url).ok()?;
         let path = format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default());
+        let host = u.host_str()?.to_string();
         let rows = self
             .store
-            .lock()
-            .search_exchanges(&HistoryFilter {
-                host: Some(u.host_str()?.to_string()),
-                path: Some(path.clone()),
-                limit: Some(50),
-                ..Default::default()
+            .read(|db| {
+                db.search_exchanges(&HistoryFilter {
+                    host: Some(host),
+                    path: Some(path.clone()),
+                    limit: Some(50),
+                    ..Default::default()
+                })
             })
             .ok()?;
         let port = u.port_or_known_default()?;
@@ -54,15 +56,14 @@ impl Service {
                 && r.scheme == u.scheme()
                 && r.status.is_some_and(|s| (200..300).contains(&s))
         })?;
-        self.store.lock().get_exchange(row.id).ok().flatten()?.response
+        self.store.read(|db| db.get_exchange(row.id)).ok().flatten()?.response
     }
 
     /// Seeds the page's sources with markers and reports which reach dangerous sinks.
     pub async fn dom_test(&self, actor: &Actor, req: DomTestRequest) -> Result<DomTestResult> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let s = &ex.summary;
         let page_url = pm_core::url(&s.scheme, &s.host, s.port, &s.path);

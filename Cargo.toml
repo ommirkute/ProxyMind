@@ -17,6 +17,14 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# SQLite (with its full-text index) and zstd are C code that does the heavy lifting of every store call;
+# unoptimized they make debug builds and the test suite several times slower than they need to be.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

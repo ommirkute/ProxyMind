@@ -1,6 +1,6 @@
 # ADR-0019: One source of truth for API contracts
 
-**Status:** Proposed. Roadmap work package 1.3 (`docs/roadmap.md`, Phase 1 and "Architecture gaps": "Hand-written contracts").
+**Status:** Accepted (2026-11-14). Roadmap work package 1.3 (`docs/roadmap.md`, Phase 1 and "Architecture gaps": "Hand-written contracts").
 
 ## Context
 The same request shape is written down up to five times, and nothing checks that the copies agree.

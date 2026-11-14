@@ -1,6 +1,6 @@
 # ADR-0017: Store concurrency: a read pool and one writer
 
-**Status:** Proposed
+**Status:** Accepted (2026-11-14, roadmap work package 1.1)
 
 ## Context
 Roadmap work package 1.1 removes the "one database connection per process" gap. What the code does today:
@@ -49,4 +49,5 @@ Each step keeps `pm-service`'s public API unchanged (ADR-0005) and ships on its 
   - Clean-shutdown must drain the queue; the join handle is awaited as `Recorder::spawn` callers do today.
   - A reader opened before a commit does not see it. Any code that writes and then reads must wait for the write reply, which `write` guarantees by being synchronous.
   - WAL growth: a reader holding a snapshot for minutes blocks checkpoints. Reads are short-lived; the pool adds a periodic `wal_checkpoint(PASSIVE)` from the writer.
+- **Full-text index (1.4).** Since 2026-11-14 a background indexer per `Service` writes the full-text index in batches on its own connection, so recording doesn't pay for it. It is a second writer, competing with the recorder for the write lock (stalls up to about 180 ms on the recorder's thread in the debug benchmark). With the single writer, indexing moves into the writer's batches and that thread goes away; WAL checkpoints move to the writer as well (measured: p99 insert stall 8 ms -> 0.4 ms when checkpoints leave the insert path).
 - **Verification (1.6).** The benchmark records 2,000 requests a second through the proxy while `history_search_text` runs over the 1M-exchange project, and measures the time from `Recorder::record` to the enqueue for each request. Pass: no enqueue waits over 50 ms, no loss (row count equals request count), `verify_audit` passes. Numbers go in the docs and are tracked weekly.

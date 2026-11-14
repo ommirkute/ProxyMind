@@ -164,7 +164,7 @@ impl Service {
         ids.truncate(max);
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(ex) = self.store.lock().get_exchange(id)? else { continue };
+            let Some(ex) = self.store.read(|db| db.get_exchange(id))? else { continue };
             let response = ex.response.as_deref().and_then(|raw| {
                 let converted;
                 let raw = if pm_http::h2text::is_http2_response(raw) {
@@ -321,8 +321,7 @@ impl Service {
     pub fn engage_references(&self, actor: &Actor, exchange_id: i64, f: &EngageFilter) -> Result<Vec<ExchangeSummary>> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(exchange_id)?
+            .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let path = ex.summary.path.split(['?', '#']).next().unwrap_or("").to_string();
         if path.len() < 2 {
@@ -473,8 +472,7 @@ impl Service {
     ) -> Result<String> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(exchange_id)?
+            .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let s = &ex.summary;
         if pm_http::h2text::is_http2_request(&ex.request) {
@@ -493,8 +491,7 @@ impl Service {
     pub fn engage_clickjacking(&self, exchange_id: i64) -> Result<Clickjacking> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(exchange_id)?
+            .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let resp =
             ex.response.ok_or_else(|| ServiceError::Invalid(format!("exchange {exchange_id} has no response")))?;

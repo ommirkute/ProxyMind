@@ -57,8 +57,10 @@ impl Service {
         if name == ANONYMOUS {
             return Ok(Identity::anonymous());
         }
-        let row =
-            self.store.lock().get_identity(name)?.ok_or_else(|| ServiceError::NotFound(format!("identity {name}")))?;
+        let row = self
+            .store
+            .read(|db| db.get_identity(name))?
+            .ok_or_else(|| ServiceError::NotFound(format!("identity {name}")))?;
         serde_json::from_str(&row.data).map_err(|e| ServiceError::Invalid(format!("identity {name} is corrupt: {e}")))
     }
 
@@ -71,12 +73,12 @@ impl Service {
             status: status.into(),
             updated_ms: now_ms(),
         };
-        self.store.lock().upsert_identity(&row)?;
+        self.store.write(|db| db.upsert_identity(&row))?;
         Ok(())
     }
 
     pub fn identity_list(&self) -> Result<Vec<IdentityInfo>> {
-        Ok(self.store.lock().list_identities()?.iter().map(info).collect())
+        Ok(self.store.read(|db| db.list_identities())?.iter().map(info).collect())
     }
 
     /// Creates or replaces an identity from a full definition. Humans only,
@@ -91,7 +93,10 @@ impl Service {
         self.save_identity(&ident, &actor.id(), "unknown")?;
         self.audit(&actor.id(), "identity_set", json!({ "name": ident.name, "role": ident.role }), "allow")?;
         Ok(info(
-            &self.store.lock().get_identity(&ident.name)?.ok_or_else(|| ServiceError::NotFound(ident.name.clone()))?,
+            &self
+                .store
+                .read(|db| db.get_identity(&ident.name))?
+                .ok_or_else(|| ServiceError::NotFound(ident.name.clone()))?,
         ))
     }
 
@@ -103,8 +108,7 @@ impl Service {
         }
         let ex = self
             .store
-            .lock()
-            .get_exchange(exchange_id)?
+            .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let auth = pm_identity::auth_from_request(&ex.request);
         if auth.is_empty() {
@@ -112,7 +116,7 @@ impl Service {
         }
         // Keep an existing health check / login recipe if re-capturing.
         let (health, login, created_by) = match self.load_identity(name) {
-            Ok(old) => (old.health, old.login, self.store.lock().get_identity(name)?.map(|r| r.created_by)),
+            Ok(old) => (old.health, old.login, self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by)),
             Err(_) => (None, None, None),
         };
         let ident = Identity { name: name.into(), role: role.into(), auth, health, login, logged_out: None };
@@ -124,14 +128,13 @@ impl Service {
             json!({ "name": name, "role": role, "from_exchange": exchange_id }),
             "allow",
         )?;
-        Ok(info(&self.store.lock().get_identity(name)?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
+        Ok(info(&self.store.read(|db| db.get_identity(name))?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
     }
 
     fn exchange_url_and_raw(&self, exchange_id: i64) -> Result<(String, String, String)> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(exchange_id)?
+            .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let s = &ex.summary;
         let url = pm_core::url(&s.scheme, &s.host, s.port, "");
@@ -153,10 +156,11 @@ impl Service {
         }
         let mut ident = self.load_identity(name)?;
         ident.health = Some(pm_identity::HealthCheck { url, request: raw, expect_status, expect_contains });
-        let created_by = self.store.lock().get_identity(name)?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
+        let created_by =
+            self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
         self.save_identity(&ident, &created_by, "unknown")?;
         self.audit(&actor.id(), "identity_set_health", json!({ "name": name, "from_exchange": exchange_id }), "allow")?;
-        Ok(info(&self.store.lock().get_identity(name)?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
+        Ok(info(&self.store.read(|db| db.get_identity(name))?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
     }
 
     /// Uses a recorded login request as the identity's login recipe. Humans
@@ -185,14 +189,14 @@ impl Service {
         });
         self.save_identity(&ident, &actor.id(), "unknown")?;
         self.audit(&actor.id(), "identity_set_login", json!({ "name": name, "from_exchange": exchange_id }), "allow")?;
-        Ok(info(&self.store.lock().get_identity(name)?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
+        Ok(info(&self.store.read(|db| db.get_identity(name))?.ok_or_else(|| ServiceError::NotFound(name.into()))?))
     }
 
     pub fn identity_delete(&self, actor: &Actor, name: &str) -> Result<bool> {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can delete identities".into()));
         }
-        let deleted = self.store.lock().delete_identity(name)?;
+        let deleted = self.store.write(|db| db.delete_identity(name))?;
         self.audit(&actor.id(), "identity_delete", json!({ "name": name }), if deleted { "allow" } else { "noop" })?;
         Ok(deleted)
     }
@@ -204,7 +208,7 @@ impl Service {
     pub async fn identity_login(&self, name: &str) -> Result<Vec<String>> {
         let mut ident = self.load_identity(name)?;
         let recipe = ident.login.clone().ok_or_else(|| ServiceError::Invalid(format!("{name} has no login recipe")))?;
-        let created_by = self.store.lock().get_identity(name)?.map(|r| r.created_by).unwrap_or_default();
+        let created_by = self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_default();
         let owner = Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         let mut learned = Vec::new();
         // What this run has learned: cookies set by its steps (sent on to
@@ -293,11 +297,11 @@ impl Service {
             }
         }
         let status = if ok { "ok" } else { "logged_out" };
-        let row = self.store.lock().get_identity(name)?;
+        let row = self.store.read(|db| db.get_identity(name))?;
         if let Some(mut row) = row {
             row.status = status.into();
             row.updated_ms = now_ms();
-            self.store.lock().upsert_identity(&row)?;
+            self.store.write(|db| db.upsert_identity(&row))?;
         }
         Ok(IdentityCheck { name: name.into(), status: status.into(), notes, exchange_id: Some(sent.exchange_id) })
     }

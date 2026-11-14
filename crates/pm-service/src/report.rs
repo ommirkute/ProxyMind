@@ -250,7 +250,7 @@ impl Service {
                 .collect();
             let mut evidence = Vec::new();
             for ex_id in evidence_ids.into_iter().filter(|_| opts.evidence.unwrap_or(true)) {
-                let Some(ex) = self.store.lock().get_exchange(ex_id)? else { continue };
+                let Some(ex) = self.store.read(|db| db.get_exchange(ex_id))? else { continue };
                 evidence.push(ReportEvidence {
                     exchange_id: ex_id,
                     identity: ex.summary.identity.clone(),
@@ -282,15 +282,14 @@ impl Service {
                 }),
             });
         }
-        let verified = crate::verify_audit(&self.store.lock());
+        let verified = self.store.read(crate::verify_audit);
         let (audit, audit_ok) = match verified {
             // The head hash lets anyone holding this report check later that
             // no records were cut off the end (`proxymind audit verify --anchor`).
             Ok(n) => {
                 let head = self
                     .store
-                    .lock()
-                    .audit_records()?
+                    .read(|db| db.audit_records())?
                     .last()
                     .map(|r| r.hash.iter().take(12).map(|b| format!("{b:02x}")).collect::<String>());
                 match head {

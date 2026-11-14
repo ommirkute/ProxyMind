@@ -921,12 +921,11 @@ impl Service {
     /// test user's email: lists of users and other cross-account leaks.
     /// One finding per operation. Sends nothing.
     pub(crate) fn cross_user_exposure(&self, actor: &Actor) -> Result<Vec<ScanLead>> {
-        let (identities, exchanges) = {
-            let store = self.store.lock();
+        let (identities, exchanges) = self.store.read(|store| -> Result<_> {
             let ids: Vec<pm_identity::Identity> =
                 store.list_identities()?.iter().filter_map(|r| serde_json::from_str(&r.data).ok()).collect();
-            (ids, store.recent_exchanges(crate::model::MODEL_WINDOW)?)
-        };
+            Ok((ids, store.recent_exchanges(crate::model::MODEL_WINDOW)?))
+        })?;
         let users: Vec<&pm_identity::Identity> =
             identities.iter().filter(|i| !i.role.to_ascii_lowercase().contains("admin")).collect();
         if users.len() < 2 {
@@ -1014,23 +1013,24 @@ mod tests {
         let request = format!("GET {path} HTTP/1.1\r\nHost: app.example.com\r\n\r\n").into_bytes();
         let response = format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\n\r\nok").into_bytes();
         s.store
-            .lock()
-            .insert_exchange(&NewExchange {
-                ts_ms: 1,
-                duration_ms: None,
-                source: source.into(),
-                actor_id: "human:t".into(),
-                scheme: "https".into(),
-                host: "app.example.com".into(),
-                port: 443,
-                method: "GET".into(),
-                path: path.into(),
-                status: Some(status),
-                request,
-                response: Some(response),
-                error: None,
-                identity: None,
-                hypothesis_id: None,
+            .write(|db| {
+                db.insert_exchange(&NewExchange {
+                    ts_ms: 1,
+                    duration_ms: None,
+                    source: source.into(),
+                    actor_id: "human:t".into(),
+                    scheme: "https".into(),
+                    host: "app.example.com".into(),
+                    port: 443,
+                    method: "GET".into(),
+                    path: path.into(),
+                    status: Some(status),
+                    request,
+                    response: Some(response),
+                    error: None,
+                    identity: None,
+                    hypothesis_id: None,
+                })
             })
             .unwrap();
     }

@@ -81,8 +81,12 @@ impl Service {
         ids.sort();
         let role_of = |n: &str| ids.iter().find(|(x, _)| x == n).map(|(_, r)| r.clone()).unwrap_or_default();
         // Who made a recorded request: stored for replays, matched by credentials for proxied traffic.
-        let identities: Vec<pm_identity::Identity> =
-            self.store.lock().list_identities()?.iter().filter_map(|r| serde_json::from_str(&r.data).ok()).collect();
+        let identities: Vec<pm_identity::Identity> = self
+            .store
+            .read(|db| db.list_identities())?
+            .iter()
+            .filter_map(|r| serde_json::from_str(&r.data).ok())
+            .collect();
         let max = req.max_operations.unwrap_or(40).clamp(1, 200);
         let mut out = AuthzMatrix { identities: ids.clone(), rows: vec![], skipped: vec![], flagged: 0, proven: 0 };
         out.identities.push((ANONYMOUS.into(), String::new()));
@@ -103,7 +107,7 @@ impl Service {
             // A recent successful example, made as a known identity if possible.
             let mut pick: Option<(i64, Option<String>)> = None;
             for id in op.examples.iter().rev() {
-                let Some(ex) = self.store.lock().get_exchange(*id)? else { continue };
+                let Some(ex) = self.store.read(|db| db.get_exchange(*id))? else { continue };
                 if !ex.summary.status.is_some_and(|s| (200..300).contains(&s)) {
                     continue;
                 }

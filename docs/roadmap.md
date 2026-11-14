@@ -93,7 +93,7 @@ No new features: this removes the limits that would block Phases 2 and 3. Write 
 | 1.1 Store concurrency | Read-only connection pool (WAL) and one writer task fed by a bounded channel; recorder writes batched in transactions | 2,000 requests a second recorded while a content search runs, no stall over 50 ms |
 | 1.2 Event bus | A typed `Event` enum broadcast from the service; SSE topics with per-event payloads; the UI stops polling | No timers left in the UI's live view |
 | 1.3 Typed contracts | JSON schemas derived from the Rust types; OpenAPI, UI types, SDK types and MCP schemas generated; CI drift check | The hand-written MCP schemas are gone |
-| 1.4 Full-text search | FTS5 over decoded text, filled by the writer task; backfill through a new (append-only) migration | Content search on 1M exchanges under 200 ms |
+| 1.4 Full-text search | FTS5 over decoded text, filled by the writer task; backfill through a new (append-only) migration | Content search on 1M exchanges under 200 ms. **Step 1 done 2026-11-14** (plain-text search, see below); step 2: HQL content terms (`resp:"…"`) |
 | 1.5 Service split | Domains (scanning, proof, regress, sessions, AI) in their own crates behind the facade | Facade API unchanged; one domain rebuilds in under 30 s |
 | 1.6 Large-project benchmark | 1M exchanges, 10k issues: ingest, search, UI first paint, memory | Numbers in the docs, tracked weekly |
 
@@ -105,6 +105,18 @@ create lists all findings to check duplicates): 10,000 findings took 393 s, 25/s
 creation first, then full-text search (1.4); the store split (1.1) matters most for service-path writes (imports,
 replay, races, audit) that share the service lock, which the next benchmark round must measure. Real numbers need a
 release build and 1M exchanges.
+
+**1.4 step 1 (2026-11-14):** a contentless trigram FTS5 index (positions-free: about 0.6x the text on JSON-like
+traffic) pre-filters plain-text content search; every candidate is still verified, so results are unchanged. Writing
+the index inside each one-row insert halved recording (per-commit index work: 43,869 vs 3,048 rows/s in raw SQLite),
+so file projects index in a background thread in batches, and exchanges not yet indexed are always candidates.
+Debug build, 30k exchanges: recording 2,700-3,160 inserts/s (unchanged from no index), content search 0.8 ms (was
+902 ms over 5,000 bodies). While recording and searching at once, the recorder's writer thread still sees stalls up
+to about 180 ms (p99 8 ms): the indexer and SQLite's WAL checkpoints compete with it for the write lock. The proxy
+doesn't wait on those (it only enqueues; the queue holds 4,096 exchanges, about 2 s at 2,000/s), so the 1.1 target
+as ADR-0017 defines it holds. Moving checkpoints into the indexer cut p99 to 0.4 ms and doubled throughput but let the
+indexer starve the recorder (max stalls up to 3 s), so it wasn't kept; the real fix is ADR-0017's single writer, which
+does the indexing in its own batches.
 
 **Gate:** the 1M-exchange benchmark meets the targets, and the byte-exact traffic tests still pass.
 

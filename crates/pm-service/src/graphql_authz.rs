@@ -156,10 +156,12 @@ impl Service {
     /// The URL of a GraphQL endpoint seen in history: a POST that looks like
     /// GraphQL and was answered with a 2xx.
     fn graphql_endpoint(&self) -> Result<Option<String>> {
-        let rows = self.store.lock().search_exchanges(&pm_store::HistoryFilter {
-            method: Some("POST".into()),
-            limit: Some(2000),
-            ..Default::default()
+        let rows = self.store.read(|db| {
+            db.search_exchanges(&pm_store::HistoryFilter {
+                method: Some("POST".into()),
+                limit: Some(2000),
+                ..Default::default()
+            })
         })?;
         for row in rows.iter().filter(|r| r.status.is_some_and(|s| (200..300).contains(&s))) {
             let Ok(ex) = self.exchange_raw(row.id) else { continue };

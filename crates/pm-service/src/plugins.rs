@@ -153,13 +153,15 @@ impl Service {
             .into_iter()
             .find(|p| p.manifest.name == plugin)
             .ok_or_else(|| ServiceError::NotFound(format!("enabled plugin {plugin}")))?;
-        let rows = self.store.lock().search_exchanges(&pm_store::HistoryFilter {
-            limit: Some(limit.unwrap_or(500).clamp(1, 5000)),
-            ..Default::default()
+        let rows = self.store.read(|db| {
+            db.search_exchanges(&pm_store::HistoryFilter {
+                limit: Some(limit.unwrap_or(500).clamp(1, 5000)),
+                ..Default::default()
+            })
         })?;
         let mut lines = Vec::with_capacity(rows.len());
         for s in rows {
-            let Some(ex) = self.store.lock().get_exchange(s.id)? else { continue };
+            let Some(ex) = self.store.read(|db| db.get_exchange(s.id))? else { continue };
             lines.push(pm_plugin::ExchangeLine {
                 exchange_id: s.id,
                 scheme: s.scheme.clone(),
@@ -216,8 +218,7 @@ impl Service {
         }
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let s = &ex.summary;
         let endpoint = Endpoint::new(&s.scheme, &s.host, s.port);
@@ -303,7 +304,8 @@ impl Service {
         for (i, (p, out)) in probes.iter().zip(&outs).enumerate() {
             let (sent, mut n) = self.send_as(actor, out, req.identity.as_deref(), true, "plugin").await?;
             notes.append(&mut n);
-            let request = self.store.lock().get_exchange(sent.exchange_id)?.map(|e| e.request).unwrap_or_default();
+            let request =
+                self.store.read(|db| db.get_exchange(sent.exchange_id))?.map(|e| e.request).unwrap_or_default();
             results.push(pm_plugin::active::ProbeResult {
                 index: i,
                 note: p.note.clone(),

@@ -184,7 +184,7 @@ impl Service {
             let path = fill_path(&op.path, target, &obj.id);
             // A recorded GET of the object, to read it back as its owner.
             let read = obj.seen_in.iter().rev().find_map(|&id| {
-                let e = self.store.lock().get_exchange(id).ok().flatten()?;
+                let e = self.store.read(|db| db.get_exchange(id)).ok().flatten()?;
                 (e.summary.method == "GET"
                     && e.summary.path.split('?').next() == Some(&fill_path(&read.template, &e.summary.path, &obj.id)))
                 .then(|| self.redactor.redact(&String::from_utf8_lossy(&e.request)))

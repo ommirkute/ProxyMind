@@ -1372,7 +1372,8 @@ async fn run() -> Result<()> {
     match &cli.command {
         Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
-            let store = Store::open(&cli.project)?;
+            let mut store = Store::open(&cli.project)?;
+            store.set_text_extractor(pm_service::searchable);
             let (recorder, writer) = Recorder::spawn(store);
             // In-scope-only rules need the rules of engagement; without
             // them only rules marked "any host" apply.
@@ -2043,7 +2044,9 @@ async fn run() -> Result<()> {
             if !*no_proxy {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
                 setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
-                let (recorder, _writer) = Recorder::spawn(Store::open(&cli.project)?);
+                let mut recording = Store::open(&cli.project)?;
+                recording.set_text_extractor(pm_service::searchable);
+                let (recorder, _writer) = Recorder::spawn(recording);
                 service.attach_recorder(&recorder)?;
                 let queue = Arc::new(pm_proxy::InterceptQueue::new());
                 service.attach_intercept(queue.clone());

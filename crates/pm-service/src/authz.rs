@@ -63,8 +63,7 @@ impl Service {
     pub async fn authz_check(&self, actor: &Actor, req: AuthzCheckRequest) -> Result<AuthzReport> {
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let s = &ex.summary;
         if Tier::for_http_method(&s.method) != Tier::ActiveSafe {
@@ -156,7 +155,7 @@ impl Service {
                     row.summary = reasons.join("; ");
                 }
             }
-            row.id = self.store.lock().insert_authz(&row)?;
+            row.id = self.store.write(|db| db.insert_authz(&row))?;
             results.push(row);
         }
         Ok(AuthzReport {
@@ -173,7 +172,7 @@ impl Service {
 
     /// Latest authorization results (per exchange and identity).
     pub fn authz_results(&self, exchange_id: Option<i64>) -> Result<Vec<AuthzRow>> {
-        Ok(self.store.lock().authz_results(exchange_id)?)
+        Ok(self.store.read(|db| db.authz_results(exchange_id))?)
     }
 }
 

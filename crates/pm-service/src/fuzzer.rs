@@ -245,8 +245,7 @@ impl Service {
             (Some(id), _) => {
                 let ex = self
                     .store
-                    .lock()
-                    .get_exchange(id)?
+                    .read(|db| db.get_exchange(id))?
                     .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
                 Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port)
             }

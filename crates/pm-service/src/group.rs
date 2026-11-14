@@ -272,7 +272,7 @@ impl Service {
                 }
                 Err(e) => record.error = Some(format!("{e:#}")),
             }
-            let id = self.store.lock().insert_exchange(&record)?;
+            let id = self.store.write(|db| db.insert_exchange(&record))?;
             results.push(GroupItemResult {
                 index: i,
                 name: names[i].clone(),

@@ -68,15 +68,14 @@ impl Service {
     /// Builds the application model. Exchanges recorded through the proxy
     /// are attributed to an identity when their credentials match one.
     pub fn model(&self) -> Result<AppModel> {
-        let (exchanges, identities) = {
-            let store = self.store.lock();
+        let (exchanges, identities) = self.store.read(|store| -> Result<_> {
             let ids: Vec<Identity> = store
                 .list_identities()?
                 .iter()
                 .filter_map(|r| serde_json::from_str::<Identity>(&r.data).ok())
                 .collect();
-            (store.recent_exchanges(MODEL_WINDOW)?, ids)
-        };
+            Ok((store.recent_exchanges(MODEL_WINDOW)?, ids))
+        })?;
         let resolved: Vec<Option<String>> = exchanges
             .iter()
             .map(|e| e.summary.identity.clone().or_else(|| resolve_identity(&e.request, &identities)))
@@ -161,7 +160,7 @@ impl Service {
         ] {
             row.insert(k.into(), v);
         }
-        let id = self.store.lock().insert_row("hypotheses", &row)?;
+        let id = self.store.write(|db| db.insert_row("hypotheses", &row))?;
         self.audit(&actor.id(), "hypothesis_create", json!({ "id": id, "hypothesis": h }), "allow")?;
         self.hypothesis_get(id)
     }
@@ -169,12 +168,11 @@ impl Service {
     pub fn hypothesis_get(&self, id: i64) -> Result<Hypothesis> {
         let row = self
             .store
-            .lock()
-            .row("hypotheses", id)?
+            .read(|db| db.row("hypotheses", id))?
             .ok_or_else(|| ServiceError::NotFound(format!("hypothesis {id}")))?;
         let mut h = decode_hypothesis(&row);
         let f = pm_store::HistoryFilter { hypothesis_id: Some(id), limit: Some(100), ..Default::default() };
-        h.evidence = self.store.lock().search_exchanges(&f)?.into_iter().map(|e| e.id).collect();
+        h.evidence = self.store.read(|db| db.search_exchanges(&f))?.into_iter().map(|e| e.id).collect();
         Ok(h)
     }
 
@@ -192,14 +190,14 @@ impl Service {
             changes.insert("notes".into(), json!(serde_json::to_string(&h.notes).unwrap_or_default()));
         }
         changes.insert("updated_ms".into(), json!(now_ms()));
-        self.store.lock().update_row("hypotheses", u.id, &changes)?;
+        self.store.write(|db| db.update_row("hypotheses", u.id, &changes))?;
         self.audit(&actor.id(), "hypothesis_update", json!(u), "allow")?;
         self.hypothesis_get(u.id)
     }
 
     pub fn hypothesis_list(&self, status: Option<&str>) -> Result<Vec<Hypothesis>> {
         let filter = status.map(|s| json!(s));
-        let rows = self.store.lock().rows("hypotheses", filter.as_ref().map(|v| ("status", v)), 1000)?;
+        let rows = self.store.read(|db| db.rows("hypotheses", filter.as_ref().map(|v| ("status", v)), 1000))?;
         Ok(rows.iter().map(decode_hypothesis).collect())
     }
 

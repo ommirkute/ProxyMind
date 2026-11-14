@@ -203,7 +203,7 @@ impl Service {
                     (None, 0, record.error.clone())
                 }
             };
-            let id = self.store.lock().insert_exchange(&record)?;
+            let id = self.store.write(|db| db.insert_exchange(&record))?;
             exchange_ids.push(id);
             groups.entry(key).or_default().push(id);
         }

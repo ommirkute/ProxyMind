@@ -35,7 +35,7 @@ struct Lazy<'a> {
 impl Lazy<'_> {
     fn load(&mut self) -> &(Vec<u8>, Option<Vec<u8>>) {
         if self.loaded.is_none() {
-            let ex = self.svc.store.lock().get_exchange(self.row.id).ok().flatten();
+            let ex = self.svc.store.read(|db| db.get_exchange(self.row.id)).ok().flatten();
             let redactor = self.svc.redactor_for(self.actor);
             let prep = |raw: &[u8]| {
                 let hay = crate::search::searchable(raw);
@@ -103,7 +103,7 @@ impl Service {
         let mut rows = if filter.in_scope == Some(true) {
             self.in_scope_rows(filter, limit)?
         } else {
-            self.store.lock().search_exchanges(filter)?
+            self.store.read(|db| db.search_exchanges(filter))?
         };
         if let Some(r) = self.redactor_for(actor) {
             for row in &mut rows {
@@ -130,7 +130,7 @@ impl Service {
         f.limit = Some(500);
         let (mut out, mut scanned, mut last, mut more) = (Vec::new(), 0usize, None, true);
         'pages: while more {
-            let page = self.store.lock().search_exchanges(&f)?;
+            let page = self.store.read(|db| db.search_exchanges(&f))?;
             more = page.len() == 500 && filter.after_id.is_none();
             for row in &page {
                 scanned += 1;
@@ -164,7 +164,7 @@ impl Service {
         f.limit = Some(500);
         let mut out = Vec::new();
         for _ in 0..40 {
-            let page = self.store.lock().search_exchanges(&f)?;
+            let page = self.store.read(|db| db.search_exchanges(&f))?;
             let n = page.len();
             let last = page.last().map(|r| r.id);
             for r in page {
@@ -195,12 +195,12 @@ impl Service {
         highlight: Option<&str>,
         comment: Option<&str>,
     ) -> Result<ExchangeSummary> {
-        let mut store = self.store.lock();
-        if !store.annotate(id, highlight, comment).map_err(|e| ServiceError::Invalid(format!("{e:#}")))? {
-            return Err(ServiceError::NotFound(format!("exchange {id}")));
-        }
-        let mut row = store.get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?.summary;
-        drop(store);
+        let mut row = self.store.write(|store| -> Result<_> {
+            if !store.annotate(id, highlight, comment).map_err(|e| ServiceError::Invalid(format!("{e:#}")))? {
+                return Err(ServiceError::NotFound(format!("exchange {id}")));
+            }
+            Ok(store.get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?.summary)
+        })?;
         if let Some(r) = self.redactor_for(actor) {
             row.path = r.redact(&row.path);
         }
@@ -209,13 +209,19 @@ impl Service {
 
     /// One exchange as a view sized for a model or a UI.
     pub fn exchange_get(&self, actor: &Actor, id: i64, view: View, max_tokens: usize) -> Result<ExchangeView> {
-        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let ex = self
+            .store
+            .read(|db| db.get_exchange(id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         Ok(render_exchange(&ex, view, max_tokens, self.redactor_for(actor)))
     }
 
     /// Raw bytes of an exchange's request, with secrets replaced for agents.
     pub fn exchange_raw_request(&self, actor: &Actor, id: i64) -> Result<String> {
-        let ex = self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
+        let ex = self
+            .store
+            .read(|db| db.get_exchange(id))?
+            .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         let text = String::from_utf8_lossy(&ex.request).into_owned();
         Ok(match self.redactor_for(actor) {
             Some(r) => r.redact(&text),
@@ -233,8 +239,7 @@ impl Service {
         check_ui_key(key)?;
         Ok(self
             .store
-            .lock()
-            .get_setting(&format!("ui:{key}"))?
+            .read(|db| db.get_setting(&format!("ui:{key}")))?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(serde_json::Value::Null))
     }
@@ -249,7 +254,7 @@ impl Service {
         if text.len() > UI_STATE_MAX {
             return Err(ServiceError::Invalid(format!("UI state larger than {} MB", UI_STATE_MAX / 1024 / 1024)));
         }
-        self.store.lock().set_setting(&format!("ui:{key}"), &text)?;
+        self.store.write(|db| db.set_setting(&format!("ui:{key}"), &text))?;
         Ok(())
     }
 }

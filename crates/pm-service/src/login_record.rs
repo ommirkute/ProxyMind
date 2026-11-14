@@ -221,49 +221,50 @@ fn body_text(response: &[u8]) -> String {
 impl Service {
     /// The newest exchange id: where a recording starts.
     pub fn history_mark(&self) -> Result<i64> {
-        Ok(self.store.lock().max_exchange_id()?)
+        Ok(self.store.read(|db| db.max_exchange_id())?)
     }
 
     fn recorded_window(&self, from: i64, to: i64) -> Result<Vec<Rec>> {
-        let store = self.store.lock();
-        let mut after = from;
-        let mut out = Vec::new();
-        let mut read = 0;
-        'outer: loop {
-            let ids = store.exchange_ids_after(after, 500)?;
-            let Some(&last) = ids.last() else { break };
-            for id in ids {
-                if id > to || read >= MAX_WINDOW {
-                    break 'outer;
+        self.store.read(|store| -> Result<Vec<Rec>> {
+            let mut after = from;
+            let mut out = Vec::new();
+            let mut read = 0;
+            'outer: loop {
+                let ids = store.exchange_ids_after(after, 500)?;
+                let Some(&last) = ids.last() else { break };
+                for id in ids {
+                    if id > to || read >= MAX_WINDOW {
+                        break 'outer;
+                    }
+                    read += 1;
+                    let Some(ex) = store.get_exchange(id)? else { continue };
+                    let s = &ex.summary;
+                    let Some(response) = ex.response else { continue };
+                    if s.identity.is_some() || s.source != "proxy" || static_path(&s.path) || static_type(&response) {
+                        continue;
+                    }
+                    let origin = pm_core::url(&s.scheme, &s.host, s.port, "");
+                    let url = format!("{origin}{}", s.path);
+                    if Target::from_url(&url).map(|t| self.policy.scope_check(&t).is_err()).unwrap_or(true) {
+                        continue;
+                    }
+                    let status = s.status.unwrap_or(0);
+                    let text = pm_identity::response_text(&response);
+                    out.push(Rec {
+                        id,
+                        method: s.method.clone(),
+                        origin,
+                        url,
+                        request: String::from_utf8_lossy(&ex.request).into_owned(),
+                        response,
+                        text,
+                        status,
+                    });
                 }
-                read += 1;
-                let Some(ex) = store.get_exchange(id)? else { continue };
-                let s = &ex.summary;
-                let Some(response) = ex.response else { continue };
-                if s.identity.is_some() || s.source != "proxy" || static_path(&s.path) || static_type(&response) {
-                    continue;
-                }
-                let origin = pm_core::url(&s.scheme, &s.host, s.port, "");
-                let url = format!("{origin}{}", s.path);
-                if Target::from_url(&url).map(|t| self.policy.scope_check(&t).is_err()).unwrap_or(true) {
-                    continue;
-                }
-                let status = s.status.unwrap_or(0);
-                let text = pm_identity::response_text(&response);
-                out.push(Rec {
-                    id,
-                    method: s.method.clone(),
-                    origin,
-                    url,
-                    request: String::from_utf8_lossy(&ex.request).into_owned(),
-                    response,
-                    text,
-                    status,
-                });
+                after = last;
             }
-            after = last;
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     /// Builds `name`'s login recipe from what the browser sent between
@@ -421,7 +422,8 @@ impl Service {
         }
         ident.auth = auth.clone();
         ident.login = Some(LoginRecipe { steps });
-        let created_by = self.store.lock().get_identity(name)?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
+        let created_by =
+            self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
         self.save_identity(&ident, &created_by, "unknown")?;
         let ids: Vec<i64> = info.iter().map(|s| s.exchange_id).collect();
         self.audit(
@@ -522,7 +524,8 @@ impl Service {
             health_contains = Some(m);
         }
         ident.logged_out = (lo != LoggedOut::default()).then(|| lo.clone());
-        let created_by = self.store.lock().get_identity(name)?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
+        let created_by =
+            self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_else(|| actor.id());
         self.save_identity(&ident, &created_by, "ok")?;
         self.audit(&actor.id(), "identity_learn_logged_out", json!({ "name": name, "logged_out": lo }), "allow")?;
         Ok(LoggedOutLearned { name: name.into(), logged_out: lo, health_contains, exchange_ids: ids })

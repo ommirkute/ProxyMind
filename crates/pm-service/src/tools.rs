@@ -101,7 +101,7 @@ impl Service {
     /// diffs of the requests and responses (secrets hidden for agents).
     pub fn compare_exchanges(&self, actor: &Actor, a: i64, b: i64) -> Result<Value> {
         let get = |id: i64| -> Result<pm_store::Exchange> {
-            self.store.lock().get_exchange(id)?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
+            self.store.read(|db| db.get_exchange(id))?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
         };
         let (ea, eb) = (get(a)?, get(b)?);
         let redact = |s: String| match self.redactor_for(actor) {
@@ -149,8 +149,7 @@ impl Service {
         }
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);

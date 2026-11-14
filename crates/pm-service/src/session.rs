@@ -608,7 +608,7 @@ fn humans_only(actor: &Actor) -> Result<()> {
 impl Service {
     pub fn session_get(&self, actor: &Actor) -> Result<SessionView> {
         humans_only(actor)?;
-        let config = load(&self.store.lock())?;
+        let config = self.store.read(load)?;
         Ok(SessionView { config, variables: self.session.lock().vars.clone() })
     }
 
@@ -617,7 +617,7 @@ impl Service {
         cfg.validate().map_err(ServiceError::Invalid)?;
         cfg.saved_by = actor.id();
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        self.store.lock().set_setting(SESSION_SETTING, &text)?;
+        self.store.write(|db| db.set_setting(SESSION_SETTING, &text))?;
         self.audit(&actor.id(), "session_handling", cfg.for_audit(), "allow")?;
         self.session_get(actor)
     }
@@ -641,7 +641,7 @@ impl Service {
     /// Runs a macro now (to test it). Humans only.
     pub async fn session_macro_run(&self, actor: &Actor, name: &str) -> Result<MacroRun> {
         humans_only(actor)?;
-        let cfg = load(&self.store.lock())?;
+        let cfg = self.store.read(load)?;
         let m = cfg
             .macros
             .iter()
@@ -653,26 +653,27 @@ impl Service {
     /// Reads responses recorded since the last look into the jar.
     fn refresh_jar(&self) -> Result<()> {
         let from = self.session.lock().jar.seen_up_to;
-        let store = self.store.lock();
-        let mut after = match from {
-            Some(id) => id,
-            None => (store.max_exchange_id()? - JAR_SEED).max(0),
-        };
-        let mut fresh = Vec::new();
-        loop {
-            let ids = store.exchange_ids_after(after, 500)?;
-            let Some(&last) = ids.last() else { break };
-            for id in ids {
-                if let Some(ex) = store.get_exchange(id)?
-                    && ex.summary.identity.is_none()
-                    && let Some(resp) = ex.response
-                {
-                    fresh.push((ex.summary.host, resp));
+        let (after, fresh) = self.store.read(|store| -> Result<_> {
+            let mut after = match from {
+                Some(id) => id,
+                None => (store.max_exchange_id()? - JAR_SEED).max(0),
+            };
+            let mut fresh = Vec::new();
+            loop {
+                let ids = store.exchange_ids_after(after, 500)?;
+                let Some(&last) = ids.last() else { break };
+                for id in ids {
+                    if let Some(ex) = store.get_exchange(id)?
+                        && ex.summary.identity.is_none()
+                        && let Some(resp) = ex.response
+                    {
+                        fresh.push((ex.summary.host, resp));
+                    }
                 }
+                after = last;
             }
-            after = last;
-        }
-        drop(store);
+            Ok((after, fresh))
+        })?;
         let mut st = self.session.lock();
         for (host, resp) in fresh {
             st.jar.absorb(&host, &resp);
@@ -811,7 +812,7 @@ impl Service {
         if EXEMPT.contains(&source) {
             return Ok(None);
         }
-        let cfg = load(&self.store.lock())?;
+        let cfg = self.store.read(load)?;
         if cfg.rules.is_empty() {
             return Ok(None);
         }

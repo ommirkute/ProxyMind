@@ -75,7 +75,7 @@ impl Service {
     fn update_state(&self) -> Result<UpdateState> {
         let text = match self.plugin_home.get() {
             Some(home) => std::fs::read_to_string(home.join(FILE)).ok(),
-            None => self.store.lock().get_setting(SETTING)?,
+            None => self.store.read(|db| db.get_setting(SETTING))?,
         };
         Ok(text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default())
     }
@@ -84,7 +84,7 @@ impl Service {
         let text = serde_json::to_string(s).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         match self.plugin_home.get() {
             Some(home) => std::fs::write(home.join(FILE), text).map_err(|e| ServiceError::Invalid(e.to_string())),
-            None => Ok(self.store.lock().set_setting(SETTING, &text)?),
+            None => Ok(self.store.write(|db| db.set_setting(SETTING, &text))?),
         }
     }
 

@@ -78,7 +78,7 @@ fn split_response(raw: Option<&[u8]>) -> (String, String) {
 
 impl Service {
     pub fn custom_checks(&self) -> Result<Vec<SavedCustomCheck>> {
-        let texts = load(&self.store.lock())?;
+        let texts = self.store.read(load)?;
         Ok(texts
             .into_iter()
             .filter_map(|yaml| {
@@ -93,9 +93,8 @@ impl Service {
             return Err(ServiceError::Invalid("only people can save custom checks".into()));
         }
         let check = custom::parse(yaml).map_err(ServiceError::Invalid)?;
-        {
-            let mut store = self.store.lock();
-            let mut saved = load(&store)?;
+        self.store.write(|store| -> Result<()> {
+            let mut saved = load(store)?;
             saved.retain(|t| custom::parse(t).map_or(true, |c| c.id != check.id));
             if saved.len() >= MAX_SAVED {
                 return Err(ServiceError::Invalid(format!("at most {MAX_SAVED} saved checks")));
@@ -103,7 +102,8 @@ impl Service {
             saved.push(yaml.to_string());
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(SETTING, &text)?;
-        }
+            Ok(())
+        })?;
         self.audit(&actor.id(), "custom_check_save", json!({ "id": check.id, "yaml": yaml }), "allow")?;
         Ok(SavedCustomCheck { id: check.id.clone(), yaml: yaml.to_string(), check })
     }
@@ -112,15 +112,14 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only people can delete custom checks".into()));
         }
-        let removed = {
-            let mut store = self.store.lock();
-            let mut saved = load(&store)?;
+        let removed = self.store.write(|store| -> Result<bool> {
+            let mut saved = load(store)?;
             let before = saved.len();
             saved.retain(|t| custom::parse(t).map_or(true, |c| c.id != id));
             let text = serde_json::to_string(&saved).map_err(|e| ServiceError::Invalid(e.to_string()))?;
             store.set_setting(SETTING, &text)?;
-            saved.len() < before
-        };
+            Ok(saved.len() < before)
+        })?;
         self.audit(&actor.id(), "custom_check_delete", json!({ "id": id }), if removed { "allow" } else { "noop" })?;
         Ok(removed)
     }
@@ -147,8 +146,7 @@ impl Service {
         checks.sort_by(|a, b| a.id.cmp(&b.id));
         let ex = self
             .store
-            .lock()
-            .get_exchange(req.exchange_id)?
+            .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         if pm_http::h2text::is_http2_request(&ex.request) {
             return Err(ServiceError::Invalid("custom checks run on HTTP/1.1 requests; resend it as HTTP/1.1".into()));
