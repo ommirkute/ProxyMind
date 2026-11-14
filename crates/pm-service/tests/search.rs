@@ -328,3 +328,46 @@ fn paging_with_the_index_covers_each_hit_once() {
     assert_eq!(ids, sorted, "newest first, no repeats");
     assert_eq!(ids.len(), 5 * 4, "response matches in bodies 0-2 and header 3");
 }
+
+/// A recorder in another connection writes without indexing; search is right at once (the tail is
+/// verified) and again after the Service's background thread has indexed it.
+#[test]
+fn rows_from_another_connection_are_found_before_and_after_background_indexing() {
+    let dir = std::env::temp_dir().join(format!("pm-search-tail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("p.pmproj");
+    let roe = "version: 1\nscope:\n  include: [\"https://shop.test/\"]\n";
+    let svc = Service::new(Store::open(&path).unwrap(), Policy::new(Roe::parse(roe).unwrap())).unwrap();
+    let mut recorder = Store::open(&path).unwrap();
+    recorder.set_text_extractor(pm_service::searchable);
+    for i in 0..20 {
+        let path = format!("/p/{i}");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: shop.test\r\n\r\n").into_bytes();
+        let resp = if i % 4 == 0 {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nxx tail-marker-xyz!!".to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()
+        };
+        insert(&mut recorder, "shop.test", &path, req, resp);
+    }
+    let human = Actor::parse("human:t").unwrap();
+    let req = SearchRequest { query: "tail-marker-xyz".into(), ..Default::default() };
+    let first = all_hits(&svc, &human, &req);
+    assert_eq!(first.len(), 5, "{first:?}");
+
+    // Wait until the tail is indexed: the candidates are then exactly the matching rows.
+    let probe = Store::open(&path).unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let c = probe.text_candidates("tail-marker-xyz").unwrap().expect("usable");
+        if c.len() == 5 {
+            break;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "tail never indexed: {c:?}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(all_hits(&svc, &human, &req), first, "same hits through the index");
+    drop(svc);
+    drop(probe);
+    let _ = std::fs::remove_dir_all(&dir);
+}

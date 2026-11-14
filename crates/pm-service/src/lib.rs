@@ -204,38 +204,56 @@ pub struct Service {
     relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
+    /// Keeps the background text indexer running; it exits when this is dropped.
+    _indexer: Option<std::sync::Arc<()>>,
 }
 
-/// Indexes exchanges recorded before the full-text index existed: in the background on
-/// its own connection for a project file, at once for an in-memory one. Errors only
-/// leave search on the slower path.
-fn start_text_backfill(store: &mut Store) {
+/// Keeps the full-text index current. A project file gets one long-lived thread on its own
+/// connection: it indexes the tail the recorder wrote (the recorder doesn't index), then a
+/// batch of the old backlog, sleeps, and repeats. It stops once the returned token is dropped
+/// (the Service owns it). An in-memory store indexes inline, so only its backlog needs a
+/// synchronous pass. Errors only leave search on the slower path.
+fn start_text_indexer(store: &mut Store) -> Option<std::sync::Arc<()>> {
     const BATCH: usize = 500;
-    match store.text_index_complete() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!("full-text index state unreadable: {e:#}");
-            return;
-        }
-    }
     let Some(path) = store.path() else {
         while !matches!(store.text_index_backfill(BATCH), Ok(true) | Err(_)) {}
-        return;
+        return None;
     };
-    let spawned = std::thread::Builder::new().name("text-index-backfill".into()).spawn(move || {
-        let run = || -> anyhow::Result<()> {
-            let mut own = Store::open(&path)?;
-            own.set_text_extractor(search::searchable);
-            while !own.text_index_backfill(BATCH)? {}
-            Ok(())
-        };
-        if let Err(e) = run() {
-            tracing::warn!("full-text index backfill stopped: {e:#}");
+    let token = std::sync::Arc::new(());
+    let alive = std::sync::Arc::downgrade(&token);
+    let spawned = std::thread::Builder::new().name("text-indexer".into()).spawn(move || {
+        let mut own: Option<Store> = None;
+        while alive.strong_count() > 0 {
+            let step = |own: &mut Option<Store>| -> anyhow::Result<()> {
+                if own.is_none() {
+                    let mut s = Store::open(&path)?;
+                    s.set_text_extractor(search::searchable);
+                    *own = Some(s);
+                }
+                let s = own.as_mut().expect("opened above");
+                while alive.strong_count() > 0 && s.text_index_catch_up(BATCH)? > 0 {}
+                if alive.strong_count() > 0 && !s.text_index_complete()? {
+                    s.text_index_backfill(BATCH)?;
+                }
+                Ok(())
+            };
+            let pause = match step(&mut own) {
+                Ok(()) => std::time::Duration::from_millis(200),
+                Err(e) => {
+                    tracing::warn!("full-text indexing failed (will retry): {e:#}");
+                    own = None;
+                    std::time::Duration::from_secs(2)
+                }
+            };
+            std::thread::sleep(pause);
         }
     });
-    if let Err(e) = spawned {
-        tracing::warn!("full-text index backfill not started: {e}");
+    match spawned {
+        Ok(_) => Some(token),
+        Err(e) => {
+            tracing::warn!("full-text indexer not started: {e}");
+            None
+        }
     }
 }
 
@@ -246,7 +264,7 @@ impl Service {
 
     pub fn with_sender(mut store: Store, policy: Policy, sender: Sender) -> Result<Self> {
         store.set_text_extractor(search::searchable);
-        start_text_backfill(&mut store);
+        let indexer = start_text_indexer(&mut store);
         let limits = policy.roe().limits;
         // Saved network settings apply from the start; a bad entry (say, a
         // moved certificate file) is reported but doesn't stop the project opening.
@@ -274,6 +292,7 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
+            _indexer: indexer,
         };
         svc.load_scan_tasks();
         Ok(svc)

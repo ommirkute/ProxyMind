@@ -96,7 +96,7 @@ fn history_at_scale() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("big.pmproj");
     let mut s = Store::open(&path).unwrap();
-    // As the proxy's recorder does, so rows are indexed for content search.
+    // As the proxy's recorder does: a file store leaves indexing to the Service's background indexer.
     s.set_text_extractor(pm_service::searchable);
     let t = Instant::now();
     for i in 0..n {
@@ -205,6 +205,17 @@ fn history_at_scale() {
         let _ = svc.counters().unwrap();
     });
     timed("site map", &mut || drop(svc.site_map(&me, None).unwrap()));
+    // The recorder doesn't index; the Service's background thread does. Wait for it to drain the tail
+    // so the content-search timings below measure the index, not the tail fallback.
+    let t = Instant::now();
+    {
+        let probe = Store::open(&path).unwrap();
+        while probe.text_candidates("nothing-matches").unwrap().is_none_or(|ids| !ids.is_empty()) {
+            assert!(t.elapsed() < Duration::from_secs(300), "indexer did not catch up");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    println!("{:<48} {:>8.1} ms", "background indexer caught up (after loading)", t.elapsed().as_secs_f64() * 1000.0);
     let search_req = SearchRequest { query: "nothing-matches".into(), ..Default::default() };
     let t = Instant::now();
     svc.history_search_text(&me, &search_req).unwrap();
@@ -227,9 +238,14 @@ fn history_at_scale() {
     let (latencies, searches) = std::thread::scope(|sc| {
         let searcher = sc.spawn(|| {
             let mut done = 0usize;
+            // A busy UI: a search every `pace` (PM_SCALE_SEARCH_PACE_MS, default 50 ms; 0 = back to back).
+            let pace = Duration::from_millis(
+                std::env::var("PM_SCALE_SEARCH_PACE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            );
             while !stop.load(Ordering::Relaxed) {
                 svc.history_search_text(&me, &search_req).unwrap();
                 done += 1;
+                std::thread::sleep(pace);
             }
             done
         });
