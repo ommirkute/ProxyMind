@@ -12,9 +12,20 @@ version may change project files, APIs and the CLI.
   that scanned 5,000 bodies (0.9 s) takes about 1 ms. New traffic is indexed in the background in batches, so
   recording keeps its speed; exchanges not indexed yet are always checked. Existing projects are indexed in the
   background after upgrading. Regex and inverted searches still scan.
+- **History queries with content terms use the full-text index.** `req:`, `resp:` and `any:` terms (alone, with
+  other terms, or in an `OR` of content terms) load only the exchanges the index names, then evaluate them as
+  before, so results and paging are unchanged: `resp:"user996@shop.test"` over 30,000 exchanges takes 17 ms
+  instead of 1.5 s (which was the query time limit). Regex, negated and short (under 3 characters) terms still scan.
 - **Creating findings no longer slows down as findings grow.** Each new finding listed every finding to look for a
   duplicate (25 per second at 10,000 findings); it now looks up findings at the same URL through an index (about
   2,000 per second). Duplicates older than the newest 1,000 findings, which were missed, now merge too.
+- **One write connection per process, and reads that don't wait for it.** The proxy's recorder writes through the
+  service's connection in batches of up to 256 exchanges (it used one transaction each, on a second connection that
+  competed for the write lock); reads use a pool of read-only connections; the full-text indexer writes in short
+  batches between them and WAL checkpoints run on their own connection, off the recording path. Recording while
+  searching: about 1,800 -> about 5,000 exchanges a second (debug build); the proxy waits at most a few milliseconds
+  to hand an exchange to the recorder. A recorder whose writer thread stopped now says so instead of losing traffic
+  silently.
 - A repeatable large-project benchmark (`crates/pm-service/tests/scale.rs`, sized by `PM_SCALE_EXCHANGES` and
   `PM_SCALE_FINDINGS`) prints one machine-readable `SCALE` line.
 

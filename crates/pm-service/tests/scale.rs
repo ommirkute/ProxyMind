@@ -17,17 +17,21 @@
 //! - `meta_query_ms_max`: slowest metadata query (filters and HQL that need no bodies).
 //! - `content_search_ms`: one content search (`history_search_text`, scans up to 5000 bodies).
 //! - `rss_mb`, `hwm_mb`: resident and peak resident memory after loading (null off Linux).
-//! - `concurrent_inserts_per_s`: inserts a second while content searches run back to back.
-//! - `write_stall_ms_max`: slowest single insert during that phase (the 1.1 gate is 50 ms at 2000 inserts/s).
-//! - `write_stall_ms_p99`: 99th percentile of the same inserts.
+//! - `concurrent_inserts_per_s`: records a second the recorder (`Recorder::spawn_shared`, one batched transaction per
+//!   drain, on the Service's shared write connection) commits while content searches run, with a producer that
+//!   never pauses.
+//! - `write_stall_ms_max`, `write_stall_ms_p99`: enqueue-to-commit latency (observer polls every 200 us) of records
+//!   produced at `PM_SCALE_RECORD_RATE` (default 2000) a second while searches run. The 1.1 gate is 50 ms.
+//!   (Before ADR-0017 steps 3 and 4 these were the duration of one `insert_exchange` on a separate connection.)
+//! - `enqueue_wait_ms_max`, `enqueue_wait_ms_p99`: how long `Recorder::record` blocked in that paced phase.
 //! - `searches_during_inserts`: content searches completed in that window.
 //! - `service_write_ms_max`, `service_write_ms_p99`: slowest and 99th-percentile latency of `Service::finding_create`
 //!   (an audited service write) while another thread runs regex content searches back to back (they scan bodies and
 //!   cannot use the full-text index). This is the case ADR-0017's read pool targets.
 //! - `service_writes_per_s`, `regex_searches_during_service_writes`: throughput of that phase.
 //!
-//! The concurrent writer uses its own `Store` handle on the same file, which is how production records:
-//! `pm_proxy::Recorder` owns a separate connection on a writer thread, next to the `Service` connection.
+//! The concurrent writer is a real `pm_proxy::Recorder::spawn_shared`, as in production: it writes through the
+//! `Service`'s own write connection (`Service::store_handle`), taking turns with the full-text indexer.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -149,6 +153,17 @@ fn history_at_scale() {
         None => println!("memory after loading: n/a"),
     }
 
+    // The recorder doesn't index; the Service's background thread does. Wait for it to drain the tail
+    // so the content-search and HQL content-term timings measure the index, not the tail fallback.
+    let t = Instant::now();
+    {
+        let probe = Store::open(&path).unwrap();
+        while probe.text_candidates("nothing-matches").unwrap().is_none_or(|ids| !ids.is_empty()) {
+            assert!(t.elapsed() < Duration::from_secs(300), "indexer did not catch up");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    println!("{:<48} {:>8.1} ms", "background indexer caught up (after loading)", t.elapsed().as_secs_f64() * 1000.0);
     let mut meta_max = 0f64;
     let mut meta = |label: &str, ms: f64| {
         println!("{label:<48} {ms:>8.1} ms");
@@ -209,17 +224,6 @@ fn history_at_scale() {
         let _ = svc.counters().unwrap();
     });
     timed("site map", &mut || drop(svc.site_map(&me, None).unwrap()));
-    // The recorder doesn't index; the Service's background thread does. Wait for it to drain the tail
-    // so the content-search timings below measure the index, not the tail fallback.
-    let t = Instant::now();
-    {
-        let probe = Store::open(&path).unwrap();
-        while probe.text_candidates("nothing-matches").unwrap().is_none_or(|ids| !ids.is_empty()) {
-            assert!(t.elapsed() < Duration::from_secs(300), "indexer did not catch up");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    println!("{:<48} {:>8.1} ms", "background indexer caught up (after loading)", t.elapsed().as_secs_f64() * 1000.0);
     let search_req = SearchRequest { query: "nothing-matches".into(), ..Default::default() };
     let t = Instant::now();
     svc.history_search_text(&me, &search_req).unwrap();
@@ -236,10 +240,14 @@ fn history_at_scale() {
         found.scanned
     );
 
-    // Recording while content searches run: the 1.1 scenario.
+    // Recording while content searches run: the 1.1 scenario. Records go through a real `Recorder::spawn_shared` on
+    // the Service's shared write connection (batched, with the indexer taking turns), as production does.
+    let (recorder, rec_thread) = pm_service::pm_proxy::Recorder::spawn_shared(svc.store_handle());
+    let rate = env_usize("PM_SCALE_RECORD_RATE", 2000);
     let stop = AtomicBool::new(false);
     let window = Duration::from_secs(concurrent_secs);
-    let (latencies, searches) = std::thread::scope(|sc| {
+    let mut next_i = n;
+    let (saturated, paced, searches) = std::thread::scope(|sc| {
         let searcher = sc.spawn(|| {
             let mut done = 0usize;
             // A busy UI: a search every `pace` (PM_SCALE_SEARCH_PACE_MS, default 50 ms; 0 = back to back).
@@ -253,32 +261,98 @@ fn history_at_scale() {
             }
             done
         });
-        let writer = sc.spawn(|| {
-            let mut store = Store::open(&path).unwrap();
-            store.set_text_extractor(pm_service::searchable);
-            let mut lat = Vec::<f64>::new();
-            let start = Instant::now();
-            let mut i = n;
-            while start.elapsed() < window {
-                let ex = exchange(i);
-                let t = Instant::now();
-                store.insert_exchange(&ex).unwrap();
-                lat.push(t.elapsed().as_secs_f64() * 1000.0);
-                i += 1;
+        let drain = |sent: u64, base: u64| {
+            while recorder.written_records() < base + sent {
+                std::thread::sleep(Duration::from_millis(5));
             }
-            lat
+        };
+
+        // Phase 1, saturated: a producer that never pauses (blocking when the queue is full); the number is how
+        // many records the writer commits a second.
+        let base = recorder.written_records();
+        let start = Instant::now();
+        let mut sent = 0u64;
+        while start.elapsed() < window {
+            recorder.record(exchange(next_i));
+            next_i += 1;
+            sent += 1;
+        }
+        let committed = recorder.written_records() - base;
+        let saturated = committed as f64 / start.elapsed().as_secs_f64();
+        drain(sent, base);
+
+        // Phase 2, paced at `rate` records a second (the 1.1 gate is 2000): the time each `record` call waits to
+        // enqueue, and enqueue-to-commit latency (an observer polls the committed count every 200 us).
+        let base = recorder.written_records();
+        let enq = parking_lot::Mutex::new(Vec::<Instant>::new());
+        let committed_at = parking_lot::Mutex::new(Vec::<Instant>::new());
+        let producing = AtomicBool::new(true);
+        let (waits, count) = std::thread::scope(|inner| {
+            let observer = inner.spawn(|| {
+                loop {
+                    let done_n = (recorder.written_records() - base) as usize;
+                    let now = Instant::now();
+                    let mut c = committed_at.lock();
+                    while c.len() < done_n {
+                        c.push(now);
+                    }
+                    drop(c);
+                    if !producing.load(Ordering::Acquire) && done_n >= enq.lock().len() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            });
+            let mut waits = Vec::<f64>::new();
+            let start = Instant::now();
+            let mut k = 0u64;
+            while start.elapsed() < window {
+                let due = start + Duration::from_secs_f64(k as f64 / rate.max(1) as f64);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                let t = Instant::now();
+                enq.lock().push(t);
+                recorder.record(exchange(next_i));
+                waits.push(t.elapsed().as_secs_f64() * 1000.0);
+                next_i += 1;
+                k += 1;
+            }
+            producing.store(false, Ordering::Release);
+            observer.join().unwrap();
+            (waits, k)
         });
-        let lat = writer.join().unwrap();
+        let lat: Vec<f64> = enq
+            .lock()
+            .iter()
+            .zip(committed_at.lock().iter())
+            .map(|(e, c)| c.duration_since(*e).as_secs_f64() * 1000.0)
+            .collect();
         stop.store(true, Ordering::Relaxed);
-        (lat, searcher.join().unwrap())
+        (saturated, (waits, lat, count), searcher.join().unwrap())
     });
-    let mut sorted = latencies.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let stall_max = sorted.last().copied().unwrap_or(0.0);
-    let p99 = sorted.get((sorted.len() * 99 / 100).min(sorted.len().saturating_sub(1))).copied().unwrap_or(0.0);
-    let per_s = latencies.len() as f64 / concurrent_secs.max(1) as f64;
+    drop(recorder);
+    rec_thread.join().unwrap();
+    let pct = |v: &[f64]| -> (f64, f64) {
+        let mut sorted = v.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let max = sorted.last().copied().unwrap_or(0.0);
+        let p99 = sorted.get((sorted.len() * 99 / 100).min(sorted.len().saturating_sub(1))).copied().unwrap_or(0.0);
+        (max, p99)
+    };
+    let per_s = saturated;
+    let (enqueue_max, enqueue_p99) = pct(&paced.0);
+    let (stall_max, p99) = pct(&paced.1);
+    let p50 = {
+        let mut v = paced.1.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    println!("recording during content search, saturated: {per_s:.0} inserts/s ({searches} searches in both phases)");
     println!(
-        "recording during content search: {per_s:.0} inserts/s, max stall {stall_max:.1} ms, p99 {p99:.1} ms, {searches} searches"
+        "recording paced at {rate}/s ({} records): enqueue wait max {enqueue_max:.1} ms p99 {enqueue_p99:.1} ms; \
+         enqueue-to-commit max {stall_max:.1} ms p99 {p99:.1} ms p50 {p50:.1} ms",
+        paced.2
     );
 
     // Service writes while regex content searches run back to back: reads and writes go through one `Service`.
@@ -345,6 +419,8 @@ fn history_at_scale() {
         "concurrent_inserts_per_s": per_s.round(),
         "write_stall_ms_max": round1(stall_max),
         "write_stall_ms_p99": round1(p99),
+        "enqueue_wait_ms_max": round1(enqueue_max),
+        "enqueue_wait_ms_p99": round1(enqueue_p99),
         "searches_during_inserts": searches,
         "service_writes_per_s": svc_per_s.round(),
         "service_write_ms_max": round1(svc_max),

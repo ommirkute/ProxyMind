@@ -531,6 +531,15 @@ pub struct NewWsMessage {
     pub compressed: bool,
 }
 
+/// Which exchange a WebSocket message of an [`Store::insert_batch`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsTarget {
+    /// An exchange stored earlier, by row id.
+    Exchange(i64),
+    /// The exchange at this index of the same batch.
+    InBatch(usize),
+}
+
 /// A stored WebSocket message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WsMessageRow {
@@ -716,6 +725,19 @@ impl Store {
         Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false })
     }
 
+    /// Opens a connection for WAL checkpoints only (ADR-0017): no migration, no pragmas that write. A PASSIVE
+    /// checkpoint takes SQLite's checkpoint lock, not the write lock, so running it here never blocks inserts on
+    /// the write connection and does not hold `StoreHandle`'s mutex while pages are copied and synced.
+    pub fn open_checkpointer(path: &Path) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        Self::reject_locked(path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)
+            .with_context(|| format!("opening project {} for checkpoints", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false })
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -789,6 +811,14 @@ impl Store {
     /// writes the database file, so it must run on the write connection, not a read-only pool connection.
     pub fn checkpoint_passive(&mut self) -> Result<()> {
         self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Turns SQLite's automatic WAL checkpoint (every 1000 pages, inside the committing statement) off or back on.
+    /// Off only makes sense when something else calls [`Store::checkpoint_passive`] regularly, or the WAL grows
+    /// without bound.
+    pub fn set_wal_autocheckpoint(&mut self, on: bool) -> Result<()> {
+        self.conn.pragma_update(None, "wal_autocheckpoint", if on { 1000 } else { 0 })?;
         Ok(())
     }
 
@@ -961,8 +991,49 @@ impl Store {
         // deferred one reads first and fails at once (SQLITE_BUSY_SNAPSHOT)
         // if another connection commits in between, losing the exchange.
         let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let req_hash = Self::put_blob(&tx, &ex.request)?;
-        let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(&tx, r)).transpose()?;
+        let id = Self::insert_exchange_in(&tx, text_of, extractor_set, index_inline, ex)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Inserts several exchanges in one IMMEDIATE transaction (one commit). Stores exactly what
+    /// `insert_exchange` would for each, in order; the returned ids are ascending and match `exchanges`. All or
+    /// nothing: on an error nothing is stored.
+    pub fn insert_exchanges(&mut self, exchanges: &[NewExchange]) -> Result<Vec<i64>> {
+        self.insert_batch(exchanges, &[])
+    }
+
+    /// Like [`Store::insert_exchanges`], plus WebSocket messages in the same transaction. The exchanges go in first,
+    /// in order, then the messages in order; a message may point at an exchange of this batch
+    /// ([`WsTarget::InBatch`]) or at one stored earlier ([`WsTarget::Exchange`]). `exchange_id` in each message is
+    /// ignored (the target decides). Returns the ids of `exchanges`.
+    pub fn insert_batch(&mut self, exchanges: &[NewExchange], ws: &[(WsTarget, NewWsMessage)]) -> Result<Vec<i64>> {
+        let (text_of, extractor_set, index_inline) = (self.text_of, self.extractor_set, self.index_inline);
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut ids = Vec::with_capacity(exchanges.len());
+        for ex in exchanges {
+            ids.push(Self::insert_exchange_in(&tx, text_of, extractor_set, index_inline, ex)?);
+        }
+        for (target, m) in ws {
+            let exchange_id = match *target {
+                WsTarget::Exchange(id) => id,
+                WsTarget::InBatch(i) => *ids.get(i).context("WebSocket message points past the batch")?,
+            };
+            Self::insert_ws_in(&tx, exchange_id, m)?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    fn insert_exchange_in(
+        tx: &rusqlite::Transaction<'_>,
+        text_of: fn(&[u8]) -> Vec<u8>,
+        extractor_set: bool,
+        index_inline: bool,
+        ex: &NewExchange,
+    ) -> Result<i64> {
+        let req_hash = Self::put_blob(tx, &ex.request)?;
+        let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
                                     status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id)
@@ -989,7 +1060,7 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         if index_inline {
-            Self::index_exchange(&tx, text_of, extractor_set, id, &ex.request, ex.response.as_deref())?;
+            Self::index_exchange(tx, text_of, extractor_set, id, &ex.request, ex.response.as_deref())?;
             // Advance the tail boundary only when no unindexed row sits below this one.
             tx.execute(
                 "UPDATE text_index_state SET indexed_through = ?1 WHERE indexed_through < ?1
@@ -997,7 +1068,6 @@ impl Store {
                 [id],
             )?;
         }
-        tx.commit()?;
         Ok(id)
     }
 
@@ -1330,11 +1400,15 @@ impl Store {
     }
 
     pub fn insert_ws_message(&mut self, m: &NewWsMessage) -> Result<i64> {
-        self.conn.execute(
+        Self::insert_ws_in(&self.conn, m.exchange_id, m)
+    }
+
+    fn insert_ws_in(conn: &Connection, exchange_id: i64, m: &NewWsMessage) -> Result<i64> {
+        conn.execute(
             "INSERT INTO ws_messages (exchange_id, ts_ms, from_client, opcode, len, payload, truncated, compressed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                m.exchange_id,
+                exchange_id,
                 m.ts_ms,
                 m.from_client,
                 m.opcode,
@@ -1344,7 +1418,7 @@ impl Store {
                 m.compressed
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Messages of one exchange in order, starting after `after_id`.
@@ -2231,6 +2305,83 @@ mod tests {
         // The ids filter narrows history.
         let f = HistoryFilter { ids: Some(vec![ids[1], ids[3]]), ..Default::default() };
         assert_eq!(s.search_exchanges(&f).unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), [ids[3], ids[1]]);
+    }
+
+    #[test]
+    fn insert_exchanges_stores_what_single_inserts_store() {
+        // Binary bytes, a missing response, an error row and a duplicate body (shared blob) must all survive.
+        let mut batch: Vec<NewExchange> = (0..40)
+            .map(|i| {
+                let mut e = sample(&format!("/b/{i}"), &[b'H', b'T', 0, 255, 13, 10, i as u8, 13, 10, 13, 10, 200]);
+                e.request.extend_from_slice(&[0, 1, 2, 254, 255, i as u8]);
+                e.hypothesis_id = (i % 3 == 0).then_some(7);
+                e
+            })
+            .collect();
+        batch[5].response = None;
+        batch[5].status = None;
+        batch[5].error = Some("connection refused".into());
+        batch[6].response = batch[7].response.clone();
+
+        let mut single = Store::open_in_memory().unwrap();
+        let mut batched = Store::open_in_memory().unwrap();
+        let want: Vec<i64> = batch.iter().map(|e| single.insert_exchange(e).unwrap()).collect();
+        let got = batched.insert_exchanges(&batch).unwrap();
+        assert_eq!(got, want, "same ids");
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "ascending, in input order");
+        assert!(batched.insert_exchanges(&[]).unwrap().is_empty());
+        for (id, ex) in got.iter().zip(&batch) {
+            let a = single.get_exchange(*id).unwrap().unwrap();
+            let b = batched.get_exchange(*id).unwrap().unwrap();
+            assert_eq!(b.request, ex.request, "request bytes are exactly what was recorded");
+            assert_eq!(b.response, ex.response, "response bytes are exactly what was recorded");
+            assert_eq!((a.request, a.response), (b.request, b.response));
+            let (a, b) = (a.summary, b.summary);
+            assert_eq!(
+                (a.ts_ms, a.status, a.req_len, a.resp_len, a.error, a.hypothesis_id, a.path),
+                (b.ts_ms, b.status, b.req_len, b.resp_len, b.error, b.hypothesis_id, b.path)
+            );
+        }
+        // The batch is one transaction: a failing member stores nothing.
+        let before = batched.count_exchanges().unwrap();
+        let bad = [sample("/ok", b"x"), sample("/bad", b"y")];
+        let ws_past_end = [(WsTarget::InBatch(9), ws_sample())];
+        assert!(batched.insert_batch(&bad, &ws_past_end).is_err());
+        assert_eq!(batched.count_exchanges().unwrap(), before, "rolled back");
+    }
+
+    fn ws_sample() -> NewWsMessage {
+        NewWsMessage {
+            exchange_id: 0,
+            ts_ms: 3,
+            from_client: true,
+            opcode: 1,
+            len: 2,
+            payload: b"hi".to_vec(),
+            truncated: false,
+            compressed: false,
+        }
+    }
+
+    #[test]
+    fn insert_batch_links_ws_messages_to_exchanges() {
+        let mut s = Store::open_in_memory().unwrap();
+        let first = s.insert_exchange(&sample("/ws0", b"x")).unwrap();
+        let exs = [sample("/ws1", b"a"), sample("/ws2", b"b")];
+        let msg = |tag: u8| NewWsMessage { payload: vec![tag], len: 1, ..ws_sample() };
+        let ws = [
+            (WsTarget::InBatch(1), msg(1)),
+            (WsTarget::Exchange(first), msg(2)),
+            (WsTarget::InBatch(0), msg(3)),
+            (WsTarget::InBatch(1), msg(4)),
+        ];
+        let ids = s.insert_batch(&exs, &ws).unwrap();
+        let payloads = |id: i64| -> Vec<u8> {
+            s.ws_messages(id, None, 100).unwrap().iter().flat_map(|m| m.payload.clone()).collect()
+        };
+        assert_eq!(payloads(ids[1]), [1, 4], "in order, on the right exchange");
+        assert_eq!(payloads(ids[0]), [3]);
+        assert_eq!(payloads(first), [2]);
     }
 
     #[test]

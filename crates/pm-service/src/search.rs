@@ -166,7 +166,7 @@ impl Probe<'_> {
 /// Whether a literal query could match text a redactor inserts (`{{secret:kind_1}}`), which
 /// the full-text index never saw. A match inside a placeholder uses only its characters
 /// (lowercase letters, digits, `_`, `:`); one across its edge includes a brace.
-fn may_match_placeholder(query: &str, case_sensitive: bool) -> bool {
+pub(crate) fn may_match_placeholder(query: &str, case_sensitive: bool) -> bool {
     let q = if case_sensitive { query.to_string() } else { query.to_ascii_lowercase() };
     q.contains(['{', '}']) || q.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
 }

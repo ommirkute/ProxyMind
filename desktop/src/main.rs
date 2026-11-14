@@ -113,9 +113,8 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8080)));
     let proxy = match tokio::net::TcpListener::bind(proxy_addr).await {
         Ok(l) => {
-            let mut recording = Store::open(project)?;
-            recording.set_text_extractor(pm_service::searchable);
-            let (recorder, writer) = Recorder::spawn(recording);
+            // Record through the Service's write connection (ADR-0017).
+            let (recorder, writer) = Recorder::spawn_shared(service.store_handle());
             service.attach_recorder(&recorder)?;
             // The recorder's writer thread lives as long as the app.
             std::mem::forget(writer);

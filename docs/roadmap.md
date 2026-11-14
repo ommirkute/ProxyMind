@@ -93,7 +93,7 @@ No new features: this removes the limits that would block Phases 2 and 3. Write 
 | 1.1 Store concurrency | Read-only connection pool (WAL) and one writer task fed by a bounded channel; recorder writes batched in transactions | 2,000 requests a second recorded while a content search runs, no stall over 50 ms |
 | 1.2 Event bus | A typed `Event` enum broadcast from the service; SSE topics with per-event payloads; the UI stops polling | No timers left in the UI's live view |
 | 1.3 Typed contracts | JSON schemas derived from the Rust types; OpenAPI, UI types, SDK types and MCP schemas generated; CI drift check | The hand-written MCP schemas are gone |
-| 1.4 Full-text search | FTS5 over decoded text, filled by the writer task; backfill through a new (append-only) migration | Content search on 1M exchanges under 200 ms. **Step 1 done 2026-11-14** (plain-text search, see below); step 2: HQL content terms (`resp:"…"`) |
+| 1.4 Full-text search | FTS5 over decoded text, filled by the writer task; backfill through a new (append-only) migration | Content search on 1M exchanges under 200 ms. **Step 1 done 2026-11-14** (plain-text search, see below); **Step 2 done 2026-11-14**: HQL content terms (`req:`/`resp:`/`any:`) pre-filter through the index; `resp:"user996@shop.test"` over 30,000 exchanges 1,500 ms -> 17 ms (debug) |
 | 1.5 Service split | Domains (scanning, proof, regress, sessions, AI) in their own crates behind the facade | Facade API unchanged; one domain rebuilds in under 30 s |
 | 1.6 Large-project benchmark | 1M exchanges, 10k issues: ingest, search, UI first paint, memory | Numbers in the docs, tracked weekly |
 

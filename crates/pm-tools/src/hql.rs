@@ -529,6 +529,43 @@ impl Query {
     pub fn matches(&self, m: &Meta<'_>, f: &mut dyn Fetch) -> bool {
         eval(&self.expr, m, f)
     }
+
+    /// Lower-case needles such that every exchange this query matches contains at least one of them
+    /// in its decoded request or response text; None when no such set is known.
+    ///
+    /// This is a necessary condition, for narrowing candidates with a full-text index only: a row that
+    /// contains a needle may still not match, and `matches` stays the judge of every candidate.
+    /// Only `req`, `resp` and `any` substring terms of 3 or more characters give needles (header,
+    /// parameter and bare terms test normalised or parsed values, not the text). `AND` needs one
+    /// child's requirement (the one with the fewest, then the longest, needles), `OR` needs all of
+    /// its children's (the union), and negation gives none.
+    pub fn required_literals(&self) -> Option<Vec<String>> {
+        required(&self.expr)
+    }
+}
+
+fn required(e: &Expr) -> Option<Vec<String>> {
+    match e {
+        Expr::Term(Field::Req | Field::Resp | Field::AnyText, Test::Contains(n)) if n.chars().count() >= 3 => {
+            Some(vec![n.clone()])
+        }
+        Expr::Term(..) | Expr::Not(_) => None,
+        Expr::All(xs) => xs
+            .iter()
+            .filter_map(required)
+            .min_by_key(|v| (v.len(), std::cmp::Reverse(v.iter().map(|n| n.chars().count()).min().unwrap_or(0)))),
+        Expr::Any(xs) => {
+            let mut all = Vec::new();
+            for x in xs {
+                all.extend(required(x)?);
+            }
+            (!all.is_empty()).then(|| {
+                all.sort();
+                all.dedup();
+                all
+            })
+        }
+    }
 }
 
 fn eval(e: &Expr, m: &Meta<'_>, f: &mut dyn Fetch) -> bool {
@@ -709,6 +746,31 @@ mod tests {
 
     fn check(q: &str) -> bool {
         Query::parse(q).unwrap_or_else(|e| panic!("{q}: {e}")).matches(&meta(), &mut row())
+    }
+
+    #[test]
+    fn required_literals_are_necessary_conditions() {
+        let lits = |q: &str| Query::parse(q).unwrap().required_literals();
+        let some = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(lits("resp:\"abc\" status:200"), some(&["abc"]));
+        assert_eq!(lits("resp:\"ABC\""), some(&["abc"]), "lower-cased");
+        assert_eq!(lits("any:abc"), some(&["abc"]));
+        assert_eq!(lits("req:\"abc\" resp:\"defgh\""), some(&["defgh"]), "longest of equals");
+        assert_eq!(lits("resp:\"abc\" OR req:\"defg\""), some(&["abc", "defg"]));
+        assert_eq!(lits("resp:\"abc\" OR status:200"), None);
+        assert_eq!(lits("-resp:\"abc\""), None);
+        assert_eq!(lits("resp:ab"), None);
+        assert_eq!(lits("status:200"), None);
+        assert_eq!(lits(""), None);
+        assert_eq!(lits("respheader:abc reqheader:abc=def param:abc abc"), None);
+        assert_eq!(lits("resp~\"abc\""), None, "regex");
+        // Nested: AND inside OR needs every branch to give something.
+        assert_eq!(lits("(resp:\"abc\" status:200) OR (req:\"defg\" host:x)"), some(&["abc", "defg"]));
+        assert_eq!(lits("(resp:\"abc\" status:200) OR (host:x method:get)"), None);
+        // OR inside AND: the OR's union, or another child that is smaller.
+        assert_eq!(lits("(resp:\"abc\" OR req:\"defg\") status:200"), some(&["abc", "defg"]));
+        assert_eq!(lits("(resp:\"abc\" OR req:\"defg\") resp:\"xyz\""), some(&["xyz"]));
+        assert_eq!(lits("(resp:\"abc\" OR req:\"defg\") -resp:\"xyz\""), some(&["abc", "defg"]));
     }
 
     #[test]
