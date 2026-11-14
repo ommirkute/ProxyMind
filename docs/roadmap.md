@@ -82,7 +82,7 @@ automation](https://www.zaproxy.org/docs/automate/), [mitmproxy modes](https://d
 | 0.6 Docs | Version, licensing and certificate decisions recorded; this file | Done 2026-11-14 |
 
 **Gate:** VulnShop at 15 or more of 38 findings proven, no false proofs on three apps, all checks green. Status
-2026-11-14: VulnShop 15/38 proven with no false positives; VAmPI and Juice Shop still to re-measure in CI.
+2026-11-14: VulnShop 20/38 proven with no false positives; VAmPI and Juice Shop still to re-measure in CI.
 
 ## Phase 1: foundations for scale
 
