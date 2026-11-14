@@ -12,7 +12,7 @@ ProxyMind's claims about agents and proofs have to be measurable. This directory
 | [VAmPI](https://github.com/erev0s/VAmPI) | [`vampi.yaml`](ground-truth/vampi.yaml): 7 bugs + 1 trap | image digest in the file | `docker compose -f bench/docker-compose.yml up -d vampi` |
 | [OWASP Juice Shop](https://github.com/juice-shop/juice-shop) | [`juice-shop.yaml`](ground-truth/juice-shop.yaml): 8 API-level bugs | v20.3.0 | `docker compose -f bench/docker-compose.yml up -d juice-shop` |
 
-The images come from Docker Hub. To avoid its pull limits, the **Bench images** workflow (Actions, run by hand) copies them to `ghcr.io/<owner>/bench-mirror`; set `BENCH_REGISTRY=ghcr.io/<owner>/bench-mirror` to use the copy (the nightly benchmark job does this once the mirror exists). The copies keep their digests, so the pins in `docker-compose.yml` still apply.
+The images come from Docker Hub. To avoid its pull limits, the **Bench images** workflow (Actions, run by hand) copies them to `ghcr.io/<owner>/bench-mirror`; set `BENCH_REGISTRY=ghcr.io/<owner>/bench-mirror` to use the copy (the nightly benchmark job does this once the mirror exists). To run only the benchmarks in CI, start the **Nightly** workflow with "Run only the benchmarks" ticked. The copies keep their digests, so the pins in `docker-compose.yml` still apply.
 | [OWASP crAPI](https://github.com/OWASP/crAPI) | [`crapi.yaml`](ground-truth/crapi.yaml): 10 bugs from crAPI's challenge list | not yet run | crAPI's own compose file (about 4 GB of images) |
 
 Every VAmPI and Juice Shop entry was reproduced by hand against the pinned image. Path segments written `{name}` match any one segment.

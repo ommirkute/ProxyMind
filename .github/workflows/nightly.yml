@@ -8,6 +8,11 @@ name: Nightly
 #     - cron: "17 3 * * 0"   # weekly, Sunday 03:17 UTC
 on:
   workflow_dispatch:
+    inputs:
+      only_bench:
+        description: "Run only the benchmarks (skips fuzzing and the image build, about 15 minutes instead of 90)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,6 +20,7 @@ permissions:
 jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
+    if: ${{ !inputs.only_bench }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -48,6 +54,7 @@ jobs:
           path: fuzz/artifacts
 
   image:
+    if: ${{ !inputs.only_bench }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
