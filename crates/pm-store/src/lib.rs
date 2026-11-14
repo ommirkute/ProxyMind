@@ -675,8 +675,8 @@ pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
-        // A sealed project (pm-vault) must be unlocked first.
+    /// Rejects a sealed project (pm-vault): it must be unlocked first.
+    fn reject_locked(path: &Path) -> Result<()> {
         let mut head = [0u8; 8];
         if std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok()
             && &head == b"PMLOCK1\0"
@@ -687,6 +687,11 @@ impl Store {
                 path.display()
             );
         }
+        Ok(())
+    }
+
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::reject_locked(path)?;
         // A project holds traffic and credentials: a new one is readable by
         // its owner only (SQLite gives the -wal and -shm files the same mode).
         if !path.exists() {
@@ -694,6 +699,21 @@ impl Store {
         }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
+    }
+
+    /// Opens an existing project file for reading only (a read-pool connection, ADR-0017). It does not set the
+    /// journal mode (the writer that created the file made it WAL) and does not migrate, so open the writer first.
+    /// The text extractor and index mode are defaults: reads never use them.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        Self::reject_locked(path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)
+            .with_context(|| format!("opening project {} read-only", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        conn.pragma_update(None, "query_only", "ON")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -765,8 +785,9 @@ impl Store {
         Ok(())
     }
 
-    /// Copies the write-ahead log into the database without blocking writers or readers.
-    pub fn checkpoint_passive(&self) -> Result<()> {
+    /// Copies the write-ahead log into the database without blocking writers or readers. `&mut self`: a checkpoint
+    /// writes the database file, so it must run on the write connection, not a read-only pool connection.
+    pub fn checkpoint_passive(&mut self) -> Result<()> {
         self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
         Ok(())
     }
@@ -1396,7 +1417,17 @@ impl Store {
         let p = path.to_str().context("snapshot path is not valid UTF-8")?;
         // VACUUM INTO accepts an empty file: make it owner-only first.
         create_private(path).with_context(|| format!("creating {}", path.display()))?;
-        self.conn.execute("VACUUM INTO ?1", [p])?;
+        // `VACUUM INTO` only writes the new file, so it works on a read-only connection, but `query_only`
+        // (set on pool readers) refuses it: lift it for the statement and restore what it was.
+        let was: bool = self.conn.query_row("PRAGMA query_only", [], |r| r.get(0))?;
+        if was {
+            self.conn.pragma_update(None, "query_only", "OFF")?;
+        }
+        let done = self.conn.execute("VACUUM INTO ?1", [p]);
+        if was {
+            self.conn.pragma_update(None, "query_only", "ON")?;
+        }
+        done?;
         Ok(())
     }
 
@@ -1848,13 +1879,103 @@ impl Store {
     }
 }
 
-/// Shared access to one [`Store`] (ADR-0017). Today this is a single mutex; later steps move `read` onto a pool of
-/// read-only connections and `write` onto a writer thread, so callers must pick the right method now.
+/// Shared access to one [`Store`] (ADR-0017). A file project reads on a pool of read-only connections (`read`) and
+/// writes through one mutex-guarded read-write connection (`write`); an in-memory store uses that one connection
+/// for both, because a private in-memory database cannot be reopened.
 ///
-/// The lock is held for the duration of the closure only. Do not call `read` or `write` from inside another
-/// closure: that deadlocks on the mutex, and debug builds panic with a clear message instead.
+/// A connection is held for the duration of the closure only. Do not call `read` or `write` from inside another
+/// closure: it is a design error (with the pool exhausted it deadlocks), and debug builds panic with a clear
+/// message instead.
 pub struct StoreHandle {
     inner: parking_lot::Mutex<Store>,
+    readers: Option<Pool>,
+}
+
+/// Read-only connections for one project file, opened lazily up to a cap.
+struct Pool {
+    path: std::path::PathBuf,
+    state: parking_lot::Mutex<PoolState>,
+    free: parking_lot::Condvar,
+    /// Set once a failure to open a reader has been reported.
+    warned: std::sync::atomic::AtomicBool,
+}
+
+struct PoolState {
+    idle: Vec<Store>,
+    /// Connections open or being opened (idle + borrowed).
+    open: usize,
+    /// How many connections may be open; lowered to `open` when opening one fails.
+    cap: usize,
+}
+
+/// A borrowed reader; goes back to the pool on drop, also when the closure panics.
+struct PooledReader<'a> {
+    pool: &'a Pool,
+    store: Option<Store>,
+}
+
+impl std::ops::Deref for PooledReader<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        self.store.as_ref().expect("reader present until drop")
+    }
+}
+
+impl Drop for PooledReader<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.store.take() {
+            self.pool.state.lock().idle.push(s);
+            self.pool.free.notify_one();
+        }
+    }
+}
+
+impl Pool {
+    fn new(path: std::path::PathBuf) -> Self {
+        let cap = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
+        Self {
+            path,
+            state: parking_lot::Mutex::new(PoolState { idle: Vec::new(), open: 0, cap }),
+            free: parking_lot::Condvar::new(),
+            warned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Borrows a reader, opening one if the pool is below its cap and waiting if all are busy. None when no reader
+    /// can be opened at all (the caller then uses the write connection).
+    fn acquire(&self) -> Option<PooledReader<'_>> {
+        let mut st = self.state.lock();
+        loop {
+            if let Some(s) = st.idle.pop() {
+                return Some(PooledReader { pool: self, store: Some(s) });
+            }
+            if st.open < st.cap {
+                st.open += 1;
+                drop(st);
+                return match Store::open_read_only(&self.path) {
+                    Ok(s) => Some(PooledReader { pool: self, store: Some(s) }),
+                    Err(e) => {
+                        if !self.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!(
+                                "pm-store: cannot open a read connection ({e:#}); reading on the write connection"
+                            );
+                        }
+                        let mut st = self.state.lock();
+                        st.open -= 1;
+                        st.cap = st.open;
+                        drop(st);
+                        self.free.notify_all();
+                        // If other readers exist, borrow one of them; otherwise the pool is unusable.
+                        self.acquire()
+                    }
+                };
+            }
+            if st.open == 0 {
+                return None;
+            }
+            self.free.wait(&mut st);
+        }
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -1872,7 +1993,7 @@ impl Reentrancy {
             assert!(
                 !c.replace(true),
                 "StoreHandle::read/write called from inside another read/write closure on the same thread \
-                 (this would deadlock on the store mutex); finish the first call before starting the next"
+                 (a design error: it can deadlock); finish the first call before starting the next"
             );
         });
         Reentrancy
@@ -1892,15 +2013,20 @@ impl Drop for Reentrancy {
 }
 
 impl StoreHandle {
+    /// Wraps `store`. A file project gets a read pool (opened lazily); an in-memory one stays on one connection.
     pub fn new(store: Store) -> Self {
-        Self { inner: parking_lot::Mutex::new(store) }
+        let readers = store.path().map(|p| Pool::new(std::path::absolute(&p).unwrap_or(p)));
+        Self { inner: parking_lot::Mutex::new(store), readers }
     }
 
-    /// Run `f` with shared access to the store. Use this for a call that only needs `&Store` methods. Step 2 of
-    /// ADR-0017 moves these onto a read-only connection pool, so `f` must not rely on seeing uncommitted state
-    /// of a transaction that is open on the writer connection.
+    /// Run `f` with shared access to the store. Use this for a call that only needs `&Store` methods. On a file
+    /// project `f` runs on a read-only connection and sees the data committed when the call starts (each call is
+    /// its own snapshot); it cannot write, and it does not see changes made while it runs.
     pub fn read<T>(&self, f: impl FnOnce(&Store) -> T) -> T {
         let _reentrancy = Reentrancy::enter();
+        if let Some(reader) = self.readers.as_ref().and_then(Pool::acquire) {
+            return f(&reader);
+        }
         let guard = self.inner.lock();
         f(&guard)
     }
@@ -2236,5 +2362,98 @@ mod tests {
         assert!(r.is_err());
         // The guard was reset by unwinding, so the handle still works afterwards.
         assert_eq!(h.read(|s| s.get_setting("none").unwrap()), None);
+    }
+
+    fn temp_project(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pm-store-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.pmproj");
+        let _ = std::fs::remove_file(&path);
+        (dir, path)
+    }
+
+    #[test]
+    fn a_read_sees_the_write_before_it() {
+        let (dir, path) = temp_project("ryw");
+        let h = StoreHandle::new(Store::open(&path).unwrap());
+        assert!(h.readers.is_some(), "a file project reads on the pool");
+        for i in 0..1000 {
+            let v = i.to_string();
+            h.write(|s| s.set_setting("k", &v).unwrap());
+            assert_eq!(h.read(|s| s.get_setting("k").unwrap()).as_deref(), Some(v.as_str()), "iteration {i}");
+        }
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_memory_stores_have_no_pool() {
+        let h = StoreHandle::new(Store::open_in_memory().unwrap());
+        assert!(h.readers.is_none());
+        h.write(|s| s.set_setting("a", "b").unwrap());
+        assert_eq!(h.read(|s| s.get_setting("a").unwrap()).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_long_read_does_not_hold_up_a_write_or_another_read() {
+        use std::time::{Duration, Instant};
+        let (dir, path) = temp_project("conc");
+        let h = StoreHandle::new(Store::open(&path).unwrap());
+        h.write(|s| s.set_setting("k", "v").unwrap());
+        let started = std::sync::Barrier::new(2);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                h.read(|_| {
+                    started.wait();
+                    std::thread::sleep(Duration::from_millis(500));
+                })
+            });
+            started.wait();
+            let t = Instant::now();
+            h.write(|s| s.set_setting("k", "w").unwrap());
+            let seen = h.read(|s| s.get_setting("k").unwrap());
+            let took = t.elapsed();
+            assert_eq!(seen.as_deref(), Some("w"));
+            assert!(took < Duration::from_millis(200), "write + read took {took:?} behind a 500 ms read");
+        });
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readers_are_read_only_and_a_panic_returns_the_connection() {
+        let (dir, path) = temp_project("ro");
+        let h = StoreHandle::new(Store::open(&path).unwrap());
+        let err = h.read(|s| s.conn.execute("INSERT INTO settings (key, value) VALUES ('x', 'y')", []));
+        assert!(err.is_err(), "a reader must not write");
+        let cap = h.readers.as_ref().unwrap().state.lock().cap;
+        for _ in 0..cap + 2 {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.read(|_| panic!("boom"))));
+            assert!(r.is_err());
+        }
+        assert_eq!(h.read(|s| s.get_setting("x").unwrap()), None, "pool still works after panics");
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_read_only_rejects_a_locked_project() {
+        let (dir, path) = temp_project("locked");
+        std::fs::write(&path, b"PMLOCK1\0rest").unwrap();
+        let e = Store::open_read_only(&path).err().expect("rejected").to_string();
+        assert!(e.contains("locked project"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshots_run_on_a_reader() {
+        let (dir, path) = temp_project("snap");
+        let h = StoreHandle::new(Store::open(&path).unwrap());
+        h.write(|s| s.set_setting("k", "v").unwrap());
+        let snap = dir.join("copy.pmproj");
+        h.read(|s| s.snapshot_to(&snap)).unwrap();
+        assert_eq!(Store::open(&snap).unwrap().get_setting("k").unwrap().as_deref(), Some("v"));
+        drop(h);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

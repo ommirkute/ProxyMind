@@ -21,6 +21,10 @@
 //! - `write_stall_ms_max`: slowest single insert during that phase (the 1.1 gate is 50 ms at 2000 inserts/s).
 //! - `write_stall_ms_p99`: 99th percentile of the same inserts.
 //! - `searches_during_inserts`: content searches completed in that window.
+//! - `service_write_ms_max`, `service_write_ms_p99`: slowest and 99th-percentile latency of `Service::finding_create`
+//!   (an audited service write) while another thread runs regex content searches back to back (they scan bodies and
+//!   cannot use the full-text index). This is the case ADR-0017's read pool targets.
+//! - `service_writes_per_s`, `regex_searches_during_service_writes`: throughput of that phase.
 //!
 //! The concurrent writer uses its own `Store` handle on the same file, which is how production records:
 //! `pm_proxy::Recorder` owns a separate connection on a writer thread, next to the `Service` connection.
@@ -277,6 +281,58 @@ fn history_at_scale() {
         "recording during content search: {per_s:.0} inserts/s, max stall {stall_max:.1} ms, p99 {p99:.1} ms, {searches} searches"
     );
 
+    // Service writes while regex content searches run back to back: reads and writes go through one `Service`.
+    let regex_req = SearchRequest { query: "user99[0-9]@nomatch\\.test".into(), regex: true, ..Default::default() };
+    let stop = AtomicBool::new(false);
+    let (svc_lat, regex_searches) = std::thread::scope(|sc| {
+        let searcher = sc.spawn(|| {
+            let mut done = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                svc.history_search_text(&me, &regex_req).unwrap();
+                done += 1;
+            }
+            done
+        });
+        let writer = sc.spawn(|| {
+            let mut lat = Vec::<f64>::new();
+            let start = Instant::now();
+            let mut i = 0usize;
+            // Let the searcher get going before the first write.
+            std::thread::sleep(Duration::from_millis(100));
+            while start.elapsed() < window {
+                let t = Instant::now();
+                svc.finding_create(
+                    &me,
+                    NewFinding {
+                        title: format!("Concurrent finding {i}"),
+                        vuln_class: "idor".into(),
+                        severity: "low".into(),
+                        description: "written while a regex search runs".into(),
+                        url: Some(format!("https://shop.test/concurrent/{i}")),
+                        evidence: vec![(i % n.max(1)) as i64 + 1],
+                        hypothesis_id: None,
+                    },
+                )
+                .unwrap();
+                lat.push(t.elapsed().as_secs_f64() * 1000.0);
+                i += 1;
+            }
+            lat
+        });
+        let lat = writer.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        (lat, searcher.join().unwrap())
+    });
+    let mut sorted = svc_lat.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let svc_max = sorted.last().copied().unwrap_or(0.0);
+    let svc_p99 = sorted.get((sorted.len() * 99 / 100).min(sorted.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    let svc_per_s = svc_lat.len() as f64 / concurrent_secs.max(1) as f64;
+    println!(
+        "service writes during regex search: {svc_per_s:.0} writes/s, max {svc_max:.1} ms, p99 {svc_p99:.1} ms, \
+         {regex_searches} regex searches"
+    );
+
     let summary = serde_json::json!({
         "exchanges": n,
         "findings": n_findings,
@@ -290,6 +346,10 @@ fn history_at_scale() {
         "write_stall_ms_max": round1(stall_max),
         "write_stall_ms_p99": round1(p99),
         "searches_during_inserts": searches,
+        "service_writes_per_s": svc_per_s.round(),
+        "service_write_ms_max": round1(svc_max),
+        "service_write_ms_p99": round1(svc_p99),
+        "regex_searches_during_service_writes": regex_searches,
     });
     println!("SCALE {summary}");
     let _ = std::fs::remove_dir_all(&dir);
