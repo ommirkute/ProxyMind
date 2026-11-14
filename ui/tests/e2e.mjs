@@ -396,20 +396,24 @@ try {
     await page.getByLabel("Next request").click();
     // Inspector: edit a header value in place.
     await page.getByLabel("Raw request").fill(`GET /search?q=shoes&page=1 HTTP/1.1\nHost: shop\nCookie: a=1; theme=dark\n\n`);
+    // The raw request is re-rendered after each edit: wait for it rather than read it at once.
+    const rawBecomes = (pred) =>
+      page
+        .waitForFunction(`(() => { const v = document.querySelector('[aria-label="Raw request"]')?.value ?? ""; return ${pred}; })()`, null, { timeout: 5000 })
+        .then(() => true, () => false);
     const qField = page.getByLabel("Query parameters q");
     await qField.fill("boots");
     await qField.press("Enter");
-    check(await page.getByLabel("Raw request").inputValue().then((v) => v.startsWith("GET /search?q=boots&page=1 ")), "Inspector edits a query parameter");
+    check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "Inspector edits a query parameter");
     await page.getByLabel("Cookies theme").fill("light");
     await page.getByLabel("Cookies theme").press("Enter");
-    check(await page.getByLabel("Raw request").inputValue().then((v) => v.includes("Cookie: a=1; theme=light")), "Inspector edits a cookie");
+    check(await rawBecomes('v.includes("Cookie: a=1; theme=light")'), "Inspector edits a cookie");
     await page.getByLabel("Protocol").selectOption("HTTP/2");
     await page.getByLabel("HTTP/2 pseudo-headers :path").fill("/search?q=h2");
     await page.getByLabel("HTTP/2 pseudo-headers :path").press("Enter");
     await page.getByLabel("HTTP/2 pseudo-headers :authority").fill("other.test");
     await page.getByLabel("HTTP/2 pseudo-headers :authority").press("Enter");
-    const h2raw = await page.getByLabel("Raw request").inputValue();
-    check(h2raw.startsWith("GET /search?q=h2 HTTP/2\n") && h2raw.includes("host: other.test") && h2raw.includes("cookie: a=1"),
+    check(await rawBecomes('v.startsWith("GET /search?q=h2 HTTP/2\\n") && v.includes("host: other.test") && v.includes("cookie: a=1")'),
       "Inspector switches to HTTP/2 and edits :path and :authority");
     await page.getByLabel("Protocol").selectOption("HTTP/1.1");
     await page.getByRole("button", { name: "New tab" }).click();
