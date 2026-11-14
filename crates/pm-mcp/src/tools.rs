@@ -822,6 +822,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "samples": {"type":"integer","minimum":5,"maximum":30},
                 "min_effect_ms": {"type":"number"},
                 "raw": {"type":"string"},
+                "view_raw": {"type":"string","description":"reflection: the request for the page that shows what raw stored (stored XSS); that page is rendered"},
                 "raws": {"type":"array","items":{"type":"string"},"description":"sql_error: baseline, the value with a quote, with a second quote, with a harmless change. boolean_injection: baseline, a true condition, a false condition. path_traversal: baseline, a made-up file name, then one request per known file. expression (template injection): baseline, the bare numbers without template syntax, then one request per expression on fresh random numbers"},
                 "markers": {"type":"array","items":{"type":"string"},"description":"path_traversal: text that shows each file request read its file, one per file request. expression: what each expression evaluates to (5+ digits)"},
                 "marker_kind": {"type":"string","enum":["redirect","crlf","host","cors"],"description":"marker: where the fresh value must not land (the redirect target, a response header, an absolute URL, or Access-Control-Allow-Origin with credentials for an Origin header)"},

@@ -67,6 +67,10 @@ pub struct ProofRequest {
     /// credentials). The request goes in `raw` with `{{marker}}` where a fresh
     /// random value should be placed.
     pub marker_kind: Option<String>,
+    /// reflection: a request for the page that shows what `raw` stored
+    /// (stored XSS). `raw` is sent first, then this, and this page is the one
+    /// rendered.
+    pub view_raw: Option<String>,
     /// timing/oast/reflection: send with this identity's credentials.
     pub identity: Option<String>,
     /// Mark this finding as proven if the proof succeeds.
@@ -297,8 +301,19 @@ impl Service {
         let (mut out, recorded_as) = self.exchange_outgoing(id)?;
         out.hypothesis_id = req.hypothesis_id;
         if Tier::for_http_method(&out.method) != Tier::ActiveSafe {
-            return invalid("differential_authz only re-sends GET/HEAD/OPTIONS requests");
+            // A GraphQL query sent by POST only reads; anything else could change state.
+            let (_, raw_body) = pm_http::split_message(&out.raw);
+            let body = pm_http::decode_chunked(raw_body).unwrap_or_else(|| raw_body.to_vec());
+            if !out.method.eq_ignore_ascii_case("POST") {
+                return invalid("differential_authz only re-sends GET/HEAD/OPTIONS requests");
+            }
+            if let Err(why) = graphql_read_only(&body) {
+                return invalid(format!(
+                    "differential_authz only re-sends GET/HEAD/OPTIONS requests or GraphQL queries sent by POST ({why})"
+                ));
+            }
         }
+        let graphql = !out.method.eq_ignore_ascii_case("GET") && !out.method.eq_ignore_ascii_case("HEAD");
         let owner = req.owner.clone().or(recorded_as).ok_or_else(|| {
             ServiceError::Invalid("can't tell who owns this data; pass owner (an identity name)".into())
         })?;
@@ -315,6 +330,11 @@ impl Service {
             sends.push(self.send_as(actor, &out, who, false, "proof").await?.0);
         }
         let resp = |i: usize| sends[i].response.clone().unwrap_or_default();
+        // GraphQL answers a refused query with 200 and an `errors` array, so judge it by the body.
+        let status = |i: usize| match sends[i].status {
+            Some(s) if graphql && graphql_refused(&resp(i)) && (200..300).contains(&s) => Some(401),
+            other => other,
+        };
         let noise = pm_diff::learn_noise(&resp(0), &resp(1));
         let d = pm_diff::diff(&resp(0), &resp(2), &noise);
         // Values that identify the owner: their name, and owner-response
@@ -336,16 +356,16 @@ impl Service {
             attacker: attacker.clone(),
             attacker_role: attacker_ident.role.clone(),
             owner_role: owner_ident.role.clone(),
-            owner_statuses: [sends[0].status, sends[1].status],
-            attacker_status: sends[2].status,
-            anonymous_status: sends[3].status,
+            owner_statuses: [status(0), status(1)],
+            attacker_status: status(2),
+            anonymous_status: status(3),
             similarity: d.similarity,
             markers_found: found.clone(),
         });
         let ids = sends.iter().map(|s| s.exchange_id).collect();
         let details = json!({
             "owner": owner, "attacker": attacker,
-            "statuses": { "owner": [sends[0].status, sends[1].status], "attacker": sends[2].status, "anonymous": sends[3].status },
+            "statuses": { "owner": [status(0), status(1)], "attacker": status(2), "anonymous": status(3) },
             "similarity": d.similarity, "diff": d.summary, "noise": noise, "markers_found": found,
             "exchanges": { "owner": [sends[0].exchange_id, sends[1].exchange_id], "attacker": sends[2].exchange_id, "anonymous": sends[3].exchange_id },
         });
@@ -538,9 +558,10 @@ impl Service {
             ))
         })?;
         let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let view = req.view_raw.as_deref().map(|v| self.outgoing(endpoint.clone(), v.as_bytes(), true)).transpose()?;
         let params = json!({
             "endpoint": format!("{}://{}:{}", endpoint.scheme, endpoint.host, endpoint.port),
-            "raw": raw, "identity": req.identity,
+            "raw": raw, "view_raw": req.view_raw, "identity": req.identity,
         });
         match self.gate_proof(
             actor,
@@ -557,18 +578,31 @@ impl Service {
             }
         }
         let token = xss_token()?;
-        let mut out = self.outgoing(endpoint, pm_proof::fill_xss_template(&raw, &token).as_bytes(), true)?;
+        let mut out = self.outgoing(endpoint.clone(), pm_proof::fill_xss_template(&raw, &token).as_bytes(), true)?;
         out.hypothesis_id = req.hypothesis_id;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
+        let mut exchange_ids = vec![sent.exchange_id];
+        // Stored XSS: the payload shows on another page; that page is the one rendered.
+        let (shown, page_url) = match &view {
+            Some(v) => {
+                let (seen, _) = self.send_as(actor, v, req.identity.as_deref(), true, "proof").await?;
+                exchange_ids.push(seen.exchange_id);
+                (seen, v.url())
+            }
+            None => (sent, out.url()),
+        };
         // Render exactly what was recorded.
-        let recorded = self.store.lock().get_exchange(sent.exchange_id)?.and_then(|e| e.response);
+        let recorded = self.store.lock().get_exchange(shown.exchange_id)?.and_then(|e| e.response);
         let payload = pm_proof::xss_payload(&token);
-        let mut inputs = pm_proof::ReflectionInputs { token: token.clone(), status: sent.status, ..Default::default() };
+        let mut inputs =
+            pm_proof::ReflectionInputs { token: token.clone(), status: shown.status, ..Default::default() };
         let mut activity = Value::Null;
         let mut render_error = None;
         let mut blocked_total = 0;
-        if let Some(doc) = recorded.as_deref().and_then(|r| recorded_document(&out.url(), r)) {
-            let body = String::from_utf8_lossy(&doc.body);
+        if let Some(mut doc) = recorded.as_deref().and_then(|r| recorded_document(&page_url, r)) {
+            // The page's own scripts run too (DOM XSS goes through them).
+            doc.resources = self.page_scripts(actor, &doc, &endpoint, req.identity.as_deref()).await;
+            let body = String::from_utf8_lossy(&doc.body).into_owned();
             inputs.token_in_body = body.contains(&token);
             // The payload as sent: the default one, or the user's own around {{token}}.
             inputs.payload_in_body = body.contains(&payload)
@@ -597,16 +631,56 @@ impl Service {
             }
         }
         let mut verdict = pm_proof::reflection(&inputs);
+        if verdict.proven && view.is_some() {
+            verdict.reasons.push(format!("the first request stored the payload; it ran on {page_url}"));
+        }
         if let Some(e) = &render_error {
             verdict.reasons.push(format!("browser error: {e}"));
         }
         let details = json!({
-            "token": token, "payload": payload, "url": out.url(), "status": sent.status,
+            "token": token, "payload": payload, "url": out.url(), "shown_on": page_url, "status": shown.status,
             "content_type": inputs.content_type, "token_in_body": inputs.token_in_body,
             "payload_in_body": inputs.payload_in_body, "rendered": inputs.rendered,
             "blocked_total": blocked_total, "page_activity": activity, "render_error": render_error,
         });
-        Ok(Ok((verdict, vec![sent.exchange_id], details)))
+        Ok(Ok((verdict, exchange_ids, details)))
+    }
+
+    /// The page's same-origin scripts, so a render runs them: the recorded
+    /// copy when there is one, else fetched once with a plain GET (the send
+    /// still checks scope).
+    async fn page_scripts(
+        &self,
+        actor: &Actor,
+        doc: &pm_browser::Document,
+        endpoint: &Endpoint,
+        identity: Option<&str>,
+    ) -> Vec<pm_browser::Resource> {
+        let html = String::from_utf8_lossy(&doc.body).into_owned();
+        let mut out = Vec::new();
+        for src in pm_scan::active::script_srcs(&html, &doc.url) {
+            let raw = match self.recorded_for_url(&src) {
+                Some(r) => r,
+                None => {
+                    let Ok(u) = url::Url::parse(&src) else { continue };
+                    let path = format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default());
+                    let host = pm_core::authority(&endpoint.scheme, &endpoint.host, endpoint.port);
+                    let get = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\n\r\n");
+                    let Ok(o) = self.outgoing(endpoint.clone(), get.as_bytes(), true) else { continue };
+                    match self.send_as(actor, &o, identity, true, "proof").await {
+                        Ok((sent, _)) => match sent.response {
+                            Some(r) => r,
+                            None => continue,
+                        },
+                        Err(_) => continue,
+                    }
+                }
+            };
+            if let Some(d) = recorded_document(&src, &raw) {
+                out.push(pm_browser::Resource { url: src, status: d.status, headers: d.headers, body: d.body });
+            }
+        }
+        out
     }
 
     /// Error-based SQL injection: send the baseline, two quote payloads and a
@@ -1384,9 +1458,173 @@ pub(crate) fn decode_proof(row: &serde_json::Map<String, Value>) -> Value {
     })
 }
 
+/// A 2xx GraphQL response whose every result has errors and no data: the
+/// server refused the query even though HTTP says 200.
+fn graphql_refused(response: &[u8]) -> bool {
+    let body = pm_http::split_message(response).1;
+    let body = pm_http::decode_chunked(body).unwrap_or_else(|| body.to_vec());
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else { return false };
+    let results: Vec<&Value> = match &v {
+        Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    !results.is_empty()
+        && results.iter().all(|r| {
+            r.get("errors").and_then(Value::as_array).is_some_and(|e| !e.is_empty())
+                && r.get("data").is_none_or(Value::is_null)
+        })
+}
+
+/// Whether a request body is a GraphQL request (or a batch of them) that can
+/// only read: JSON with a string `query` field whose document has no
+/// `mutation` or `subscription` operation. Conservative: anything it can't
+/// parse is refused, with the reason.
+fn graphql_read_only(body: &[u8]) -> std::result::Result<(), String> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| "the body is not JSON".to_string())?;
+    let items: Vec<&Value> = match &v {
+        Value::Array(a) if !a.is_empty() => a.iter().collect(),
+        Value::Array(_) => return Err("empty GraphQL batch".into()),
+        other => vec![other],
+    };
+    for item in items {
+        let doc = item
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "the JSON body has no string \"query\" field, so it isn't a GraphQL query".to_string())?;
+        graphql_document_read_only(doc)?;
+    }
+    Ok(())
+}
+
+/// Scans a GraphQL document, skipping comments and string values (including
+/// block strings), and refuses a `mutation` or `subscription` keyword outside
+/// any braces, parentheses or brackets (an operation definition).
+fn graphql_document_read_only(doc: &str) -> std::result::Result<(), String> {
+    let c: Vec<char> = doc.chars().collect();
+    let (mut i, mut depth) = (0usize, 0i64);
+    while i < c.len() {
+        match c[i] {
+            '#' => {
+                while i < c.len() && c[i] != '\n' && c[i] != '\r' {
+                    i += 1;
+                }
+            }
+            '"' => {
+                if c[i..].starts_with(&['"', '"', '"']) {
+                    i += 3;
+                    loop {
+                        if i >= c.len() {
+                            return Err("unterminated GraphQL block string".into());
+                        }
+                        if c[i..].starts_with(&['\\', '"', '"', '"']) {
+                            i += 4;
+                        } else if c[i..].starts_with(&['"', '"', '"']) {
+                            i += 3;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                    loop {
+                        match c.get(i) {
+                            None | Some('\n') => return Err("unterminated GraphQL string".into()),
+                            Some('\\') => i += 2,
+                            Some('"') => {
+                                i += 1;
+                                break;
+                            }
+                            Some(_) => i += 1,
+                        }
+                    }
+                }
+            }
+            '{' | '(' | '[' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' | ')' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err("unbalanced GraphQL document".into());
+                }
+                i += 1;
+            }
+            ch if ch.is_ascii_alphabetic() || ch == '_' => {
+                let start = i;
+                while i < c.len() && (c[i].is_ascii_alphanumeric() || c[i] == '_') {
+                    i += 1;
+                }
+                let word: String = c[start..i].iter().collect();
+                if depth == 0 && matches!(word.as_str(), "mutation" | "subscription") {
+                    return Err(format!("the document has a {word} operation"));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    if depth != 0 {
+        return Err("unbalanced GraphQL document".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gql(doc: &str) -> Vec<u8> {
+        json!({ "query": doc }).to_string().into_bytes()
+    }
+
+    #[test]
+    fn graphql_queries_are_read_only_and_mutations_are_not() {
+        for ok in [
+            "{ invoice(id: 5001) { total } }",
+            "query Q { a }",
+            "# hi\nquery { a }",
+            "{ search(q: \"mutation\") { id } }",
+        ] {
+            assert_eq!(graphql_read_only(&gql(ok)), Ok(()), "{ok}");
+        }
+        for bad in [
+            "mutation { delete(id:1) }",
+            "# comment\nmutation M { x }",
+            "{ a }\nmutation M { x }",
+            "subscription S { x }",
+            "query Q { a } mutation { b }",
+            "{ a",
+        ] {
+            assert!(graphql_read_only(&gql(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn graphql_batches_need_every_element_to_be_a_query() {
+        let ok = br#"[{"query":"{ a }"},{"query":"query B { b }"}]"#;
+        assert_eq!(graphql_read_only(ok), Ok(()));
+        let bad = br#"[{"query":"{ a }"},{"query":"mutation { b }"}]"#;
+        assert!(graphql_read_only(bad).is_err());
+        assert!(graphql_read_only(b"[]").is_err());
+        assert!(graphql_read_only(br#"[{"query":"{ a }"},{"id":"abc"}]"#).is_err());
+    }
+
+    #[test]
+    fn graphql_errors_without_data_count_as_refused() {
+        let resp = |b: &str| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{b}", b.len()).into_bytes();
+        assert!(graphql_refused(&resp(r#"{"errors":[{"message":"not logged in"}],"data":null}"#)));
+        assert!(!graphql_refused(&resp(r#"{"data":{"me":{"id":"1"}}}"#)));
+        assert!(!graphql_refused(&resp(r#"{"errors":[{"message":"x"}],"data":{"a":1}}"#)));
+        assert!(!graphql_refused(&resp("not json")));
+    }
+
+    #[test]
+    fn non_graphql_post_bodies_are_refused() {
+        assert!(graphql_read_only(b"a=1&b=2").is_err());
+        assert!(graphql_read_only(br#"{"name":"x"}"#).is_err());
+        assert!(graphql_read_only(br#"{"query":5}"#).is_err());
+    }
 
     fn page(body: &str) -> Vec<u8> {
         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()

@@ -34,7 +34,7 @@ pub struct DomTestResult {
 
 impl Service {
     /// The latest recorded 2xx response for exactly `url` (scheme, host, port, path and query).
-    fn recorded_for_url(&self, url: &str) -> Option<Vec<u8>> {
+    pub(crate) fn recorded_for_url(&self, url: &str) -> Option<Vec<u8>> {
         let u = url::Url::parse(url).ok()?;
         let path = format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default());
         let rows = self

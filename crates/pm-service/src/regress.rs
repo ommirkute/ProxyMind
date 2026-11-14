@@ -187,6 +187,10 @@ impl Service {
                         }
                     }
                 }
+                // Stored XSS shows on another page; the runner only reads the answer to the request it sends.
+                "reflection" if inputs["view_raw"].is_string() => {
+                    Err("stored XSS (shown on another page) can't run as a one-request test: retest it in ProxyMind")
+                }
                 "reflection" => match (inputs["raw"].as_str(), d["url"].as_str().and_then(origin_of)) {
                     (Some(raw), Some(origin)) => {
                         let (request, auth) = self.portable(raw, identity);
