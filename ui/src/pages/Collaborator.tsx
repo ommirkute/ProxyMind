@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
+import { useLiveTick } from "../live";
 
 interface Status { public_url?: string; dns_domain?: string; listening?: string; smtp?: string; payloads: number; interactions: number; probes: number; late_findings: number }
 interface Payload { token: string; note: string; created_ms: number; actor: string; http_url?: string; dns_name?: string; email?: string; interactions: number }
@@ -144,24 +145,22 @@ function Interactions({ onCount }: { onCount: (n: number) => void }) {
   const [items, setItems] = useState<Interaction[]>([]);
   const [open, setOpen] = useState<Interaction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A stored callback is a `collaborator` event (and every reconnect is a resync): refetch the list.
+  const tick = useLiveTick(["collaborator"]);
   useEffect(() => {
     let stop = false;
-    const poll = () =>
-      api
-        .get<Interaction[]>("/collaborator/interactions?limit=200")
-        .then((v) => !stop && (setItems(v), setError(null), onCount(v.length)))
-        .catch((e: Error) => !stop && setError(e.message));
-    poll();
-    const t = setInterval(poll, 2000);
+    api
+      .get<Interaction[]>("/collaborator/interactions?limit=200")
+      .then((v) => !stop && (setItems(v), setError(null), onCount(v.length)))
+      .catch((e: Error) => !stop && setError(e.message));
     return () => {
       stop = true;
-      clearInterval(t);
     };
-  }, [onCount]);
+  }, [onCount, tick]);
   return (
     <Panel title="Interactions">
       <ErrorBox error={error} />
-      <p className="small muted">Checked every 2 seconds. Callback contents come from the network: treat them as untrusted.</p>
+      <p className="small muted">The list updates as callbacks arrive. Callback contents come from the network: treat them as untrusted.</p>
       {items.length === 0 ? (
         <Empty>No callbacks yet.</Empty>
       ) : (

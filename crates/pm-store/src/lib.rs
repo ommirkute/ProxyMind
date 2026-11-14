@@ -667,6 +667,8 @@ pub struct Store {
     index_inline: bool,
     /// Exchanges committed since `StoreHandle::write` last drained this (None = nobody observes, nothing is kept).
     committed: Option<Vec<CommittedExchange>>,
+    /// Exchange ids that got WebSocket messages since `StoreHandle::write` last drained this (None = nobody observes).
+    committed_ws: Option<Vec<i64>>,
 }
 
 /// What a commit observer is told about a stored exchange: ids and short summary fields only, never bodies.
@@ -685,6 +687,21 @@ pub struct CommittedExchange {
 
 /// Called with the exchanges a `StoreHandle::write` committed, in commit order (see [`StoreHandle::set_on_exchanges`]).
 pub type ExchangeObserver = Box<dyn Fn(&[CommittedExchange]) + Send + Sync>;
+
+/// An exchange that received WebSocket messages in one `StoreHandle::write`. Like [`CommittedExchange`] it carries
+/// ids and the scope fields only, never message payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedWs {
+    pub exchange_id: i64,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+}
+
+/// Called with the exchanges that got WebSocket messages in a `StoreHandle::write`, each once, in first-insert order
+/// (see [`StoreHandle::set_on_ws_messages`]).
+pub type WsObserver = Box<dyn Fn(&[CommittedWs]) + Send + Sync>;
 
 /// The highlight stored in an exchange's tags (`["highlight:red"]`).
 fn highlight_of(tags: &str) -> Option<String> {
@@ -741,7 +758,14 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "query_only", "ON")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false, committed: None })
+        Ok(Self {
+            conn,
+            text_of: raw_text,
+            extractor_set: false,
+            index_inline: false,
+            committed: None,
+            committed_ws: None,
+        })
     }
 
     /// Opens a connection for WAL checkpoints only (ADR-0017): no migration, no pragmas that write. A PASSIVE
@@ -754,7 +778,14 @@ impl Store {
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("opening project {} for checkpoints", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
-        Ok(Self { conn, text_of: raw_text, extractor_set: false, index_inline: false, committed: None })
+        Ok(Self {
+            conn,
+            text_of: raw_text,
+            extractor_set: false,
+            index_inline: false,
+            committed: None,
+            committed_ws: None,
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -768,7 +799,8 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let index_inline = conn.path().is_none_or(str::is_empty);
-        let mut store = Self { conn, text_of: raw_text, extractor_set: false, index_inline, committed: None };
+        let mut store =
+            Self { conn, text_of: raw_text, extractor_set: false, index_inline, committed: None, committed_ws: None };
         store.migrate()?;
         Ok(store)
     }
@@ -1049,15 +1081,18 @@ impl Store {
         for ex in exchanges {
             ids.push(Self::insert_exchange_in(&tx, text_of, extractor_set, index_inline, ex)?);
         }
+        let mut ws_ids = Vec::new();
         for (target, m) in ws {
             let exchange_id = match *target {
                 WsTarget::Exchange(id) => id,
                 WsTarget::InBatch(i) => *ids.get(i).context("WebSocket message points past the batch")?,
             };
             Self::insert_ws_in(&tx, exchange_id, m)?;
+            ws_ids.push(exchange_id);
         }
         tx.commit()?;
         self.note_committed(exchanges, &ids);
+        self.note_committed_ws(&ws_ids);
         Ok(ids)
     }
 
@@ -1436,7 +1471,25 @@ impl Store {
     }
 
     pub fn insert_ws_message(&mut self, m: &NewWsMessage) -> Result<i64> {
-        Self::insert_ws_in(&self.conn, m.exchange_id, m)
+        let id = Self::insert_ws_in(&self.conn, m.exchange_id, m)?;
+        self.note_committed_ws(&[m.exchange_id]);
+        Ok(id)
+    }
+
+    /// Remembers which exchanges got WebSocket messages, for the `StoreHandle` observer. Only after the commit.
+    fn note_committed_ws(&mut self, exchange_ids: &[i64]) {
+        if let Some(list) = self.committed_ws.as_mut() {
+            list.extend_from_slice(exchange_ids);
+        }
+    }
+
+    /// The scope fields of an exchange, for the WebSocket observer.
+    fn ws_target(&self, exchange_id: i64) -> Option<CommittedWs> {
+        self.conn
+            .query_row("SELECT scheme, host, port, path FROM exchanges WHERE id = ?1", [exchange_id], |r| {
+                Ok(CommittedWs { exchange_id, scheme: r.get(0)?, host: r.get(1)?, port: r.get(2)?, path: r.get(3)? })
+            })
+            .ok()
     }
 
     fn insert_ws_in(conn: &Connection, exchange_id: i64, m: &NewWsMessage) -> Result<i64> {
@@ -2021,6 +2074,7 @@ pub struct StoreHandle {
     inner: parking_lot::Mutex<Store>,
     readers: Option<Pool>,
     on_exchanges: std::sync::OnceLock<ExchangeObserver>,
+    on_ws_messages: std::sync::OnceLock<WsObserver>,
 }
 
 /// Read-only connections for one project file, opened lazily up to a cap.
@@ -2148,7 +2202,12 @@ impl StoreHandle {
     /// Wraps `store`. A file project gets a read pool (opened lazily); an in-memory one stays on one connection.
     pub fn new(store: Store) -> Self {
         let readers = store.path().map(|p| Pool::new(std::path::absolute(&p).unwrap_or(p)));
-        Self { inner: parking_lot::Mutex::new(store), readers, on_exchanges: std::sync::OnceLock::new() }
+        Self {
+            inner: parking_lot::Mutex::new(store),
+            readers,
+            on_exchanges: std::sync::OnceLock::new(),
+            on_ws_messages: std::sync::OnceLock::new(),
+        }
     }
 
     /// Run `f` with shared access to the store. Use this for a call that only needs `&Store` methods. On a file
@@ -2179,7 +2238,26 @@ impl StoreHandle {
                 observer(&batch);
             }
         }
+        if let Some(observer) = self.on_ws_messages.get() {
+            let mut ids = guard.committed_ws.as_mut().map(std::mem::take).unwrap_or_default();
+            // One report per exchange per write, however many messages it got (a burst on one socket).
+            let mut seen = std::collections::HashSet::new();
+            ids.retain(|id| seen.insert(*id));
+            let batch: Vec<CommittedWs> = ids.into_iter().filter_map(|id| guard.ws_target(id)).collect();
+            if !batch.is_empty() {
+                observer(&batch);
+            }
+        }
         out
+    }
+
+    /// Installs the WebSocket observer, once (a second call is ignored and returns false). After every `write` in
+    /// which `insert_ws_message` or `insert_batch` committed WebSocket messages, `observer` gets the exchanges they
+    /// belong to, each once per `write`, after `COMMIT` and under the write lock (same rules as
+    /// [`StoreHandle::set_on_exchanges`]). It covers the proxy recorder's `spawn_shared` and service inserts.
+    pub fn set_on_ws_messages(&self, observer: WsObserver) -> bool {
+        self.inner.lock().committed_ws.get_or_insert_with(Vec::new);
+        self.on_ws_messages.set(observer).is_ok()
     }
 
     /// Installs the commit observer, once (a second call is ignored and returns false). After every `write` in
@@ -2250,6 +2328,36 @@ mod tests {
         let mut plain = Store::open_in_memory().unwrap();
         plain.insert_exchange(&sample("/p", b"x")).unwrap();
         assert!(plain.committed.is_none());
+    }
+
+    #[test]
+    fn the_ws_observer_reports_each_exchange_once_per_write() {
+        use std::sync::{Arc, Mutex};
+        let h = StoreHandle::new(Store::open_in_memory().unwrap());
+        let seen: Arc<Mutex<Vec<Vec<_>>>> = Arc::default();
+        let log = seen.clone();
+        assert!(h.set_on_ws_messages(Box::new(move |rows| {
+            log.lock().unwrap().push(rows.iter().map(|r| (r.exchange_id, r.host.clone())).collect());
+        })));
+        assert!(!h.set_on_ws_messages(Box::new(|_| {})), "installed once");
+        let m = || NewWsMessage { len: 1, payload: vec![1], ..ws_sample() };
+        // A message that points past the batch rolls everything back: nothing is reported.
+        assert!(h.write(|s| s.insert_batch(&[sample("/x", b"x")], &[(WsTarget::InBatch(4), m())])).is_err());
+        assert!(seen.lock().unwrap().is_empty());
+        // A burst on one socket (three messages) and one on another: two reports, in first-insert order.
+        let ids = h.write(|s| s.insert_exchanges(&[sample("/a", b"x"), sample("/b", b"x")])).unwrap();
+        assert!(seen.lock().unwrap().is_empty(), "plain exchanges are not WebSocket messages");
+        let ws = [
+            (WsTarget::Exchange(ids[1]), m()),
+            (WsTarget::Exchange(ids[0]), m()),
+            (WsTarget::Exchange(ids[1]), m()),
+            (WsTarget::Exchange(ids[1]), m()),
+        ];
+        h.write(|s| s.insert_batch(&[], &ws)).unwrap();
+        // A single message insert is its own write.
+        h.write(|s| s.insert_ws_message(&NewWsMessage { exchange_id: ids[0], ..m() })).unwrap();
+        let host = sample("/a", b"x").host;
+        assert_eq!(*seen.lock().unwrap(), [vec![(ids[1], host.clone()), (ids[0], host.clone())], vec![(ids[0], host)]]);
     }
 
     #[test]

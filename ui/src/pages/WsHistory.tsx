@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, fmtTime, qs, type WsMessage } from "../api";
 import { Empty, ErrorBox, ExchangeLink, MessageView, useNav } from "../components";
+import { useLiveTick } from "../live";
 
 interface Item extends WsMessage {
   exchange_id: number;
@@ -15,7 +16,9 @@ interface Page {
 
 /** WebSocket messages across every connection, newest first. */
 export default function WsHistory() {
-  const { counters, go } = useNav();
+  const { go } = useNav();
+  // Every committed WebSocket message is a `websockets` event (the exchange counters never moved for them).
+  const tick = useLiveTick(["websockets"]);
   const [host, setHost] = useState("");
   const [dir, setDir] = useState<"" | "client" | "server">("");
   const [text, setText] = useState("");
@@ -36,8 +39,7 @@ export default function WsHistory() {
         .catch((e) => setError(e.message));
     }, 200);
     return () => clearTimeout(t);
-    // New messages don't change the exchange counters, so refresh on any counter change.
-  }, [host, counters?.last_exchange_id, counters?.audit_records]);
+  }, [host, tick]);
 
   const loadOlder = () =>
     api

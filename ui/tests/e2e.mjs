@@ -5,7 +5,7 @@
 // Uses the real `proxymind` binary (PROXYMIND, default ../target/debug/proxymind)
 // and Chromium (CHROMIUM, default: Playwright's bundled path).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -614,17 +614,26 @@ try {
     await page.getByTestId("intercept-toggle").click();
     await page.waitForSelector("text=Intercept is ON");
     search = (q) => viaProxy(proxy, shop, `GET /api/products/search?q=${q} HTTP/1.1\r\nHost: shop\r\n\r\n`);
+    // ADR-0018: the page learns of a held request from a server event, not a timer. Time from sending the
+    // request to its row being on screen (this includes the proxy round trip and the 250 ms-class event path).
+    const sentAt = Date.now();
     edited = search("held-original"); // waits in the queue until forwarded
-    await page.waitForSelector('[data-testid="intercept-badge"]');
     await page.locator('[data-testid="intercept-queue"]', { hasText: "held-original" }).waitFor();
+    const shownIn = Date.now() - sentAt;
+    check(shownIn < 1500, `a newly held request shows on the Intercept page within 1.5 s (${shownIn} ms)`);
+    await page.waitForSelector('[data-testid="intercept-badge"]');
     check(true, "request is held and the sidebar shows a badge");
     const editor = page.getByLabel("Held message");
     await editor.fill((await editor.inputValue()).replace("held-original", "held-edited"));
     await page.screenshot({ path: join(SHOTS, "6b-intercept.png") });
     await page.getByTestId("intercept-forward").click();
     check((await edited).startsWith("HTTP/1.1 200"), "edited request is forwarded and answered");
+    // One request forwarded and the next arriving leaves the held count at 1 -> 0 -> 1: only events see that.
+    const droppedAt = Date.now();
     const dropped = search("held-drop");
     await page.locator('[data-testid="intercept-queue"]', { hasText: "held-drop" }).waitFor();
+    const droppedShownIn = Date.now() - droppedAt;
+    check(droppedShownIn < 1500, `the next held request shows within 1.5 s as well (${droppedShownIn} ms)`);
     await page.getByTestId("intercept-drop").click();
     check((await dropped).startsWith("HTTP/1.1 403"), "dropped request gets 403 from ProxyMind");
     await page.getByTestId("intercept-toggle").click();
@@ -1349,6 +1358,13 @@ match:
     check(await page.getByTestId("audit-verify").textContent().then((t) => t.includes("intact")), "audit log verified intact");
     await page.screenshot({ path: join(SHOTS, "8-audit.png") });
   });
+
+  // ADR-0018: no live page polls on an interval. The built bundle must not call setInterval at all (one-shot
+  // setTimeout calls for toasts, debounces and task-progress chains are allowed and are not checked here).
+  const assets = new URL("../dist/assets/", import.meta.url).pathname;
+  const bundles = readdirSync(assets).filter((f) => f.endsWith(".js"));
+  const withInterval = bundles.filter((f) => readFileSync(join(assets, f), "utf8").includes("setInterval("));
+  check(bundles.length > 0 && withInterval.length === 0, `the UI bundle has no setInterval( (${bundles.length} file(s) checked${withInterval.length ? "; found in " + withInterval.join(", ") : ""})`);
 
   // A fresh browser without the cookie is refused.
   const other = await browser.newPage();

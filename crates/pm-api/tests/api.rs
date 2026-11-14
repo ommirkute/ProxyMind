@@ -255,6 +255,72 @@ async fn event_topics_filter_resync_and_keep_the_counters_live() {
 }
 
 #[tokio::test]
+async fn the_websockets_topic_reports_each_exchange_once_per_batch() {
+    use pm_service::pm_store::{NewExchange, NewWsMessage, WsTarget};
+    let svc = Arc::new(
+        Service::new(
+            Store::open_in_memory().unwrap(),
+            Policy::new(Roe::parse("version: 1\nscope:\n  include: [\"http://127.0.0.1/\"]\n").unwrap()),
+        )
+        .unwrap(),
+    );
+    let state =
+        pm_api::AppState::new(svc.clone(), Actor::parse("human:tester").unwrap(), TOKEN.into(), "test.pmproj".into())
+            .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(l, pm_api::router(state)).await.unwrap() });
+
+    let mut ws = open_events(port, "?topics=websockets", "").await;
+    let mut all = open_events(port, "?topics=all", "").await;
+    let (mut got, mut got_all) = (String::new(), String::new());
+    // Both streams are open once their headers arrive; only then is it safe to publish.
+    read_until(&mut ws, &mut got, "\r\n\r\n").await;
+    read_until(&mut all, &mut got_all, "\r\n\r\n").await;
+    let ex = NewExchange {
+        ts_ms: 1,
+        duration_ms: None,
+        source: "proxy".into(),
+        actor_id: "human:tester".into(),
+        scheme: "http".into(),
+        host: "127.0.0.1".into(),
+        port: 80,
+        method: "GET".into(),
+        path: "/ws".into(),
+        status: Some(101),
+        request: b"GET /ws HTTP/1.1\r\n\r\n".to_vec(),
+        response: None,
+        error: None,
+        identity: None,
+        hypothesis_id: None,
+    };
+    let msg = || NewWsMessage {
+        exchange_id: 0,
+        ts_ms: 2,
+        from_client: true,
+        opcode: 1,
+        len: 1,
+        payload: b"x".to_vec(),
+        truncated: false,
+        compressed: false,
+    };
+    let id = svc.store_handle().write(|s| s.insert_exchange(&ex)).unwrap();
+    let burst = [(WsTarget::Exchange(id), msg()), (WsTarget::Exchange(id), msg()), (WsTarget::Exchange(id), msg())];
+    svc.store_handle().write(|s| s.insert_batch(&[], &burst)).unwrap();
+    read_until(&mut ws, &mut got, "event: websockets").await;
+    let block = got.split("\n\n").find(|b| b.contains("event: websockets")).unwrap();
+    let data: Value = serde_json::from_str(block.lines().find_map(|l| l.strip_prefix("data: ")).unwrap()).unwrap();
+    assert_eq!(
+        (data["type"].as_str(), data["exchange_id"].as_i64(), data["topic"].as_str()),
+        (Some("ws_message_recorded"), Some(id), Some("websockets"))
+    );
+    assert!(!got.contains("event: exchanges"), "only the requested topic: {got}");
+    read_until(&mut all, &mut got_all, "event: websockets").await;
+    // Three messages in one batch, one event.
+    assert_eq!(got.matches("event: websockets").count(), 1, "{got}");
+}
+
+#[tokio::test]
 async fn match_and_replace_rules() {
     let (port, _) = start().await;
     let (st, _, body) = http(port, "GET", "/api/v1/match-replace", &[AUTH], None).await;

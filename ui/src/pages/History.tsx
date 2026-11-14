@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
 import { Chip, ContextMenu, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
+import { useLiveEvent } from "../live";
 
 const ROW = 28;
 /** Bytes of a message shown before "Show all". */
@@ -747,24 +748,25 @@ function WsReplay({ id }: { id: number }) {
   );
 }
 
-/** WebSocket messages of an upgraded exchange; refreshes while open. */
+/** WebSocket messages of an upgraded exchange; reloads when the server says this exchange got new ones. */
 function WsMessages({ id }: { id: number }) {
   const [page, setPage] = useState<WsPage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  // `websockets` events name the exchange; a resync (lag or reconnect) reloads whichever is open.
+  useLiveEvent(["websockets"], (e) => {
+    if (e.topic === "resync" || e.data.exchange_id === id) setTick((t) => t + 1);
+  });
   useEffect(() => {
     let live = true;
-    const load = () =>
-      api
-        .get<WsPage>(`/exchanges/${id}/ws?limit=500`)
-        .then((p) => live && setPage(p))
-        .catch((e) => live && setError(e.message));
-    load();
-    const t = setInterval(load, 3000);
+    api
+      .get<WsPage>(`/exchanges/${id}/ws?limit=500`)
+      .then((p) => live && (setPage(p), setError(null)))
+      .catch((e) => live && setError(e.message));
     return () => {
       live = false;
-      clearInterval(t);
     };
-  }, [id]);
+  }, [id, tick]);
   if (error) return <ErrorBox error={error} />;
   if (!page) return <div className="muted">Loading…</div>;
   if (page.total === 0) return <Empty>No WebSocket messages recorded yet.</Empty>;

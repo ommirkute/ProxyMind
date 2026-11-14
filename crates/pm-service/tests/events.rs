@@ -294,3 +294,60 @@ fn a_collaborator_callback_publishes_a_hit_with_its_row_id() {
     let got = drain(&mut sub);
     assert_eq!((got[0].topic, got[0].event.clone()), (Topic::Collaborator, Event::CollaboratorHit { id: 1 }));
 }
+
+#[test]
+fn ws_messages_publish_one_event_per_exchange_per_batch_with_scope_rules() {
+    let svc = service();
+    let (human, agent) = (Actor::parse("human:h").unwrap(), Actor::parse("agent:a").unwrap());
+    let handle = svc.store_handle();
+    let ids = handle.write(|s| s.insert_exchanges(&[exchange("shop.test", 1), exchange("evil.test", 2)])).unwrap();
+    let msg = || NewWsMessage {
+        exchange_id: 0,
+        ts_ms: 1,
+        from_client: true,
+        opcode: 1,
+        len: 1,
+        payload: vec![b'x'],
+        truncated: false,
+        compressed: false,
+    };
+    let mut sub = svc.subscribe();
+    // Five messages on three sockets (one in the same batch as its exchange): one event per exchange.
+    let ws = [
+        (WsTarget::Exchange(ids[0]), msg()),
+        (WsTarget::Exchange(ids[0]), msg()),
+        (WsTarget::Exchange(ids[1]), msg()),
+        (WsTarget::Exchange(ids[0]), msg()),
+        (WsTarget::InBatch(0), msg()),
+    ];
+    handle.write(|s| s.insert_batch(&[exchange("shop.test", 3)], &ws)).unwrap();
+    let got = drain(&mut sub);
+    let kinds: Vec<_> = got.iter().map(|p| (p.topic, p.event.clone())).collect();
+    assert_eq!(kinds.len(), 4, "{kinds:?}");
+    assert!(matches!(kinds[0].1, Event::ExchangeRecorded { .. }));
+    assert_eq!(
+        kinds[1..],
+        [
+            (Topic::Websockets, Event::WsMessageRecorded { exchange_id: ids[0] }),
+            (Topic::Websockets, Event::WsMessageRecorded { exchange_id: ids[1] }),
+            (Topic::Websockets, Event::WsMessageRecorded { exchange_id: ids[1] + 1 }),
+        ]
+    );
+    // Humans see all; an agent loses the out-of-scope host's socket.
+    let human_view: Vec<_> = got.iter().filter_map(|p| svc.event_for(&human, p)).collect();
+    assert_eq!(human_view.len(), 4);
+    assert_eq!(human_view[1]["type"], "ws_message_recorded");
+    assert_eq!(
+        (human_view[1]["topic"].as_str(), human_view[1]["exchange_id"].as_i64()),
+        (Some("websockets"), Some(ids[0]))
+    );
+    let agent_ws: Vec<_> =
+        got.iter().filter_map(|p| svc.event_for(&agent, p)).filter(|v| v["topic"] == "websockets").collect();
+    assert_eq!(agent_ws.len(), 2, "the evil.test socket is dropped: {agent_ws:?}");
+    assert!(agent_ws.iter().all(|v| v["exchange_id"] != ids[1]));
+    assert!(svc.may_read_topic(&agent, Topic::Websockets));
+
+    // A rolled-back batch publishes nothing.
+    assert!(handle.write(|s| s.insert_batch(&[], &[(WsTarget::InBatch(0), msg())])).is_err());
+    assert!(drain(&mut sub).is_empty());
+}
