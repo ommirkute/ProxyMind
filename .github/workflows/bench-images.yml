@@ -1,0 +1,35 @@
+name: Bench images
+
+# Copies the deliberately vulnerable apps the benchmarks use from Docker Hub
+# to GHCR (ghcr.io/<owner>/bench-mirror/...), so benchmark runs don't depend
+# on Docker Hub's pull limits. Manifests are copied as they are, so the
+# digest pins in bench/docker-compose.yml still match. Run it by hand when an
+# image version in bench/docker-compose.yml changes.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy the images
+        run: |
+          mirror="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bench-mirror"
+          # Tag only, or name@digest (also tagged "pinned" so the package has a tag).
+          docker buildx imagetools create --tag "$mirror/bkimminich/juice-shop:v20.3.0" \
+            docker.io/bkimminich/juice-shop:v20.3.0
+          digest=sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
+          docker buildx imagetools create --tag "$mirror/erev0s/vampi:pinned" "docker.io/erev0s/vampi@$digest"
+          # The digest pin must still resolve on the mirror.
+          docker buildx imagetools inspect "$mirror/erev0s/vampi@$digest" >/dev/null
+          echo "Mirrored to $mirror. Benchmarks use it with BENCH_REGISTRY=$mirror." >> "$GITHUB_STEP_SUMMARY"

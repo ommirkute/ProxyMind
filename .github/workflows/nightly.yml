@@ -73,6 +73,19 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo build --release -p pm-cli
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Use the GHCR image mirror when it has been filled
+        run: |
+          mirror="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bench-mirror"
+          if docker manifest inspect "$mirror/bkimminich/juice-shop:v20.3.0" >/dev/null 2>&1; then
+            echo "BENCH_REGISTRY=$mirror" >> "$GITHUB_ENV"
+          else
+            echo "No mirror yet (run the Bench images workflow); pulling from Docker Hub."
+          fi
       - name: Start Juice Shop and VAmPI
         run: docker compose -f bench/docker-compose.yml up -d juice-shop vampi
       - name: Run benchmarks
@@ -89,3 +102,6 @@ jobs:
         with:
           name: bench-results
           path: ${{ runner.temp }}/bench
+    permissions:
+      contents: read
+      packages: read

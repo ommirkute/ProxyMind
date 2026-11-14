@@ -4,6 +4,15 @@ Written 2026-11-12, right after version 0.2.0 was merged to `main` (PR #21). Rea
 `docs/handoff.md` (architecture, crates, pitfalls), then this file. This file replaces the older plan; everything it
 listed is done.
 
+## 0. Owner decisions and the roadmap (2026-11-14)
+
+- **Version stays 0.2.0** until the roadmap's Phase 4 gate. Don't bump it, tag or release; record changes under
+  "Unreleased" in `CHANGELOG.md`.
+- **Every feature stays open source**, team features included.
+- **Signing certificates** (Apple, Windows) are bought once the app has all planned features; signing waits.
+- The plan to follow is `docs/roadmap.md` (five phases with gates). Phase 0 is in progress; its table there has the
+  status of each work package.
+
 ## 1. Where things stand
 
 - `main` is at **0.2.0** and green on Linux CI. The **v0.2.0 release is not published yet**: the owner creates the
@@ -79,8 +88,11 @@ Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tes
 **Follow-ups to push past 12 toward 15+ (and to finish the measurement):**
 - Re-measure VAmPI and Juice Shop in CI and fill `bench/README.md` (this sandbox was Docker-Hub rate-limited).
 - Add oracles for the classes still suspected: header-based time SQLi (needs to add the insertion-point header to the
-  request, e.g. User-Agent; VS-15), NoSQL operator injection (VS-21), GraphQL-over-POST IDOR (VS-12), blind XXE
-  (VS-16), host-header injection (VS-19), and stored/DOM XSS (VS-23/VS-25, render a different exchange).
+  request, e.g. User-Agent; VS-15), GraphQL-over-POST IDOR (VS-12) and stored/DOM XSS (VS-23/VS-25, render a
+  different exchange). Done 2026-11-14 (roadmap Phase 0.2): template injection (`expression` oracle), NoSQL operator
+  injection (boolean split with `$eq`/`$ne`), XXE (entity file read, or blind via OAST), CORS (`cors` marker kind)
+  and Host-header injection (`host` marker in `X-Forwarded-Host`); tests in `crates/pm-service/tests/prove_more.rs`
+  against a purpose-built app with fixed versions and traps.
 - Done 2026-11-13: every proof kind except out-of-band now exports as a CI regression test (9 of 9 proven findings
   in a VulnShop run, it was 4), the runner no longer calls a test "fixed" when the credentials stopped working or
   the server fails, and exported files never hold the recorded session. See the handoff's "Regression tests for CI".

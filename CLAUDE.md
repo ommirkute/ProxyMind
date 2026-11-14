@@ -2,7 +2,8 @@
 
 Starting a new session? Read `docs/handoff.md` first: architecture, what's done, what's next and how to build it, and environment pitfalls.
 
-Read `docs/plan.md` for the roadmap and `docs/adr/` for decisions before changing architecture.
+Read `docs/roadmap.md` for the current plan (phases, gates, owner decisions), `docs/plan.md` for the earlier roadmap
+and `docs/adr/` for decisions before changing architecture.
 
 ## Commands
 
