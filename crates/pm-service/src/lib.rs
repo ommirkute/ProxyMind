@@ -172,7 +172,7 @@ pub enum Authorization {
 pub struct Service {
     /// Shared with the proxy's scope checks, so ROE changes reach them too.
     policy: std::sync::Arc<Policy>,
-    store: StoreHandle,
+    store: std::sync::Arc<StoreHandle>,
     sender: Sender,
     limiter: RateLimiter,
     redactor: Redactor,
@@ -203,55 +203,107 @@ pub struct Service {
     relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
-    /// Keeps the background text indexer running; it exits when this is dropped.
-    _indexer: Option<std::sync::Arc<()>>,
 }
 
-/// Keeps the full-text index current. A project file gets one long-lived thread on its own
-/// connection: it indexes the tail the recorder wrote (the recorder doesn't index), then a
-/// batch of the old backlog, sleeps, and repeats. It stops once the returned token is dropped
-/// (the Service owns it). An in-memory store indexes inline, so only its backlog needs a
-/// synchronous pass. Errors only leave search on the slower path.
-fn start_text_indexer(store: &mut Store) -> Option<std::sync::Arc<()>> {
-    const BATCH: usize = 500;
-    let Some(path) = store.path() else {
-        while !matches!(store.text_index_backfill(BATCH), Ok(true) | Err(_)) {}
-        return None;
-    };
-    let token = std::sync::Arc::new(());
-    let alive = std::sync::Arc::downgrade(&token);
+/// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
+/// thread that writes through the shared handle, like the recorder and every `Service` write: it indexes the tail
+/// the recorder wrote (the recorder doesn't index), then a batch of the old backlog, checkpoints about every
+/// 200 ms, sleeps, and repeats. Batches are small and the thread yields between them, so the recorder's
+/// transactions interleave. It holds only a `Weak` handle and exits when the last `Arc` is gone. Returns false if
+/// the thread could not start. An in-memory store indexes inline, so only its backlog needs a synchronous pass.
+/// Errors only leave search on the slower path.
+fn start_text_indexer(handle: &std::sync::Arc<StoreHandle>, file_project: bool) -> bool {
+    /// First batch size, adjusted to `TARGET` of lock time per batch.
+    const BATCH: usize = 100;
+    const TARGET: std::time::Duration = std::time::Duration::from_millis(3);
+    const CYCLE: std::time::Duration = std::time::Duration::from_millis(200);
+    const YIELD: std::time::Duration = std::time::Duration::from_millis(2);
+    if !file_project {
+        while !matches!(handle.write(|s| s.text_index_backfill(500)), Ok(true) | Err(_)) {}
+        return false;
+    }
+    let weak = std::sync::Arc::downgrade(handle);
+    let path = handle.read(|s| s.path());
     let spawned = std::thread::Builder::new().name("text-indexer".into()).spawn(move || {
-        let mut own: Option<Store> = None;
-        while alive.strong_count() > 0 {
-            let step = |own: &mut Option<Store>| -> anyhow::Result<()> {
-                if own.is_none() {
-                    let mut s = Store::open(&path)?;
-                    s.set_text_extractor(search::searchable);
-                    *own = Some(s);
+        let mut last_checkpoint = std::time::Instant::now();
+        let mut batch = BATCH;
+        let mut checkpointer = path.as_deref().and_then(|p| match Store::open_checkpointer(p) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("checkpoints will run on the shared write connection: {e:#}");
+                None
+            }
+        });
+        loop {
+            let pause = {
+                let Some(h) = weak.upgrade() else { return };
+                let mut step = || -> anyhow::Result<()> {
+                    // Each batch holds the write lock, so its size follows how long the last one took (debug
+                    // builds and big bodies are slow): about `TARGET` of lock time, then the recorder gets a turn.
+                    let timed = |batch: &mut usize, run: &dyn Fn(usize) -> anyhow::Result<usize>| {
+                        let t = std::time::Instant::now();
+                        let n = run(*batch)?;
+                        let took = t.elapsed().as_secs_f64().max(1e-4);
+                        // Only a batch that did work says how long a row takes (an idle poll takes microseconds).
+                        if n > 0 {
+                            *batch = ((n as f64) * TARGET.as_secs_f64() / took).clamp(5.0, 500.0) as usize;
+                        }
+                        Ok::<usize, anyhow::Error>(n)
+                    };
+                    // Checkpoints run in this thread's turn but on their own connection: a PASSIVE checkpoint
+                    // takes SQLite's checkpoint lock, not its write lock, so the recorder keeps inserting while
+                    // pages are copied and synced (done under the shared mutex, it stalled the recorder ~80 ms).
+                    let mut checkpoint = |last: &mut std::time::Instant| -> anyhow::Result<()> {
+                        if last.elapsed() >= CYCLE {
+                            match checkpointer.as_mut() {
+                                Some(c) => c.checkpoint_passive()?,
+                                None => h.write(|s| s.checkpoint_passive())?,
+                            }
+                            *last = std::time::Instant::now();
+                        }
+                        Ok(())
+                    };
+                    while timed(&mut batch, &|n| h.write(|s| s.text_index_catch_up(n)))? > 0 {
+                        checkpoint(&mut last_checkpoint)?;
+                        std::thread::sleep(YIELD);
+                    }
+                    if !h.read(|s| s.text_index_complete())? {
+                        loop {
+                            let finished = std::cell::Cell::new(false);
+                            timed(&mut batch, &|n| {
+                                let done = h.write(|s| s.text_index_backfill(n))?;
+                                finished.set(done);
+                                Ok(if done { 0 } else { n })
+                            })?;
+                            if finished.get() {
+                                break;
+                            }
+                            checkpoint(&mut last_checkpoint)?;
+                            std::thread::sleep(YIELD);
+                            // New traffic comes first: the tail is what searches need soonest.
+                            if timed(&mut batch, &|n| h.write(|s| s.text_index_catch_up(n)))? > 0 {
+                                std::thread::sleep(YIELD);
+                            }
+                        }
+                    }
+                    checkpoint(&mut last_checkpoint)
+                };
+                match step() {
+                    Ok(()) => CYCLE,
+                    Err(e) => {
+                        tracing::warn!("full-text indexing failed (will retry): {e:#}");
+                        std::time::Duration::from_secs(2)
+                    }
                 }
-                let s = own.as_mut().expect("opened above");
-                while alive.strong_count() > 0 && s.text_index_catch_up(BATCH)? > 0 {}
-                if alive.strong_count() > 0 && !s.text_index_complete()? {
-                    s.text_index_backfill(BATCH)?;
-                }
-                Ok(())
-            };
-            let pause = match step(&mut own) {
-                Ok(()) => std::time::Duration::from_millis(200),
-                Err(e) => {
-                    tracing::warn!("full-text indexing failed (will retry): {e:#}");
-                    own = None;
-                    std::time::Duration::from_secs(2)
-                }
-            };
+            }; // the Arc is released before sleeping, so a dropped Service closes its connections promptly
             std::thread::sleep(pause);
         }
     });
     match spawned {
-        Ok(_) => Some(token),
+        Ok(_) => true,
         Err(e) => {
             tracing::warn!("full-text indexer not started: {e}");
-            None
+            false
         }
     }
 }
@@ -263,17 +315,33 @@ impl Service {
 
     pub fn with_sender(mut store: Store, policy: Policy, sender: Sender) -> Result<Self> {
         store.set_text_extractor(search::searchable);
-        let indexer = start_text_indexer(&mut store);
+        let file_project = store.path().is_some();
+        if file_project {
+            // Checkpoints happen in the indexer's turn, never inside a recorder insert (ADR-0017). Only this one
+            // write connection stops auto-checkpointing, and only while the indexer thread runs (below).
+            if let Err(e) = store.set_wal_autocheckpoint(false) {
+                tracing::warn!("could not move WAL checkpoints to the indexer: {e}");
+            }
+        }
         let limits = policy.roe().limits;
         // Saved network settings apply from the start; a bad entry (say, a
         // moved certificate file) is reported but doesn't stop the project opening.
         if let Err(e) = network::sync_network(&store, sender.network()) {
             tracing::warn!("network settings not applied: {e}");
         }
+        let store = std::sync::Arc::new(StoreHandle::new(store));
+        if file_project && !start_text_indexer(&store, true) {
+            // Nobody would checkpoint: go back to SQLite's automatic checkpoints.
+            if let Err(e) = store.write(|s| s.set_wal_autocheckpoint(true)) {
+                tracing::warn!("could not restore automatic WAL checkpoints: {e}");
+            }
+        } else if !file_project {
+            start_text_indexer(&store, false);
+        }
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
-            store: StoreHandle::new(store),
+            store,
             sender,
             redactor: Redactor::new(),
             intercept: std::sync::OnceLock::new(),
@@ -291,10 +359,17 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
-            _indexer: indexer,
         };
         svc.load_scan_tasks();
         Ok(svc)
+    }
+
+    /// The project's shared write connection (ADR-0017), for the proxy's recorder to write through
+    /// (`pm_proxy::Recorder::spawn_shared`) so that recording, indexing and service writes take turns on one lock.
+    /// This is wiring only: clients (API, MCP, CLI, UI) still act through `Service` methods, so every action goes
+    /// through `pm-policy` (ADR-0005).
+    pub fn store_handle(&self) -> std::sync::Arc<StoreHandle> {
+        self.store.clone()
     }
 
     /// Sets the passive-check plugins to run with the passive scan. Callers

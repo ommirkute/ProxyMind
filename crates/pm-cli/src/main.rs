@@ -1372,20 +1372,30 @@ async fn run() -> Result<()> {
     match &cli.command {
         Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
-            let mut store = Store::open(&cli.project)?;
-            store.set_text_extractor(pm_service::searchable);
-            let (recorder, writer) = Recorder::spawn(store);
+            // With a Service for this project in this process, the recorder shares its write connection
+            // (ADR-0017); without rules of engagement there is no Service, so it keeps its own connection.
+            let service = match open_service(&cli.project, None) {
+                Ok(service) => Some(Arc::new(service)),
+                Err(_) => {
+                    eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off.");
+                    None
+                }
+            };
+            let (recorder, writer) = match &service {
+                Some(service) => Recorder::spawn_shared(service.store_handle()),
+                None => {
+                    let mut store = Store::open(&cli.project)?;
+                    store.set_text_extractor(pm_service::searchable);
+                    Recorder::spawn(store)
+                }
+            };
             // In-scope-only rules need the rules of engagement; without
             // them only rules marked "any host" apply.
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
-            match open_service(&cli.project, None) {
-                Ok(service) => {
-                    let service = Arc::new(service);
-                    service.attach_rewriter(rewriter.clone())?;
-                    service.attach_recorder(&recorder)?;
-                    pm_service::watch_roe(service);
-                }
-                Err(_) => eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off."),
+            if let Some(service) = service {
+                service.attach_rewriter(rewriter.clone())?;
+                service.attach_recorder(&recorder)?;
+                pm_service::watch_roe(service);
             }
             let network = pm_service::pm_replay::Network::new();
             let hooks = pm_proxy::Hooks {
@@ -2044,9 +2054,8 @@ async fn run() -> Result<()> {
             if !*no_proxy {
                 let ca = Arc::new(CertAuthority::load_or_create(&home)?);
                 setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
-                let mut recording = Store::open(&cli.project)?;
-                recording.set_text_extractor(pm_service::searchable);
-                let (recorder, _writer) = Recorder::spawn(recording);
+                // The Service for this project is in this process: record through its write connection.
+                let (recorder, _writer) = Recorder::spawn_shared(service.store_handle());
                 service.attach_recorder(&recorder)?;
                 let queue = Arc::new(pm_proxy::InterceptQueue::new());
                 service.attach_intercept(queue.clone());

@@ -29,7 +29,7 @@ use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings};
 pub use listeners::{ListenerConfig, ListenerStatus, Listeners, Redirect};
 pub use pm_store::NewExchange as RecordedExchange;
-use pm_store::{NewExchange, NewWsMessage, Store};
+use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, WsTarget};
 use pm_tls::{CertAuthority, TlsAcceptor};
 pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
@@ -44,11 +44,26 @@ pub const RECORD_CAP: usize = 64 << 20;
 
 /// Records waiting for the writer thread at most.
 const RECORD_QUEUE: usize = 4096;
+/// The most records one `spawn_shared` transaction holds.
+const BATCH_MAX: usize = 256;
+/// How long the shared writer keeps draining the queue into one transaction.
+const BATCH_WINDOW: Duration = Duration::from_millis(20);
 
 enum Record {
     Exchange(Box<NewExchange>, Option<u64>),
     Ws(u64, NewWsMessage),
     WsDone(u64),
+}
+
+/// Counters shared by every clone of a [`Recorder`].
+#[derive(Default)]
+struct RecorderStats {
+    /// Records the writer thread has handled (committed, or failed and logged).
+    written: std::sync::atomic::AtomicU64,
+    /// Write transactions the writer thread has run (`spawn_shared`: one per drained batch).
+    batches: std::sync::atomic::AtomicU64,
+    /// Records that could not be queued because the writer thread is gone.
+    lost: std::sync::atomic::AtomicU64,
 }
 
 /// Decides whether an exchange goes into history (e.g. in scope only).
@@ -62,12 +77,17 @@ pub struct Recorder {
     tx: std::sync::mpsc::SyncSender<Record>,
     next_key: Arc<std::sync::atomic::AtomicU64>,
     filter: Arc<parking_lot::RwLock<Option<RecordFilter>>>,
+    stats: Arc<RecorderStats>,
 }
 
 impl Recorder {
-    /// Starts the writer thread. It runs until every `Recorder` is dropped.
+    /// Starts the writer thread on its own connection, one transaction per record. For a process without a
+    /// `Service`; with one, use [`Recorder::spawn_shared`]. It runs until every `Recorder` is dropped.
     pub fn spawn(mut store: Store) -> (Self, std::thread::JoinHandle<()>) {
+        use std::sync::atomic::Ordering::Relaxed;
         let (tx, rx) = std::sync::mpsc::sync_channel::<Record>(RECORD_QUEUE);
+        let stats = Arc::new(RecorderStats::default());
+        let st = stats.clone();
         let handle = std::thread::spawn(move || {
             // Upgraded exchanges by key, so their WebSocket messages can be
             // linked to the row id. Records arrive in order on one thread.
@@ -94,9 +114,70 @@ impl Recorder {
                 if let Err(e) = r {
                     tracing::error!(error = %e, "failed to record traffic");
                 }
+                st.written.fetch_add(1, Relaxed);
+                st.batches.fetch_add(1, Relaxed);
             }
         });
-        (Self { tx, next_key: Arc::default(), filter: Arc::default() }, handle)
+        (Self { tx, next_key: Arc::default(), filter: Arc::default(), stats }, handle)
+    }
+
+    /// Starts the writer thread on the process's shared write connection (ADR-0017), so recording, the full-text
+    /// indexer and `Service` writes take turns on one lock instead of fighting over SQLite's. The thread blocks for
+    /// a record, then drains what else is queued (up to 256 records or 20 ms, never waiting for more) and writes it
+    /// all in ONE transaction, in arrival order. A WebSocket message goes in after its exchange (it may be in the
+    /// same batch). If a batch fails, its records are retried one by one so a single bad row costs one row.
+    /// The queue is as bounded as in [`Recorder::spawn`]: a full queue makes senders wait.
+    ///
+    /// The thread keeps `handle` alive until every `Recorder` clone is dropped.
+    pub fn spawn_shared(handle: Arc<StoreHandle>) -> (Self, std::thread::JoinHandle<()>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Record>(RECORD_QUEUE);
+        let stats = Arc::new(RecorderStats::default());
+        let st = stats.clone();
+        let join = std::thread::Builder::new()
+            .name("recorder".into())
+            .spawn(move || {
+                let mut ids = std::collections::HashMap::<u64, i64>::new();
+                let mut batch = Vec::with_capacity(BATCH_MAX);
+                while let Ok(first) = rx.recv() {
+                    batch.push(first);
+                    let deadline = Instant::now() + BATCH_WINDOW;
+                    while batch.len() < BATCH_MAX && Instant::now() < deadline {
+                        match rx.try_recv() {
+                            Ok(r) => batch.push(r),
+                            Err(_) => break,
+                        }
+                    }
+                    let n = batch.len() as u64;
+                    write_batch(&handle, &mut ids, std::mem::take(&mut batch));
+                    st.written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    st.batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .expect("spawning the recorder thread");
+        (Self { tx, next_key: Arc::default(), filter: Arc::default(), stats }, join)
+    }
+
+    /// Records the writer thread has handled so far (stored, or failed and logged).
+    pub fn written_records(&self) -> u64 {
+        self.stats.written.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Write transactions the writer thread has run: with `spawn_shared`, one per drained batch.
+    pub fn write_batches(&self) -> u64 {
+        self.stats.batches.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Records that could not be queued because the writer thread has exited (it panicked). Zero in normal use.
+    pub fn lost_records(&self) -> u64 {
+        self.stats.lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Queues a record, waiting while the queue is full (never dropping for load). Fails only when the writer
+    /// thread is gone: that is counted and logged once, not silently ignored.
+    fn send(&self, rec: Record) {
+        if self.tx.send(rec).is_err() && self.stats.lost.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            tracing::error!("the recorder's writer thread has stopped; traffic is no longer being recorded");
+        }
     }
 
     /// Sets (or removes) the filter for every clone of this recorder.
@@ -110,7 +191,7 @@ impl Recorder {
 
     pub fn record(&self, ex: NewExchange) {
         if self.keep(&ex) {
-            let _ = self.tx.send(Record::Exchange(Box::new(ex), None));
+            self.send(Record::Exchange(Box::new(ex), None));
         }
     }
 
@@ -119,17 +200,91 @@ impl Recorder {
     fn record_upgrade(&self, ex: NewExchange) -> u64 {
         let key = self.next_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if self.keep(&ex) {
-            let _ = self.tx.send(Record::Exchange(Box::new(ex), Some(key)));
+            self.send(Record::Exchange(Box::new(ex), Some(key)));
         }
         key
     }
 
     fn record_ws(&self, key: u64, m: NewWsMessage) {
-        let _ = self.tx.send(Record::Ws(key, m));
+        self.send(Record::Ws(key, m));
     }
 
     fn ws_done(&self, key: u64) {
-        let _ = self.tx.send(Record::WsDone(key));
+        self.send(Record::WsDone(key));
+    }
+}
+
+/// Writes drained records through the shared handle in one transaction, then updates the key -> row id map.
+/// Records are never reordered: exchanges go in arrival order, and each WebSocket message is resolved against the
+/// exchange it follows (in this batch or an earlier one).
+fn write_batch(handle: &StoreHandle, ids: &mut std::collections::HashMap<u64, i64>, records: Vec<Record>) {
+    use std::collections::{HashMap, HashSet};
+    let mut exchanges: Vec<NewExchange> = Vec::new();
+    let mut keys: Vec<Option<u64>> = Vec::new();
+    let mut ws: Vec<(WsTarget, NewWsMessage)> = Vec::new();
+    let mut pending = HashMap::<u64, usize>::new();
+    let mut done = HashSet::<u64>::new();
+    for rec in records {
+        match rec {
+            Record::Exchange(ex, key) => {
+                if let Some(k) = key {
+                    pending.insert(k, exchanges.len());
+                }
+                exchanges.push(*ex);
+                keys.push(key);
+            }
+            Record::Ws(key, m) => {
+                if done.contains(&key) {
+                    // The socket is over; nothing may follow (the unbatched path drops these too).
+                } else if let Some(&i) = pending.get(&key) {
+                    ws.push((WsTarget::InBatch(i), m));
+                } else if let Some(&id) = ids.get(&key) {
+                    ws.push((WsTarget::Exchange(id), m));
+                } // else: its exchange wasn't kept (filtered out), so the message isn't either
+            }
+            Record::WsDone(key) => {
+                pending.remove(&key);
+                done.insert(key);
+            }
+        }
+    }
+    let mut row_ids: Vec<Option<i64>> = vec![None; exchanges.len()];
+    match handle.write(|s| s.insert_batch(&exchanges, &ws)) {
+        Ok(new_ids) => row_ids = new_ids.into_iter().map(Some).collect(),
+        Err(e) if exchanges.len() + ws.len() <= 1 => tracing::error!(error = %e, "failed to record traffic"),
+        Err(e) => {
+            // Nothing was stored (one transaction). Find the bad record by writing one at a time.
+            tracing::warn!(error = %e, "batch write failed; retrying its records one by one");
+            for (i, ex) in exchanges.iter().enumerate() {
+                let own: Vec<(WsTarget, NewWsMessage)> = ws
+                    .iter()
+                    .filter(|(t, _)| *t == WsTarget::InBatch(i))
+                    .map(|(_, m)| (WsTarget::InBatch(0), m.clone()))
+                    .collect();
+                match handle.write(|s| s.insert_batch(std::slice::from_ref(ex), &own)) {
+                    Ok(v) => row_ids[i] = v.first().copied(),
+                    Err(e) => tracing::error!(error = %e, "failed to record traffic"),
+                }
+            }
+            for (t, m) in &ws {
+                if let WsTarget::Exchange(id) = *t {
+                    let m = NewWsMessage { exchange_id: id, ..m.clone() };
+                    if let Err(e) = handle.write(|s| s.insert_ws_message(&m)) {
+                        tracing::error!(error = %e, "failed to record traffic");
+                    }
+                }
+            }
+        }
+    }
+    for (key, id) in keys.iter().zip(&row_ids) {
+        if let (Some(k), Some(id)) = (key, id)
+            && !done.contains(k)
+        {
+            ids.insert(*k, *id);
+        }
+    }
+    for k in done {
+        ids.remove(&k);
     }
 }
 
@@ -752,4 +907,137 @@ fn resolve_target(
     let (host, port) = pm_http::split_host_port(std::str::from_utf8(host_hdr)?.trim(), default_port)
         .ok_or_else(|| anyhow!("bad Host header"))?;
     Ok(Target { scheme: tunnel_scheme.into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
+}
+
+#[cfg(test)]
+mod recorder_tests {
+    use super::*;
+
+    fn exchange(i: usize) -> NewExchange {
+        NewExchange {
+            ts_ms: i as i64,
+            duration_ms: Some(1),
+            source: "proxy".into(),
+            actor_id: "human:local".into(),
+            scheme: "http".into(),
+            host: "rec.test".into(),
+            port: 80,
+            method: "GET".into(),
+            path: format!("/{i}"),
+            status: Some(200),
+            // Not valid UTF-8, and not trimmed or normalised anywhere on the way.
+            request: [format!("GET /{i} HTTP/1.1\r\nHost: rec.test\r\n\r\n").into_bytes(), vec![0, 255, 13, 10]]
+                .concat(),
+            response: Some(
+                [b"HTTP/1.1 200 OK\r\n\r\n".to_vec(), format!("body {i}").into_bytes(), vec![0, 254]].concat(),
+            ),
+            error: None,
+            identity: None,
+            hypothesis_id: None,
+        }
+    }
+
+    fn project(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pm-recorder-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("p.pmproj"), dir)
+    }
+
+    #[test]
+    fn shared_recorder_writes_every_record_in_order_in_batches() {
+        const N: usize = 5000;
+        let (path, dir) = project("order");
+        let handle = Arc::new(StoreHandle::new(Store::open(&path).unwrap()));
+        let (rec, join) = Recorder::spawn_shared(handle.clone());
+        // Two producers, so records interleave, but each producer's own order must hold.
+        let producers: Vec<_> = (0..2)
+            .map(|p| {
+                let rec = rec.clone();
+                std::thread::spawn(move || {
+                    for i in (p..N).step_by(2) {
+                        rec.record(exchange(i));
+                    }
+                })
+            })
+            .collect();
+        for p in producers {
+            p.join().unwrap();
+        }
+        let stats = rec.stats.clone();
+        drop(rec);
+        join.join().unwrap(); // drains the queue before returning
+        assert_eq!(stats.lost.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(stats.written.load(std::sync::atomic::Ordering::Relaxed), N as u64);
+        let batches = stats.batches.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(batches >= 1 && batches < N as u64 / 4, "records were batched: {batches} transactions for {N}");
+
+        let rows = handle.read(|s| {
+            assert_eq!(s.count_exchanges().unwrap(), N as i64);
+            (1..=N as i64).map(|id| s.get_exchange(id).unwrap().unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(rows.len(), N, "nothing lost");
+        for p in 0..2usize {
+            let mine: Vec<usize> = rows.iter().map(|r| r.summary.ts_ms as usize).filter(|t| t % 2 == p).collect();
+            assert_eq!(mine, (p..N).step_by(2).collect::<Vec<_>>(), "producer {p}'s records stay in order");
+        }
+        for r in &rows {
+            let want = exchange(r.summary.ts_ms as usize);
+            assert_eq!(r.request, want.request, "request bytes exactly as recorded");
+            assert_eq!(r.response, want.response, "response bytes exactly as recorded");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shared_recorder_links_websocket_messages_across_and_within_batches() {
+        let (path, dir) = project("ws");
+        let handle = Arc::new(StoreHandle::new(Store::open(&path).unwrap()));
+        let (rec, join) = Recorder::spawn_shared(handle.clone());
+        let msg = |tag: u8| NewWsMessage {
+            exchange_id: -1,
+            ts_ms: tag as i64,
+            from_client: true,
+            opcode: 1,
+            len: 1,
+            payload: vec![tag],
+            truncated: false,
+            compressed: false,
+        };
+        // Two sockets whose messages interleave, with plain exchanges between them; some arrive in a batch with
+        // their exchange, some after it was committed (the sleep forces a batch boundary).
+        let a = rec.record_upgrade(exchange(0));
+        rec.record_ws(a, msg(1));
+        rec.record(exchange(1));
+        let b = rec.record_upgrade(exchange(2));
+        rec.record_ws(b, msg(2));
+        rec.record_ws(a, msg(3));
+        while rec.written_records() < 6 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        rec.record_ws(b, msg(4));
+        rec.record_ws(a, msg(5));
+        rec.ws_done(a);
+        rec.record_ws(a, msg(99)); // after done: its key is gone, so it is dropped
+        let filtered = rec.record_upgrade(exchange(3));
+        rec.set_filter(Some(Arc::new(|_| false)));
+        let dropped = rec.record_upgrade(exchange(4)); // filtered out
+        rec.record_ws(dropped, msg(98));
+        rec.ws_done(b);
+        let _ = filtered;
+        drop(rec);
+        join.join().unwrap();
+        handle.read(|s| {
+            let all = s.search_exchanges(&pm_store::HistoryFilter::default()).unwrap();
+            assert_eq!(all.len(), 4, "the filtered exchange is not stored");
+            let id_of = |ts: i64| all.iter().find(|r| r.ts_ms == ts).unwrap().id;
+            let payloads = |id: i64| -> Vec<u8> {
+                s.ws_messages(id, None, 100).unwrap().iter().flat_map(|m| m.payload.clone()).collect()
+            };
+            assert_eq!(payloads(id_of(0)), [1, 3, 5]);
+            assert_eq!(payloads(id_of(2)), [2, 4]);
+            assert!(payloads(id_of(1)).is_empty() && payloads(id_of(3)).is_empty());
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
