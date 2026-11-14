@@ -805,13 +805,14 @@ pub fn tool_definitions() -> Vec<Value> {
              reflection (url or exchange_id + raw containing {{xss_url}} in a query/form value, {{xss}} unencoded, or \
              {{token}} inside your own payload that calls pmProof('{{token}}') or alert('{{token}}'): sends it, \
              renders the recorded response offline in headless Chromium and proves XSS only if the script ran). \
-             Four more work from a set of requests, and finding_prove builds them for a finding: sql_error, \
-             boolean_injection and path_traversal take `raws` (the requests, in the order the field describes), \
-             path_traversal also `markers`; marker takes `raw` with {{marker}} and a `marker_kind`. \
+             Five more work from a set of requests, and finding_prove builds them for a finding: sql_error, \
+             boolean_injection, path_traversal and expression take `raws` (the requests, in the order the field \
+             describes), path_traversal and expression also `markers`; marker takes `raw` with {{marker}} and a \
+             `marker_kind`. \
              Pass finding_id/hypothesis_id to update them when proven. Payload oracles may need human approval.",
             json!({
                 "oracle": {"type":"string","enum":["differential_authz","timing","oast","reflection","sql_error",
-                    "boolean_injection","path_traversal","marker"]},
+                    "boolean_injection","path_traversal","expression","marker"]},
                 "exchange_id": {"type":"integer"},
                 "attacker": {"type":"string"},
                 "owner": {"type":"string"},
@@ -821,9 +822,9 @@ pub fn tool_definitions() -> Vec<Value> {
                 "samples": {"type":"integer","minimum":5,"maximum":30},
                 "min_effect_ms": {"type":"number"},
                 "raw": {"type":"string"},
-                "raws": {"type":"array","items":{"type":"string"},"description":"sql_error: baseline, the value with a quote, with a second quote, with a harmless change. boolean_injection: baseline, a true condition, a false condition. path_traversal: baseline, a made-up file name, then one request per known file"},
-                "markers": {"type":"array","items":{"type":"string"},"description":"path_traversal: text that shows each file request read its file, one per file request"},
-                "marker_kind": {"type":"string","enum":["redirect","crlf","host"],"description":"marker: where the fresh value must not land (the redirect target, a response header, a reflected URL)"},
+                "raws": {"type":"array","items":{"type":"string"},"description":"sql_error: baseline, the value with a quote, with a second quote, with a harmless change. boolean_injection: baseline, a true condition, a false condition. path_traversal: baseline, a made-up file name, then one request per known file. expression (template injection): baseline, the bare numbers without template syntax, then one request per expression on fresh random numbers"},
+                "markers": {"type":"array","items":{"type":"string"},"description":"path_traversal: text that shows each file request read its file, one per file request. expression: what each expression evaluates to (5+ digits)"},
+                "marker_kind": {"type":"string","enum":["redirect","crlf","host","cors"],"description":"marker: where the fresh value must not land (the redirect target, a response header, an absolute URL, or Access-Control-Allow-Origin with credentials for an Origin header)"},
                 "wait_seconds": {"type":"integer","minimum":1,"maximum":60},
                 "identity": {"type":"string"},
                 "finding_id": {"type":"integer"},

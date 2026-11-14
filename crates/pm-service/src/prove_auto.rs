@@ -7,7 +7,7 @@
 //! identities for it.
 
 use pm_policy::Actor;
-use pm_scan::active::{Point, PointKind, inject, points};
+use pm_scan::active::{Point, PointKind, inject, inject_operator, points};
 use serde::Serialize;
 
 use crate::{ProofRequest, ProofResult, Result, Service};
@@ -38,10 +38,27 @@ pub struct ProveSweep {
 const SENTINEL: &str = "pmproofzz";
 
 /// Classes `auto_prove` tries. IDOR/BFLA/authn come from the matrix; a few
-/// classes (stored/DOM XSS, XXE, CORS, mass assignment, …) have no automatic
-/// oracle yet and stay suspected.
-pub(crate) const AUTO_PROVE_CLASSES: &[&str] =
-    &["xss", "sqli", "command_injection", "rce", "path_traversal", "open_redirect", "crlf", "ssrf"];
+/// classes (stored/DOM XSS, mass assignment, cache poisoning, …) have no
+/// automatic oracle yet and stay suspected.
+pub(crate) const AUTO_PROVE_CLASSES: &[&str] = &[
+    "xss",
+    "sqli",
+    "command_injection",
+    "rce",
+    "path_traversal",
+    "open_redirect",
+    "crlf",
+    "ssrf",
+    "ssti",
+    "nosqli",
+    "xxe",
+    "cors",
+    "host_header_injection",
+];
+
+/// Classes proven on the request as a whole (a header, the XML document),
+/// not at one insertion point.
+const WHOLE_REQUEST_CLASSES: &[&str] = &["xxe", "cors", "host_header_injection"];
 
 impl Service {
     /// Proves every suspected, unproven finding whose class has an oracle.
@@ -116,28 +133,31 @@ impl Service {
             None => candidate_points(&all_points),
         };
 
+        let attempts: Vec<ProofRequest> = if WHOLE_REQUEST_CLASSES.contains(&class.as_str()) {
+            whole_request_proofs(&class, baseline, &raw, &all_points)
+        } else {
+            targeted.iter().flat_map(|point| prove_requests(&class, baseline, &raw, point)).collect()
+        };
         let mut last = vec!["no oracle produced a proof".to_string()];
-        for point in &targeted {
-            for mut req in prove_requests(&class, baseline, &raw, point) {
-                req.finding_id = Some(id);
-                match self.proof_run(actor, req).await {
-                    Ok(ProofResult::Completed { proven, reasons, proof_id, oracle, .. }) => {
-                        if proven {
-                            out.proven = true;
-                            out.reasons = reasons;
-                            out.oracle = Some(oracle);
-                            out.proof_id = Some(proof_id);
-                            return Ok(out);
-                        }
-                        last = reasons;
-                    }
-                    Ok(ProofResult::Denied { reasons }) | Ok(ProofResult::PendingApproval { reasons, .. }) => {
+        for mut req in attempts {
+            req.finding_id = Some(id);
+            match self.proof_run(actor, req).await {
+                Ok(ProofResult::Completed { proven, reasons, proof_id, oracle, .. }) => {
+                    if proven {
+                        out.proven = true;
                         out.reasons = reasons;
+                        out.oracle = Some(oracle);
+                        out.proof_id = Some(proof_id);
                         return Ok(out);
                     }
-                    // A bad template for this point (e.g. no insertion possible): try the next.
-                    Err(_) => continue,
+                    last = reasons;
                 }
+                Ok(ProofResult::Denied { reasons }) | Ok(ProofResult::PendingApproval { reasons, .. }) => {
+                    out.reasons = reasons;
+                    return Ok(out);
+                }
+                // A bad template for this point (e.g. no insertion possible): try the next.
+                Err(_) => continue,
             }
         }
         out.reasons = last;
@@ -303,9 +323,173 @@ fn prove_requests(class: &str, baseline: i64, raw: &str, point: &Point) -> Vec<P
                 out.push(ProofRequest { oracle: "oast".into(), raw: Some(raw), ..base.clone() });
             }
         }
+        "ssti" => {
+            // Each syntax: the bare numbers as a control, then two fresh
+            // random products. Only an evaluator turns `A*B` into the product.
+            for syntax in SSTI_SYNTAXES {
+                let pairs = [rand_pair(), rand_pair()];
+                let expr = |(a, b): (u64, u64)| syntax.replace('A', &a.to_string()).replace('B', &b.to_string());
+                let control = value_raw(raw, point, &format!("{orig}{}*{}", pairs[0].0, pairs[0].1));
+                let payloads: Option<Vec<String>> =
+                    pairs.iter().map(|p| value_raw(raw, point, &format!("{orig}{}", expr(*p)))).collect();
+                if let (Some(control), Some(payloads)) = (control, payloads) {
+                    let mut raws = vec![raw.to_string(), control];
+                    raws.extend(payloads);
+                    out.push(ProofRequest {
+                        oracle: "expression".into(),
+                        raws,
+                        markers: pairs.iter().map(|(a, b)| (a * b).to_string()).collect(),
+                        ..base.clone()
+                    });
+                }
+            }
+        }
+        "nosqli" => {
+            // A true/false split through query operators: `$eq` of the
+            // original value answers like the baseline, `$ne` of it doesn't —
+            // but only where operators reach the database.
+            let value = match (point.kind, orig.parse::<f64>()) {
+                (PointKind::Json, Ok(n)) => serde_json::json!(n),
+                _ => serde_json::json!(orig),
+            };
+            let pairs = [
+                ("$eq", value.clone(), "$ne", value.clone()),
+                ("$in", serde_json::json!([value.clone()]), "$nin", serde_json::json!([value])),
+            ];
+            for (t_op, t_val, f_op, f_val) in pairs {
+                let as_text = |v: Option<Vec<u8>>| v.map(|v| String::from_utf8_lossy(&v).into_owned());
+                if let (Some(t), Some(f)) = (
+                    as_text(inject_operator(raw, point, t_op, &t_val)),
+                    as_text(inject_operator(raw, point, f_op, &f_val)),
+                ) {
+                    out.push(ProofRequest {
+                        oracle: "boolean_injection".into(),
+                        raws: vec![raw.to_string(), t, f],
+                        ..base.clone()
+                    });
+                }
+            }
+        }
         _ => {}
     }
     out
+}
+
+/// Proof attempts that change the request as a whole: a header for CORS and
+/// Host-header injection, the XML document for XXE.
+fn whole_request_proofs(class: &str, baseline: i64, raw: &str, all: &[Point]) -> Vec<ProofRequest> {
+    let base = ProofRequest { exchange_id: Some(baseline), ..Default::default() };
+    let marker = |kind: &str, raw: String| ProofRequest {
+        oracle: "marker".into(),
+        raw: Some(raw),
+        marker_kind: Some(kind.into()),
+        ..base.clone()
+    };
+    let mut out = Vec::new();
+    match class {
+        "cors" => {
+            out.push(marker("cors", with_header(raw, "Origin", "https://{{marker}}.proxymind-oast.invalid")));
+        }
+        "host_header_injection" => {
+            let host = "{{marker}}.proxymind-oast.invalid";
+            out.push(marker("host", with_header(raw, "X-Forwarded-Host", host)));
+            out.push(marker("host", with_header(raw, "X-Host", host)));
+        }
+        "xxe" => {
+            // In-band: an entity that reads a known file, shown where an
+            // element's text was; a bogus file name must read nothing.
+            for point in all.iter().filter(|p| p.kind == PointKind::Xml).take(3) {
+                let doc = |system: &str| xml_with_entity(raw, point, system);
+                if let (Some(control), Some(passwd), Some(winini)) = (
+                    doc(&format!("file:///etc/pmnope{SENTINEL}")),
+                    doc("file:///etc/passwd"),
+                    doc("file:///c:/windows/win.ini"),
+                ) {
+                    out.push(ProofRequest {
+                        oracle: "path_traversal".into(),
+                        raws: vec![raw.to_string(), control, passwd, winini],
+                        markers: vec!["root:".into(), "[fonts]".into()],
+                        ..base.clone()
+                    });
+                }
+            }
+            // Blind: a parameter entity fetched while the DOCTYPE is parsed
+            // calls the out-of-band listener back.
+            if let Some(blind) = xml_with_doctype(raw, "<!ENTITY % pmx SYSTEM \"{{oast}}\"> %pmx;") {
+                out.push(ProofRequest { oracle: "oast".into(), raw: Some(blind), ..base.clone() });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Template syntaxes for the expression oracle (`A` and `B` are replaced by
+/// random numbers): Jinja2/Twig/Nunjucks, FreeMarker/Velocity/EL/JS template
+/// literals, ERB/EJS, Ruby/Pug/JSF, Thymeleaf, Razor, Smarty.
+const SSTI_SYNTAXES: &[&str] = &["{{A*B}}", "${A*B}", "<%= A*B %>", "#{A*B}", "*{A*B}", "@(A*B)", "{A*B}"];
+
+/// Two random four-digit numbers (their product has 7 or 8 digits).
+fn rand_pair() -> (u64, u64) {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 4];
+    let _ = SystemRandom::new().fill(&mut b);
+    let n = |hi: u8, lo: u8| 1000 + (u64::from(hi) << 8 | u64::from(lo)) % 9000;
+    (n(b[0], b[1]), n(b[2], b[3]))
+}
+
+/// `raw` with header `name` set to `value` (an existing one replaced).
+fn with_header(raw: &str, name: &str, value: &str) -> String {
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let prefix = format!("{}:", name.to_ascii_lowercase());
+    let rest: Vec<&str> = lines.filter(|l| !l.to_ascii_lowercase().starts_with(&prefix)).collect();
+    let mut out = format!("{request_line}\r\n{name}: {value}\r\n");
+    for l in rest {
+        out.push_str(l);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out.push_str(body);
+    out
+}
+
+/// The request with `decl` inside a DOCTYPE at the start of its XML body
+/// (any XML declaration and DOCTYPE already there are dropped).
+fn xml_with_doctype(raw: &str, decl: &str) -> Option<String> {
+    let (head, body) = raw.split_once("\r\n\r\n")?;
+    let mut doc = body.trim_start();
+    if !doc.starts_with('<') {
+        return None;
+    }
+    if doc.starts_with("<?xml") {
+        doc = doc[doc.find("?>")? + 2..].trim_start();
+    }
+    if doc.starts_with("<!DOCTYPE") {
+        // A DOCTYPE with an internal subset ends at "]>", else at ">".
+        let end = match (doc.find('['), doc.find('>')) {
+            (Some(b), Some(g)) if b < g => doc.find("]>")? + 2,
+            (_, Some(g)) => g + 1,
+            _ => return None,
+        };
+        doc = doc[end..].trim_start();
+    }
+    let root = doc.trim_start_matches('<').split(|c: char| c.is_whitespace() || c == '>' || c == '/').next()?;
+    if root.is_empty() || root.starts_with(['!', '?']) {
+        return None;
+    }
+    Some(format!("{head}\r\n\r\n<?xml version=\"1.0\"?>\n<!DOCTYPE {root} [{decl}]>\n{doc}"))
+}
+
+/// The request with an external entity `pmx` (pointing at `system`) declared
+/// and used as the text of the XML element at `point`.
+fn xml_with_entity(raw: &str, point: &Point, system: &str) -> Option<String> {
+    let marked = String::from_utf8_lossy(&inject(raw, point, SENTINEL)?).into_owned();
+    if !marked.contains(SENTINEL) {
+        return None;
+    }
+    xml_with_doctype(&marked.replace(SENTINEL, "&pmx;"), &format!("<!ENTITY pmx SYSTEM \"{system}\">"))
 }
 
 /// (true, false) suffixes appended to the point's original value. Each closes

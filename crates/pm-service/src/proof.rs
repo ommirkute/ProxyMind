@@ -19,7 +19,7 @@ pub const OAST_DNS_SETTING: &str = "oast_dns_domain";
 #[serde(default, deny_unknown_fields)]
 pub struct ProofRequest {
     /// differential_authz, timing, oast, reflection, sql_error,
-    /// boolean_injection, path_traversal or marker
+    /// boolean_injection, path_traversal, expression or marker
     pub oracle: String,
     /// Recorded exchange to work from (the owner's request for
     /// differential_authz; the baseline for timing; the target for oast).
@@ -50,6 +50,9 @@ pub struct ProofRequest {
     /// requests. boolean_injection: [baseline, true-condition,
     /// false-condition]. path_traversal: [baseline, control, file-1, file-2, …] where
     /// each file-N request reads a known file; `markers[N]` is what proves it.
+    /// expression: [baseline, control, payload-1, payload-2, …] where each
+    /// payload sends an arithmetic expression and `markers[N]` is its result;
+    /// the control sends the same numbers without template delimiters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raws: Vec<String>,
     /// path_traversal: a marker expected in each file request's response (same
@@ -59,8 +62,10 @@ pub struct ProofRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<String>,
     /// marker: what to prove — "redirect" (open redirect), "crlf" (CRLF header
-    /// injection) or "host" (Host-header injection). The request goes in `raw`
-    /// with `{{marker}}` where a fresh random value should be placed.
+    /// injection), "host" (Host-header injection: the marker comes back in an
+    /// absolute URL) or "cors" (an `Origin` carrying the marker is trusted with
+    /// credentials). The request goes in `raw` with `{{marker}}` where a fresh
+    /// random value should be placed.
     pub marker_kind: Option<String>,
     /// timing/oast/reflection: send with this identity's credentials.
     pub identity: Option<String>,
@@ -169,11 +174,12 @@ impl Service {
             "sql_error" => self.prove_sql_error(actor, &req).await?,
             "boolean_injection" => self.prove_boolean(actor, &req).await?,
             "path_traversal" => self.prove_traversal(actor, &req).await?,
+            "expression" => self.prove_expression(actor, &req).await?,
             "marker" => self.prove_marker(actor, &req).await?,
             other => {
                 return invalid(format!(
                     "unknown oracle {other:?}; use differential_authz, timing, oast, reflection, sql_error, \
-                     boolean_injection, path_traversal or marker"
+                     boolean_injection, path_traversal, expression or marker"
                 ));
             }
         };
@@ -686,7 +692,7 @@ impl Service {
             }
             rounds.push(round);
         }
-        let (verdict, mut details) = judge_boolean(&rounds);
+        let (verdict, mut details) = judge_boolean(&rounds, &req.raws);
         details["exchanges"] = json!(ids);
         Ok(Ok((verdict, ids, details)))
     }
@@ -733,6 +739,49 @@ impl Service {
         Ok(Ok((verdict, ids, details)))
     }
 
+    /// Expression oracle (template injection): arithmetic on random numbers is
+    /// evaluated only if the input reaches a template or code evaluator.
+    #[allow(clippy::type_complexity)]
+    async fn prove_expression(
+        &self,
+        actor: &Actor,
+        req: &ProofRequest,
+    ) -> Result<std::result::Result<(pm_proof::Verdict, Vec<i64>, Value), ProofResult>> {
+        if req.raws.len() < 3 || req.markers.len() != req.raws.len() - 2 || req.markers.iter().any(|m| m.len() < 5) {
+            return invalid(
+                "expression needs raws = [baseline, control, payload-1, …] and one expected result (5+ digits) per \
+                 payload request",
+            );
+        }
+        let endpoint = self.proof_endpoint(req)?;
+        let outs: Vec<_> =
+            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let params = json!({ "raws": req.raws, "markers": req.markers, "identity": req.identity });
+        match self.gate_proof(
+            actor,
+            "proof_expression",
+            Tier::ActiveIntrusive,
+            &outs[2],
+            &params,
+            req.approval_id.as_deref(),
+        )? {
+            Authorization::Allowed { .. } => {}
+            Authorization::Denied { reasons } => return Ok(Err(ProofResult::Denied { reasons })),
+            Authorization::PendingApproval { approval_id, summary, reasons } => {
+                return Ok(Err(ProofResult::PendingApproval { approval_id, summary, reasons }));
+            }
+        }
+        let mut sends = Vec::new();
+        for out in &outs {
+            sends.push(self.send_as(actor, out, req.identity.as_deref(), true, "proof").await?.0);
+        }
+        let responses: Vec<Vec<u8>> = sends.iter().map(|s| s.response.clone().unwrap_or_default()).collect();
+        let (verdict, mut details) = judge_expression(&req.markers, &responses);
+        let ids: Vec<i64> = sends.iter().map(|s| s.exchange_id).collect();
+        details["exchanges"] = json!(ids);
+        Ok(Ok((verdict, ids, details)))
+    }
+
     /// Marker oracle: inject a fresh random marker and check it reaches the one
     /// dangerous place — the redirect target's host, an injected response
     /// header, or a reflected absolute URL.
@@ -749,7 +798,7 @@ impl Service {
         }
         let kind = req.marker_kind.clone().unwrap_or_default();
         if !MARKER_KINDS.contains(&kind.as_str()) {
-            return invalid("marker_kind must be \"redirect\", \"crlf\" or \"host\"");
+            return invalid("marker_kind must be \"redirect\", \"crlf\", \"host\" or \"cors\"");
         }
         let endpoint = self.proof_endpoint(req)?;
         let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
@@ -932,6 +981,9 @@ enum MarkerHit {
     ResponseHeader,
     /// The marker is reflected in a Location or absolute URL (Host injection).
     Reflected,
+    /// `Access-Control-Allow-Origin` names the marker's origin and credentials
+    /// are allowed (any site can read the user's data).
+    TrustedOrigin,
 }
 
 /// Decides whether `marker` reached the dangerous place in a recorded
@@ -974,10 +1026,32 @@ fn marker_lands(resp: &[u8], marker: &str, kind: MarkerHit, self_host: &str) -> 
             if let Some(loc) = header("location").filter(|l| l.contains(marker)) {
                 return (true, format!("Location: {}", loc.chars().take(120).collect::<String>()));
             }
+            // Only an absolute URL counts: a page that echoes request headers
+            // back (a debug page, an API mirror) shows the bare value too.
             let body = body_text(resp);
-            let needle = format!("//{marker}");
-            let hit = body.contains(&needle) || body.contains(&format!("{marker}."));
-            (hit, if hit { format!("marker reflected in an absolute URL ({marker})") } else { "not reflected".into() })
+            let hit = body.contains(&format!("//{marker}"));
+            let detail = if hit {
+                format!("marker reflected in an absolute URL (//{marker}…)")
+            } else if body.contains(marker) {
+                "the marker is echoed, but not as a link or redirect host".into()
+            } else {
+                "not reflected".into()
+            };
+            (hit, detail)
+        }
+        MarkerHit::TrustedOrigin => {
+            let Some(acao) = header("access-control-allow-origin") else {
+                return (false, "no Access-Control-Allow-Origin header".into());
+            };
+            let creds =
+                header("access-control-allow-credentials").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+            let named = acao.contains(marker);
+            let detail = format!(
+                "Access-Control-Allow-Origin: {}, Access-Control-Allow-Credentials: {}",
+                acao.chars().take(120).collect::<String>(),
+                if creds { "true" } else { "absent" }
+            );
+            (named && creds, detail)
         }
     }
 }
@@ -1018,8 +1092,29 @@ pub(crate) fn judge_sql_error(responses: &[Vec<u8>]) -> (pm_proof::Verdict, Valu
 }
 
 /// Boolean-condition injection, from two rounds of responses to
-/// `[baseline, true condition, false condition]`.
-pub(crate) fn judge_boolean(rounds: &[[Vec<u8>; 3]]) -> (pm_proof::Verdict, Value) {
+/// `[baseline, true condition, false condition]` (`requests`, the same three
+/// requests, when known). A page that echoes its input differs between the
+/// two conditions by the echo alone, so an echoed condition is masked in
+/// both answers before they are compared.
+pub(crate) fn judge_boolean(rounds: &[[Vec<u8>; 3]], requests: &[String]) -> (pm_proof::Verdict, Value) {
+    let mut echoed = None;
+    let masked: Vec<[Vec<u8>; 3]>;
+    let rounds = match (requests.get(1), requests.get(2)) {
+        (Some(t), Some(f)) => {
+            masked = rounds
+                .iter()
+                .map(|r| match mask_echo(t, f, &r[1], &r[2]) {
+                    Some((mt, mf, window)) => {
+                        echoed = Some(window);
+                        [r[0].clone(), mt, mf]
+                    }
+                    None => r.clone(),
+                })
+                .collect();
+            &masked[..]
+        }
+        _ => rounds,
+    };
     let split = |r: &[Vec<u8>; 3]| {
         let noise = pm_diff::learn_noise(&r[0], &r[1]);
         let sim = |a: &[u8], b: &[u8]| pm_diff::diff(a, b, &noise).similarity;
@@ -1041,8 +1136,55 @@ pub(crate) fn judge_boolean(rounds: &[[Vec<u8>; 3]]) -> (pm_proof::Verdict, Valu
         "true_similarity": ts1, "false_similarity": fs1, "true_false_similarity": tf1,
         "round2": { "true_similarity": ts2, "true_false_similarity": tf2 },
         "statuses": { "true": inputs.status_true, "false": inputs.status_false },
+        "echoed_condition": echoed,
     });
     (pm_proof::boolean_injection(&inputs), details)
+}
+
+/// Where the true and false requests differ, the longest stretch around the
+/// difference (decoded, as is or HTML-escaped) that each answer echoes back:
+/// both answers with it replaced by the same placeholder, and the stretch.
+fn mask_echo(t_req: &str, f_req: &str, t_resp: &[u8], f_resp: &[u8]) -> Option<(Vec<u8>, Vec<u8>, String)> {
+    let (t, f): (Vec<char>, Vec<char>) =
+        (percent_decode(t_req).chars().collect(), percent_decode(f_req).chars().collect());
+    let prefix = t.iter().zip(&f).take_while(|(a, b)| a == b).count();
+    let suffix = t.iter().rev().zip(f.iter().rev()).take_while(|(a, b)| a == b).count();
+    let (t_end, f_end) = (t.len().saturating_sub(suffix).max(prefix), f.len().saturating_sub(suffix).max(prefix));
+    if t_end == prefix && f_end == prefix {
+        return None;
+    }
+    let (t_text, f_text) = (String::from_utf8_lossy(t_resp).into_owned(), String::from_utf8_lossy(f_resp).into_owned());
+    let found = |text: &str, s: &str| html_forms(s).into_iter().find(|v| text.contains(v.as_str()));
+    // Longest window first; at least 4 characters so a lone digit isn't "echoed".
+    let mut best: Option<(usize, String, String, String)> = None;
+    for left in 0..=16usize.min(prefix) {
+        for right in 0..=16usize.min(suffix) {
+            let tw: String = t[prefix - left..t_end + right].iter().collect();
+            let fw: String = f[prefix - left..f_end + right].iter().collect();
+            if tw.chars().count() < 4 || best.as_ref().is_some_and(|b| b.0 >= left + right) {
+                continue;
+            }
+            if let (Some(tv), Some(fv)) = (found(&t_text, &tw), found(&f_text, &fw)) {
+                best = Some((left + right, tw, tv, fv));
+            }
+        }
+    }
+    let (_, window, tv, fv) = best?;
+    let placeholder = "\u{1}pm-echo\u{1}";
+    Some((t_text.replace(&tv, placeholder).into_bytes(), f_text.replace(&fv, placeholder).into_bytes(), window))
+}
+
+/// `s` as is and HTML-escaped the usual ways.
+fn html_forms(s: &str) -> Vec<String> {
+    let base = s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let mut out = vec![s.to_string()];
+    for q in ["&#39;", "&#x27;", "&apos;"] {
+        let v = base.replace('\'', q);
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
 }
 
 /// Path traversal, from the responses to `[baseline, bogus name, file 1, …]`
@@ -1072,8 +1214,29 @@ pub(crate) fn judge_traversal(
     (pm_proof::path_traversal(&inputs), details)
 }
 
+/// Template injection, from the responses to `[baseline, control, payload
+/// 1, …]`; `products[n]` is what payload n evaluates to.
+pub(crate) fn judge_expression(products: &[String], responses: &[Vec<u8>]) -> (pm_proof::Verdict, Value) {
+    let empty = Vec::new();
+    let body = |i: usize| body_text(responses.get(i).unwrap_or(&empty));
+    let (baseline, control) = (body(0), body(1));
+    let products_found: Vec<bool> =
+        products.iter().enumerate().map(|(i, p)| body(i + 2).contains(p.as_str())).collect();
+    let inputs = pm_proof::ExpressionInputs {
+        syntax: "the injected expression".into(),
+        products_found: products_found.clone(),
+        baseline_clean: !products.iter().any(|p| baseline.contains(p.as_str())),
+        control_clean: !products.iter().any(|p| control.contains(p.as_str())),
+    };
+    let details = json!({
+        "products": products, "products_found": products_found,
+        "baseline_clean": inputs.baseline_clean, "control_clean": inputs.control_clean,
+    });
+    (pm_proof::expression(&inputs), details)
+}
+
 /// The kinds the marker oracle knows.
-pub(crate) const MARKER_KINDS: &[&str] = &["redirect", "crlf", "host"];
+pub(crate) const MARKER_KINDS: &[&str] = &["redirect", "crlf", "host", "cors"];
 
 /// The marker oracle, from the response to the request that carried `marker`.
 /// `kind` is one of [`MARKER_KINDS`] (anything else is never a hit).
@@ -1082,6 +1245,7 @@ pub(crate) fn judge_marker(kind: &str, marker: &str, resp: &[u8], self_host: &st
         "redirect" => ("open redirect", Some(MarkerHit::RedirectHost)),
         "crlf" => ("CRLF header injection", Some(MarkerHit::ResponseHeader)),
         "host" => ("Host-header injection", Some(MarkerHit::Reflected)),
+        "cors" => ("CORS trusts any origin", Some(MarkerHit::TrustedOrigin)),
         _ => ("marker", None),
     };
     let (hit, detail) = match place {
@@ -1223,6 +1387,31 @@ pub(crate) fn decode_proof(row: &serde_json::Map<String, Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn page(body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    #[test]
+    fn an_echoed_condition_is_not_a_boolean_split() {
+        let req = |v: &str| format!("GET /s?q=guest{v} HTTP/1.1\r\nHost: x\r\n\r\n");
+        let raws = vec![req(""), req("%27%20AND%20%271%27%3D%271"), req("%27%20AND%20%271%27%3D%272")];
+        // An echo page, HTML-escaping the quote: only the echo differs.
+        let echo = |v: &str| page(&format!("<p>You searched for {}</p>", v.replace('\'', "&#39;")));
+        let round = [echo("guest"), echo("guest' AND '1'='1"), echo("guest' AND '1'='2")];
+        let (v, d) = judge_boolean(&[round.clone(), round], &raws);
+        assert!(!v.proven, "{:?}", v.reasons);
+        assert!(d["echoed_condition"].is_string(), "{d}");
+        // A real split echoes the term too, but the rows differ as well.
+        let rows = "<ul><li>Green tea, loose leaf, 100 g</li><li>Black tea, Assam, 250 g</li></ul>";
+        let real = |v: &str, hit: bool| {
+            let shown = v.replace('\'', "&#39;");
+            page(&format!("<p>You searched for {shown}</p>{}", if hit { rows } else { "<p>No results.</p>" }))
+        };
+        let round = [real("guest", true), real("guest' AND '1'='1", true), real("guest' AND '1'='2", false)];
+        let (v, _) = judge_boolean(&[round.clone(), round], &raws);
+        assert!(v.proven, "{:?}", v.reasons);
+    }
 
     #[test]
     fn custom_payloads_are_found_and_decoded() {

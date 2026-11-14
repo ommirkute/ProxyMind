@@ -130,7 +130,7 @@ pub struct RegressionTest {
     /// Where it was found (`scheme://host:port`); `--target` points it elsewhere.
     pub origin: String,
     /// The proof it comes from: differential_authz, reflection, timing,
-    /// sql_error, boolean_injection, path_traversal or marker.
+    /// sql_error, boolean_injection, path_traversal, expression or marker.
     pub oracle: String,
     /// The request that shows the finding (for tests with `requests`, the
     /// one carrying the payload, for people reading the file).
@@ -138,13 +138,15 @@ pub struct RegressionTest {
     /// The requests the proof sends, in its order: sql_error `[baseline,
     /// quote, second quote, benign change]`, boolean_injection `[baseline,
     /// true condition, false condition]`, path_traversal `[baseline, bogus
-    /// name, file 1, …]`.
+    /// name, file 1, …]`, expression `[baseline, bare numbers, expression 1,
+    /// …]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests: Vec<String>,
-    /// path_traversal: what shows each file request read its file.
+    /// path_traversal: what shows each file request read its file;
+    /// expression: what each expression evaluates to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<String>,
-    /// marker: redirect, crlf or host (where `{{marker}}` must not land).
+    /// marker: redirect, crlf, host or cors (where `{{marker}}` must not land).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_kind: Option<String>,
     /// With `auth`: a request that shows the credentials still work.

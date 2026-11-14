@@ -17,6 +17,21 @@ version may change project files, APIs and the CLI.
   `POST /api/v1/findings/prove`), as the MCP tool `finding_prove`, and from an **Auto-prove** button on the Findings
   page. Also exposed as new `proof_run` oracles `sql_error`, `boolean_injection`, `path_traversal` and `marker`.
   SDKs gain `finding_prove` / `findings_prove_all` (Python) and `findingProve` / `findingsProveAll` (TypeScript).
+- **Five more classes proven automatically,** each with a control that rules out a look-alike:
+  - **Template injection** by a new `expression` oracle: arithmetic on two fresh pairs of random numbers comes back
+    as the products, while the same numbers without template syntax do not (so a page that computes from any input
+    is not mistaken for a template engine).
+  - **NoSQL operator injection** by a true/false split: `$eq` of the original value answers like the original,
+    `$ne` of it does not (also `$in`/`$nin`).
+  - **XXE** by an external entity that reads a known file into an element's text while a bogus file reads nothing,
+    or by an out-of-band callback from a parameter entity (blind XXE).
+  - **CORS** by a new `cors` marker kind: an `Origin` carrying a fresh random host is echoed in
+    `Access-Control-Allow-Origin` with credentials allowed. Reflection without credentials is not counted.
+  - **Host-header injection** by the `host` marker sent in `X-Forwarded-Host` or `X-Host`.
+
+  The `host` marker kind is stricter: the marker must come back in an absolute URL (`//marker`) or a redirect, not
+  just anywhere in the page, so a debug page that prints request headers is no longer a proof. Template-injection
+  and CORS proofs export as regression tests too.
 - **Regression tests for the new proofs.** Findings proven by error-based or boolean SQL injection, path traversal
   or a marker (open redirect, header injection) now export as CI regression tests too: the test re-sends the
   proof's requests and judges the answers the way the proof did. They use a second test format

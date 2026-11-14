@@ -524,6 +524,62 @@ pub fn path_traversal(i: &TraversalInputs) -> Verdict {
     Verdict { proven, confidence, reasons }
 }
 
+// ----------------------------------------------------------- expression ---
+
+/// Inputs for the expression oracle (server-side template injection and
+/// other code evaluation): the input is sent as an arithmetic expression on
+/// fresh random numbers, and only the product proves it was evaluated.
+#[derive(Debug, Clone, Default)]
+pub struct ExpressionInputs {
+    /// Template syntax tried, e.g. `{{A*B}}` (for the reasons only).
+    pub syntax: String,
+    /// One entry per payload request: did its product come back?
+    pub products_found: Vec<bool>,
+    /// The products were not on the untouched page.
+    pub baseline_clean: bool,
+    /// The same numbers without the template delimiters did not produce the
+    /// product: the page does not compute it from any input it is given.
+    pub control_clean: bool,
+}
+
+/// Proven when every payload's product comes back (two fresh pairs of random
+/// numbers, so a coincidence is out), neither product is on the baseline
+/// page, and the bare expression does not produce it.
+pub fn expression(i: &ExpressionInputs) -> Verdict {
+    let mut reasons = Vec::new();
+    let all = !i.products_found.is_empty() && i.products_found.iter().all(|f| *f);
+    let mut proven = true;
+    if !all {
+        proven = false;
+        let n = i.products_found.iter().filter(|f| **f).count();
+        reasons.push(format!("{}: {n} of {} expressions were evaluated (needs all)", i.syntax, i.products_found.len()));
+    }
+    if !i.baseline_clean {
+        proven = false;
+        reasons.push("the expected result was already on the untouched page; inconclusive".into());
+    }
+    if !i.control_clean {
+        proven = false;
+        reasons.push("the bare expression (no template delimiters) also produced the result; inconclusive".into());
+    }
+    if proven {
+        reasons.push(format!(
+            "the server evaluated {} on {} fresh pairs of random numbers and returned each product, while the bare \
+             expression and the untouched page did not show it: input reaches a template or code evaluator",
+            i.syntax,
+            i.products_found.len()
+        ));
+    }
+    let confidence = if !proven {
+        "low"
+    } else if i.products_found.len() >= 2 {
+        "high"
+    } else {
+        "medium"
+    };
+    Verdict { proven, confidence, reasons }
+}
+
 // --------------------------------------------------------------- marker ---
 
 /// Inputs for the marker oracle: a fresh random value is injected and the
@@ -738,5 +794,20 @@ mod tests {
         // Did not land anywhere dangerous.
         let miss = MarkerInputs { hit: false, ..hit };
         assert!(!marker(&miss).proven);
+    }
+    #[test]
+    fn expression_needs_every_product_and_clean_controls() {
+        let ok = ExpressionInputs {
+            syntax: "{{A*B}}".into(),
+            products_found: vec![true, true],
+            baseline_clean: true,
+            control_clean: true,
+        };
+        assert!(expression(&ok).proven);
+        assert_eq!(expression(&ok).confidence, "high");
+        assert!(!expression(&ExpressionInputs { products_found: vec![true, false], ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { products_found: vec![], ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { baseline_clean: false, ..ok.clone() }).proven);
+        assert!(!expression(&ExpressionInputs { control_clean: false, ..ok }).proven);
     }
 }

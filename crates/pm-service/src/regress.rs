@@ -223,7 +223,7 @@ impl Service {
                 }
                 // Proofs that send a fixed set of requests: the test re-sends
                 // them and judges the answers the way the proof did.
-                "sql_error" | "boolean_injection" | "path_traversal" => {
+                "sql_error" | "boolean_injection" | "path_traversal" | "expression" => {
                     let raws: Vec<&str> =
                         inputs["raws"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                     let markers: Vec<String> = inputs["markers"]
@@ -504,7 +504,7 @@ pub async fn run_regression(
             }
         }
         // The proof's own requests, judged the way the proof judged them.
-        "sql_error" | "boolean_injection" | "path_traversal" => 'multi: {
+        "sql_error" | "boolean_injection" | "path_traversal" | "expression" => 'multi: {
             let n = t.requests.len();
             let whole = match t.oracle.as_str() {
                 "sql_error" => n == 4,
@@ -529,8 +529,9 @@ pub async fn run_regression(
                 "boolean_injection" => {
                     let rounds: Vec<[Vec<u8>; 3]> =
                         replies.iter().map(|x| [x[0].raw.clone(), x[1].raw.clone(), x[2].raw.clone()]).collect();
-                    crate::proof::judge_boolean(&rounds)
+                    crate::proof::judge_boolean(&rounds, &t.requests)
                 }
+                "expression" => crate::proof::judge_expression(&t.markers, &raws(&replies[0])),
                 _ => crate::proof::judge_traversal(&t.requests, &t.markers, &raws(&replies[0])),
             };
             let first = &replies[0];
