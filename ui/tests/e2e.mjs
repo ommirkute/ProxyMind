@@ -1111,16 +1111,16 @@ try {
     });
     await open(`checks/${productsId}`);
     await page.getByLabel("Check YAML").fill(`id: debug-switch
-  title: Hidden debug switch
-  severity: high
-  run: per_request
-  request:
-    add_query: { debug: "1" }
-  match:
-    status: [200]
-    body_contains: [db_password]
-    not_in_baseline: true
-  `);
+title: Hidden debug switch
+severity: high
+run: per_request
+request:
+  add_query: { debug: "1" }
+match:
+  status: [200]
+  body_contains: [db_password]
+  not_in_baseline: true
+`);
     await page.getByTestId("check-save").click();
     await page.locator("td", { hasText: "Hidden debug switch" }).first().waitFor();
     await page.getByTestId("check-run").click();
