@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { Chip, Empty, ErrorBox, ExchangeLink, Panel, pollRetryDelay, useAction, useLoad, useNav } from "../components";
+import { useLiveEvent } from "../live";
+import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
 interface Issue {
   check: string;
@@ -171,33 +172,34 @@ function CrawlAudit() {
   const tasks = useLoad(() => api.get<ScanTask[]>("/scan/tasks"), [id, task?.status]);
   const action = useAction();
 
-  useEffect(() => {
-    if (!id) return;
-    let stop = false;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const poll = async () => {
-      try {
-        const t = await api.get<ScanTask>(`/scan/tasks/${id}`);
-        if (stop) return;
-        if (failures) action.setError(null);
-        failures = 0;
+  // The task's progress arrives as `scans` events (ADR-0018): each one for this task, and every resync, refetches
+  // it. Only the newest response is shown, so a slow reply cannot overwrite a newer one.
+  const shown = useRef<{ id: string | null; req: number; failed: boolean }>({ id: null, req: 0, failed: false });
+  const refresh = (taskId: string) => {
+    const s = shown.current;
+    const req = ++s.req;
+    api
+      .get<ScanTask>(`/scan/tasks/${taskId}`)
+      .then((t) => {
+        if (s.id !== taskId || s.req !== req) return;
+        if (s.failed) action.setError(null);
+        s.failed = false;
         setTask(t);
-        if (running(t)) timer = setTimeout(poll, 1000);
-      } catch (e) {
-        if (stop) return;
-        action.setError((e as Error).message);
-        const wait = pollRetryDelay(e, failures++);
-        if (wait !== null) timer = setTimeout(poll, wait);
-      }
-    };
-    poll();
-    return () => {
-      stop = true;
-      clearTimeout(timer);
-    };
+      })
+      .catch((e: Error) => {
+        if (s.id !== taskId || s.req !== req) return;
+        s.failed = true;
+        action.setError(e.message);
+      });
+  };
+  useEffect(() => {
+    shown.current = { id, req: 0, failed: false };
+    if (id) refresh(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+  useLiveEvent(["scans"], (e) => {
+    if (id && (e.topic === "resync" || e.data.task === id)) refresh(id);
+  });
 
   const start = () =>
     action.run(async () => {

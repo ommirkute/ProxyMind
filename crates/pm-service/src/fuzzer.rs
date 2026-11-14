@@ -16,6 +16,7 @@ use pm_replay::Endpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::events::{Event, Rate};
 use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
 
@@ -145,6 +146,18 @@ pub struct AttackSummary {
     pub status: AttackStatus,
     pub total: usize,
     pub done: usize,
+}
+
+impl AttackStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Cancelled => "cancelled",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 struct AttackState {
@@ -337,6 +350,10 @@ impl Service {
             paused: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
         });
+        {
+            let st = a.state.lock();
+            self.fuzzer_event(&a, &st, Rate::Always);
+        }
         let mut list = self.attacks.lock();
         list.push(a.clone());
         // Forget the oldest finished attacks beyond the limit.
@@ -351,17 +368,40 @@ impl Service {
         a
     }
 
+    /// Publishes `FuzzerProgress` for the attack as it stands (`st` is its locked state; publishing never blocks).
+    /// `Always` for a state change, `Limited` for one more result, `Last` once the attack is over.
+    fn fuzzer_event(&self, a: &Attack, st: &AttackState, rate: Rate) {
+        let event = Event::FuzzerProgress {
+            attack: a.id.clone(),
+            done: st.rows.len(),
+            total: a.total,
+            state: st.status.as_str().into(),
+        };
+        self.publish_rated(&format!("fuzzer:{}", a.id), event, Some(&a.actor), rate);
+    }
+
+    /// The rate for an update that may or may not have ended the attack.
+    fn fuzzer_rate(st: &AttackState, otherwise: Rate) -> Rate {
+        if matches!(st.status, AttackStatus::Running | AttackStatus::Paused) { otherwise } else { Rate::Last }
+    }
+
     async fn fuzzer_execute(&self, actor: &Actor, p: Prepared, a: &Attack) {
         let send = |out: Outgoing| {
             let identity = p.identity.clone();
             async move { self.send_as(actor, &out, identity.as_deref(), p.fix_cl, "fuzzer").await.map(|(s, _)| s) }
         };
         match send(p.baseline.clone()).await {
-            Ok(b) => a.state.lock().baseline = Some(row(b, None, vec![None; p.positions], &p.grep, &p.extract)),
+            Ok(b) => {
+                // The baseline row is shown at once, so this update is not held back.
+                let mut st = a.state.lock();
+                st.baseline = Some(row(b, None, vec![None; p.positions], &p.grep, &p.extract));
+                self.fuzzer_event(a, &st, Rate::Always);
+            }
             Err(e) => {
                 let mut st = a.state.lock();
                 st.status = AttackStatus::Failed;
                 st.error = Some(e.to_string());
+                self.fuzzer_event(a, &st, Rate::Last);
                 return;
             }
         }
@@ -390,13 +430,18 @@ impl Service {
             let Some((i, payloads, sent)) = r else { continue };
             let mut st = a.state.lock();
             match sent {
-                Ok(s) => st.rows.push(row(s, Some(i), payloads, &p.grep, &p.extract)),
+                Ok(s) => {
+                    st.rows.push(row(s, Some(i), payloads, &p.grep, &p.extract));
+                    let rate = Self::fuzzer_rate(&st, Rate::Limited);
+                    self.fuzzer_event(a, &st, rate);
+                }
                 Err(e) => {
                     // The gate or the target refused mid-attack (rate limit window,
                     // scope change): stop and say why.
                     st.status = AttackStatus::Failed;
                     st.error = Some(e.to_string());
                     a.cancelled.store(true, Ordering::Relaxed);
+                    self.fuzzer_event(a, &st, Rate::Always);
                 }
             }
         }
@@ -404,6 +449,8 @@ impl Service {
         if matches!(st.status, AttackStatus::Running | AttackStatus::Paused) {
             st.status = if a.cancelled.load(Ordering::Relaxed) { AttackStatus::Cancelled } else { AttackStatus::Done };
         }
+        // The final state and count always go out (also after a cancel, when results were still arriving).
+        self.fuzzer_event(a, &st, Rate::Last);
     }
 
     /// Recursive grep: one request at a time, each payload taken from the
@@ -447,11 +494,17 @@ impl Service {
                     let mut st = a.state.lock();
                     st.status = AttackStatus::Failed;
                     st.error = Some(e.to_string());
+                    self.fuzzer_event(a, &st, Rate::Last);
                     return;
                 }
             };
             let next = r.rule.extract.find(r.re.as_ref(), &response_text(sent.response.as_deref()));
-            a.state.lock().rows.push(row(sent, Some(i), vec![Some(payload.clone())], &p.grep, &p.extract));
+            {
+                let mut st = a.state.lock();
+                st.rows.push(row(sent, Some(i), vec![Some(payload.clone())], &p.grep, &p.extract));
+                let rate = Self::fuzzer_rate(&st, Rate::Limited);
+                self.fuzzer_event(a, &st, rate);
+            }
             seen.insert(payload.clone());
             match next {
                 Some(v) if v.is_empty() => {
@@ -475,6 +528,7 @@ impl Service {
             st.status = if a.cancelled.load(Ordering::Relaxed) { AttackStatus::Cancelled } else { AttackStatus::Done };
         }
         st.note = stop;
+        self.fuzzer_event(a, &st, Rate::Last);
     }
 
     /// Runs an attack to the end and returns every result.
@@ -572,6 +626,8 @@ impl Service {
             }
             other => return Err(invalid(format!("unknown action {other}; use pause, resume or cancel"))),
         }
+        let rate = Self::fuzzer_rate(&st, Rate::Always);
+        self.fuzzer_event(&a, &st, rate);
         Ok(st.status)
     }
 

@@ -9,7 +9,7 @@ version may change project files, APIs and the CLI.
 
 - **Typed events on the event stream.** `GET /api/v1/events?topics=exchanges,findings` streams `event: <topic>`,
   `id: <seq>`, `data: <json>` for the topics `exchanges`, `findings`, `scans`, `proofs`, `intercept`, `approvals`,
-  `audit`, `collaborator` and `websockets` (`topics=all` for every topic you may read; list `counters` to get the old event too).
+  `audit`, `collaborator`, `websockets`, `fuzzer` and `ai_scan` (`topics=all` for every topic you may read; list `counters` to get the old event too).
   Events carry ids and short summaries only, are sent after the change has been saved, and an agent only receives
   those for hosts in scope, with secrets in host names replaced. A client that falls behind gets one `resync` event
   and should refetch what it shows; an unknown topic is a 400. Without `topics` the stream is unchanged (a
@@ -17,6 +17,10 @@ version may change project files, APIs and the CLI.
   counts rows instead of loading them.
 - **The UI updates from server events.** Intercept, Collaborator and WebSocket views no longer poll: a held
   request, a callback or a new WebSocket message shows as soon as the server reports it.
+- **Scans, the Fuzzer and AI scans update from events too.** New `scan_state_changed` (every state change of a
+  crawl-and-audit task), `fuzzer_progress` and `ai_scan_changed` events (ids and state words only, at most one per
+  250 ms per run, the final state always sent) replace the last progress timers: no page polls any more. Agents
+  only receive scan and fuzzer events for runs they started.
 
 ### Performance
 
