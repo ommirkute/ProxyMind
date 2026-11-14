@@ -205,6 +205,14 @@ async fn app(fixed: bool) -> String {
                         };
                         format!("<p>We sent a link: <a href=\"https://{host}/reset?t=91c2\">reset</a></p>")
                     }
+                    "/share" => {
+                        let host = if fixed {
+                            "shop.example".to_string()
+                        } else {
+                            r.headers.get("host").cloned().unwrap_or_default()
+                        };
+                        format!("<p>Share this: <a href=\"http://{host}/p/1\">link</a></p>")
+                    }
                     // Echoes the request headers back (a debug page): not Host injection.
                     "/echo" => {
                         let mut h: Vec<String> = r.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
@@ -343,6 +351,11 @@ async fn host_header_injection_needs_the_marker_in_a_link_not_an_echo() {
     let r = prove(&s, "host_header_injection", "Host header injection in GET /reset", reset).await;
     assert!(r.proven, "{:?}", r.reasons);
 
+    // Links built from the Host header itself.
+    let share = get(&s, &url, "/share").await;
+    let r = prove(&s, "host_header_injection", "Host header injection in GET /share", share).await;
+    assert!(r.proven, "{:?}", r.reasons);
+
     // A page that prints the request headers shows the marker, but not as a host.
     let echo = get(&s, &url, "/echo").await;
     let r = prove(&s, "host_header_injection", "Host header injection in GET /echo", echo).await;
@@ -360,7 +373,9 @@ async fn no_class_is_proven_anywhere_on_the_fixed_app() {
     let s = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
     let xml = "<?xml version=\"1.0\"?>\n<order><item>Coffee</item><qty>2</qty></order>";
     let mut evidence = Vec::new();
-    for path in ["/tpl?name=guest", "/calc?name=guest", "/items?q=apple", "/api/me", "/api/public", "/reset", "/echo"] {
+    for path in
+        ["/tpl?name=guest", "/calc?name=guest", "/items?q=apple", "/api/me", "/api/public", "/reset", "/share", "/echo"]
+    {
         evidence.push((path.to_string(), get(&s, &fixed, path).await));
     }
     let raw = format!(

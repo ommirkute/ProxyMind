@@ -91,7 +91,7 @@ Findings page (both SDKs too). New pure oracles live in `pm-proof` with unit tes
   request, e.g. User-Agent; VS-15), GraphQL-over-POST IDOR (VS-12) and stored/DOM XSS (VS-23/VS-25, render a
   different exchange). Done 2026-11-14 (roadmap Phase 0.2): template injection (`expression` oracle), NoSQL operator
   injection (boolean split with `$eq`/`$ne`), XXE (entity file read, or blind via OAST), CORS (`cors` marker kind)
-  and Host-header injection (`host` marker in `X-Forwarded-Host`); tests in `crates/pm-service/tests/prove_more.rs`
+  and Host-header injection (`host` marker in `X-Forwarded-Host`, `X-Host` or `Host`); VulnShop 15/38 proven; tests in `crates/pm-service/tests/prove_more.rs`
   against a purpose-built app with fixed versions and traps.
 - Done 2026-11-13: every proof kind except out-of-band now exports as a CI regression test (9 of 9 proven findings
   in a VulnShop run, it was 4), the runner no longer calls a test "fixed" when the credentials stopped working or

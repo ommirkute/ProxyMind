@@ -394,6 +394,8 @@ fn whole_request_proofs(class: &str, baseline: i64, raw: &str, all: &[Point]) ->
             let host = "{{marker}}.proxymind-oast.invalid";
             out.push(marker("host", with_header(raw, "X-Forwarded-Host", host)));
             out.push(marker("host", with_header(raw, "X-Host", host)));
+            // The request still goes to the target's address; only the name it claims changes.
+            out.push(marker("host", with_header(raw, "Host", host)));
         }
         "xxe" => {
             // In-band: an entity that reads a known file, shown where an

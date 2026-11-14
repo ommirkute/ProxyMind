@@ -127,3 +127,14 @@ async fn auto_prove_sweeps_suspected_findings() {
     // Proven findings are no longer suspected.
     assert!(s.finding_list(Some("suspected")).unwrap().is_empty(), "all suspected findings were proven");
 }
+
+#[tokio::test]
+async fn proves_host_header_injection_from_a_forged_host() {
+    let (s, url) = setup().await;
+    // VS-19: share links are built from the Host header.
+    let share = record(&s, &url, "/api/share?product=1").await;
+    let f = suspect(&s, "host_header_injection", "Host header injection in GET /api/share", share).await;
+    let r = s.finding_prove(&human(), f).await.unwrap();
+    assert!(r.proven, "{:?}", r.reasons);
+    assert_eq!(r.oracle.as_deref(), Some("marker"));
+}

@@ -27,7 +27,8 @@ version may change project files, APIs and the CLI.
     or by an out-of-band callback from a parameter entity (blind XXE).
   - **CORS** by a new `cors` marker kind: an `Origin` carrying a fresh random host is echoed in
     `Access-Control-Allow-Origin` with credentials allowed. Reflection without credentials is not counted.
-  - **Host-header injection** by the `host` marker sent in `X-Forwarded-Host` or `X-Host`.
+  - **Host-header injection** by the `host` marker sent in `X-Forwarded-Host`, `X-Host` or a forged `Host` (the
+    request still goes to the target's address).
 
   The `host` marker kind is stricter: the marker must come back in an absolute URL (`//marker`) or a redirect, not
   just anywhere in the page, so a debug page that prints request headers is no longer a proof. Template-injection
