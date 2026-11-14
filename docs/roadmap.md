@@ -60,13 +60,13 @@ automation](https://www.zaproxy.org/docs/automate/), [mitmproxy modes](https://d
 
 | Gap | Evidence | Fix (phase) |
 | --- | --- | --- |
-| One database connection per process | `store: Mutex<Store>` in `pm-service/src/lib.rs`: every read and write takes one lock | Read pool plus one writer task fed by a channel (1) |
-| No event bus | The UI's live stream polls counters every 700 ms (`pm-api/src/routes.rs`) | Typed events broadcast from the service; SSE topics and webhooks subscribe (1) |
-| Hand-written contracts | REST routes, MCP schemas and both SDKs are kept in step by hand | Schemas derived from the Rust types; OpenAPI, SDK types and MCP schemas generated; CI fails on drift (1) |
+| Service calls share one store lock | `store: Mutex<Store>` in `pm-service/src/lib.rs` (192 call sites): every service read and write takes one lock. The proxy recorder writes on its own connection, so two writers also contend for SQLite's write lock; the audit chain relies on the mutex for its order | Read pool plus one writer that also takes the recorder's writes (1, ADR-0017) |
+| No event bus | The UI's live stream polls counters every 700 ms per open stream (`pm-api/src/routes.rs`), each tick loading up to 10,000 findings to count them; three pages keep their own timers | Typed events broadcast from the service; SSE topics and webhooks subscribe (1, ADR-0018) |
+| Hand-written contracts | REST routes, MCP schemas, both SDKs and the UI types are kept in step by hand; about two thirds of REST bodies use structs private to `routes.rs` and every handler returns untyped JSON | Schemas derived from the Rust types; OpenAPI, SDK, UI and MCP schemas generated; CI fails on drift (1, ADR-0019) |
 | History search scans content | No full-text index in `pm-store` | SQLite FTS5 filled by the recorder; HQL content terms use it (1) |
 | One very large service crate | `pm-service` is about 21,500 lines | Domains in their own crates behind the one `pm-service` facade (ADR-0005 holds) (1) |
 | Single user, single project | The API acts as one person fixed at start-up; one project per process | Users, roles and a project registry; authorization on every route (3) |
-| No inline traffic hook | Live traffic changes only through regex rules (`pm-proxy/src/rewrite.rs`) | A hook interface run by the WASM plugin runtime with time and memory limits (2) |
+| No inline traffic hook | Live traffic changes only through regex rules (`pm-proxy/src/rewrite.rs`); plugins run as sandboxed processes per check, and there is no WASM runtime yet (ADR-0016) | A hook interface with time and memory limits: a WASM runtime, or the existing sandboxed plugin processes (2, needs an ADR) |
 | HTTP/1.1 and HTTP/2 only | No QUIC stack, no decoders for non-HTTP streams | QUIC and HTTP/3 on both sides, pluggable stream decoders, raw TCP relay (2) |
 | One long end-to-end script | `ui/tests/e2e.mjs` runs as one sequence | Sections isolated so one failure doesn't hide the rest (0) |
 
@@ -105,7 +105,7 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 
 | Work package | What |
 | --- | --- |
-| 2.1 Traffic hooks | Request and response hooks in the proxy, run by the WASM plugin runtime with time, memory and fuel limits; changes recorded next to the original |
+| 2.1 Traffic hooks | Request and response hooks in the proxy with time and memory limits (an ADR first: a new WASM runtime or the existing sandboxed plugin processes, ADR-0015/0016); changes recorded next to the original |
 | 2.2 Workflows | Saved chains of steps (match, extract, transform, send, assert), run on demand, per exchange or from the fuzzer, through the policy gate |
 | 2.3 Inline transforms | Encode, decode and hash in the editor with a reversible preview |
 | 2.4 HTTP/3 | QUIC on the client and upstream sides, Alt-Svc handling, HTTP/3 in history and replay |
