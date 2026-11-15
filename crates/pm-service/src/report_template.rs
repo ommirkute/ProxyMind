@@ -22,10 +22,12 @@ pub const TEMPLATES_SETTING: &str = "report_templates";
 /// Largest template body.
 const MAX_BODY: usize = 200 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReportTemplate {
+    /// Name of the template (the built-in name is reserved).
     pub name: String,
+    /// What the template is for.
     pub description: String,
     /// html or md
     pub format: String,

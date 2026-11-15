@@ -14,7 +14,7 @@ pub struct Entry<'a> {
     pub id: i64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Node {
     /// This segment (`/` for an origin's root).
     pub name: String,
@@ -34,7 +34,7 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Site {
     pub origin: String,
     pub total: usize,

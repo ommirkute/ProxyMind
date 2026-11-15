@@ -27,7 +27,7 @@ pub struct AuthzCheckRequest {
     pub include_anonymous: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AuthzReport {
     pub exchange_id: i64,
     pub method: String,

@@ -6,15 +6,16 @@ use serde_json::{Value, json};
 
 use crate::{Authorization, Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DecodeRequest {
+    /// The text to encode or decode.
     pub input: String,
     /// Operations in order; empty means smart decode.
     pub ops: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct TokenAnalyzerRequest {
     /// The request that issues a token (e.g. a login or a page setting a cookie).
@@ -23,11 +24,13 @@ pub struct TokenAnalyzerRequest {
     pub locator: String,
     /// How many tokens to collect (default 100, 10–500).
     pub samples: Option<usize>,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TokenAnalyzerResult {
     /// Statistics only: the tokens themselves are live secrets and aren't returned.
@@ -60,7 +63,7 @@ fn text_of(raw: &[u8], max: usize) -> String {
 }
 
 /// A change to a request in the Replay editor (nothing is sent).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RequestTransform {
     /// GET ⇄ POST, moving the parameters between query and body.

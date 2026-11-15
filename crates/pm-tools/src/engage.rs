@@ -187,7 +187,7 @@ pub fn find_scripts(html: &str) -> Vec<Script> {
 }
 
 /// Where a parameter was found.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 pub enum ParamWhere {
     #[serde(rename = "query")]
     Query,
@@ -280,7 +280,7 @@ pub(crate) fn form_pairs(s: &str) -> Vec<(String, String)> {
 }
 
 /// One parameter across the requests analysed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ParamSummary {
     pub name: String,
     pub locations: Vec<ParamWhere>,
@@ -360,7 +360,7 @@ fn esc(s: &str) -> String {
 }
 
 /// How the CSRF proof-of-concept submits the request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CsrfTechnique {
     /// Picks one from the request's content type.
@@ -497,7 +497,7 @@ pub(crate) fn multipart_fields(body: &str, content_type: &str) -> Vec<(String, S
     out
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Clickjacking {
     /// Whether the recorded response lets other sites frame it.
     pub framable: bool,

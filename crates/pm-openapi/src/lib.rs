@@ -24,7 +24,7 @@ impl std::fmt::Display for SpecError {
 
 impl std::error::Error for SpecError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Param {
     pub name: String,
     /// path, query, header or cookie
@@ -33,7 +33,7 @@ pub struct Param {
     pub example: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Operation {
     pub method: String,
     /// As written in the spec, e.g. `/users/{id}`.

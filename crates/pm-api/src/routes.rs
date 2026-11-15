@@ -10,6 +10,14 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use pm_service::api_types::{
+    AiScanMessage, AnnotationBody, CaptureBody, ChangesQuery, CheckYaml, CodeBody, CodeQuery, CollabQuery, CompareBody,
+    CoverageQuery, CurlBody, EngageExchange, ExchangeQuery, ExplainBody, ForwardBody, FromQuery, HostQuery, KeyBody,
+    LimitQuery, ListenBody, ListenersBody, OrganizerAdd, OrganizerQuery, PackQuery, PanelQuery, PayloadBody, PluginSet,
+    ProbesQuery, ReconDns, ReconWayback, RecordLoginBody, ReportQuery, RoeBody, RulesBody, ScanQuery, SendBody,
+    SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet, WsHistoryQuery,
+    WsQuery,
+};
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
@@ -261,8 +269,10 @@ async fn status(State(st): State<AppState>) -> ApiResult {
     }))
 }
 
-#[derive(Deserialize)]
-struct EventsQuery {
+/// Query of `GET /events`.
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct EventsQuery {
+    /// Comma-separated topics, or `all`; `counters` adds the legacy event. Missing: only the legacy `counters` event.
     topics: Option<String>,
 }
 
@@ -449,8 +459,9 @@ async fn exchanges(State(st): State<AppState>, Query(f): Query<HistoryFilter>) -
     ok(st.service.history_search(&st.actor, &f)?)
 }
 
-#[derive(serde::Deserialize)]
-struct BytesQuery {
+/// Query of `GET /exchanges/{id}`.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct BytesQuery {
     /// Also return the exact bytes, base64-encoded (for hex views).
     #[serde(default)]
     bytes: Option<u8>,
@@ -504,11 +515,6 @@ async fn replay(State(st): State<AppState>, Json(r): Json<ReplayRequest>) -> Api
     ok(st.service.replay_send(&st.actor, r).await?)
 }
 
-#[derive(Deserialize)]
-struct StatusQuery {
-    status: Option<String>,
-}
-
 async fn approvals(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> ApiResult {
     let status = q.status.filter(|s| s != "all");
     ok(st.service.approvals(status.as_deref(), 200)?)
@@ -527,30 +533,12 @@ async fn identities(State(st): State<AppState>) -> ApiResult {
     ok(st.service.identity_list()?)
 }
 
-#[derive(Deserialize)]
-struct CaptureBody {
-    name: String,
-    #[serde(default)]
-    role: Option<String>,
-    exchange_id: i64,
-}
-
 async fn identity_capture(State(st): State<AppState>, Json(b): Json<CaptureBody>) -> ApiResult {
     ok(st.service.identity_capture(&st.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.exchange_id)?)
 }
 
 async fn identity_check(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
     ok(st.service.identity_check(&st.actor, &name).await?)
-}
-
-#[derive(Deserialize)]
-struct RecordLoginBody {
-    name: String,
-    #[serde(default)]
-    role: Option<String>,
-    from: i64,
-    #[serde(default)]
-    to: Option<i64>,
 }
 
 async fn identity_record_login(State(st): State<AppState>, Json(b): Json<RecordLoginBody>) -> ApiResult {
@@ -573,20 +561,8 @@ async fn model_snapshots(State(st): State<AppState>) -> ApiResult {
     ok(st.service.model_snapshot_list()?)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotBody {
-    name: String,
-}
-
 async fn model_snapshot_save(State(st): State<AppState>, Json(b): Json<SnapshotBody>) -> ApiResult {
     ok(st.service.model_snapshot_save(&st.actor, &b.name)?)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChangesQuery {
-    snapshot: i64,
 }
 
 async fn model_changes(State(st): State<AppState>, Query(q): Query<ChangesQuery>) -> ApiResult {
@@ -595,11 +571,6 @@ async fn model_changes(State(st): State<AppState>, Query(q): Query<ChangesQuery>
 
 async fn authz_check(State(st): State<AppState>, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
     ok(st.service.authz_check(&st.actor, r).await?)
-}
-
-#[derive(Deserialize)]
-struct ExchangeQuery {
-    exchange_id: Option<i64>,
 }
 
 async fn authz_results(State(st): State<AppState>, Query(q): Query<ExchangeQuery>) -> ApiResult {
@@ -612,11 +583,6 @@ async fn authz_candidates(State(st): State<AppState>) -> ApiResult {
 
 async fn model(State(st): State<AppState>, Query(f): Query<ModelFilter>) -> ApiResult {
     ok(st.service.model_get(&f)?)
-}
-
-#[derive(Deserialize)]
-struct CoverageQuery {
-    all: Option<bool>,
 }
 
 async fn scan_task_start(State(st): State<AppState>, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
@@ -643,31 +609,12 @@ async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) ->
     ok(st.service.scan_task_resume(&st.actor, &id)?)
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct ProbesQuery {
-    limit: Option<usize>,
-}
-
 async fn collaborator_probes(State(st): State<AppState>, Query(q): Query<ProbesQuery>) -> ApiResult {
     ok(st.service.collaborator_probes(q.limit.unwrap_or(200))?)
 }
 
 async fn collaborator_status(State(st): State<AppState>) -> ApiResult {
     ok(st.service.collaborator_status()?)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListenBody {
-    listen: String,
-    public_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SmtpBody {
-    listen: String,
 }
 
 async fn collaborator_smtp(State(st): State<AppState>, Json(b): Json<SmtpBody>) -> ApiResult {
@@ -688,28 +635,8 @@ async fn collaborator_listen(State(st): State<AppState>, Json(b): Json<ListenBod
     ok(st.service.collaborator_listen(&st.actor, addr, b.public_url).await?)
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct PayloadBody {
-    note: String,
-}
-
 async fn collaborator_payload(State(st): State<AppState>, Json(b): Json<PayloadBody>) -> ApiResult {
     ok(st.service.collaborator_payload(&st.actor, &b.note)?)
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct OrganizerQuery {
-    status: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OrganizerAdd {
-    exchange_id: i64,
-    #[serde(default)]
-    note: String,
 }
 
 async fn organizer_list(State(st): State<AppState>, Query(q): Query<OrganizerQuery>) -> ApiResult {
@@ -731,12 +658,6 @@ async fn organizer_update(
 async fn organizer_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
     st.service.organizer_delete(&st.actor, id)?;
     ok(json!({ "deleted": id }))
-}
-
-#[derive(serde::Deserialize)]
-struct CollabQuery {
-    limit: Option<usize>,
-    token: Option<String>,
 }
 
 async fn collaborator_payloads(State(st): State<AppState>, Query(q): Query<CollabQuery>) -> ApiResult {
@@ -772,41 +693,12 @@ async fn update_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.update_get()?)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UpdateSet {
-    enabled: bool,
-}
-
 async fn update_set(State(st): State<AppState>, Json(b): Json<UpdateSet>) -> ApiResult {
     ok(st.service.update_set(&st.actor, b.enabled)?)
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct UpdateCheck {
-    /// Ask now even if the daily check is off or the last answer is fresh.
-    force: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReconDns {
-    host: String,
-    #[serde(default)]
-    resolver: Option<std::net::SocketAddr>,
-}
-
 async fn recon_dns(State(st): State<AppState>, Json(b): Json<ReconDns>) -> ApiResult {
     ok(st.service.recon_dns(&st.actor, &b.host, b.resolver).await?)
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReconWayback {
-    host: String,
-    #[serde(default)]
-    limit: Option<usize>,
 }
 
 async fn recon_wayback(State(st): State<AppState>, Json(b): Json<ReconWayback>) -> ApiResult {
@@ -821,23 +713,9 @@ async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_servic
     ok(st.service.engage_js_endpoints(&st.actor, &f)?)
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct TriageBody {
-    host: Option<String>,
-    in_scope: Option<bool>,
-    limit: Option<usize>,
-}
-
 async fn traffic_triage(State(st): State<AppState>, Json(b): Json<TriageBody>) -> ApiResult {
     let f = pm_service::EngageFilter { host: b.host, in_scope: b.in_scope, ..Default::default() };
     ok(st.service.traffic_triage(&st.actor, &f, b.limit.unwrap_or(100))?)
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct HostQuery {
-    host: Option<String>,
 }
 
 async fn memory_list(State(st): State<AppState>, Query(q): Query<HostQuery>) -> ApiResult {
@@ -857,16 +735,6 @@ async fn engage_analyze(State(st): State<AppState>, Json(f): Json<pm_service::En
     ok(st.service.engage_analyze(&st.actor, &f)?)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EngageExchange {
-    exchange_id: i64,
-    #[serde(default)]
-    technique: pm_service::pm_tools::engage::CsrfTechnique,
-    #[serde(default)]
-    auto_submit: bool,
-}
-
 async fn engage_references(State(st): State<AppState>, Json(b): Json<EngageExchange>) -> ApiResult {
     ok(st.service.engage_references(&st.actor, b.exchange_id, &Default::default())?)
 }
@@ -883,19 +751,8 @@ async fn plugins(State(st): State<AppState>) -> ApiResult {
     ok(st.service.plugin_list())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginSet {
-    enabled: bool,
-}
-
 async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b): Json<PluginSet>) -> ApiResult {
     ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
-}
-
-#[derive(Deserialize)]
-struct PanelQuery {
-    limit: Option<usize>,
 }
 
 async fn plugin_panel(
@@ -924,12 +781,6 @@ async fn dom_test(State(st): State<AppState>, Json(r): Json<pm_service::DomTestR
 
 async fn custom_checks(State(st): State<AppState>) -> ApiResult {
     ok(st.service.custom_checks()?)
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckYaml {
-    yaml: String,
 }
 
 async fn custom_check_save(State(st): State<AppState>, Json(b): Json<CheckYaml>) -> ApiResult {
@@ -1018,11 +869,6 @@ async fn proof_rerun(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResu
     ok(st.service.proof_rerun(&st.actor, id).await?)
 }
 
-#[derive(Deserialize)]
-struct LimitQuery {
-    limit: Option<usize>,
-}
-
 async fn audit(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> ApiResult {
     ok(st.service.audit_list(q.limit.unwrap_or(200).min(5000))?)
 }
@@ -1032,16 +878,6 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
         Ok(n) => ok(json!({ "intact": true, "records": n })),
         Err(e) => ok(json!({ "intact": false, "error": e.to_string() })),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ReportQuery {
-    format: Option<String>,
-    template: Option<String>,
-    min_severity: Option<String>,
-    /// Comma-separated statuses to include.
-    statuses: Option<String>,
-    evidence: Option<bool>,
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
@@ -1065,12 +901,6 @@ async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Res
 
 /// Largest evidence pack the verify endpoint takes.
 const EVIDENCE_LIMIT: usize = 512 * 1024 * 1024;
-
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct PackQuery {
-    all: bool,
-}
 
 /// A signed evidence pack (ZIP) to hand to the client.
 async fn evidence_pack(State(st): State<AppState>, Query(q): Query<PackQuery>) -> Result<Response, ApiError> {
@@ -1155,14 +985,6 @@ async fn intercept_settings(
     ok(st.service.intercept_settings(&st.actor, s)?)
 }
 
-#[derive(Deserialize)]
-struct ForwardBody {
-    #[serde(default)]
-    raw: Option<String>,
-    #[serde(default)]
-    fix_content_length: Option<bool>,
-}
-
 async fn intercept_forward(State(st): State<AppState>, Path(id): Path<u64>, Json(b): Json<ForwardBody>) -> ApiResult {
     st.service.intercept_forward(&st.actor, id, b.raw, b.fix_content_length.unwrap_or(true))?;
     ok(json!({ "forwarded": id }))
@@ -1173,23 +995,12 @@ async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiR
     ok(json!({ "dropped": id }))
 }
 
-#[derive(Deserialize)]
-struct WsQuery {
-    after_id: Option<i64>,
-    limit: Option<usize>,
-}
-
 async fn search(State(st): State<AppState>, Json(r): Json<pm_service::SearchRequest>) -> ApiResult {
     ok(st.service.history_search_text(&st.actor, &r)?)
 }
 
 async fn search_ws(State(st): State<AppState>, Json(r): Json<pm_service::WsSearchRequest>) -> ApiResult {
     ok(st.service.ws_search_text(&st.actor, &r)?)
-}
-
-#[derive(serde::Deserialize)]
-struct SiteQuery {
-    host: Option<String>,
 }
 
 async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiResult {
@@ -1233,11 +1044,6 @@ async fn roe_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.roe_get()?)
 }
 
-#[derive(serde::Deserialize)]
-struct RoeBody {
-    text: String,
-}
-
 async fn roe_put(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
     ok(st.service.roe_set(&st.actor, &b.text)?)
 }
@@ -1246,23 +1052,8 @@ async fn roe_check(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiRes
     ok(st.service.roe_check(&b.text)?)
 }
 
-#[derive(serde::Deserialize)]
-struct AnnotationBody {
-    #[serde(default)]
-    highlight: Option<String>,
-    #[serde(default)]
-    comment: Option<String>,
-}
-
 async fn annotate(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AnnotationBody>) -> ApiResult {
     ok(st.service.exchange_annotate(&st.actor, id, b.highlight.as_deref(), b.comment.as_deref())?)
-}
-
-#[derive(serde::Deserialize)]
-struct WsHistoryQuery {
-    host: Option<String>,
-    before_id: Option<i64>,
-    limit: Option<usize>,
 }
 
 async fn ws_history(State(st): State<AppState>, Query(q): Query<WsHistoryQuery>) -> ApiResult {
@@ -1283,21 +1074,8 @@ async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiRe
     ok(json!({ "command": st.service.exchange_curl(&st.actor, id)? }))
 }
 
-#[derive(serde::Deserialize)]
-struct CodeQuery {
-    lang: pm_service::pm_tools::codegen::Lang,
-}
-
 async fn exchange_code(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<CodeQuery>) -> ApiResult {
     ok(json!({ "code": st.service.exchange_code(&st.actor, id, q.lang)? }))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodeBody {
-    url: String,
-    raw: String,
-    lang: pm_service::pm_tools::codegen::Lang,
 }
 
 async fn tools_code(State(st): State<AppState>, Json(b): Json<CodeBody>) -> ApiResult {
@@ -1322,11 +1100,6 @@ async fn export_har(
         har.to_string(),
     )
         .into_response())
-}
-
-#[derive(serde::Deserialize)]
-struct CurlBody {
-    command: String,
 }
 
 async fn tools_curl(State(st): State<AppState>, Json(r): Json<CurlBody>) -> ApiResult {
@@ -1357,12 +1130,6 @@ async fn tools_request_transform(State(st): State<AppState>, Json(t): Json<pm_se
     ok(st.service.request_transform(&t)?)
 }
 
-#[derive(serde::Deserialize)]
-struct CompareBody {
-    a: i64,
-    b: i64,
-}
-
 async fn tools_compare(State(st): State<AppState>, Json(r): Json<CompareBody>) -> ApiResult {
     ok(st.service.compare_exchanges(&st.actor, r.a, r.b)?)
 }
@@ -1372,11 +1139,6 @@ async fn tools_token_analyzer(
     Json(r): Json<pm_service::TokenAnalyzerRequest>,
 ) -> ApiResult {
     ok(st.service.token_analyzer_run(&st.actor, r).await?)
-}
-
-#[derive(serde::Deserialize)]
-struct TokensBody {
-    tokens: Vec<String>,
 }
 
 async fn tools_token_analyzer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
@@ -1397,11 +1159,6 @@ async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::Fuzz
 
 async fn attacks_list(State(st): State<AppState>) -> ApiResult {
     ok(st.service.fuzzer_list(&st.actor))
-}
-
-#[derive(serde::Deserialize)]
-struct FromQuery {
-    from: Option<usize>,
 }
 
 async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FromQuery>) -> ApiResult {
@@ -1426,13 +1183,6 @@ async fn ws_replay(State(st): State<AppState>, Json(r): Json<pm_service::WsRepla
 
 async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
     ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyBody {
-    name: String,
-    key: String,
 }
 
 async fn model_key_set(State(st): State<AppState>, Json(b): Json<KeyBody>) -> ApiResult {
@@ -1466,12 +1216,6 @@ async fn assistant_models(State(st): State<AppState>, Json(cfg): Json<pm_service
     ok(serde_json::json!({ "models": st.assistant.list_models(&cfg).await? }))
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct ExplainBody {
-    framework: Option<String>,
-}
-
 async fn finding_explain(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<ExplainBody>) -> ApiResult {
     let md = st.assistant.explain_finding(&st.actor, id, b.framework.as_deref()).await?;
     ok(serde_json::json!({ "explanation": md }))
@@ -1479,12 +1223,6 @@ async fn finding_explain(State(st): State<AppState>, Path(id): Path<i64>, Json(b
 
 async fn assistant_chat(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
     ok(st.service.chat_get(id)?)
-}
-
-#[derive(Deserialize)]
-struct SendBody {
-    chat_id: Option<i64>,
-    text: String,
 }
 
 async fn assistant_send(State(st): State<AppState>, Json(b): Json<SendBody>) -> ApiResult {
@@ -1510,20 +1248,8 @@ async fn ai_scan_stop(State(st): State<AppState>, Path(id): Path<i64>) -> ApiRes
     ok(st.service.ai_scan_stop(&st.actor, id)?)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AiScanMessage {
-    text: String,
-}
-
 async fn ai_scan_message(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AiScanMessage>) -> ApiResult {
     ok(st.service.ai_scan_message(&st.actor, id, &b.text)?)
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct ScanQuery {
-    scan: Option<i64>,
 }
 
 async fn attack_paths(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
@@ -1586,22 +1312,12 @@ async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>)
     ok(st.service.session_macro_run(&st.actor, &name).await?)
 }
 
-#[derive(Deserialize)]
-struct ListenersBody {
-    listeners: Vec<pm_service::pm_proxy::ListenerConfig>,
-}
-
 async fn listeners_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.listeners_get()?)
 }
 
 async fn listeners_put(State(st): State<AppState>, Json(b): Json<ListenersBody>) -> ApiResult {
     ok(st.service.listeners_set(&st.actor, b.listeners)?)
-}
-
-#[derive(Deserialize)]
-struct RulesBody {
-    rules: Vec<pm_service::pm_proxy::RewriteRule>,
 }
 
 async fn rules_presets(State(st): State<AppState>) -> ApiResult {

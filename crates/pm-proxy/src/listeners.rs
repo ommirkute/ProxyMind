@@ -20,15 +20,17 @@ use crate::Proxy;
 /// Most extra listeners a project can have.
 pub const MAX_LISTENERS: usize = 16;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ListenerConfig {
     /// Address and port, e.g. `127.0.0.1:8081` or `0.0.0.0:8082`.
     pub bind: String,
+    /// Listen on this address (false: configured but off).
     pub enabled: bool,
     /// Send every request to this host instead of where the client asked
     /// (empty: no redirect). The Host header is left as the client sent it.
     pub redirect_host: String,
+    /// Port to send requests to with `redirect_host`.
     pub redirect_port: u16,
     /// With a redirect: connect to it with TLS even for plain-HTTP clients.
     pub force_tls: bool,
@@ -90,7 +92,7 @@ pub fn validate(list: &[ListenerConfig]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ListenerStatus {
     pub bind: String,
     pub running: bool,

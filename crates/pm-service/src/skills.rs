@@ -28,7 +28,7 @@ const BUILTIN: &[&str] = &[
 const MAX_USER_SKILLS: usize = 100;
 const MAX_SKILL_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct Skill {
     pub name: String,
     pub title: String,

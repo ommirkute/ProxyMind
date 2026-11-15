@@ -8,7 +8,7 @@ use pm_service::pm_replay::{Endpoint, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -16,7 +16,7 @@ pub enum Role {
 }
 
 /// One piece of a message. The shape matches Anthropic's content blocks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Text { text: String },
@@ -24,7 +24,7 @@ pub enum Block {
     ToolResult { tool_use_id: String, content: String, is_error: bool },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<Block>,

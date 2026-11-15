@@ -15,7 +15,7 @@ use serde::Serialize;
 use url::Url;
 
 /// A form found on a page. Forms are reported, never submitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Form {
     pub page: String,
     pub method: String,

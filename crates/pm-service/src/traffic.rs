@@ -17,14 +17,14 @@ pub const MAX_IMPORT_BYTES: usize = 200 * 1024 * 1024;
 /// Most exchanges in one export.
 pub const MAX_EXPORT: usize = 20_000;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImportRequest {
     /// The HAR document as text.
     pub har: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ImportResult {
     pub imported: usize,
     /// Ids of the new exchanges (first 1000).
@@ -33,7 +33,7 @@ pub struct ImportResult {
 }
 
 /// A request read from a cURL command, ready for Replay.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CurlParsed {
     /// Where to send it (scheme://host[:port]).
     pub url: String,
@@ -42,7 +42,7 @@ pub struct CurlParsed {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExportRequest {
     /// Exactly these exchanges…

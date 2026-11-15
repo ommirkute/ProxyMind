@@ -32,7 +32,7 @@ pub(crate) fn url_key(url: &str) -> &str {
 }
 
 /// What a retest found.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Retest {
     pub finding_id: i64,
     /// proof (re-ran the proof), scan (re-ran the scanner check) or none.

@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+schemars = "1.2.3"
 anyhow = "1.0.104"
 pm-ai = { version = "0.2.0", path = "../pm-ai" }
 pm-core = { version = "0.2.0", path = "../pm-core" }

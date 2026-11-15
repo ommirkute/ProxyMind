@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DomTestRequest {
     /// A recorded HTML page.
@@ -20,7 +20,7 @@ pub struct DomTestRequest {
     pub pollution: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DomTestResult {
     pub url: String,
     /// Sources that reached sinks, exploitable ones first.

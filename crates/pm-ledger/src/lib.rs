@@ -111,7 +111,7 @@ pub fn checklist(op: &OperationInfo<'_>) -> Vec<(&'static str, String)> {
 }
 
 /// A hypothesis as stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Hypothesis {
     pub id: i64,
     pub operation: String,
@@ -129,7 +129,7 @@ pub struct Hypothesis {
     pub updated_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CoverageCell {
     pub operation: String,
     pub vuln_class: String,
@@ -141,7 +141,7 @@ pub struct CoverageCell {
     pub hypotheses: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Coverage {
     pub cells: Vec<CoverageCell>,
     pub totals: BTreeMap<String, usize>,

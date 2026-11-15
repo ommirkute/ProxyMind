@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct Analysis {
     pub samples: usize,
     pub unique: usize,
@@ -41,7 +41,7 @@ pub struct Analysis {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct BitTests {
     /// Bits tested (each character gives `bits_per_char` bits).
     pub bits: usize,
@@ -49,7 +49,7 @@ pub struct BitTests {
     pub tests: Vec<BitTest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct BitTest {
     pub name: &'static str,
     pub passed: bool,

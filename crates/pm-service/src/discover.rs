@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::{Authorization, Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DiscoverRequest {
     /// The folder to look in, e.g. https://app.example.com/ or …/api/
@@ -23,11 +23,13 @@ pub struct DiscoverRequest {
     pub extensions: Vec<String>,
     /// Most requests (default 500, max 5000).
     pub max_requests: Option<usize>,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Found {
     pub url: String,
     pub status: u16,
@@ -40,7 +42,7 @@ pub struct Found {
     pub note: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DiscoverResult {
     Done {

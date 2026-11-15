@@ -15,12 +15,14 @@ pub const MAX_SCAN: usize = 50_000;
 /// Most exchanges in a site map.
 pub const MAX_SITE_ROWS: usize = 200_000;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SearchRequest {
     /// Text (or a regex with `regex: true`) to find.
     pub query: String,
+    /// Treat `query` as a regular expression.
     pub regex: bool,
+    /// Match letter case.
     pub case_sensitive: bool,
     /// both (default), request, response, headers, bodies, request_headers,
     /// request_body, response_headers or response_body.
@@ -34,7 +36,7 @@ pub struct SearchRequest {
     pub filter: HistoryFilter,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SearchHit {
     pub exchange: ExchangeSummary,
     /// request or response
@@ -45,7 +47,7 @@ pub struct SearchHit {
     pub snippets: Vec<Snippet>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SearchResult {
     pub hits: Vec<SearchHit>,
     pub scanned: usize,
@@ -54,7 +56,7 @@ pub struct SearchResult {
     pub next_before_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SiteView {
     #[serde(flatten)]
     pub site: sitemap::Site,
@@ -172,11 +174,14 @@ pub(crate) fn may_match_placeholder(query: &str, case_sensitive: bool) -> bool {
 }
 
 /// A search through WebSocket messages.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct WsSearchRequest {
+    /// Text (or a regex with `regex: true`) to find in message payloads.
     pub query: String,
+    /// Treat `query` as a regular expression.
     pub regex: bool,
+    /// Match letter case.
     pub case_sensitive: bool,
     /// Messages that don't match.
     pub invert: bool,
@@ -186,6 +191,7 @@ pub struct WsSearchRequest {
     pub direction: Option<String>,
     /// Only connections whose targets are in scope.
     pub in_scope: Option<bool>,
+    /// Only messages with an id below this (for paging back).
     pub before_id: Option<i64>,
     /// Messages to look at, newest first (default 5000, max 50 000).
     pub max_scan: Option<usize>,
@@ -193,7 +199,7 @@ pub struct WsSearchRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsSearchHit {
     pub id: i64,
     pub exchange_id: i64,
@@ -206,7 +212,7 @@ pub struct WsSearchHit {
     pub snippets: Vec<Snippet>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsSearchResult {
     pub hits: Vec<WsSearchHit>,
     pub scanned: usize,

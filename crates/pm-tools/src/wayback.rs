@@ -5,7 +5,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Capture {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]

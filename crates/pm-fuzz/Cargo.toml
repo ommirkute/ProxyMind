@@ -9,6 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+schemars = "1.2.3"
 pm-core = { version = "0.2.0", path = "../pm-core" }
 regex = "1.13.1"
 ring = "0.17.14"

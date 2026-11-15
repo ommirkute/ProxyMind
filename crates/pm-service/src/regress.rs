@@ -18,14 +18,14 @@ use serde_json::{Value, json};
 
 use crate::{Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Skipped {
     pub finding_id: i64,
     pub title: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RegressionExport {
     pub tests: Vec<RegressionTest>,
     /// Findings with no test, and why.

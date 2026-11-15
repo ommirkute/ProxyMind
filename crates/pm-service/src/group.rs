@@ -18,7 +18,7 @@ use crate::{Authorization, Result, Service, ServiceError, now_ms};
 /// Most requests in a group.
 pub const MAX_GROUP: usize = 20;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupMode {
     /// One after another, each waiting for the previous response.
@@ -28,11 +28,12 @@ pub enum GroupMode {
     Parallel,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GroupItem {
     /// Target as scheme://host[:port] (or use exchange_id).
     pub url: Option<String>,
+    /// The recorded exchange to send.
     pub exchange_id: Option<i64>,
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
@@ -40,22 +41,28 @@ pub struct GroupItem {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GroupRequest {
+    /// The requests to send.
     pub requests: Vec<GroupItem>,
+    /// Send one after another (`sequence`) or at once (`parallel`).
     pub mode: GroupMode,
     /// For parallel groups: how to send at once (default auto).
     pub parallel: RaceModeChoice,
     /// Sequence only: stop at the first request that fails to get a response.
     pub stop_on_error: bool,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Update Content-Length to match the body (default true).
     pub fix_content_length: Option<bool>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// Hypothesis this request tests (links the exchanges as evidence).
     pub hypothesis_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GroupItemResult {
     pub index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,7 +75,7 @@ pub struct GroupItemResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GroupResult {
     Done {

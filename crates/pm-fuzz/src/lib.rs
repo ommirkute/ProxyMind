@@ -56,7 +56,7 @@ impl std::fmt::Display for FuzzError {
 impl std::error::Error for FuzzError {}
 
 /// How payloads are placed in the positions.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     /// One position at a time, the others keep their original value.
@@ -83,7 +83,7 @@ impl Mode {
 }
 
 /// One payload set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PayloadSet {
     /// Literal payloads.
@@ -119,7 +119,7 @@ pub struct PayloadSet {
 
 /// Payloads that come from the responses: `first`, then whatever `extract`
 /// finds in each response, up to `count` requests.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecursiveGrep {
     pub first: String,
@@ -131,7 +131,7 @@ pub struct RecursiveGrep {
 /// Most requests a recursive grep sends.
 pub const MAX_RECURSIVE: usize = 1000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BruteForce {
     pub charset: String,
@@ -140,7 +140,7 @@ pub struct BruteForce {
 }
 
 /// One payload processing step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Rule {
     Prefix {
@@ -469,7 +469,7 @@ pub fn plan(t: &Template, mode: Mode, sets: &[Vec<String>]) -> Result<Vec<Planne
 /// Pulls a value out of each response for its own results column
 /// (extract): text between two markers, or a regex's first
 /// group (or whole match).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Extract {
     pub start: Option<String>,
@@ -564,7 +564,7 @@ pub struct Observed {
 }
 
 /// Why a result stands out.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Anomaly {
     /// Index into the results.
     pub index: usize,

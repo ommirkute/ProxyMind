@@ -37,7 +37,7 @@ const EXEMPT: &[&str] = &["macro", "login", "health"];
 /// How many recent exchanges seed the cookie jar when a project opens.
 const JAR_SEED: i64 = 2000;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionConfig {
     pub macros: Vec<Macro>,
@@ -46,7 +46,7 @@ pub struct SessionConfig {
     pub saved_by: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Macro {
     pub name: String,
@@ -56,7 +56,7 @@ pub struct Macro {
     pub use_cookie_jar: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MacroStep {
     /// scheme://host[:port]
@@ -66,7 +66,7 @@ pub struct MacroStep {
     pub extract: Vec<Extraction>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractKind {
     /// First capture group (or the whole match) of a regex over head and body.
@@ -80,7 +80,7 @@ pub enum ExtractKind {
     Cookie,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Extraction {
     /// Variable name: letters, digits and `_`.
@@ -89,7 +89,7 @@ pub struct Extraction {
     pub expr: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunWhen {
     /// Before every request the rule covers (e.g. a fresh CSRF token).
@@ -99,7 +99,7 @@ pub enum RunWhen {
     WhenInvalid,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SetWhere {
     #[default]
@@ -109,7 +109,7 @@ pub enum SetWhere {
     Param,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SetValue {
     #[serde(rename = "where")]
@@ -121,7 +121,7 @@ pub struct SetValue {
 
 /// When a response means the session is gone. Empty: 401, 419, 440 or a
 /// redirect to a login page.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Validity {
     pub statuses: Vec<u16>,
@@ -141,7 +141,7 @@ fn canonical_tool(name: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionRule {
     pub name: String,
@@ -350,7 +350,7 @@ pub(crate) struct SessionState {
 }
 
 /// What a macro run produced.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MacroRun {
     pub name: String,
     pub exchange_ids: Vec<i64>,
@@ -358,7 +358,7 @@ pub struct MacroRun {
     pub variables: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SessionView {
     #[serde(flatten)]
     pub config: SessionConfig,

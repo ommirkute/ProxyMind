@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::{Result, Service, ServiceError};
 
 /// The parts of an operation a snapshot keeps.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OpShape {
     pub method: String,
     pub template: String,
@@ -32,7 +32,7 @@ impl OpShape {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SnapshotInfo {
     pub id: i64,
     pub name: String,
@@ -41,7 +41,7 @@ pub struct SnapshotInfo {
     pub operations: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct OpChange {
     /// `METHOD /template`
     pub operation: String,
@@ -58,7 +58,7 @@ pub struct OpChange {
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RetestItem {
     pub operation: String,
     pub why: String,
@@ -66,7 +66,7 @@ pub struct RetestItem {
     pub findings: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ModelChanges {
     /// What the current model is compared with.
     pub since: String,

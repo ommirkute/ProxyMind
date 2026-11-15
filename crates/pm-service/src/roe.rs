@@ -15,7 +15,7 @@ use crate::{Result, Service, ServiceError};
 pub const ROE_SETTING: &str = "roe";
 
 /// The rules as text plus what they mean.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RoeView {
     /// The YAML as saved (None when the project has none saved).
     pub text: Option<String>,

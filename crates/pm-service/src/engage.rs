@@ -26,7 +26,7 @@ pub struct EngageFilter {
     pub max_scan: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FoundComment {
     pub kind: &'static str,
     pub text: String,
@@ -37,7 +37,7 @@ pub struct FoundComment {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FoundScript {
     pub kind: &'static str,
     /// An external script's URL, resolved against the page.
@@ -52,7 +52,7 @@ pub struct FoundScript {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TargetAnalysis {
     pub host_filter: Option<String>,
     pub requests: usize,
@@ -68,7 +68,7 @@ pub struct TargetAnalysis {
 }
 
 /// A recorded request worth testing (see `traffic_triage`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct TriageItem {
     pub exchange_id: i64,
     pub method: String,
@@ -81,7 +81,7 @@ pub struct TriageItem {
 }
 
 /// Business-logic candidates (see `engage_logic`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct LogicReport {
     pub candidates: Vec<pm_tools::logic::LogicCandidate>,
     /// Recorded URLs that look like steps of a multi-step flow.
@@ -89,7 +89,7 @@ pub struct LogicReport {
 }
 
 /// An endpoint a recorded script mentions.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FoundEndpoint {
     /// Absolute URL (resolved against the page or script it came from).
     pub url: String,

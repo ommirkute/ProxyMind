@@ -18,14 +18,14 @@ pub struct ProxyInfo {
     pub profile_dir: std::path::PathBuf,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrowserOpenRequest {
     /// Page to open (default: the first URL in scope).
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BrowserOpened {
     pub url: String,
     pub proxy: String,

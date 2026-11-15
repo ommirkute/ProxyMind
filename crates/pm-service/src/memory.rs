@@ -16,7 +16,7 @@ const MAX_PER_HOST: usize = 200;
 /// Finding statuses that are a person's verdict.
 const VERDICTS: &[&str] = &["false_positive", "confirmed", "reported", "fixed", "accepted_risk"];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Memory {
     pub id: i64,
     pub host: String,

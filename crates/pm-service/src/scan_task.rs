@@ -54,7 +54,7 @@ pub struct ScanTaskRequest {
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanTaskStatus {
     Crawling,
@@ -84,7 +84,7 @@ impl ScanTaskStatus {
 }
 
 /// One issue a task found.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScanTaskIssue {
     pub operation: String,
     pub check: String,
@@ -120,7 +120,7 @@ impl ScanTaskIssue {
 }
 
 /// A task's progress and issues so far.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScanTaskView {
     pub task_id: String,
     pub url: String,

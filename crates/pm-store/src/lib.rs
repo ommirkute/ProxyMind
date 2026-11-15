@@ -422,7 +422,7 @@ pub struct IdentityRow {
 }
 
 /// One authorization-check result.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct AuthzRow {
     pub id: i64,
     pub exchange_id: i64,
@@ -439,7 +439,7 @@ pub struct AuthzRow {
 }
 
 /// An action waiting for, or decided by, a human.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ApprovalRow {
     pub id: String,
     pub created_ms: i64,
@@ -458,7 +458,7 @@ pub struct ApprovalRow {
 }
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AuditRecord {
     pub seq: i64,
     pub ts_ms: i64,
@@ -556,7 +556,7 @@ pub struct WsMessageRow {
 }
 
 /// One row of history, without the raw bytes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExchangeSummary {
     pub id: i64,
     pub ts_ms: i64,

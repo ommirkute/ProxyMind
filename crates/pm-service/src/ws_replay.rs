@@ -65,7 +65,7 @@ pub struct WsReplayRequest {
     pub max_chars: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WsReplayResult {
     /// The socket opened; everything sent and received is recorded under

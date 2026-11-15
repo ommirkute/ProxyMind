@@ -27,7 +27,7 @@ pub struct Panel {
 }
 
 /// What a panel shows, after validation.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PanelData {
     pub title: String,
     pub text: String,

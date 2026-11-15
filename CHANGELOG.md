@@ -8,6 +8,10 @@ version may change project files, APIs and the CLI.
 ### API contracts
 
 - An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **The OpenAPI document now covers every route of the REST API** (175 operations): each one lists its query
+  parameters or request body and what it answers with. 125 answer with a full schema; the rest say in words which keys
+  they return, or are downloads and the event stream. A test fails if a route is added or removed without the document
+  following. Nothing the API accepts or returns has changed.
 - **Agents see 8 more fields, by name.** `history_search` now lists `status_class`, `hide_ext`, `annotated`, `identity`,
   `hypothesis_id` and `text`, and `scan_task_start` lists `browser` and `record_findings`. They already worked, but the
   tool descriptions did not mention them, so agents never used them. The input schemas of these 14 MCP tools

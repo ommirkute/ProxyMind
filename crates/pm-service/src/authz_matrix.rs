@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::{AuthzCheckRequest, NewFinding, ProofRequest, ProofResult, Result, Service};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthzMatrixRequest {
     /// Prove each flagged cell (differential oracle) and record proven ones as findings.
@@ -22,7 +22,7 @@ pub struct AuthzMatrixRequest {
     pub max_operations: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MatrixCell {
     /// owner, same_as_owner, allowed_different, denied, inconclusive, needs_approval, not_allowed, error
     pub verdict: String,
@@ -32,7 +32,7 @@ pub struct MatrixCell {
     pub evidence_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MatrixFlag {
     pub identity: String,
     /// idor, bfla or no_auth
@@ -44,7 +44,7 @@ pub struct MatrixFlag {
     pub finding_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct MatrixRow {
     pub operation: String,
     pub exchange_id: i64,
@@ -55,7 +55,7 @@ pub struct MatrixRow {
     pub flags: Vec<MatrixFlag>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AuthzMatrix {
     /// Columns: (identity, role); `anonymous` last.
     pub identities: Vec<(String, String)>,

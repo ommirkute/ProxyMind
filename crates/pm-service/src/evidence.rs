@@ -30,7 +30,7 @@ const MAX_INCLUDED: usize = 5_000;
 
 // ---------- coverage proof ----------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CoverageCellProof {
     pub operation: String,
     pub vuln_class: String,
@@ -48,7 +48,7 @@ pub struct CoverageCellProof {
     pub findings: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CoverageProof {
     pub operations: usize,
     pub cells: Vec<CoverageCellProof>,
@@ -370,14 +370,14 @@ impl Service {
 
 // ---------- verification ----------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct EvidenceVerification {
     /// Every check passed.
     pub ok: bool,

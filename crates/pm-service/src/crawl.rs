@@ -11,7 +11,7 @@ use crate::{Authorization, Result, Service, ServiceError};
 
 pub const MAX_CRAWL_PAGES: usize = 500;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CrawlRequest {
     /// Where to start, e.g. https://app.example.com/
@@ -24,13 +24,14 @@ pub struct CrawlRequest {
     pub robots: Option<bool>,
     /// Crawl as this identity.
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
     /// Load pages in a headless browser that runs their JavaScript (single-page
     /// apps, routes, API calls made by scripts). Default false.
     pub browser: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CrawledPage {
     pub url: String,
     pub depth: usize,
@@ -42,13 +43,13 @@ pub struct CrawledPage {
     pub links_found: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Skipped {
     pub url: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CrawlResult {
     Done {

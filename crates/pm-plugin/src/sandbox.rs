@@ -24,7 +24,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 /// What the sandbox can do on this machine.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Status {
     /// Plugins can't reach the network.
     pub network_isolated: bool,

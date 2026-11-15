@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::{Result, Service, ServiceError};
 
 /// One page of history search results.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExchangePage {
     pub exchanges: Vec<ExchangeSummary>,
     /// Pass as `before_id` to get the next (older) page, if there may be more.

@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::{ProofRequest, ProofResult, Result, Service};
 
 /// The result of trying to prove one finding.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FindingProve {
     pub finding_id: i64,
     pub vuln_class: String,
@@ -26,7 +26,7 @@ pub struct FindingProve {
 }
 
 /// A run of [`Service::auto_prove`].
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, schemars::JsonSchema)]
 pub struct ProveSweep {
     pub attempted: usize,
     pub proven: usize,

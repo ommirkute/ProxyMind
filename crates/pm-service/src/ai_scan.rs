@@ -26,7 +26,7 @@ pub const MAX_MINUTES: u32 = 24 * 60;
 /// Log entries kept per run (older ones are dropped).
 const MAX_LOG: usize = 2000;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AiScanRequest {
     /// The target URL; defaults to the first URL in the scope. Must be in scope.
@@ -41,7 +41,7 @@ pub struct AiScanRequest {
     pub max_cost: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AiScanLog {
     pub ts_ms: i64,
     /// phase, tool, note, loopback, recon, approval, out_of_scope, model, stop, error, user, chain, verify
@@ -49,7 +49,7 @@ pub struct AiScanLog {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AiScan {
     pub id: i64,
     pub target: String,

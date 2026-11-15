@@ -26,7 +26,7 @@ const MAX_WINDOW: usize = 3000;
 /// At most this many steps in a recorded login.
 const MAX_STEPS: usize = 20;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RecordedStep {
     pub exchange_id: i64,
     pub method: String,
@@ -38,7 +38,7 @@ pub struct RecordedStep {
 }
 
 /// What a recording produced (names only; values stay in the identity).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct LoginRecording {
     pub name: String,
     pub steps: Vec<RecordedStep>,
@@ -50,7 +50,7 @@ pub struct LoginRecording {
 }
 
 /// What learning the logged-out look found.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct LoggedOutLearned {
     pub name: String,
     pub logged_out: LoggedOut,

@@ -41,7 +41,7 @@ pub fn sync_listeners(store: &Store, listeners: &Listeners) -> Result<()> {
 }
 
 /// Extra proxy listeners and whether each is running in this process.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ListenersView {
     /// The proxy's main listener (from the command line), if this process runs one.
     pub primary: Option<String>,
@@ -190,7 +190,7 @@ impl Service {
 /// Project setting: what the proxy records in history.
 pub const RECORDING_SETTING: &str = "history_recording";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecordingSettings {
     /// Keep only exchanges whose target is in the rules of engagement's
