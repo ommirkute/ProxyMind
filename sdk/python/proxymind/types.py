@@ -24,15 +24,17 @@ class ActiveFinding(_ActiveFindingRequired, total=False):
     prove_with: _t.Optional[str]
 
 
-class ActiveScanRequest(TypedDict, total=False):
+class _ActiveScanRequestRequired(TypedDict):
+    # The recorded request to scan (its target is used).
+    exchange_id: int
+
+
+class ActiveScanRequest(_ActiveScanRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Checks to run (default: all but request_smuggling, file_upload and
-    # race_condition, which need approval and run only when named). See
-    # `pm_scan::active::CHECKS` and `pm_scan::oob::CHECKS`.
-    checks: _t.List[str]
-    # The recorded request to scan (its target is used).
-    exchange_id: int
+    # race_condition, which need approval and run only when named).
+    checks: _t.List[_t.Literal["sql_error", "cmd_injection", "reflected_input", "open_redirect", "path_traversal", "ssti", "sql_boolean", "sql_time", "cmd_time", "ssrf_oob", "xxe_oob", "sql_oob", "cmd_oob", "ssti_oob", "log4shell", "code_oob", "crlf", "host_header", "cors", "nosql_operator", "auth_bypass", "hidden_params", "stored_xss", "dom_xss", "csrf", "jwt", "graphql", "cache_poisoning", "cache_deception", "mass_assignment", "proto_pollution", "oauth", "deserialization", "request_smuggling", "file_upload", "race_condition", "password_change", "user_enumeration"]]
     # Hypothesis this request tests (links the exchanges as evidence).
     hypothesis_id: _t.Optional[int]
     # Send with this test identity's credentials (names from the identities list; "anonymous" for none).
@@ -676,7 +678,12 @@ class CoverageQuery(TypedDict, total=False):
     all: _t.Optional[bool]
 
 
-class CrawlRequest(TypedDict, total=False):
+class _CrawlRequestRequired(TypedDict):
+    # Where to start, e.g. https://app.example.com/
+    url: str
+
+
+class CrawlRequest(_CrawlRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Load pages in a headless browser that runs their JavaScript (single-page
@@ -690,8 +697,6 @@ class CrawlRequest(TypedDict, total=False):
     max_pages: _t.Optional[int]
     # Also read /robots.txt and sitemaps for paths (default true).
     robots: _t.Optional[bool]
-    # Where to start, e.g. https://app.example.com/
-    url: str
 
 
 class _CrawlResultDoneRequired(TypedDict):
@@ -788,13 +793,16 @@ class CustomFinding(_CustomFindingRequired, total=False):
     payload: _t.Optional[str]
 
 
-class CustomScanRequest(TypedDict, total=False):
+class _CustomScanRequestRequired(TypedDict):
+    # The recorded request to test.
+    exchange_id: int
+
+
+class CustomScanRequest(_CustomScanRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Saved checks to run by id (default: all saved checks).
     checks: _t.List[str]
-    # The recorded request to test.
-    exchange_id: int
     # Hypothesis this request tests (links the exchanges as evidence).
     hypothesis_id: _t.Optional[int]
     # Send with this test identity's credentials (names from the identities list; "anonymous" for none).
@@ -826,14 +834,22 @@ class CustomScanResultDenied(TypedDict):
 
 CustomScanResult = _t.Union["CustomScanResultDone", "CustomScanResultPendingApproval", "CustomScanResultDenied"]
 
-class DecodeRequest(TypedDict, total=False):
+class _DecodeRequestRequired(TypedDict):
     # The text to encode or decode.
     input: str
+
+
+class DecodeRequest(_DecodeRequestRequired, total=False):
     # Operations in order; empty means smart decode.
     ops: _t.List[str]
 
 
-class DiscoverRequest(TypedDict, total=False):
+class _DiscoverRequestRequired(TypedDict):
+    # The folder to look in, e.g. https://app.example.com/ or …/api/
+    url: str
+
+
+class DiscoverRequest(_DiscoverRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Also try the built-in list when giving words.
@@ -844,8 +860,6 @@ class DiscoverRequest(TypedDict, total=False):
     identity: _t.Optional[str]
     # Most requests (default 500, max 5000).
     max_requests: _t.Optional[int]
-    # The folder to look in, e.g. https://app.example.com/ or …/api/
-    url: str
     # Words to try (paths relative to url). Empty: the built-in list.
     words: _t.List[str]
 
@@ -886,9 +900,12 @@ class DnsReport(TypedDict):
     resolver: str
 
 
-class DomTestRequest(TypedDict, total=False):
+class _DomTestRequestRequired(TypedDict):
     # A recorded HTML page.
     exchange_id: int
+
+
+class DomTestRequest(_DomTestRequestRequired, total=False):
     # Also try prototype pollution through the URL (one render per technique).
     pollution: bool
     # Also seed localStorage / sessionStorage reads (missing keys).
@@ -1227,7 +1244,14 @@ FromQuery = TypedDict("FromQuery", {
 }, total=False)
 
 
-class FuzzerRequest(TypedDict, total=False):
+class _FuzzerRequestRequired(TypedDict):
+    # One set for one_at_a_time and same everywhere; one per position otherwise.
+    payload_sets: _t.List["PayloadSet"]
+    # The request with positions marked §like this§.
+    raw: str
+
+
+class FuzzerRequest(_FuzzerRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Requests in flight at once (1-20, default 1). The rules of
@@ -1248,10 +1272,6 @@ class FuzzerRequest(TypedDict, total=False):
     # Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     identity: _t.Optional[str]
     mode: "Mode"
-    # One set for one_at_a_time and same everywhere; one per position otherwise.
-    payload_sets: _t.List["PayloadSet"]
-    # The request with positions marked §like this§.
-    raw: str
     # Pause before each request, in milliseconds (0-60000).
     throttle_ms: _t.Optional[int]
     # Target as scheme://host[:port], when not using exchange_id.
@@ -1442,7 +1462,12 @@ class GroupItemResult(_GroupItemResultRequired, total=False):
 
 GroupMode = _t.Literal["sequence", "parallel"]
 
-class GroupRequest(TypedDict, total=False):
+class _GroupRequestRequired(TypedDict):
+    # The requests to send.
+    requests: _t.List["GroupItem"]
+
+
+class GroupRequest(_GroupRequestRequired, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
     # Update Content-Length to match the body (default true).
@@ -1455,8 +1480,6 @@ class GroupRequest(TypedDict, total=False):
     mode: "GroupMode"
     # For parallel groups: how to send at once (default auto).
     parallel: "RaceModeChoice"
-    # The requests to send.
-    requests: _t.List["GroupItem"]
     # Sequence only: stop at the first request that fails to get a response.
     stop_on_error: bool
 
@@ -1614,7 +1637,7 @@ class IdentityInfo(TypedDict):
     status: str
 
 
-class ImportRequest(TypedDict, total=False):
+class ImportRequest(TypedDict):
     # The HAR document as text.
     har: str
 
@@ -1959,7 +1982,7 @@ class NewAttackPath(TypedDict):
     # What an attacker gains at the end.
     impact: str
     # critical, high, medium, low or info: the severity of the whole chain.
-    severity: str
+    severity: _t.Literal["critical", "high", "medium", "low", "info"]
     # The steps, in order.
     steps: _t.List["AttackStep"]
     # Short name of the chain.
@@ -2199,8 +2222,8 @@ class PayloadSet(TypedDict, total=False):
     """One payload set."""
     # Every string of `charset` from `min` to `max` characters long.
     brute: _t.Optional["BruteForce"]
-    # A built-in list: see [`BUILTINS`].
-    builtin: _t.Optional[str]
+    # A built-in list: ids, sqli, xss, traversal, ssti or methods_override.
+    builtin: _t.Literal["ids", "sqli", "xss", "traversal", "ssti", "methods_override"]
     # Each word as written, lower case, UPPER case and Capitalised.
     case_variants: _t.List[str]
     # Literal payloads.
@@ -2228,15 +2251,18 @@ class PluginCheckIssue(TypedDict):
     title: str
 
 
-class PluginCheckRequest(TypedDict, total=False):
-    # From an earlier `pending_approval`: sends the requests shown then.
-    approval_id: _t.Optional[str]
+class _PluginCheckRequestRequired(TypedDict):
     # The recorded exchange to check.
     exchange_id: int
-    # Send the requests as this identity.
-    identity: _t.Optional[str]
     # Name of the plugin to run.
     plugin: str
+
+
+class PluginCheckRequest(_PluginCheckRequestRequired, total=False):
+    # From an earlier `pending_approval`: sends the requests shown then.
+    approval_id: _t.Optional[str]
+    # Send the requests as this identity.
+    identity: _t.Optional[str]
 
 
 class PluginCheckResultDone(TypedDict):
@@ -2872,7 +2898,7 @@ class ScanFilter(TypedDict, total=False):
     # How many recent exchanges to look at (default 2000, max 20000).
     limit: _t.Optional[int]
     # Only issues at least this severe: info, low, medium or high.
-    min_severity: _t.Optional[str]
+    min_severity: _t.Literal["info", "low", "medium", "high"]
 
 
 class ScanIssue(TypedDict):
@@ -3031,7 +3057,12 @@ class SearchHit(TypedDict):
     snippets: _t.List["Snippet"]
 
 
-class SearchRequest(TypedDict, total=False):
+class _SearchRequestRequired(TypedDict):
+    # Text (or a regex with `regex: true`) to find.
+    query: str
+
+
+class SearchRequest(_SearchRequestRequired, total=False):
     """Filters for searching history. All set fields must match."""
     # Who sent it, e.g. human:local or agent:claude.
     actor: _t.Optional[str]
@@ -3065,7 +3096,7 @@ class SearchRequest(TypedDict, total=False):
     method: _t.Optional[str]
     # both (default), request, response, headers, bodies, request_headers,
     # request_body, response_headers or response_body.
-    part: _t.Optional[str]
+    part: _t.Literal["both", "request", "response", "headers", "bodies", "request_headers", "request_body", "response_headers", "response_body"]
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
@@ -3074,8 +3105,6 @@ class SearchRequest(TypedDict, total=False):
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
     q: _t.Optional[str]
-    # Text (or a regex with `regex: true`) to find.
-    query: str
     # Treat `query` as a regular expression.
     regex: bool
     # Where the exchange came from: proxy (browser traffic) or replay (sent via ProxyMind).
@@ -3278,15 +3307,18 @@ class TestFinding(TypedDict):
     vuln_class: str
 
 
-class TokenAnalyzerRequest(TypedDict, total=False):
-    # Run a previously approved request. All other fields must be identical.
-    approval_id: _t.Optional[str]
+class _TokenAnalyzerRequestRequired(TypedDict):
     # The request that issues a token (e.g. a login or a page setting a cookie).
     exchange_id: int
-    # Send with this test identity's credentials (names from the identities list; "anonymous" for none).
-    identity: _t.Optional[str]
     # Where the token is: cookie:<name>, header:<name>, json:/pointer or between:<start>|<end>.
     locator: str
+
+
+class TokenAnalyzerRequest(_TokenAnalyzerRequestRequired, total=False):
+    # Run a previously approved request. All other fields must be identical.
+    approval_id: _t.Optional[str]
+    # Send with this test identity's credentials (names from the identities list; "anonymous" for none).
+    identity: _t.Optional[str]
     # How many tokens to collect (default 100, 10–500).
     samples: _t.Optional[int]
 
@@ -3626,14 +3658,19 @@ class WsSearchHit(TypedDict):
     ts_ms: int
 
 
-class WsSearchRequest(TypedDict, total=False):
+class _WsSearchRequestRequired(TypedDict):
+    # Text (or a regex with `regex: true`) to find in message payloads.
+    query: str
+
+
+class WsSearchRequest(_WsSearchRequestRequired, total=False):
     """A search through WebSocket messages."""
     # Only messages with an id below this (for paging back).
     before_id: _t.Optional[int]
     # Match letter case.
     case_sensitive: bool
     # client (to the server), server, or both (default).
-    direction: _t.Optional[str]
+    direction: _t.Literal["both", "client", "server"]
     # Host contains this text.
     host: _t.Optional[str]
     # Only connections whose targets are in scope.
@@ -3644,8 +3681,6 @@ class WsSearchRequest(TypedDict, total=False):
     limit: _t.Optional[int]
     # Messages to look at, newest first (default 5000, max 50 000).
     max_scan: _t.Optional[int]
-    # Text (or a regex with `regex: true`) to find in message payloads.
-    query: str
     # Treat `query` as a regular expression.
     regex: bool
 

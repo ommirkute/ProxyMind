@@ -8,6 +8,9 @@ version may change project files, APIs and the CLI.
 ### API contracts
 
 - An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **Typed clients.** The same command generates TypeScript types (`ui/src/api-types.gen.ts`, `sdk/typescript/src/types.gen.ts`)
+  and Python `TypedDict`s (`sdk/python/proxymind/types.py`) from the API description. The TypeScript SDK exports them and
+  its methods return them; the Python SDK's methods are annotated with them. Types only: no runtime change.
 - **Every MCP tool's input schema now comes from the Rust types** the server reads the arguments into, so what an agent
   is told and what the server accepts cannot differ. The schemas of 65 tools were written by hand before. As a result
   an argument a tool does not list is now refused with an error naming it (14 tools already did this); `history_grep`

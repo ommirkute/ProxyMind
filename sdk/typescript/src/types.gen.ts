@@ -20,12 +20,11 @@ export interface ActiveScanRequest {
   approval_id?: string | null;
   /**
    * Checks to run (default: all but request_smuggling, file_upload and
-   * race_condition, which need approval and run only when named). See
-   * `pm_scan::active::CHECKS` and `pm_scan::oob::CHECKS`.
+   * race_condition, which need approval and run only when named).
    */
-  checks?: string[];
+  checks?: ("sql_error" | "cmd_injection" | "reflected_input" | "open_redirect" | "path_traversal" | "ssti" | "sql_boolean" | "sql_time" | "cmd_time" | "ssrf_oob" | "xxe_oob" | "sql_oob" | "cmd_oob" | "ssti_oob" | "log4shell" | "code_oob" | "crlf" | "host_header" | "cors" | "nosql_operator" | "auth_bypass" | "hidden_params" | "stored_xss" | "dom_xss" | "csrf" | "jwt" | "graphql" | "cache_poisoning" | "cache_deception" | "mass_assignment" | "proto_pollution" | "oauth" | "deserialization" | "request_smuggling" | "file_upload" | "race_condition" | "password_change" | "user_enumeration")[];
   /** The recorded request to scan (its target is used). */
-  exchange_id?: number;
+  exchange_id: number;
   /** Hypothesis this request tests (links the exchanges as evidence). */
   hypothesis_id?: number | null;
   /** Send with this test identity's credentials (names from the identities list; "anonymous" for none). */
@@ -667,7 +666,7 @@ export interface CrawlRequest {
   /** Also read /robots.txt and sitemaps for paths (default true). */
   robots?: boolean | null;
   /** Where to start, e.g. https://app.example.com/ */
-  url?: string;
+  url: string;
 }
 
 export type CrawlResult =
@@ -770,7 +769,7 @@ export interface CustomScanRequest {
   /** Saved checks to run by id (default: all saved checks). */
   checks?: string[];
   /** The recorded request to test. */
-  exchange_id?: number;
+  exchange_id: number;
   /** Hypothesis this request tests (links the exchanges as evidence). */
   hypothesis_id?: number | null;
   /** Send with this test identity's credentials (names from the identities list; "anonymous" for none). */
@@ -801,7 +800,7 @@ export type CustomScanResult =
 
 export interface DecodeRequest {
   /** The text to encode or decode. */
-  input?: string;
+  input: string;
   /** Operations in order; empty means smart decode. */
   ops?: string[];
 }
@@ -818,7 +817,7 @@ export interface DiscoverRequest {
   /** Most requests (default 500, max 5000). */
   max_requests?: number | null;
   /** The folder to look in, e.g. https://app.example.com/ or …/api/ */
-  url?: string;
+  url: string;
   /** Words to try (paths relative to url). Empty: the built-in list. */
   words?: string[];
 }
@@ -860,7 +859,7 @@ export interface DnsReport {
 
 export interface DomTestRequest {
   /** A recorded HTML page. */
-  exchange_id?: number;
+  exchange_id: number;
   /** Also try prototype pollution through the URL (one render per technique). */
   pollution?: boolean;
   /** Also seed localStorage / sessionStorage reads (missing keys). */
@@ -1212,9 +1211,9 @@ export interface FuzzerRequest {
   identity?: string | null;
   mode?: Mode;
   /** One set for one_at_a_time and same everywhere; one per position otherwise. */
-  payload_sets?: PayloadSet[];
+  payload_sets: PayloadSet[];
   /** The request with positions marked §like this§. */
-  raw?: string;
+  raw: string;
   /** Pause before each request, in milliseconds (0-60000). */
   throttle_ms?: number | null;
   /** Target as scheme://host[:port], when not using exchange_id. */
@@ -1394,7 +1393,7 @@ export interface GroupRequest {
   /** For parallel groups: how to send at once (default auto). */
   parallel?: RaceModeChoice;
   /** The requests to send. */
-  requests?: GroupItem[];
+  requests: GroupItem[];
   /** Sequence only: stop at the first request that fails to get a response. */
   stop_on_error?: boolean;
 }
@@ -1555,7 +1554,7 @@ export interface IdentityInfo {
 
 export interface ImportRequest {
   /** The HAR document as text. */
-  har?: string;
+  har: string;
 }
 
 export interface ImportResult {
@@ -1902,7 +1901,7 @@ export interface NewAttackPath {
   /** What an attacker gains at the end. */
   impact: string;
   /** critical, high, medium, low or info: the severity of the whole chain. */
-  severity: string;
+  severity: "critical" | "high" | "medium" | "low" | "info";
   /** The steps, in order. */
   steps: AttackStep[];
   /** Short name of the chain. */
@@ -2127,8 +2126,8 @@ export type PayloadMode =
 export interface PayloadSet {
   /** Every string of `charset` from `min` to `max` characters long. */
   brute?: BruteForce | null;
-  /** A built-in list: see [`BUILTINS`]. */
-  builtin?: string | null;
+  /** A built-in list: ids, sqli, xss, traversal, ssti or methods_override. */
+  builtin?: "ids" | "sqli" | "xss" | "traversal" | "ssti" | "methods_override";
   /** Each word as written, lower case, UPPER case and Capitalised. */
   case_variants?: string[];
   /** Literal payloads. */
@@ -2164,11 +2163,11 @@ export interface PluginCheckRequest {
   /** From an earlier `pending_approval`: sends the requests shown then. */
   approval_id?: string | null;
   /** The recorded exchange to check. */
-  exchange_id?: number;
+  exchange_id: number;
   /** Send the requests as this identity. */
   identity?: string | null;
   /** Name of the plugin to run. */
-  plugin?: string;
+  plugin: string;
 }
 
 export type PluginCheckResult =
@@ -2817,7 +2816,7 @@ export interface ScanFilter {
   /** How many recent exchanges to look at (default 2000, max 20000). */
   limit?: number | null;
   /** Only issues at least this severe: info, low, medium or high. */
-  min_severity?: string | null;
+  min_severity?: "info" | "low" | "medium" | "high";
 }
 
 export interface ScanIssue {
@@ -3022,7 +3021,16 @@ export interface SearchRequest {
    * both (default), request, response, headers, bodies, request_headers,
    * request_body, response_headers or response_body.
    */
-  part?: string | null;
+  part?:
+    | "both"
+    | "request"
+    | "response"
+    | "headers"
+    | "bodies"
+    | "request_headers"
+    | "request_body"
+    | "response_headers"
+    | "response_body";
   /** Path (including query) contains this text (case-insensitive). */
   path?: string | null;
   /**
@@ -3034,7 +3042,7 @@ export interface SearchRequest {
    */
   q?: string | null;
   /** Text (or a regex with `regex: true`) to find. */
-  query?: string;
+  query: string;
   /** Treat `query` as a regular expression. */
   regex?: boolean;
   /** Where the exchange came from: proxy (browser traffic) or replay (sent via ProxyMind). */
@@ -3238,11 +3246,11 @@ export interface TokenAnalyzerRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
   /** The request that issues a token (e.g. a login or a page setting a cookie). */
-  exchange_id?: number;
+  exchange_id: number;
   /** Send with this test identity's credentials (names from the identities list; "anonymous" for none). */
   identity?: string | null;
   /** Where the token is: cookie:<name>, header:<name>, json:/pointer or between:<start>|<end>. */
-  locator?: string;
+  locator: string;
   /** How many tokens to collect (default 100, 10–500). */
   samples?: number | null;
 }
@@ -3564,7 +3572,7 @@ export interface WsSearchRequest {
   /** Match letter case. */
   case_sensitive?: boolean;
   /** client (to the server), server, or both (default). */
-  direction?: string | null;
+  direction?: "both" | "client" | "server";
   /** Host contains this text. */
   host?: string | null;
   /** Only connections whose targets are in scope. */
@@ -3576,7 +3584,7 @@ export interface WsSearchRequest {
   /** Messages to look at, newest first (default 5000, max 50 000). */
   max_scan?: number | null;
   /** Text (or a regex with `regex: true`) to find in message payloads. */
-  query?: string;
+  query: string;
   /** Treat `query` as a regular expression. */
   regex?: boolean;
 }
