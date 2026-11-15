@@ -126,7 +126,26 @@ impl Service {
         }
         m.insert("updated_ms".into(), json!(pm_core::now_ms()));
         self.store.write(|db| db.update_row("ai_scans", id, &m))?;
+        self.ai_scan_event(id);
         Ok(())
+    }
+
+    /// Publishes `AiScanChanged` after a committed update of scan `id` (status, phase, log, steps, tokens or cost).
+    /// Paced like other progress (at most one per 250 ms per scan, the newest held update goes out when the window
+    /// ends); the update that leaves the scan `stopped`, `done` or `failed` always goes out at once. Carries the
+    /// state and phase words only: no log text, report or model output. Anyone who may open the AI scan page may
+    /// read it, as with `GET /ai-scan` (no owner).
+    fn ai_scan_event(&self, id: i64) {
+        use crate::events::{Event, Rate};
+        // Nobody listening: skip the extra read.
+        if !self.bus.has_subscribers() {
+            return;
+        }
+        let Ok(r) = self.ai_row(id) else { return };
+        let state = s(&r, "status");
+        let rate = if matches!(state.as_str(), "running" | "stopping") { Rate::Limited } else { Rate::Last };
+        let event = Event::AiScanChanged { scan_id: id, state, phase: s(&r, "phase") };
+        self.publish_rated(&format!("ai_scan:{id}"), event, None, rate);
     }
 
     /// The system prompt for a scan: the user's file if there is one, else the built-in.
@@ -197,6 +216,7 @@ impl Service {
             row.insert(k.into(), v);
         }
         let id = self.store.write(|db| db.insert_row("ai_scans", &row))?;
+        self.ai_scan_event(id);
         self.audit(
             &actor.id(),
             "ai_scan_start",

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
-import { api, toast } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { ApiError, api, toast } from "../api";
 import { AttackGraph } from "../AttackGraph";
-import { Chip, Empty, ErrorBox, Panel, copyText, pollRetryDelay, useAction, useLoad } from "../components";
+import { useLiveEvent } from "../live";
+import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
 
 interface Log { ts_ms: number; kind: string; text: string }
 interface Scan {
@@ -123,33 +124,37 @@ function Start({ state, stateError, onStarted }: { state: AssistantState | null;
 function Run({ id, onChange }: { id: number; onChange: () => void }) {
   const [s, setS] = useState<Scan | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let stop = false;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout>;
-    const load = () =>
-      api.get<Scan>(`/ai-scan/${id}`).then((r) => {
-        if (stop) return;
-        failures = 0;
+  // Status, phase, log and cost changes arrive as `ai_scan` events (ADR-0018). The events carry only ids and state
+  // words, so each one for this scan, and every resync, refetches the scan. Only the newest response is shown.
+  const latest = useRef({ id, req: 0, failed: false });
+  const load = () => {
+    const l = latest.current;
+    const req = ++l.req;
+    api
+      .get<Scan>(`/ai-scan/${id}`)
+      .then((r) => {
+        if (latest.current !== l || l.req !== req) return;
+        l.failed = false;
         setS(r);
         setError(null);
-        if (active(r)) timer = setTimeout(load, 2000);
-        else onChange();
-      }).catch((e: Error) => {
-        if (stop) return;
-        const wait = pollRetryDelay(e, failures++);
-        if (wait === null) {
-          setError(e.message);
-          return;
-        }
-        // A blip: keep the last state on screen and try again.
-        if (failures === 1) toast(`Lost contact with ProxyMind, retrying: ${e.message}`, "bad");
-        timer = setTimeout(load, wait);
+        if (!active(r)) onChange();
+      })
+      .catch((e: Error) => {
+        if (latest.current !== l || l.req !== req) return;
+        // Keep the last state on screen after a blip (the next event refetches); a scan that is gone says so.
+        if (e instanceof ApiError && e.status < 500 && e.status !== 429) setError(e.message);
+        else if (!l.failed) toast(`Lost contact with ProxyMind: ${e.message}`, "bad");
+        l.failed = true;
       });
+  };
+  useEffect(() => {
+    latest.current = { id, req: 0, failed: false };
     load();
-    return () => { stop = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+  useLiveEvent(["ai_scan"], (e) => {
+    if (e.topic === "resync" || e.data.scan_id === id) load();
+  });
   const stopScan = async () => {
     setS(await api.post<Scan>(`/ai-scan/${id}/stop`, {}));
     toast("Stopping after the current step");

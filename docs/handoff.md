@@ -215,6 +215,9 @@ npm run test:e2e                      # needs a built binary (target/debug/proxy
 4. Integration tests against VulnShop or small local servers in `tests/`, and a step in `ui/tests/e2e.mjs` for UI work.
 5. Update `docs/plan.md` (Status / Next) and the README; add an ADR for hard-to-reverse decisions.
 
+### Contracts (ADR-0019, in progress)
+Request and response types derive `schemars::JsonSchema`; the generated, committed outputs live in `docs/api/` (`openapi.json` so far). Regenerate with `cargo xtask contracts` after changing a derived type or the route table in `crates/pm-api/src/contracts.rs`; `cargo xtask contracts --check` (and the `pm-api` test `committed_openapi_document_is_current`, so plain `cargo test`) fails when the file is stale. Wire formats are pinned by golden tests (`crates/pm-service/tests/wire_contract.rs`); never change a serde attribute to improve a schema. `crates/pm-mcp/tests/schema_parity.rs` compares the hand-written MCP schemas with the generated ones until step 4 replaces them.
+
 ### Environment pitfalls seen in the cloud sandbox
 - **Disk fills up.** `target/` grew past 30 GB, and a full disk shows up as `ld … Bus error`. Build with `CARGO_INCREMENTAL=0`, and run `cargo clean` if space runs low.
 - **Chromium** is preinstalled at `/opt/pw-browsers`; never run `playwright install`. The e2e HTTP/2 step needs `openssl` on PATH.

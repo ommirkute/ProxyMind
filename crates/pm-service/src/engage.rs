@@ -7,13 +7,14 @@ use std::collections::{BTreeMap, HashMap};
 use pm_policy::Actor;
 use pm_store::{ExchangeSummary, HistoryFilter};
 use pm_tools::engage::{self, Clickjacking, CsrfTechnique, ParamSummary};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{Result, Service, ServiceError};
 
 /// Which recorded exchanges the tools look at.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct EngageFilter {
     /// Host contains this text.
@@ -21,6 +22,7 @@ pub struct EngageFilter {
     /// Only in-scope exchanges (default: true when the ROE has a scope).
     pub in_scope: Option<bool>,
     /// Most exchanges looked at, newest first (default 3000, max 20000).
+    #[schemars(range(min = 1, max = 20000))]
     pub max_scan: Option<usize>,
 }
 

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api, fmtDateTime, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
+import { useLiveTick } from "../live";
 
 export interface ScanProfile {
   name: string;
@@ -59,7 +60,9 @@ function describe(e: Every): string {
 
 function Tasks({ profiles, bump }: { profiles: ScanProfile[]; bump: number }) {
   const { go } = useNav();
-  const tasks = useLoad(() => api.get<TaskRow[]>("/scan/tasks"), [bump]);
+  // Progress and state changes arrive as `scans` events (ADR-0018); each one refetches the list.
+  const tick = useLiveTick(["scans"]);
+  const tasks = useLoad(() => api.get<TaskRow[]>("/scan/tasks"), [bump, tick]);
   const action = useAction();
   const [url, setUrl] = useState("");
   const [profile, setProfile] = useState("default");
@@ -68,7 +71,6 @@ function Tasks({ profiles, bump }: { profiles: ScanProfile[]; bump: number }) {
     action.run(async () => {
       await api.post(`/scan/tasks/${id}/${verb}`, {});
       tasks.reload();
-      setTimeout(tasks.reload, 1500);
     });
   const start = () =>
     action.run(async () => {
@@ -76,13 +78,6 @@ function Tasks({ profiles, bump }: { profiles: ScanProfile[]; bump: number }) {
       toast("Scan started");
       tasks.reload();
     });
-  const anyRunning = !!tasks.data?.some(running);
-  useEffect(() => {
-    if (!anyRunning) return;
-    const t = setTimeout(tasks.reload, 2000);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks.data]);
 
   return (
     <Panel title="Scan tasks" actions={<button className="btn" onClick={tasks.reload}>Refresh</button>}>

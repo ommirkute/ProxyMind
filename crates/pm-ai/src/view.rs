@@ -1,13 +1,14 @@
 //! Token-budgeted views of an exchange (RFC 0001, "Views").
 
 use pm_store::Exchange;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::body::{self, Decoded, Kind};
 use crate::{Redactor, prompt_injection_signals, wrap_untrusted};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum View {
     /// Request line, status, key headers, short body preview.
@@ -30,7 +31,7 @@ impl View {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MessageView {
     pub start_line: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -39,7 +40,7 @@ pub struct MessageView {
     pub body: Option<BodyView>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BodyView {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,7 +59,7 @@ pub struct BodyView {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ExchangeView {
     pub id: i64,
     pub url: String,

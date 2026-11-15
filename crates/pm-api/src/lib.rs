@@ -11,6 +11,7 @@
 //! - requests that change anything must carry `X-ProxyMind: 1`, which a
 //!   cross-site form or image can't send.
 
+pub mod contracts;
 mod routes;
 
 use std::sync::Arc;

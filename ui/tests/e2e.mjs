@@ -69,6 +69,21 @@ async function section(name, body) {
     await page?.reload().catch(() => {});
   }
 }
+/**
+ * Runs `body` with the page's timers frozen: Playwright's fake clock is paused, so no setTimeout/setInterval callback
+ * in the page can fire (and none can be re-armed). A page that polls on a timer cannot get its progress while this
+ * runs; one driven by server events can. Time flows again afterwards.
+ */
+async function withFrozenTimers(body) {
+  const now = Date.now();
+  await page.clock.install({ time: now });
+  await page.clock.pauseAt(now + 60_000);
+  try {
+    await body();
+  } finally {
+    await page.clock.resume();
+  }
+}
 /** One request through the proxy (absolute-form), returns the raw response. */
 function viaProxy(proxyPort, shopPort, raw) {
   return new Promise((resolve, reject) => {
@@ -582,8 +597,16 @@ try {
     await page.getByLabel("Grep").fill("alice@");
     await page.getByRole("button", { name: "Add extract" }).click();
     await page.getByLabel("Extract 1 regex").fill("([a-z]+@[a-z.]+)");
-    await page.getByTestId("fuzzer-run").click();
-    await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"));
+    // ADR-0018: with every page timer frozen, the attack's progress and end still arrive (as `fuzzer` events).
+    const attackFetches = [];
+    const onRequest = (r) => /\/api\/v1\/fuzzer\/attacks\/[0-9a-f]+/.test(r.url()) && r.method() === "GET" && attackFetches.push(r.url());
+    page.on("request", onRequest);
+    await withFrozenTimers(async () => {
+      await page.getByTestId("fuzzer-run").click();
+      await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"), null, { timeout: 30000 });
+    });
+    page.off("request", onRequest);
+    check(attackFetches.length > 0, `the attack's progress and end arrive without any page timer (${attackFetches.length} fetch(es), each after an event)`);
     check(await page.getByTestId("fuzzer-summary").textContent().then((t) => t.startsWith("3 requests")), "an attack sends 3 requests in the background");
     check((await page.getByTestId("extract-cell").allTextContents()).some((t) => t.startsWith("alice@")), "an extract column shows alice's email");
     check((await page.getByTestId("anomaly").count()) === 3, "alice's orders (grep) and the 404 stand out");
@@ -1047,8 +1070,12 @@ try {
     await page.getByLabel("Start URL").fill(`http://127.0.0.1:${shop}/`);
     await page.getByLabel("Pages to crawl").fill("15");
     await page.getByText("quick checks only").click();
-    await page.getByTestId("audit-start").click();
-    await page.waitForSelector('[data-testid="audit-progress"] b:text-is("done")', { timeout: 120000 });
+    // ADR-0018: timers frozen, the task still goes from crawling through auditing to done, on `scans` events alone.
+    await withFrozenTimers(async () => {
+      await page.getByTestId("audit-start").click();
+      await page.waitForSelector('[data-testid="audit-progress"] b:text-is("done")', { timeout: 120000 });
+    });
+    check(await page.getByTestId("audit-progress").textContent().then((t) => /\d+\/\d+ operations/.test(t)), "a crawl-and-audit task reaches done with its progress shown, without any page timer");
     check(await page.getByTestId("audit-issues").textContent().then((t) => t.includes("/search")), "crawl and audit finds the reflected XSS on /search");
     await page.screenshot({ path: join(SHOTS, "6e-crawl-audit.png") });
   });
@@ -1302,10 +1329,12 @@ match:
     check(true, "a saved profile joins the list");
     await page.getByLabel("Scan URL").fill(`http://127.0.0.1:${shop}/`);
     await page.getByLabel("Scan profile").selectOption("e2e-quick");
-    await page.getByTestId("scan-start").click();
-    await page.locator('[data-testid="scan-tasks"] td', { hasText: "e2e-quick" }).first().waitFor();
-    await page.locator('[data-testid="scan-tasks"] tr', { hasText: "e2e-quick" }).filter({ hasText: "done" }).first().waitFor({ timeout: 60000 });
-    check(true, "a scan with a saved profile runs to the end");
+    await withFrozenTimers(async () => {
+      await page.getByTestId("scan-start").click();
+      await page.locator('[data-testid="scan-tasks"] td', { hasText: "e2e-quick" }).first().waitFor();
+      await page.locator('[data-testid="scan-tasks"] tr', { hasText: "e2e-quick" }).filter({ hasText: "done" }).first().waitFor({ timeout: 60000 });
+    });
+    check(true, "a scan with a saved profile runs to the end (page timers frozen: the list follows `scans` events)");
     await page.getByLabel("Schedule name").fill("e2e nightly");
     await page.getByLabel("Schedule URL").fill(`http://127.0.0.1:${shop}/`);
     await page.getByLabel("Schedule profile").selectOption("e2e-quick");
@@ -1359,8 +1388,18 @@ match:
     await page.screenshot({ path: join(SHOTS, "8-audit.png") });
   });
 
-  // ADR-0018: no live page polls on an interval. The built bundle must not call setInterval at all (one-shot
-  // setTimeout calls for toasts, debounces and task-progress chains are allowed and are not checked here).
+  // ADR-0018: no live page polls. The built bundle must not call setInterval at all. A polling setTimeout chain
+  // cannot be told from a debounce in minified code, so it is checked two other ways: the sections above run with
+  // the page's timers frozen, and the sources may call setTimeout only in the files below, each a one-shot (toast
+  // dismissal, autosave and filter debounces, focusing an input, revoking a download URL). A new file that wants a
+  // timer must be looked at, then added here.
+  const srcDir = new URL("../src/", import.meta.url).pathname;
+  const oneShot = ["App.tsx", "api.ts", "palette.tsx", "pages/AiScan.tsx", "pages/Engage.tsx", "pages/History.tsx", "pages/Replay.tsx", "pages/WsHistory.tsx"];
+  const withTimeout = readdirSync(srcDir, { recursive: true })
+    .map((f) => String(f).replace(/\\/g, "/"))
+    .filter((f) => /\.tsx?$/.test(f) && readFileSync(join(srcDir, f), "utf8").includes("setTimeout("))
+    .sort();
+  check(JSON.stringify(withTimeout) === JSON.stringify([...oneShot].sort()), `setTimeout appears only in the known one-shot files (${withTimeout.join(", ")})`);
   const assets = new URL("../dist/assets/", import.meta.url).pathname;
   const bundles = readdirSync(assets).filter((f) => f.endsWith(".js"));
   const withInterval = bundles.filter((f) => readFileSync(join(assets, f), "utf8").includes("setInterval("));

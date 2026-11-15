@@ -1,0 +1,1817 @@
+{
+  "components": {
+    "schemas": {
+      "AuthzCheckRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "exchange_id": {
+            "description": "A recorded GET/HEAD/OPTIONS exchange, made by the data's owner.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "identities": {
+            "default": [],
+            "description": "Identities to try (names from identity_list).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "include_anonymous": {
+            "default": null,
+            "description": "Also try with no credentials (default true).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "exchange_id"
+        ],
+        "type": "object"
+      },
+      "BodyView": {
+        "properties": {
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "outline": {
+            "description": "Short outline: JSON shape or HTML title/forms. Kept even when the\ntext is cut, because it's the most useful part for a model.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "description": "Decoded size in bytes.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "description": "Body text, wrapped in untrusted markers when it came from the target.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "size",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "EngageFilter": {
+        "additionalProperties": false,
+        "description": "Which recorded exchanges the tools look at.",
+        "properties": {
+          "host": {
+            "default": null,
+            "description": "Host contains this text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "in_scope": {
+            "default": null,
+            "description": "Only in-scope exchanges (default: true when the ROE has a scope).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_scan": {
+            "default": null,
+            "description": "Most exchanges looked at, newest first (default 3000, max 20000).",
+            "format": "uint",
+            "maximum": 20000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ExchangeView": {
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "method": {
+            "type": "string"
+          },
+          "notice": {
+            "type": "string"
+          },
+          "possible_prompt_injection": {
+            "description": "Phrases in target content that look like attempts to instruct a model.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "request": {
+            "$ref": "#/components/schemas/MessageView"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "method",
+          "source",
+          "actor",
+          "request",
+          "redacted",
+          "notice"
+        ],
+        "type": "object"
+      },
+      "FindingUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "add_evidence": {
+            "default": [],
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "description": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "severity": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "description": "Humans: suspected, confirmed, false_positive, reported, fixed, accepted_risk. Agents: suspected.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "HistoryFilter": {
+        "additionalProperties": false,
+        "description": "Filters for searching history. All set fields must match.",
+        "properties": {
+          "actor": {
+            "default": null,
+            "description": "e.g. agent:claude-1",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "after_id": {
+            "default": null,
+            "description": "Only exchanges with an id greater than this (for paging forward).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "annotated": {
+            "default": null,
+            "description": "Only rows with a highlight or a comment.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "before_id": {
+            "default": null,
+            "description": "Only exchanges with an id less than this (for paging back).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hide_ext": {
+            "default": null,
+            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "default": null,
+            "description": "Host contains this text (case-insensitive).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hypothesis_id": {
+            "default": null,
+            "description": "Exchanges sent while testing this hypothesis.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "identity": {
+            "default": null,
+            "description": "Exchanges sent with this identity's credentials.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "in_scope": {
+            "default": null,
+            "description": "Only targets in the rules of engagement (applied by the service).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum rows (default 50, max 500).",
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "method": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": null,
+            "description": "Path (including query) contains this text (case-insensitive).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "q": {
+            "default": null,
+            "description": "A history query (`pm_tools::hql`), applied by the service.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "default": null,
+            "description": "e.g. proxy, replay",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status_class": {
+            "default": null,
+            "description": "Status classes to show, e.g. \"2,3\" for 2xx and 3xx (\"0\" means no response).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "default": null,
+            "description": "Host, path or comment contains this text (case-insensitive).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MessageView": {
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BodyView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "headers": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "start_line": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_line"
+        ],
+        "type": "object"
+      },
+      "ModelFilter": {
+        "additionalProperties": false,
+        "properties": {
+          "contains": {
+            "default": null,
+            "description": "Only operations whose key contains this text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "include_objects": {
+            "default": null,
+            "description": "Include objects (default false; there can be many).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "object_type": {
+            "default": null,
+            "description": "Only objects of this type, e.g. Order.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "NewFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "evidence": {
+            "default": [],
+            "description": "Exchange ids that show the issue.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "hypothesis_id": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "severity": {
+            "description": "critical, high, medium, low or info",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "default": null,
+            "description": "Affected URL; defaults to the first evidence exchange's URL.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vuln_class": {
+            "description": "idor, bfla, sqli, ssrf, xss, …",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "vuln_class",
+          "severity",
+          "description"
+        ],
+        "type": "object"
+      },
+      "ProofRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attacker": {
+            "default": null,
+            "description": "differential_authz: identity that should NOT have access.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseline_raw": {
+            "default": null,
+            "description": "timing: normal request (defaults to the exchange's request).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Recorded exchange to work from (the owner's request for\ndifferential_authz; the baseline for timing; the target for oast).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "finding_id": {
+            "default": null,
+            "description": "Mark this finding as proven if the proof succeeds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hypothesis_id": {
+            "default": null,
+            "description": "Mark this hypothesis as confirmed if the proof succeeds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "identity": {
+            "default": null,
+            "description": "timing/oast/reflection: send with this identity's credentials.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "marker_kind": {
+            "default": null,
+            "description": "marker: what to prove — \"redirect\" (open redirect), \"crlf\" (CRLF header\ninjection), \"host\" (Host-header injection: the marker comes back in an\nabsolute URL) or \"cors\" (an `Origin` carrying the marker is trusted with\ncredentials). The request goes in `raw` with `{{marker}}` where a fresh\nrandom value should be placed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "markers": {
+            "description": "path_traversal: a marker expected in each file request's response (same\norder as the file requests in `raws`, i.e. offset by the two leading\nbaseline/control requests), e.g. \"root:\". Values from the target are\nuntrusted; these are strings ProxyMind chose, so safe to match on.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "min_effect_ms": {
+            "default": null,
+            "description": "timing: required median slowdown in ms (default 500).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "oracle": {
+            "default": "",
+            "description": "differential_authz, timing, oast, reflection, sql_error,\nboolean_injection, path_traversal, expression or marker",
+            "type": "string"
+          },
+          "owner": {
+            "default": null,
+            "description": "differential_authz: identity that owns the data (defaults to the one\nthe exchange was made as).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload_raw": {
+            "default": null,
+            "description": "timing: the same request with the delay payload.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "raw": {
+            "default": null,
+            "description": "oast: request containing {{oast}} where the callback URL goes, or\n{{oast_dns}} where a host name to resolve goes (needs a DNS listener).\nreflection: request containing {{xss}} (payload as is), {{xss_url}}\n(percent-encoded) or {{token}} (inside a payload of your own).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "raws": {
+            "description": "sql_error: [baseline, quote, second quote, harmless change] raw\nrequests. boolean_injection: [baseline, true-condition,\nfalse-condition]. path_traversal: [baseline, control, file-1, file-2, …] where\neach file-N request reads a known file; `markers[N]` is what proves it.\nexpression: [baseline, control, payload-1, payload-2, …] where each\npayload sends an arithmetic expression and `markers[N]` is its result;\nthe control sends the same numbers without template delimiters.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "samples": {
+            "default": null,
+            "description": "timing: samples of each (default 8, 5–30).",
+            "format": "uint",
+            "maximum": 30,
+            "minimum": 5,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "url": {
+            "default": null,
+            "description": "timing/oast: scheme://host[:port] when there is no exchange_id.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "view_raw": {
+            "default": null,
+            "description": "reflection: a request for the page that shows what `raw` stored\n(stored XSS). `raw` is sent first, then this, and this page is the one\nrendered.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait_seconds": {
+            "default": null,
+            "description": "oast: how long to wait for a callback (default 10 s, max 60).",
+            "format": "uint64",
+            "maximum": 60,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "oracle"
+        ],
+        "type": "object"
+      },
+      "ProofResult": {
+        "oneOf": [
+          {
+            "properties": {
+              "confidence": {
+                "type": "string"
+              },
+              "details": true,
+              "exchange_ids": {
+                "items": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "oracle": {
+                "type": "string"
+              },
+              "proof_id": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "proven": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "proof_id",
+              "oracle",
+              "proven",
+              "confidence",
+              "reasons",
+              "exchange_ids",
+              "details"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "pending_approval",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "approval_id",
+              "summary",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReplayRequest": {
+        "additionalProperties": false,
+        "description": "A request to send. Either `exchange_id` (resend or edit a recorded\nrequest) or `url` (where to send `raw`) must be given.",
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "Run a previously approved send. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Recorded exchange to base this on (its target is used).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "fix_content_length": {
+            "default": null,
+            "description": "Update Content-Length to match the body (default true).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "hypothesis_id": {
+            "default": null,
+            "description": "Hypothesis this send tests (links the exchange as evidence).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "identity": {
+            "default": null,
+            "description": "Send with this test identity's credentials instead of the request's own\n(use \"anonymous\" for none).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "normalize_newlines": {
+            "default": null,
+            "description": "Convert bare \"\\n\" line endings in the head to \"\\r\\n\" (default true).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "raw": {
+            "default": null,
+            "description": "Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.\nIf omitted, the request of `exchange_id` is resent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "default": null,
+            "description": "Target as scheme://host[:port], used when there is no `exchange_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/View"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "View of the response to return (default summary)."
+          }
+        },
+        "type": "object"
+      },
+      "ReplayResult": {
+        "oneOf": [
+          {
+            "description": "Sent; the response is recorded as `exchange_id`.",
+            "properties": {
+              "elapsed_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "exchange_id": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "notes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "sent",
+                "type": "string"
+              },
+              "view": {
+                "$ref": "#/components/schemas/ExchangeView"
+              }
+            },
+            "required": [
+              "status",
+              "exchange_id",
+              "elapsed_ms",
+              "view"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The send failed (e.g. connection refused); recorded as `exchange_id`.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "exchange_id": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "exchange_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A human must approve first; call again with `approval_id`.",
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "pending_approval",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "approval_id",
+              "summary",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ScanTaskRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "Approval for the crawl, if the gate asked for one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "browser": {
+            "default": null,
+            "description": "Crawl in a headless browser that runs the app's JavaScript (default:\nyes when a Chromium is installed).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "checks": {
+            "default": [],
+            "description": "Checks to run (default all; submissions only get stored_xss and csrf).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "crawl": {
+            "default": null,
+            "description": "Crawl first (default true); without it, only what history holds.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "identity": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_pages": {
+            "default": null,
+            "description": "Most pages to crawl (default 30, max 500).",
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_requests": {
+            "default": null,
+            "description": "Most requests per operation (default 150, max 2000).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_targets": {
+            "default": null,
+            "description": "Most operations to scan (default 30, max 200).",
+            "format": "uint",
+            "maximum": 200,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "profile": {
+            "default": null,
+            "description": "A scan profile (light, default, thorough, api-only or a saved one)\nthat fills in the settings left out here.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "record_findings": {
+            "default": null,
+            "description": "Record strong issues as suspected findings (default true).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "url": {
+            "default": "",
+            "description": "Where to start, e.g. https://app.example.com/ (its origin is audited).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "View": {
+        "oneOf": [
+          {
+            "const": "summary",
+            "description": "Request line, status, key headers, short body preview.",
+            "type": "string"
+          },
+          {
+            "const": "headers",
+            "description": "All headers, no bodies.",
+            "type": "string"
+          },
+          {
+            "const": "full",
+            "description": "Everything, truncated to the token budget.",
+            "type": "string"
+          }
+        ]
+      },
+      "WsOut": {
+        "additionalProperties": false,
+        "description": "One message to send: `text`, or `hex` for binary data.",
+        "properties": {
+          "hex": {
+            "default": null,
+            "description": "Binary payload as hex (spaces allowed).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "default": null,
+            "description": "May contain `{{secret:...}}` placeholders.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WsReplayRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": 0,
+            "description": "A recorded WebSocket upgrade exchange (status 101).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "hypothesis_id": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "identity": {
+            "default": null,
+            "description": "Open the socket as this test identity.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "default": null,
+            "description": "Characters of each message shown back (default 2000).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "messages": {
+            "default": [],
+            "description": "Sent in order, each followed by `wait_ms` of listening.",
+            "items": {
+              "$ref": "#/components/schemas/WsOut"
+            },
+            "type": "array"
+          },
+          "raw": {
+            "default": null,
+            "description": "Edited upgrade request (HTTP/1.1). Default: the recorded one.\nProxyMind sets a fresh Sec-WebSocket-Key and turns compression off.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait_ms": {
+            "default": null,
+            "description": "How long to listen after each message (and after opening). Default\n1000, at most 10000; a whole session ends after 60 s.",
+            "format": "uint64",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "exchange_id"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Generated from the Rust types by `cargo xtask contracts`; do not edit by hand. Every request needs the per-install token, and requests that change anything must carry the header `X-ProxyMind: 1`. Only the routes listed here are described so far.",
+    "license": {
+      "identifier": "AGPL-3.0-only",
+      "name": "AGPL-3.0-only"
+    },
+    "summary": "REST API of the local ProxyMind app (part of it; see docs/adr/0019-typed-api-contracts.md).",
+    "title": "ProxyMind API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/authz/check": {
+      "post": {
+        "operationId": "authz_check",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Replay one recorded request as several identities and classify the responses."
+      }
+    },
+    "/api/v1/engage/analyze": {
+      "post": {
+        "operationId": "engage_analyze",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageFilter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Summary analysis of a target's recorded traffic."
+      }
+    },
+    "/api/v1/engage/comments": {
+      "post": {
+        "operationId": "engage_comments",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageFilter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Comments found in recorded responses."
+      }
+    },
+    "/api/v1/engage/js-endpoints": {
+      "post": {
+        "operationId": "engage_js_endpoints",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageFilter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Endpoints referenced from recorded JavaScript."
+      }
+    },
+    "/api/v1/engage/logic": {
+      "post": {
+        "operationId": "engage_logic",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageFilter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Business-logic leads from recorded traffic."
+      }
+    },
+    "/api/v1/engage/scripts": {
+      "post": {
+        "operationId": "engage_scripts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngageFilter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Scripts found in recorded responses."
+      }
+    },
+    "/api/v1/exchanges": {
+      "get": {
+        "operationId": "exchanges_list",
+        "parameters": [
+          {
+            "description": "Host contains this text (case-insensitive).",
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Path (including query) contains this text (case-insensitive).",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "method",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "e.g. proxy, replay",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "e.g. agent:claude-1",
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Exchanges sent while testing this hypothesis.",
+            "in": "query",
+            "name": "hypothesis_id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Exchanges sent with this identity's credentials.",
+            "in": "query",
+            "name": "identity",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only exchanges with an id greater than this (for paging forward).",
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only exchanges with an id less than this (for paging back).",
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Maximum rows (default 50, max 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Status classes to show, e.g. \"2,3\" for 2xx and 3xx (\"0\" means no response).",
+            "in": "query",
+            "name": "status_class",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\".",
+            "in": "query",
+            "name": "hide_ext",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only rows with a highlight or a comment.",
+            "in": "query",
+            "name": "annotated",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only targets in the rules of engagement (applied by the service).",
+            "in": "query",
+            "name": "in_scope",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Host, path or comment contains this text (case-insensitive).",
+            "in": "query",
+            "name": "text",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "A history query (`pm_tools::hql`), applied by the service.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Search recorded exchanges, newest first."
+      }
+    },
+    "/api/v1/findings": {
+      "post": {
+        "operationId": "finding_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewFinding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Record a finding."
+      }
+    },
+    "/api/v1/findings/{id}": {
+      "patch": {
+        "operationId": "finding_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Update a finding. The body must still carry `id` (the handler overwrites it with the path id)."
+      }
+    },
+    "/api/v1/model": {
+      "get": {
+        "operationId": "model_get",
+        "parameters": [
+          {
+            "description": "Only operations whose key contains this text.",
+            "in": "query",
+            "name": "contains",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Include objects (default false; there can be many).",
+            "in": "query",
+            "name": "include_objects",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only objects of this type, e.g. Order.",
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "The application model built from recorded traffic."
+      }
+    },
+    "/api/v1/proofs": {
+      "post": {
+        "operationId": "proof_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProofRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProofResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Run a proof oracle and store the result."
+      }
+    },
+    "/api/v1/replay": {
+      "post": {
+        "operationId": "replay_send",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Send a request, as recorded or edited, through the policy gate."
+      }
+    },
+    "/api/v1/scan/tasks": {
+      "post": {
+        "operationId": "scan_task_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Start a crawl-and-audit background task."
+      }
+    },
+    "/api/v1/ws/replay": {
+      "post": {
+        "operationId": "ws_replay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WsReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "OK (response schema not yet typed)"
+          }
+        },
+        "summary": "Replay a recorded WebSocket session with edited messages."
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ]
+}

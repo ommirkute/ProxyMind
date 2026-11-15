@@ -7,6 +7,7 @@ use pm_ai::{ExchangeView, View, render_exchange};
 use pm_policy::{ActionRequest, Actor, Target, Tier, Wait};
 use pm_replay::Endpoint;
 use pm_store::NewExchange;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -17,7 +18,7 @@ const MAX_LIMIT_WAIT: Duration = Duration::from_secs(30);
 
 /// A request to send. Either `exchange_id` (resend or edit a recorded
 /// request) or `url` (where to send `raw`) must be given.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReplayRequest {
     /// Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
@@ -43,7 +44,7 @@ pub struct ReplayRequest {
     pub max_tokens: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReplayResult {
     /// Sent; the response is recorded as `exchange_id`.

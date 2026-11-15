@@ -351,3 +351,212 @@ fn ws_messages_publish_one_event_per_exchange_per_batch_with_scope_rules() {
     assert!(handle.write(|s| s.insert_batch(&[], &[(WsTarget::InBatch(0), msg())])).is_err());
     assert!(drain(&mut sub).is_empty());
 }
+
+// ---- ADR-0018 step 5: scan, fuzzer and AI-scan progress ----
+
+use std::time::{Duration, Instant};
+
+use pm_demo::VulnShop;
+use pm_service::pm_fuzz::PayloadSet;
+use pm_service::{AiScanRequest, AttackStatus, FuzzerRequest, FuzzerStart, ScanTaskRequest};
+
+/// Receives events until `done` says so (it sees each one), failing after 30 s. Returns everything received.
+async fn collect_until(sub: &mut Subscription, mut done: impl FnMut(&Event) -> bool) -> Vec<Published> {
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), sub.recv()).await.expect("no event for 30 s") {
+            Some(Delivery::Event(p)) => {
+                let stop = done(&p.event);
+                out.push(p);
+                if stop {
+                    return out;
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+async fn shop_service() -> (Arc<Service>, String) {
+    let addr = VulnShop::start_local().await.unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+    let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");
+    (Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap()), url)
+}
+
+fn scan_states(got: &[Published], task: &str) -> Vec<String> {
+    got.iter()
+        .filter_map(|p| match &p.event {
+            Event::ScanStateChanged { task: t, state } if t == task => Some(state.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scan_tasks_publish_every_state_change_and_a_final_progress() {
+    let (svc, url) = shop_service().await;
+    let human = Actor::parse("human:tester").unwrap();
+    let mut sub = svc.subscribe();
+    let req = ScanTaskRequest {
+        url: format!("{url}/"),
+        max_pages: Some(20),
+        browser: Some(false),
+        checks: vec!["reflected_input".into(), "sql_error".into()],
+        ..Default::default()
+    };
+    let id = svc.scan_task_start(&human, req).unwrap().task_id;
+    // Wait for the audit to be under way (an event, not a sleep), then cancel and resume it.
+    let mut got = collect_until(&mut sub, |e| matches!(e, Event::ScanProgress { done, .. } if *done >= 2)).await;
+    svc.scan_task_cancel(&human, &id).unwrap();
+    got.extend(
+        collect_until(&mut sub, |e| matches!(e, Event::ScanStateChanged { state, .. } if state == "cancelled")).await,
+    );
+    svc.scan_task_resume(&human, &id).unwrap();
+    got.extend(
+        collect_until(&mut sub, |e| matches!(e, Event::ScanStateChanged { state, .. } if state == "done")).await,
+    );
+
+    let states = scan_states(&got, &id);
+    assert_eq!(states, ["crawling", "auditing", "cancelled", "auditing", "done"], "once per transition: {states:?}");
+    // The final progress is sent whatever the rate limit says, and is the last progress event.
+    let last = got.iter().rev().find_map(|p| match &p.event {
+        Event::ScanProgress { done, total, .. } => Some((*done, *total)),
+        _ => None,
+    });
+    let v = svc.scan_task_status(&human, &id).unwrap();
+    assert_eq!(last, Some((v.targets_done, v.targets_total)), "{v:?}");
+    assert!(got.iter().any(|p| p.topic == Topic::Scans && p.topic.as_str() == "scans"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scan_and_fuzzer_events_go_to_humans_and_the_run_s_owner_only() {
+    let (svc, url) = shop_service().await;
+    let (human, a, b) =
+        (Actor::parse("human:h").unwrap(), Actor::parse("agent:a").unwrap(), Actor::parse("agent:b").unwrap());
+    let mut sub = svc.subscribe();
+    // Whatever the gate says for an agent (it may need an approval), the task's own events carry its owner.
+    let id = svc
+        .scan_task_start(&a, ScanTaskRequest { url: format!("{url}/"), browser: Some(false), ..Default::default() })
+        .unwrap()
+        .task_id;
+    let got = collect_until(&mut sub, |e| {
+        matches!(e, Event::ScanStateChanged { state, .. } if matches!(state.as_str(), "done" | "failed" | "cancelled"))
+    })
+    .await;
+    // (The crawl and the audit also record exchanges and audit entries, on other topics.)
+    let seen = |who: &Actor| got.iter().filter(|p| p.topic == Topic::Scans && svc.event_for(who, p).is_some()).count();
+    assert!(seen(&a) >= 2, "the owner sees its task's events");
+    assert_eq!(seen(&a), seen(&human), "a human sees every task's events");
+    assert_eq!(seen(&b), 0, "another agent sees none, as it cannot read the task");
+    assert!(svc.scan_task_status(&b, &id).is_err());
+    for t in [Topic::Scans, Topic::Fuzzer, Topic::AiScan] {
+        assert!(svc.may_read_topic(&a, t) && svc.may_read_topic(&human, t));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fuzzer_progress_is_rate_limited_and_state_changes_and_the_end_always_go_out() {
+    let (svc, url) = shop_service().await;
+    let human = Actor::parse("human:h").unwrap();
+    let mut sub = svc.subscribe();
+    let req = |n: usize, throttle: Option<u64>| FuzzerRequest {
+        url: Some(url.clone()),
+        raw: "GET /api/products?x=§a§ HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+        payload_sets: vec![PayloadSet { null_payloads: Some(n), ..Default::default() }],
+        throttle_ms: throttle,
+        ..Default::default()
+    };
+    let FuzzerStart::Started { attack_id, total } = svc.fuzzer_start(&human, req(60, None)).unwrap() else {
+        panic!("not started")
+    };
+    let started = Instant::now();
+    let is_end = |e: &Event| matches!(e, Event::FuzzerProgress { state, .. } if state == "done");
+    let got = collect_until(&mut sub, is_end).await;
+    let took = started.elapsed();
+    // (The attack also records exchanges and audit entries, on other topics.)
+    let got: Vec<Published> = got.into_iter().filter(|p| p.topic == Topic::Fuzzer).collect();
+    let prog: Vec<(usize, usize, String)> = got
+        .iter()
+        .filter_map(|p| match &p.event {
+            Event::FuzzerProgress { attack, done, total, state } if *attack == attack_id => {
+                Some((*done, *total, state.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prog.len(), got.len());
+    assert_eq!(prog[0], (0, total, "running".into()), "the start is announced");
+    assert_eq!(prog.last().unwrap(), &(60, 60, "done".into()), "the final count always goes out");
+    assert!(prog.windows(2).all(|w| w[0].0 <= w[1].0), "done never goes back: {prog:?}");
+    // Two always-sent updates (start, baseline), one per 250 ms window, the held one, and the end.
+    let allowed = 4 + (took.as_millis() / 250) as usize;
+    assert!(prog.len() <= allowed, "{} events in {took:?} (at most {allowed}): {prog:?}", prog.len());
+    assert!(prog.len() < 60, "60 results did not make 60 events");
+
+    // pause, resume and cancel are each announced at once, and the cancelled attack ends with its final count.
+    let FuzzerStart::Started { attack_id: id2, .. } = svc.fuzzer_start(&human, req(200, Some(20))).unwrap() else {
+        panic!("not started")
+    };
+    let state_of = |e: &Event| match e {
+        Event::FuzzerProgress { attack, state, .. } if *attack == id2 => Some(state.clone()),
+        _ => None,
+    };
+    collect_until(
+        &mut sub,
+        |e| matches!(e, Event::FuzzerProgress { attack, done, .. } if *attack == id2 && *done >= 2),
+    )
+    .await;
+    for (action, want) in [("pause", "paused"), ("resume", "running"), ("cancel", "cancelled")] {
+        svc.fuzzer_control(&human, &id2, action).unwrap();
+        let got = collect_until(&mut sub, |e| state_of(e).as_deref() == Some(want)).await;
+        assert!(got.iter().any(|p| state_of(&p.event).as_deref() == Some(want)), "{action}");
+    }
+    let v = svc.fuzzer_status(&human, &id2, 0).unwrap();
+    assert_eq!(v.status, AttackStatus::Cancelled);
+    // The attack stops after its in-flight request; the last event matches the status the page will fetch.
+    let end = collect_until(&mut sub, |e| matches!(e, Event::FuzzerProgress { attack, done, .. } if *attack == id2 && *done == svc.fuzzer_status(&human, &id2, 0).unwrap().done)).await;
+    assert!(!end.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ai_scan_changes_publish_ids_and_state_words_only_and_the_end_goes_out_at_once() {
+    let svc = service();
+    let (human, agent) = (Actor::parse("human:h").unwrap(), Actor::parse("agent:a").unwrap());
+    let mut sub = svc.subscribe();
+    let scan = svc.ai_scan_create(&human, &AiScanRequest::default(), "m").unwrap();
+    let secret = "PLANTED-LOG-TEXT-from-the-target";
+    for i in 0..20 {
+        svc.ai_scan_log(scan.id, "note", &format!("{secret} {i}")).unwrap();
+    }
+    svc.ai_scan_set_phase(scan.id, "scanning", "gate met").unwrap();
+    svc.ai_scan_usage(scan.id, 10, 5, 1000).unwrap();
+    svc.ai_scan_finish(scan.id, "done", "").unwrap();
+    // The end is sent at once: no waiting for a window.
+    let t = Instant::now();
+    let got = collect_until(&mut sub, |e| matches!(e, Event::AiScanChanged { state, .. } if state == "done")).await;
+    assert!(t.elapsed() < Duration::from_millis(200), "{:?}", t.elapsed());
+    let got: Vec<Published> = got.into_iter().filter(|p| p.topic == Topic::AiScan).collect();
+    // 24 updates inside a few milliseconds made a handful of events (create, the first, the end).
+    assert!(got.len() <= 4, "{} events", got.len());
+    match &got.last().unwrap().event {
+        Event::AiScanChanged { scan_id, state, phase } => {
+            assert_eq!((*scan_id, state.as_str(), phase.as_str()), (scan.id, "done", "scanning"));
+        }
+        e => panic!("{e:?}"),
+    }
+    for who in [&human, &agent] {
+        let shown: String = got.iter().filter_map(|p| svc.event_for(who, p)).map(|v| v.to_string()).collect();
+        assert!(!shown.contains("PLANTED") && !shown.contains("gate met"), "no log text: {shown}");
+        assert!(shown.contains("ai_scan_changed") && shown.contains("\"topic\":\"ai_scan\""), "{shown}");
+    }
+    // Held updates are not lost: a last quiet update still arrives within the window.
+    let s2 = svc.ai_scan_create(&human, &AiScanRequest::default(), "m").unwrap();
+    svc.ai_scan_set_phase(s2.id, "scanning", "").unwrap();
+    let got = collect_until(
+        &mut sub,
+        |e| matches!(e, Event::AiScanChanged { scan_id, phase, .. } if *scan_id == s2.id && phase == "scanning"),
+    )
+    .await;
+    assert!(!got.is_empty());
+}

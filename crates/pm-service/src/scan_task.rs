@@ -12,14 +12,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pm_policy::{Actor, ActorKind};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ActiveFinding, ActiveScanRequest, ActiveScanResult, CrawlRequest, CrawlResult, Result, Service, ServiceError,
 };
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the service rejects an empty or unparsable url.
+#[schemars(extend("required" = ["url"]))]
 pub struct ScanTaskRequest {
     /// Where to start, e.g. https://app.example.com/ (its origin is audited).
     pub url: String,
@@ -29,11 +32,13 @@ pub struct ScanTaskRequest {
     /// Crawl first (default true); without it, only what history holds.
     pub crawl: Option<bool>,
     /// Most pages to crawl (default 30, max 500).
+    #[schemars(range(min = 1, max = 500))]
     pub max_pages: Option<usize>,
     /// Crawl in a headless browser that runs the app's JavaScript (default:
     /// yes when a Chromium is installed).
     pub browser: Option<bool>,
     /// Most operations to scan (default 30, max 200).
+    #[schemars(range(min = 1, max = 200))]
     pub max_targets: Option<usize>,
     /// Most requests per operation (default 150, max 2000).
     pub max_requests: Option<usize>,
@@ -163,6 +168,8 @@ pub(crate) struct ScanTask {
     paused: AtomicBool,
     view: parking_lot::Mutex<ScanTaskView>,
     progress: parking_lot::Mutex<Progress>,
+    /// The state last announced on the event bus, so each transition is published once.
+    announced: parking_lot::Mutex<Option<ScanTaskStatus>>,
 }
 
 /// Tasks kept in memory and loaded when a project opens.
@@ -237,6 +244,7 @@ impl Service {
                 error: None,
             }),
             progress: parking_lot::Mutex::new(Progress { request: req, done: Vec::new(), crawled: false }),
+            announced: parking_lot::Mutex::new(None),
         });
         task.update(|v| v.task_id = task.id.clone());
         self.keep_task(task.clone());
@@ -269,14 +277,31 @@ impl Service {
             created_ms: saved.view.created_ms,
             updated_ms: pm_core::now_ms(),
         };
-        match self.store.write(|db| db.upsert_scan_task(&row)) {
-            Ok(()) => {
-                let v = &saved.view;
-                // At most one update per 250 ms per task, but the one that ends the task always goes out.
-                self.publish_scan_progress(&task.id, v.targets_done, v.targets_total, !v.status.running());
-            }
-            Err(e) => tracing::warn!(task = %task.id, error = %e, "scan task not saved"),
+        if let Err(e) = self.store.write(|db| db.upsert_scan_task(&row)) {
+            tracing::warn!(task = %task.id, error = %e, "scan task not saved");
         }
+        // The in-memory view is what the API serves, so the events go out whether or not the save worked.
+        self.publish_scan_events(task, &saved.view);
+    }
+
+    /// Publishes `ScanStateChanged` when the state differs from the last one announced (every transition, never
+    /// rate-limited), then `ScanProgress` (at most one per 250 ms per task; the one that ends the task always goes
+    /// out). Only the owner and humans can read them (see `event_for`).
+    fn publish_scan_events(&self, task: &ScanTask, v: &ScanTaskView) {
+        use crate::events::{Event, Rate};
+        let key = format!("scan:{}", task.id);
+        {
+            // The check and the publish share the lock, so two saves cannot announce out of order.
+            let mut announced = task.announced.lock();
+            if *announced != Some(v.status) {
+                *announced = Some(v.status);
+                let event = Event::ScanStateChanged { task: task.id.clone(), state: v.status.as_str().into() };
+                self.publish_rated(&key, event, Some(&task.actor), Rate::Always);
+            }
+        }
+        let rate = if v.status.running() { Rate::Limited } else { Rate::Last };
+        let event = Event::ScanProgress { task: task.id.clone(), done: v.targets_done, total: v.targets_total };
+        self.publish_rated(&key, event, Some(&task.actor), rate);
     }
 
     /// Loads recent tasks when the project opens. Tasks that were running
@@ -292,6 +317,7 @@ impl Service {
         let mut loaded = Vec::new();
         for row in rows.into_iter().rev() {
             let Ok(saved) = serde_json::from_str::<Saved>(&row.data) else { continue };
+            let saved_status = saved.view.status;
             let task = Arc::new(ScanTask {
                 id: row.id,
                 actor: row.actor,
@@ -299,6 +325,8 @@ impl Service {
                 paused: AtomicBool::new(false),
                 view: parking_lot::Mutex::new(saved.view),
                 progress: parking_lot::Mutex::new(saved.progress),
+                // What a loaded task shows is not news; only a change from here is published.
+                announced: parking_lot::Mutex::new(Some(saved_status)),
             });
             let running = task.view.lock().status.running();
             if running && pm_core::now_ms() - row.updated_ms < 3 * HEARTBEAT_MS {

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, originOf, toast, type ExchangeDetail, type IdentityInfo } from "../api";
-import { ErrorBox, ExchangeLink, MessageView, StatusCode, pollRetryDelay, useAction, useLoad, useNav, usePref } from "../components";
+import { ErrorBox, ExchangeLink, MessageView, StatusCode, useAction, useLoad, useNav, usePref } from "../components";
 import { autoMark } from "../http";
+import { useLiveEvent } from "../live";
 
 interface Row {
   index?: number;
@@ -272,43 +273,51 @@ export default function Fuzzer() {
       }
     });
 
-  // Poll the attack: new rows are appended (the server sends only what's new).
-  useEffect(() => {
-    if (!attackId) return;
-    let stop = false;
-    let have = 0;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try {
-        const v = await api.get<AttackView>(`/fuzzer/attacks/${attackId}?from=${have}`);
-        if (stop) return;
-        if (failures) action.setError(null);
-        failures = 0;
-        have += v.rows.length;
+  // The attack's progress arrives as `fuzzer` events (ADR-0018); each one for this attack, and every resync, pulls
+  // what is new (the server sends only the rows after `have`, and the pulls never overlap, so no row is added
+  // twice). A failed pull shows its error; the next event pulls again.
+  const sync = useRef({ id: null as string | null, have: 0, busy: false, again: false, failed: false });
+  const pull = async () => {
+    const s = sync.current;
+    if (!s.id) return;
+    if (s.busy) {
+      s.again = true;
+      return;
+    }
+    s.busy = true;
+    try {
+      do {
+        s.again = false;
+        const v = await api.get<AttackView>(`/fuzzer/attacks/${s.id}?from=${s.have}`);
+        if (sync.current !== s) return;
+        if (s.failed) action.setError(null);
+        s.failed = false;
+        s.have += v.rows.length;
         setView((old) => (old && old.attack_id === v.attack_id ? { ...v, rows: [...old.rows, ...v.rows] } : v));
-        if (v.status === "running" || v.status === "paused") timer = setTimeout(tick, 500);
-      } catch (e) {
-        if (stop) return;
+      } while (s.again);
+    } catch (e) {
+      if (sync.current === s) {
+        s.failed = true;
         action.setError((e as Error).message);
-        const wait = pollRetryDelay(e, failures++);
-        if (wait !== null) timer = setTimeout(tick, wait);
       }
-    };
-    tick();
-    return () => {
-      stop = true;
-      clearTimeout(timer);
-    };
+    } finally {
+      s.busy = false;
+    }
+  };
+  useEffect(() => {
+    sync.current = { id: attackId, have: 0, busy: false, again: false, failed: false };
+    void pull();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attackId]);
+  useLiveEvent(["fuzzer"], (e) => {
+    if (e.topic === "resync" || e.data.attack === sync.current.id) void pull();
+  });
 
   const control = (what: "pause" | "resume" | "cancel") =>
     attackId &&
     action.run(async () => {
       const r = await api.post<{ status: AttackStatus }>(`/fuzzer/attacks/${attackId}/${what}`);
       setView((v) => (v ? { ...v, status: r.status } : v));
-      if (what === "resume") setAttackId((id) => id); // polling continues on its own
     });
 
   return (

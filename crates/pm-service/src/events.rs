@@ -24,7 +24,8 @@ use crate::{Counters, Result, Service};
 /// Events a slow subscriber may fall behind by before it gets a resync.
 pub const EVENT_BUFFER: usize = 1024;
 
-/// Scan progress is published at most this often per task (the final update always is).
+/// Progress (scan, fuzzer, AI scan) is published at most this often per run; the newest update that was held back
+/// goes out when the window ends, and the final one always goes out at once.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -39,10 +40,12 @@ pub enum Topic {
     Audit,
     Collaborator,
     Websockets,
+    Fuzzer,
+    AiScan,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 9] = [
+    pub const ALL: [Topic; 11] = [
         Topic::Exchanges,
         Topic::Findings,
         Topic::Scans,
@@ -52,6 +55,8 @@ impl Topic {
         Topic::Audit,
         Topic::Collaborator,
         Topic::Websockets,
+        Topic::Fuzzer,
+        Topic::AiScan,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -65,6 +70,8 @@ impl Topic {
             Topic::Audit => "audit",
             Topic::Collaborator => "collaborator",
             Topic::Websockets => "websockets",
+            Topic::Fuzzer => "fuzzer",
+            Topic::AiScan => "ai_scan",
         }
     }
 
@@ -128,6 +135,28 @@ pub enum Event {
     WsMessageRecorded {
         exchange_id: i64,
     },
+    /// A scan task moved to another state: `crawling`, `auditing`, `paused`, `done`, `cancelled` or `failed`. Sent for
+    /// every transition (never rate-limited). Carries no target-derived text.
+    ScanStateChanged {
+        task: String,
+        state: String,
+    },
+    /// A fuzzer attack made progress or changed state (`running`, `paused`, `cancelled`, `done`, `failed`). State
+    /// changes always go out; plain progress is rate-limited. Carries no request or response text.
+    FuzzerProgress {
+        attack: String,
+        done: usize,
+        total: usize,
+        state: String,
+    },
+    /// An AI scan's status, phase, log, steps or cost changed. `state` is `running`, `stopping`, `stopped`, `done` or
+    /// `failed`; `phase` one of the fixed phase words. No log text, report or model output: the page refetches the
+    /// scan through the normal API.
+    AiScanChanged {
+        scan_id: i64,
+        state: String,
+        phase: String,
+    },
 }
 
 impl Event {
@@ -142,42 +171,71 @@ impl Event {
             Event::AuditAppended { .. } => Topic::Audit,
             Event::CollaboratorHit { .. } => Topic::Collaborator,
             Event::WsMessageRecorded { .. } => Topic::Websockets,
+            Event::ScanStateChanged { .. } => Topic::Scans,
+            Event::FuzzerProgress { .. } => Topic::Fuzzer,
+            Event::AiScanChanged { .. } => Topic::AiScan,
         }
     }
 }
 
-/// An event as published: with its `seq` and topic. The scope target (what an agent's scope check needs) is kept
-/// out of the serialized form.
+/// An event as published: with its `seq` and topic. The scope target (what an agent's scope check needs) and the
+/// owner (who started the run, for scans and attacks) are kept out of the serialized form.
 #[derive(Debug, Clone)]
 pub struct Published {
     pub seq: u64,
     pub topic: Topic,
     pub event: Event,
     scope: Option<Target>,
+    owner: Option<String>,
 }
 
+/// How a progress-like event is paced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rate {
+    /// At most one per 250 ms per key; the newest one held back is sent when the window ends.
+    Limited,
+    /// A state change: sent at once, and it supersedes anything held back.
+    Always,
+    /// The final update of a run: sent at once and the key is forgotten.
+    Last,
+}
+
+struct Slot {
+    at: Instant,
+    held: Option<(Event, Option<String>)>,
+}
+
+#[derive(Clone)]
 pub(crate) struct Bus {
     tx: broadcast::Sender<Published>,
-    seq: parking_lot::Mutex<u64>,
-    progress: parking_lot::Mutex<HashMap<String, Instant>>,
+    seq: std::sync::Arc<parking_lot::Mutex<u64>>,
+    progress: std::sync::Arc<parking_lot::Mutex<HashMap<String, Slot>>>,
 }
 
 impl Bus {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             tx: broadcast::channel(capacity).0,
-            seq: parking_lot::Mutex::new(0),
-            progress: parking_lot::Mutex::new(HashMap::new()),
+            seq: std::sync::Arc::new(parking_lot::Mutex::new(0)),
+            progress: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
     /// Never blocks. `scope` is the request target an agent's scope rules are checked against, if the event
     /// belongs to one.
     pub(crate) fn publish(&self, event: Event, scope: Option<Target>) {
+        self.publish_full(event, scope, None);
+    }
+
+    fn publish_full(&self, event: Event, scope: Option<Target>, owner: Option<String>) {
         let mut seq = self.seq.lock();
         *seq += 1;
         // Err only means nobody is subscribed.
-        let _ = self.tx.send(Published { seq: *seq, topic: event.topic(), event, scope });
+        let _ = self.tx.send(Published { seq: *seq, topic: event.topic(), event, scope, owner });
+    }
+
+    pub(crate) fn has_subscribers(&self) -> bool {
+        self.tx.receiver_count() > 0
     }
 
     pub(crate) fn publish_exchanges(&self, rows: &[CommittedExchange]) {
@@ -202,20 +260,58 @@ impl Bus {
         Subscription { rx: self.tx.subscribe(), latest: *seq }
     }
 
-    /// Whether a progress update for `task` should go out now (at most one per 250 ms, always when `last`).
-    fn progress_due(&self, task: &str, last: bool) -> bool {
+    /// Publishes a progress-like event for the run `key`, paced by `rate`. `owner` is who started the run (an agent
+    /// only gets events of its own runs). Never blocks. With `Limited`, an update inside the 250 ms window is held,
+    /// and the newest held one is sent when the window ends (from a tokio task, so without a runtime it is dropped:
+    /// the next update or the final one carries the state).
+    pub(crate) fn publish_rated(&self, key: &str, event: Event, owner: Option<&str>, rate: Rate) {
+        let owner = owner.map(str::to_string);
+        // The map lock is held while publishing, so the pacing state and `seq` order cannot disagree.
         let mut map = self.progress.lock();
-        if last {
-            map.remove(task);
-            return true;
-        }
         let now = Instant::now();
-        match map.get(task) {
-            Some(t) if now.duration_since(*t) < PROGRESS_EVERY => false,
-            _ => {
-                map.insert(task.to_string(), now);
-                true
+        match rate {
+            Rate::Last => {
+                map.remove(key);
             }
+            Rate::Always => {
+                map.insert(key.to_string(), Slot { at: now, held: None });
+            }
+            Rate::Limited => {
+                if let Some(slot) = map.get_mut(key)
+                    && now.duration_since(slot.at) < PROGRESS_EVERY
+                {
+                    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                        let first = slot.held.is_none();
+                        slot.held = Some((event, owner));
+                        if first {
+                            let (bus, key) = (self.clone(), key.to_string());
+                            let wait = PROGRESS_EVERY - now.duration_since(slot.at);
+                            rt.spawn(async move {
+                                tokio::time::sleep(wait).await;
+                                bus.flush(&key);
+                            });
+                        }
+                    }
+                    return;
+                }
+                if map.len() >= 1024 {
+                    // Runs that never ended (a crashed task) must not pile up.
+                    map.retain(|_, s| now.duration_since(s.at) < Duration::from_secs(60));
+                }
+                map.insert(key.to_string(), Slot { at: now, held: None });
+            }
+        }
+        self.publish_full(event, None, owner);
+    }
+
+    /// Sends the update held back for `key`, if it is still held (a final or state-change update clears it).
+    fn flush(&self, key: &str) {
+        let mut map = self.progress.lock();
+        if let Some(slot) = map.get_mut(key)
+            && let Some((event, owner)) = slot.held.take()
+        {
+            slot.at = Instant::now();
+            self.publish_full(event, None, owner);
         }
     }
 }
@@ -274,14 +370,18 @@ impl Service {
         self.publish_scoped(Event::FindingChanged { id, status: status.into() }, url);
     }
 
-    /// Publishes scan progress, rate-limited per task; `last` marks the final update, which always goes out.
-    pub(crate) fn publish_scan_progress(&self, task: &str, done: usize, total: usize, last: bool) {
-        if self.bus.progress_due(task, last) {
-            self.publish(Event::ScanProgress { task: task.into(), done, total });
-        }
+    /// Publishes a progress-like event for run `key`, owned by `owner` (None: everyone may read it). See
+    /// [`Bus::publish_rated`].
+    pub(crate) fn publish_rated(&self, key: &str, event: Event, owner: Option<&str>, rate: Rate) {
+        self.bus.publish_rated(key, event, owner, rate);
     }
 
     /// Whether `actor` may read events of this topic. The intercept queue is for humans only, like its REST routes.
+    ///
+    /// Scan, fuzzer and AI-scan events carry no host, so scope does not apply; they follow the resource's own API.
+    /// `scans` and `fuzzer` events go to humans and to the agent that started the run (`event_for` checks the owner),
+    /// like `scan_task_*` and `fuzzer_*` ("people see every task, agents only their own"). `ai_scan` is readable by
+    /// every actor, like `GET /ai-scan`, which has no actor check; its events carry ids and state words only.
     pub fn may_read_topic(&self, actor: &Actor, topic: Topic) -> bool {
         topic != Topic::Intercept || actor.kind == ActorKind::Human
     }
@@ -292,12 +392,16 @@ impl Service {
     /// - for an agent, an event about a request target (`ExchangeRecorded`, `FindingChanged`, `WsMessageRecorded`) is dropped when the
     ///   target is out of scope, or when its scope could not be determined;
     /// - for an agent, strings pass through the redactor when the ROE asks for it (`json_for`), so a host
-    ///   containing a secret is replaced by a placeholder. Humans see events as published.
+    ///   containing a secret is replaced by a placeholder. Humans see events as published;
+    /// - for an agent or plugin, an event of a run someone else started (scan tasks, fuzzer attacks) is dropped.
     pub fn event_for(&self, actor: &Actor, p: &Published) -> Option<Value> {
         if !self.may_read_topic(actor, p.topic) {
             return None;
         }
         if actor.kind != ActorKind::Human {
+            if p.owner.as_deref().is_some_and(|o| o != actor.id()) {
+                return None;
+            }
             let targeted = matches!(
                 p.event,
                 Event::ExchangeRecorded { .. } | Event::FindingChanged { .. } | Event::WsMessageRecorded { .. }
@@ -428,14 +532,60 @@ mod tests {
         assert!(matches!(now(&mut sub), Some(Delivery::Event(p)) if p.seq == 11));
     }
 
+    fn progress(done: usize) -> Event {
+        Event::ScanProgress { task: "t".into(), done, total: 10 }
+    }
+
+    fn dones(sub: &mut Subscription) -> Vec<usize> {
+        let mut out = Vec::new();
+        while let Some(Some(Delivery::Event(p))) = futures_util::FutureExt::now_or_never(sub.recv()) {
+            if let Event::ScanProgress { done, .. } = p.event {
+                out.push(done);
+            }
+        }
+        out
+    }
+
     #[test]
-    fn progress_is_rate_limited_per_task_and_the_last_always_goes_out() {
-        let bus = Bus::new(4);
-        assert!(bus.progress_due("a", false));
-        assert!(!bus.progress_due("a", false));
-        assert!(bus.progress_due("b", false), "another task has its own clock");
-        assert!(bus.progress_due("a", true), "the final update is never dropped");
-        assert!(bus.progress_due("a", false), "and the task starts over");
+    fn progress_is_rate_limited_per_key_and_the_last_always_goes_out() {
+        let bus = Bus::new(16);
+        let mut sub = bus.subscribe();
+        bus.publish_rated("a", progress(1), None, Rate::Limited);
+        bus.publish_rated("a", progress(2), None, Rate::Limited);
+        bus.publish_rated("b", progress(3), None, Rate::Limited);
+        assert_eq!(dones(&mut sub), [1, 3], "one per window per key; another key has its own clock");
+        bus.publish_rated("a", progress(4), None, Rate::Last);
+        assert_eq!(dones(&mut sub), [4], "the final update is never dropped");
+        bus.publish_rated("a", progress(5), None, Rate::Limited);
+        assert_eq!(dones(&mut sub), [5], "and the key starts over");
+    }
+
+    #[tokio::test]
+    async fn the_newest_held_update_goes_out_when_the_window_ends() {
+        let bus = Bus::new(16);
+        let mut sub = bus.subscribe();
+        for i in 1..=5 {
+            bus.publish_rated("a", progress(i), None, Rate::Limited);
+        }
+        let got = |p: Published| match p.event {
+            Event::ScanProgress { done, .. } => done,
+            e => panic!("{e:?}"),
+        };
+        let first = tokio::time::timeout(Duration::from_secs(5), sub.recv()).await.unwrap();
+        assert!(matches!(first, Some(Delivery::Event(p)) if got(p.clone()) == 1));
+        let second = tokio::time::timeout(Duration::from_secs(5), sub.recv()).await.unwrap();
+        assert!(matches!(second, Some(Delivery::Event(p)) if got(p.clone()) == 5), "the newest, not every held one");
+        assert!(dones(&mut sub).is_empty());
+    }
+
+    #[test]
+    fn a_state_change_supersedes_held_progress() {
+        let bus = Bus::new(16);
+        let mut sub = bus.subscribe();
+        bus.publish_rated("a", progress(1), None, Rate::Limited);
+        bus.publish_rated("a", progress(2), None, Rate::Limited);
+        bus.publish_rated("a", progress(3), None, Rate::Always);
+        assert_eq!(dones(&mut sub), [1, 3]);
     }
 
     #[test]

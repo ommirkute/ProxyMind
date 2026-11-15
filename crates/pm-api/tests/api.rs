@@ -255,6 +255,48 @@ async fn event_topics_filter_resync_and_keep_the_counters_live() {
 }
 
 #[tokio::test]
+async fn the_scans_fuzzer_and_ai_scan_topics_deliver_progress_without_polling() {
+    let (port, shop) = start().await;
+    // Every topic name is accepted, alone or with others; `all` includes the new ones.
+    for q in ["?topics=fuzzer", "?topics=ai_scan", "?topics=scans,fuzzer,ai_scan,counters"] {
+        let mut s = open_events(port, q, "").await;
+        let mut got = String::new();
+        read_until(&mut s, &mut got, "HTTP/1.1 200").await;
+    }
+    let msg = http(port, "GET", "/api/v1/events?topics=fuzzers", &[AUTH], None).await;
+    assert!(msg.0 == 400 && msg.2.contains("fuzzer") && msg.2.contains("ai_scan"), "{}", msg.2);
+
+    let mut typed = open_events(port, "?topics=fuzzer,scans,ai_scan", "").await;
+    let mut all = open_events(port, "?topics=all", "").await;
+    let (mut got, mut got_all) = (String::new(), String::new());
+    read_until(&mut typed, &mut got, "\r\n\r\n").await;
+    read_until(&mut all, &mut got_all, "\r\n\r\n").await;
+
+    let url = format!("http://127.0.0.1:{shop}");
+    let body = json!({"url": url, "raw": "GET /api/products?x=§a§ HTTP/1.1\nHost: x\n\n",
+                      "payload_sets": [{"null_payloads": 3}]});
+    let (st, _, b) = http(port, "POST", "/api/v1/fuzzer/attacks", &[AUTH, CHANGE], Some(body)).await;
+    assert_eq!(st, 200, "{b}");
+    let attack = serde_json::from_str::<Value>(&b).unwrap()["attack_id"].as_str().unwrap().to_string();
+    // The attack's progress and end arrive as events; no status request is made.
+    read_until(&mut typed, &mut got, "\"state\":\"done\"").await;
+    let block = got.split("\n\n").find(|b| b.contains("event: fuzzer")).unwrap();
+    let data: Value = serde_json::from_str(block.lines().find_map(|l| l.strip_prefix("data: ")).unwrap()).unwrap();
+    assert_eq!((data["type"].as_str(), data["attack"].as_str()), (Some("fuzzer_progress"), Some(attack.as_str())));
+    assert_eq!((data["topic"].as_str(), data["total"].as_u64()), (Some("fuzzer"), Some(3)));
+    read_until(&mut all, &mut got_all, "event: fuzzer").await;
+
+    let body = json!({"url": format!("{url}/"), "max_pages": 3, "browser": false, "checks": ["reflected_input"]});
+    let (st, _, b) = http(port, "POST", "/api/v1/scan/tasks", &[AUTH, CHANGE], Some(body)).await;
+    assert_eq!(st, 200, "{b}");
+    let task = serde_json::from_str::<Value>(&b).unwrap()["task_id"].as_str().unwrap().to_string();
+    let finished = format!("\"type\":\"scan_state_changed\",\"task\":\"{task}\",\"state\":\"done\"");
+    read_until(&mut typed, &mut got, &finished).await;
+    assert!(got.contains("event: scans"), "{got}");
+    assert!(got.contains("\"state\":\"crawling\"") && got.contains("scan_progress"), "{got}");
+}
+
+#[tokio::test]
 async fn the_websockets_topic_reports_each_exchange_once_per_batch() {
     use pm_service::pm_store::{NewExchange, NewWsMessage, WsTarget};
     let svc = Arc::new(
