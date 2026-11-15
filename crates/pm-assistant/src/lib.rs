@@ -1,8 +1,8 @@
 //! The assistant built into ProxyMind. It is an agent like any other: it
 //! acts as `agent:assistant`, uses the same tools as MCP clients, and goes
 //! through the same policy gate (scope, approvals, rate limits, redaction,
-//! audit). Models run locally by default; cloud models need
-//! `allow_cloud_models: true` in the rules of engagement.
+//! audit). Cloud and local models both work by default; an engagement that
+//! sets `allow_cloud_models: false` in the rules of engagement uses local ones only.
 
 pub mod ai_scan;
 mod explain;
@@ -113,7 +113,8 @@ impl Assistant {
         if !is_local_url(&cfg.base_url) && !self.service.cloud_models_allowed() {
             return Err(AssistantError::Refused(format!(
                 "{} is not a local model server, and the rules of engagement don't allow cloud models \
-                 (data.allow_cloud_models). Use a local server such as Ollama, or ask the engagement owner to allow cloud models.",
+                 (data.allow_cloud_models: false). Use a local server such as Ollama, or ask the engagement owner to \
+                 allow cloud models.",
                 cfg.base_url
             )));
         }

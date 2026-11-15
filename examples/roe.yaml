@@ -64,5 +64,7 @@ data:
   # Replace secrets (cookies, tokens, passwords) with placeholders before
   # any content is sent to a model.
   redact_before_llm: true
-  # false = only local models (e.g. Ollama) may see project data.
-  allow_cloud_models: false
+  # true (the default) = cloud model APIs (Anthropic, OpenAI, ...) may see
+  # project data, with secrets replaced as above. Set false when the data
+  # must stay on this machine: only local models (e.g. Ollama) are used then.
+  allow_cloud_models: true

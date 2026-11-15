@@ -59,8 +59,8 @@ pub(crate) fn compact(all: &mut [Message]) {
 
 impl Assistant {
     /// Starts an AI scan in the background and returns it. People only;
-    /// the model settings are the assistant's (cloud models need
-    /// `data.allow_cloud_models` in the rules of engagement).
+    /// the model settings are the assistant's (cloud models are refused when
+    /// the rules of engagement set `data.allow_cloud_models: false`).
     pub fn start_ai_scan(self: &Arc<Self>, human: &pm_service::pm_policy::Actor, req: AiScanRequest) -> Result<AiScan> {
         let cfg = self.service.assistant_config()?;
         let key = self.check(&cfg)?;

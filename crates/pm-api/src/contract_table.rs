@@ -36,7 +36,7 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/exchanges", "exchanges", "Search recorded exchanges, newest first.").query::<HistoryFilter>().out::<ExchangePage>(),
         op("get", "/exchanges/{id}", "exchange", "One exchange: summary, request and response text, and a model-safe view.")
             .query::<BytesQuery>()
-            .json("Object with `summary`, `request`, `response`, `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
+            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
         op("post", "/search", "search", "Search recorded traffic for text or a regular expression.")
             .body::<SearchRequest>().out::<SearchResult>(),
         op("post", "/search/ws", "search_ws", "Search recorded WebSocket messages.").body::<WsSearchRequest>().out::<WsSearchResult>(),

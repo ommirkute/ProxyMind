@@ -188,8 +188,8 @@ export default function Assistant() {
               <p className="small muted">
                 Paste the key here and press Save key: it is kept on this computer only (in your ProxyMind folder, readable by you),
                 never in the project file, and never shown again. An environment variable of the same name, if set, takes precedence.
-                The AI scan uses the same model and key. Cloud models also need{" "}
-                <code>allow_cloud_models: true</code> in the rules of engagement
+                The AI scan uses the same model and key. Cloud models are allowed unless the rules of engagement set{" "}
+                <code>allow_cloud_models: false</code>
                 {s && ` (currently ${s.cloud_models_allowed ? "allowed" : "not allowed"})`}.
               </p>
               <ErrorBox error={save.error} />

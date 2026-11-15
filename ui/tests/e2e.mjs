@@ -424,6 +424,18 @@ try {
     await page.locator('[data-testid="replay-result"]', { hasText: "401" }).waitFor();
     check(true, "Ctrl+Enter sends, and ‹ › step through the tab's history");
     await page.getByLabel("Next request").click();
+    await page.locator('[data-testid="replay-result"]', { hasText: "200" }).waitFor();
+    // Pretty and Render read the decoded body (not the model view, which is cut and keeps no markup).
+    await page.locator('[data-testid="replay-response"] button', { hasText: "Pretty" }).click();
+    check(await page.locator('[data-testid="replay-response"] pre').textContent().then((t) => /\{\n {2}"/.test(t)), "Replay's Pretty view indents the JSON response");
+    await page.getByLabel("Raw request").fill(`GET /search?q=pretty-check HTTP/1.1\nHost: shop\n\n`);
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="replay-result"]', { hasText: "200" }).waitFor();
+    await page.locator('[data-testid="replay-response"] pre', { hasText: "pretty-check" }).waitFor();
+    check(await page.locator('[data-testid="replay-response"] pre').textContent().then((t) => t.includes("<h1>Search</h1>")), "Replay's Pretty view shows an HTML response with its tags");
+    await page.locator('[data-testid="replay-response"] button', { hasText: "Render" }).click();
+    check(await page.getByTestId("render-frame").contentFrame().locator("h1").textContent() === "Search", "Replay's Render view draws the HTML page");
+    await page.locator('[data-testid="replay-response"] button', { hasText: "Pretty" }).click();
     // Inspector: edit a header value in place.
     await page.getByLabel("Raw request").fill(`GET /search?q=shoes&page=1 HTTP/1.1\nHost: shop\nCookie: a=1; theme=dark\n\n`);
     // The raw request is re-rendered after each edit: wait for it rather than read it at once.
@@ -586,8 +598,13 @@ try {
     await open(`history/${htmlId}`);
     await page.locator('[data-testid="response-view"] button', { hasText: "Render" }).click();
     const renderFrame = page.getByTestId("render-frame");
-    check(await renderFrame.getAttribute("sandbox") === "" && (await renderFrame.getAttribute("srcdoc")).includes("default-src 'none'"), "HTML responses render sandboxed, without scripts or network");
+    const srcdoc = await renderFrame.getAttribute("srcdoc");
+    check(await renderFrame.getAttribute("sandbox") === "" && srcdoc.includes("default-src 'none'"), "HTML responses render sandboxed, without scripts or network");
+    // The page itself, markup and all (not the model view's visible text, which drops every tag).
+    check(srcdoc.includes("<h1>Search</h1>") && srcdoc.includes("<li>Coffee</li>"), "Render draws the page's own HTML");
+    check(await renderFrame.contentFrame().locator("h1").textContent() === "Search", "the rendered page shows its heading");
     await page.locator('[data-testid="response-view"] button', { hasText: "Pretty" }).click();
+    check(await page.locator('[data-testid="response-view"] pre').textContent().then((t) => t.includes("<title>Search</title>")), "Pretty shows the HTML with its tags");
     await page.getByTestId(`row-${htmlId}`).click({ button: "right" });
     await page.getByText("Copy as Python requests").click();
     await page.locator("text=Code copied.").first().waitFor();

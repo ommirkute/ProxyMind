@@ -13,8 +13,13 @@ use tokio::net::TcpStream;
 const TOKEN: &str = "t0k3n-for-tests-0123456789abcdef0123456789";
 
 async fn start() -> (u16, u16) {
+    start_with("").await
+}
+
+/// `start` with extra top-level rules-of-engagement YAML appended.
+async fn start_with(extra_roe: &str) -> (u16, u16) {
     let shop = pm_demo::VulnShop::start_local().await.unwrap().port();
-    let roe = format!("version: 1\nscope:\n  include: [\"http://127.0.0.1:{shop}/\"]\n");
+    let roe = format!("version: 1\nscope:\n  include: [\"http://127.0.0.1:{shop}/\"]\n{extra_roe}");
     let svc = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap();
     let state =
         pm_api::AppState::new(Arc::new(svc), Actor::parse("human:tester").unwrap(), TOKEN.into(), "test.pmproj".into())
@@ -424,13 +429,14 @@ async fn proxy_listeners_are_saved_and_validated() {
 
 #[tokio::test]
 async fn assistant_settings_and_refusals() {
-    let (port, _) = start().await;
+    // Cloud models are allowed by default; this engagement keeps its data on the machine.
+    let (port, _) = start_with("data:\n  allow_cloud_models: false\n").await;
     let (st, _, body) = http(port, "GET", "/api/v1/assistant", &[AUTH], None).await;
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(st, 200);
     assert_eq!(v["acts_as"], "agent:assistant");
     assert!(v["problem"].as_str().unwrap().contains("choose a model"));
-    // A cloud model without permission in the ROE is refused before anything is sent.
+    // A cloud model the ROE does not allow is refused before anything is sent.
     let cloud = json!({"provider": "anthropic", "base_url": "https://api.anthropic.com/v1", "model": "m"});
     assert_eq!(http(port, "PUT", "/api/v1/assistant/config", &[AUTH, CHANGE], Some(cloud)).await.0, 200);
     let (st, _, body) =

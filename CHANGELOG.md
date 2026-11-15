@@ -3,6 +3,23 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
+## Unreleased
+
+### Changed
+
+- **Cloud models are allowed by default.** Most people use a cloud model (Anthropic, OpenAI) with the Assistant and the
+  AI scan, so the rules of engagement now allow them unless they say `data.allow_cloud_models: false`. Secrets are still
+  replaced before any model sees traffic (`redact_before_llm`, on by default). Engagements whose data must stay on the
+  machine set `allow_cloud_models: false` and only local model servers (Ollama, LM Studio, vLLM) are used, as before.
+
+### Fixed
+
+- **Pretty and Render showed the wrong body** in Replay, HTTP history and the Fuzzer. They read the text prepared for
+  models, which keeps only the visible text of an HTML page (no tags) and is cut to a token budget, so Render drew
+  plain text instead of the page, Pretty showed HTML without its markup, and a large JSON body was cut in the middle and
+  could not be indented. They now use the decoded body itself (de-chunked and decompressed, all of it, markup kept):
+  `GET /api/v1/exchanges/{id}` returns it as `request_body` and `response_body`.
+
 ## 0.2.0 (2026-11-15)
 
 First release since 0.1.0. Everything below ships in it; the version number did not change while it was prepared.
