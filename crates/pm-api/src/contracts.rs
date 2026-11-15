@@ -353,7 +353,8 @@ mod tests {
     #[test]
     fn committed_openapi_document_is_current() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api/openapi.json");
-        let committed = std::fs::read_to_string(path).unwrap_or_default();
+        // A Windows checkout may turn the file's line ends into CRLF; the content is what counts.
+        let committed = std::fs::read_to_string(path).unwrap_or_default().replace("\r\n", "\n");
         assert!(committed == openapi_json(), "docs/api/openapi.json is stale: run `cargo xtask contracts`");
     }
 
@@ -410,7 +411,8 @@ mod tests {
     /// The (method, path, handler) triples `routes::api()` registers, read from its source: each `.route("path", ..)`
     /// and the `get`/`post`/`put`/`patch`/`delete` calls inside its second argument.
     fn registered_routes() -> Vec<(String, String, String)> {
-        let src = include_str!("routes.rs");
+        // CRLF in a Windows checkout would hide the `\n}\n` that ends `api()`.
+        let src = include_str!("routes.rs").replace("\r\n", "\n");
         let start = src.find("pub fn api() -> Router<AppState> {").expect("api() exists");
         let body = &src[start..];
         let body = &body[..body.find("\n}\n").expect("api() ends")];

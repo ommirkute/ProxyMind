@@ -37,7 +37,9 @@ fn contracts(check: bool) -> Result<(), String> {
     for out in outputs() {
         let path = root.join(out.path);
         if check {
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(out.content.as_str()) {
+            // Compare content, not line ends (a Windows checkout may hold CRLF).
+            let committed = std::fs::read_to_string(&path).ok().map(|c| c.replace("\r\n", "\n"));
+            if committed.as_deref() != Some(out.content.as_str()) {
                 return Err(format!("{} is stale: run `cargo xtask contracts`", out.path));
             }
         } else {
