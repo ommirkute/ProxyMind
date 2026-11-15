@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { ErrorBox, Panel, useAction, useLoad } from "../components";
+import type { ClientCert, HostOverride } from "../api-types.gen";
 
 interface Upstream {
   kind: "http" | "socks5";
@@ -12,16 +13,7 @@ interface Upstream {
   bypass: string[];
 }
 
-interface ClientCert {
-  host: string;
-  cert_file: string;
-  key_file: string;
-}
 
-interface HostOverride {
-  host: string;
-  address: string;
-}
 
 interface NetConfig {
   upstream: Upstream | null;

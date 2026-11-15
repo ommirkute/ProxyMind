@@ -3,8 +3,8 @@ import { ApiError, api, toast } from "../api";
 import { AttackGraph } from "../AttackGraph";
 import { useLiveEvent } from "../live";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction, useLoad } from "../components";
+import type { AiScanLog as Log, Memory } from "../api-types.gen";
 
-interface Log { ts_ms: number; kind: string; text: string }
 interface Scan {
   id: number; target: string; focus: string; status: string; phase: string; model: string;
   steps: number; max_steps: number; deadline_ms: number; actor: string; started_by: string;
@@ -234,7 +234,6 @@ function Say({ id, onSent }: { id: number; onSent: (s: Scan) => void }) {
   );
 }
 
-interface Memory { id: number; host: string; kind: string; text: string; actor: string; created_ms: number }
 
 const hostOf = (url: string) => {
   try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }

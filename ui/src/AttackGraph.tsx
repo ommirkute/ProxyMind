@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { api, toast } from "./api";
 import { Chip, Empty, ErrorBox, Panel } from "./components";
+import type { GraphEdge as Edge } from "./api-types.gen";
 
 interface Step { text: string; finding_id?: number; exchange_id?: number }
 interface Path { id: number; scan_id: number | null; title: string; impact: string; severity: string; steps: Step[]; actor: string; created_ms: number }
 interface Node { id: string; label: string; finding_id?: number; severity?: string; depth: number; impact: boolean }
-interface Edge { from: string; to: string; paths: number[] }
 interface Graph { nodes: Node[]; edges: Edge[]; paths: Path[] }
 
 const W = 190, H = 54, GX = 70, GY = 22, PAD = 12;

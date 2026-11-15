@@ -23,7 +23,48 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, List, Optional
+
+if TYPE_CHECKING:  # the generated shapes of the API (see proxymind/types.py); annotations only
+    from .types import (
+        ActiveScanResult,
+        ApprovalRow,
+        AuthzReport,
+        Clickjacking,
+        CollaboratorInteraction,
+        CollaboratorPayload,
+        CollaboratorStatus,
+        Coverage,
+        CrawlResult,
+        CurlParsed,
+        CustomScanResult,
+        DiscoverResult,
+        DomTestResult,
+        ExchangeSummary,
+        FindingProve,
+        FoundComment,
+        FoundScript,
+        FuzzerResult,
+        GraphQlImportResult,
+        GroupResult,
+        ImportResult,
+        OpenApiImportResult,
+        OrganizerItem,
+        PluginCheckResult,
+        PluginsView,
+        Preset,
+        ProofResult,
+        ProveSweep,
+        ReplayResult,
+        RoeView,
+        SavedCustomCheck,
+        ScanIssue,
+        SearchResult,
+        SiteView,
+        TargetAnalysis,
+        TokenAnalyzerResult,
+        WsSearchResult,
+    )
 
 __all__ = ["Client", "ApiError", "Denied", "PendingApproval"]
 __version__ = "0.2.0"
@@ -128,7 +169,7 @@ class Client:
     def status(self) -> dict:
         return self._get("/status")
 
-    def roe(self) -> dict:
+    def roe(self) -> RoeView:
         """The rules of engagement in force: {text, summary}."""
         return self._get("/roe")
 
@@ -136,11 +177,11 @@ class Client:
         """Validates ROE YAML without saving; returns its summary."""
         return self._post("/roe/check", {"text": text})
 
-    def set_roe(self, text: str) -> dict:
+    def set_roe(self, text: str) -> RoeView:
         """Replaces the rules of engagement (you act as the human who started the UI); audited."""
         return self.request("PUT", "/roe", body={"text": text})
 
-    def history(self, **filters: Any) -> list:
+    def history(self, **filters: Any) -> List[ExchangeSummary]:
         """Recorded exchanges, newest first. Filters: host, path, method, status, source, limit, before_id…"""
         return self._get("/exchanges", **filters)["exchanges"]
 
@@ -148,26 +189,26 @@ class Client:
         return self._get(f"/exchanges/{exchange_id}")
 
     def search(self, query: str, regex: bool = False, case_sensitive: bool = False, part: str = "both",
-               **filters: Any) -> dict:
+               **filters: Any) -> SearchResult:
         """Finds text in recorded requests/responses (bodies decoded). Returns {hits, scanned, next_before_id}."""
         return self._post("/search", self._args(query=query, regex=regex, case_sensitive=case_sensitive, part=part,
                                                **filters))
 
-    def search_ws(self, query: str, **opts: Any) -> dict:
+    def search_ws(self, query: str, **opts: Any) -> WsSearchResult:
         """Finds text in recorded WebSocket messages. Options: regex, case_sensitive, invert, host,
         direction (client/server/both), in_scope, before_id, limit. Returns {hits, scanned, next_before_id}."""
         return self._post("/search/ws", self._args(query=query, **opts))
 
     # ----------------------------------------------------------- organizer --
 
-    def organizer(self, status: Optional[str] = None) -> list:
+    def organizer(self, status: Optional[str] = None) -> List[OrganizerItem]:
         """Exchanges kept aside, newest first. status: new, in_progress, postponed, done or ignored."""
         return self._get("/organizer", status=status)
 
-    def organizer_add(self, exchange_id: int, note: str = "") -> dict:
+    def organizer_add(self, exchange_id: int, note: str = "") -> OrganizerItem:
         return self._post("/organizer", {"exchange_id": exchange_id, "note": note})
 
-    def organizer_update(self, item_id: int, status: Optional[str] = None, note: Optional[str] = None) -> dict:
+    def organizer_update(self, item_id: int, status: Optional[str] = None, note: Optional[str] = None) -> OrganizerItem:
         return self.request("PATCH", f"/organizer/{item_id}", body=self._args(status=status, note=note))
 
     def organizer_delete(self, item_id: int) -> dict:
@@ -175,18 +216,18 @@ class Client:
 
     # ---------------------------------------------- engagement tools (read) --
 
-    def engage_comments(self, **filters: Any) -> list:
+    def engage_comments(self, **filters: Any) -> List[FoundComment]:
         """Comments in recorded HTML/JS/CSS. Filters: host, in_scope, max_scan. Sends nothing."""
         return self._post("/engage/comments", self._args(**filters))
 
-    def engage_scripts(self, **filters: Any) -> list:
+    def engage_scripts(self, **filters: Any) -> List[FoundScript]:
         return self._post("/engage/scripts", self._args(**filters))
 
-    def engage_analyze(self, **filters: Any) -> dict:
+    def engage_analyze(self, **filters: Any) -> TargetAnalysis:
         """URLs, methods, statuses, content types and every parameter seen."""
         return self._post("/engage/analyze", self._args(**filters))
 
-    def engage_references(self, exchange_id: int) -> list:
+    def engage_references(self, exchange_id: int) -> List[ExchangeSummary]:
         """Recorded responses that link to this exchange's page."""
         return self._post("/engage/references", {"exchange_id": exchange_id})
 
@@ -196,20 +237,20 @@ class Client:
         body = {"exchange_id": exchange_id, "technique": technique, "auto_submit": auto_submit}
         return self._post("/engage/csrf", body)["html"]
 
-    def clickjacking(self, exchange_id: int) -> dict:
+    def clickjacking(self, exchange_id: int) -> Clickjacking:
         """{framable, reasons, poc} for a recorded page."""
         return self._post("/engage/clickjacking", {"exchange_id": exchange_id})
 
     # -------------------------------------------------------- collaborator --
 
-    def collaborator(self) -> dict:
+    def collaborator(self) -> CollaboratorStatus:
         return self._get("/collaborator")
 
-    def collaborator_payload(self, note: str = "") -> dict:
+    def collaborator_payload(self, note: str = "") -> CollaboratorPayload:
         """A new out-of-band payload {token, http_url, dns_name}; a listener must be set up."""
         return self._post("/collaborator/payloads", {"note": note})
 
-    def collaborator_interactions(self, token: Optional[str] = None, limit: int = 100) -> list:
+    def collaborator_interactions(self, token: Optional[str] = None, limit: int = 100) -> List[CollaboratorInteraction]:
         """Callbacks seen (untrusted network content), newest first."""
         return self._get("/collaborator/interactions", token=token, limit=limit)
 
@@ -218,11 +259,11 @@ class Client:
         multipart or json. Sends nothing."""
         return self._post("/tools/request-transform", self._args(op=op, raw=raw, to=to))["raw"]
 
-    def site_map(self, host: Optional[str] = None) -> list:
+    def site_map(self, host: Optional[str] = None) -> List[SiteView]:
         """Recorded traffic as a tree per origin."""
         return self._get("/sitemap", host=host)
 
-    def annotate(self, exchange_id: int, highlight: Optional[str] = None, comment: Optional[str] = None) -> dict:
+    def annotate(self, exchange_id: int, highlight: Optional[str] = None, comment: Optional[str] = None) -> ExchangeSummary:
         """Sets (or clears) a history row's highlight (red, orange, yellow, green, blue, purple, gray) and comment."""
         return self.request("PUT", f"/exchanges/{exchange_id}/annotation", body=self._args(highlight=highlight, comment=comment))
 
@@ -233,10 +274,10 @@ class Client:
     def model(self, **filters: Any) -> dict:
         return self._get("/model", **filters)
 
-    def coverage(self, all: bool = False) -> dict:
+    def coverage(self, all: bool = False) -> Coverage:
         return self._get("/coverage", all=str(all).lower())
 
-    def issues(self, **filters: Any) -> list:
+    def issues(self, **filters: Any) -> List[ScanIssue]:
         """Passive scan of recorded traffic (sends nothing). Filters: host, min_severity, limit."""
         return self._get("/scan/issues", **filters)
 
@@ -249,15 +290,15 @@ class Client:
     def proof(self, proof_id: int) -> dict:
         return self._get(f"/proofs/{proof_id}")
 
-    def finding_prove(self, finding_id: int) -> dict:
+    def finding_prove(self, finding_id: int) -> FindingProve:
         """Try to prove a finding with the oracle that fits its class."""
         return self._post(f"/findings/{finding_id}/prove", {})
 
-    def findings_prove_all(self) -> dict:
+    def findings_prove_all(self) -> ProveSweep:
         """Prove every suspected finding whose class has an oracle."""
         return self._post("/findings/prove", {})
 
-    def approvals(self, status: Optional[str] = None) -> list:
+    def approvals(self, status: Optional[str] = None) -> List[ApprovalRow]:
         """Approvals, all by default; status: pending, approved, denied, used."""
         return self._get("/approvals", status=status or "all")
 
@@ -280,58 +321,58 @@ class Client:
     # ------------------------------------------------------------- acting --
 
     def replay(self, raw: Optional[str] = None, url: Optional[str] = None, exchange_id: Optional[int] = None,
-               identity: Optional[str] = None, approval_id: Optional[str] = None, **extra: Any) -> dict:
+               identity: Optional[str] = None, approval_id: Optional[str] = None, **extra: Any) -> ReplayResult:
         """Send a request through the policy gate. Raises PendingApproval if a human must approve."""
         body = self._args(raw=raw, url=url, exchange_id=exchange_id, identity=identity, approval_id=approval_id, **extra)
         return self._check(self._post("/replay", body))
 
-    def replay_group(self, requests: list, mode: str = "sequence", **extra: Any) -> dict:
+    def replay_group(self, requests: list, mode: str = "sequence", **extra: Any) -> GroupResult:
         """Send 2-20 requests to one server as a group: mode "sequence" (one after another) or "parallel"
         (at the same moment). requests: [{"url": ..., "raw": ..., "name": ...}]. Raises PendingApproval."""
         return self._check(self._post("/replay/group", self._args(requests=requests, mode=mode, **extra)))
 
-    def fuzzer(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> dict:
+    def fuzzer(self, raw: str, payload_sets: list, url: Optional[str] = None, **extra: Any) -> FuzzerResult:
         """Fuzz positions marked §like this§. payload_sets: [{"list": [...]}, {"numbers": "1-10"}, {"builtin": "sqli"}]."""
         return self._check(self._post("/fuzzer", self._args(raw=raw, payload_sets=payload_sets, url=url, **extra)))
 
-    def crawl(self, url: str, **extra: Any) -> dict:
+    def crawl(self, url: str, **extra: Any) -> CrawlResult:
         return self._check(self._post("/crawl", self._args(url=url, **extra)))
 
     def discover(self, url: str, words: Optional[list] = None, extensions: Optional[list] = None,
-                 **extra: Any) -> dict:
+                 **extra: Any) -> DiscoverResult:
         """Looks for hidden files and folders under url (GET only; built-in list unless words are given)."""
         return self._check(self._post("/discover", self._args(url=url, words=words, extensions=extensions, **extra)))
 
-    def plugins(self) -> dict:
+    def plugins(self) -> PluginsView:
         """Installed plugins (per user) and what the plugin sandbox does here: {plugins, sandbox, registry}."""
         return self._get("/plugins")
 
     def plugin_check(self, plugin: str, exchange_id: int, identity: Optional[str] = None,
-                     approval_id: Optional[str] = None) -> dict:
+                     approval_id: Optional[str] = None) -> PluginCheckResult:
         """Runs an active-check plugin on a recorded exchange; its requests go through the policy gate.
         Returns {issues, exchange_ids, notes}; raises PendingApproval or Denied otherwise."""
         return self._check(self._post("/plugins/check", self._args(
             plugin=plugin, exchange_id=exchange_id, identity=identity, approval_id=approval_id)))
 
-    def scan_active(self, exchange_id: int, checks: Optional[list] = None, **extra: Any) -> dict:
+    def scan_active(self, exchange_id: int, checks: Optional[list] = None, **extra: Any) -> ActiveScanResult:
         return self._check(self._post("/scan/active", self._args(exchange_id=exchange_id, checks=checks, **extra)))
 
-    def openapi_import(self, spec: Optional[str] = None, exchange_id: Optional[int] = None, **extra: Any) -> dict:
+    def openapi_import(self, spec: Optional[str] = None, exchange_id: Optional[int] = None, **extra: Any) -> OpenApiImportResult:
         return self._check(self._post("/openapi/import", self._args(spec=spec, exchange_id=exchange_id, **extra)))
 
     def graphql_import(self, url: Optional[str] = None, schema: Optional[str] = None,
-                       exchange_id: Optional[int] = None, fetch: bool = False, **extra: Any) -> dict:
+                       exchange_id: Optional[int] = None, fetch: bool = False, **extra: Any) -> GraphQlImportResult:
         """Reads a GraphQL schema (introspection JSON, a recorded response, or fetch=True) into operations."""
         return self._check(self._post("/graphql/import", self._args(url=url, schema=schema, exchange_id=exchange_id,
                                                                     fetch=fetch or None, **extra)))
 
-    def authz_check(self, exchange_id: int, identities: list, include_anonymous: bool = True) -> dict:
+    def authz_check(self, exchange_id: int, identities: list, include_anonymous: bool = True) -> AuthzReport:
         return self._post("/authz/check", {"exchange_id": exchange_id, "identities": identities, "include_anonymous": include_anonymous})
 
     def create_finding(self, title: str, vuln_class: str, severity: str, evidence: list, description: str = "", url: Optional[str] = None) -> dict:
         return self._post("/findings", self._args(title=title, vuln_class=vuln_class, severity=severity, evidence=evidence, description=description, url=url))
 
-    def prove(self, oracle: str, **inputs: Any) -> dict:
+    def prove(self, oracle: str, **inputs: Any) -> ProofResult:
         """Run a proof: differential_authz, timing, oast or reflection (see docs/agents.md for inputs)."""
         return self._check(self._post("/proofs", self._args(oracle=oracle, **inputs)))
 
@@ -342,10 +383,10 @@ class Client:
     def compare(self, a: int, b: int) -> dict:
         return self._post("/tools/compare", {"a": a, "b": b})
 
-    def token_analyzer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> dict:
+    def token_analyzer(self, exchange_id: int, locator: str, samples: int = 100, **extra: Any) -> TokenAnalyzerResult:
         return self._check(self._post("/tools/token-analyzer", self._args(exchange_id=exchange_id, locator=locator, samples=samples, **extra)))
 
-    def import_har(self, har: str) -> dict:
+    def import_har(self, har: str) -> ImportResult:
         """Adds a HAR file's exchanges (text) to history; sends nothing. Returns {imported, exchange_ids, skipped}."""
         return self._post("/import/har", {"har": har})
 
@@ -361,28 +402,28 @@ class Client:
         """A recorded request as a python, javascript or powershell snippet."""
         return self._get(f"/exchanges/{exchange_id}/code", lang=lang)["code"]
 
-    def dom_test(self, exchange_id: int, storage: bool = False, pollution: bool = True) -> dict:
+    def dom_test(self, exchange_id: int, storage: bool = False, pollution: bool = True) -> DomTestResult:
         """DOM sources reaching sinks on a recorded page (rendered offline; sends nothing)."""
         return self._post("/dom/test", {"exchange_id": exchange_id, "storage": storage, "pollution": pollution})
 
-    def custom_checks(self) -> list:
+    def custom_checks(self) -> List[SavedCustomCheck]:
         """Saved custom checks (YAML scan checks)."""
         return self._get("/scan/custom-checks")
 
-    def custom_check_save(self, yaml: str) -> dict:
+    def custom_check_save(self, yaml: str) -> SavedCustomCheck:
         """Saves (or replaces, by id) a custom check written in YAML."""
         return self._post("/scan/custom-checks", {"yaml": yaml})
 
-    def custom_scan(self, exchange_id: int, checks: Optional[list] = None, yaml: Optional[str] = None, **extra: Any) -> dict:
+    def custom_scan(self, exchange_id: int, checks: Optional[list] = None, yaml: Optional[str] = None, **extra: Any) -> CustomScanResult:
         """Runs saved custom checks (default all) or one given as yaml on a recorded request."""
         body = self._args(exchange_id=exchange_id, checks=checks, yaml=yaml, **extra)
         return self._check(self._post("/scan/custom", body))
 
-    def match_replace_presets(self) -> list:
+    def match_replace_presets(self) -> List[Preset]:
         """Ready-made response-modification rules (unhide fields, remove scripts…) to add to the rules."""
         return self._get("/match-replace/presets")
 
-    def curl_parse(self, command: str) -> dict:
+    def curl_parse(self, command: str) -> CurlParsed:
         """Reads a curl command into {url, method, raw, warnings}, ready for replay(); sends nothing."""
         return self._post("/tools/curl", {"command": command})
 

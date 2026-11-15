@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, fmtDateTime, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
 import { useLiveTick } from "../live";
+import type { ScanTaskView as TaskRow, Every } from "../api-types.gen";
 
 export interface ScanProfile {
   name: string;
@@ -16,25 +17,7 @@ export interface ScanProfile {
   builtin: boolean;
 }
 
-interface TaskRow {
-  task_id: string;
-  url: string;
-  actor: string;
-  created_ms: number;
-  profile?: string;
-  schedule_id?: number;
-  status: "crawling" | "auditing" | "paused" | "done" | "cancelled" | "failed";
-  pages_crawled: number;
-  targets_total: number;
-  targets_done: number;
-  requests: number;
-  relogins?: number;
-  current?: string;
-  notes: string[];
-  error?: string;
-}
 
-type Every = { kind: "hourly" } | { kind: "daily"; at: string } | { kind: "weekly"; day: string; at: string };
 
 interface Schedule {
   id: number;
