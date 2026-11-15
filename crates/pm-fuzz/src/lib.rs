@@ -92,8 +92,9 @@ pub struct PayloadSet {
     /// Numbers "from-to" or "from-to:step", e.g. "1000-1010".
     #[serde(default)]
     pub numbers: Option<String>,
-    /// A built-in list: see [`BUILTINS`].
+    /// A built-in list: ids, sqli, xss, traversal, ssti or methods_override.
     #[serde(default)]
+    #[schemars(extend("enum" = ["ids", "sqli", "xss", "traversal", "ssti", "methods_override"]))]
     pub builtin: Option<String>,
     /// Every string of `charset` from `min` to `max` characters long.
     #[serde(default)]

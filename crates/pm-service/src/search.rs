@@ -17,6 +17,9 @@ pub const MAX_SITE_ROWS: usize = 200_000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["query"]))]
+#[schemars(extend("additionalProperties" = false))]
 pub struct SearchRequest {
     /// Text (or a regex with `regex: true`) to find.
     pub query: String,
@@ -26,8 +29,11 @@ pub struct SearchRequest {
     pub case_sensitive: bool,
     /// both (default), request, response, headers, bodies, request_headers,
     /// request_body, response_headers or response_body.
+    #[schemars(extend("enum" = ["both", "request", "response", "headers", "bodies", "request_headers",
+        "request_body", "response_headers", "response_body"]))]
     pub part: Option<String>,
     /// How many exchanges to look at, newest first (default 5000).
+    #[schemars(range(min = 1, max = 50000))]
     pub max_scan: Option<usize>,
     /// List exchanges where the searched parts do NOT match (no snippets).
     pub invert: bool,
@@ -176,6 +182,8 @@ pub(crate) fn may_match_placeholder(query: &str, case_sensitive: bool) -> bool {
 /// A search through WebSocket messages.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["query"]))]
 pub struct WsSearchRequest {
     /// Text (or a regex with `regex: true`) to find in message payloads.
     pub query: String,
@@ -188,14 +196,17 @@ pub struct WsSearchRequest {
     /// Host contains this text.
     pub host: Option<String>,
     /// client (to the server), server, or both (default).
+    #[schemars(extend("enum" = ["both", "client", "server"]))]
     pub direction: Option<String>,
     /// Only connections whose targets are in scope.
     pub in_scope: Option<bool>,
     /// Only messages with an id below this (for paging back).
     pub before_id: Option<i64>,
     /// Messages to look at, newest first (default 5000, max 50 000).
+    #[schemars(range(min = 1, max = 50000))]
     pub max_scan: Option<usize>,
     /// Most hits (default 50, max 500).
+    #[schemars(range(min = 1, max = 500))]
     pub limit: Option<usize>,
 }
 

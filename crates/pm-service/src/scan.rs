@@ -16,8 +16,10 @@ pub struct ScanFilter {
     /// Only exchanges whose host contains this.
     pub host: Option<String>,
     /// How many recent exchanges to look at (default 2000, max 20000).
+    #[schemars(range(min = 1, max = 20000))]
     pub limit: Option<usize>,
     /// Only issues at least this severe: info, low, medium or high.
+    #[schemars(extend("enum" = ["info", "low", "medium", "high"]))]
     pub min_severity: Option<String>,
 }
 
@@ -297,17 +299,26 @@ impl Plan {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct ActiveScanRequest {
     /// The recorded request to scan (its target is used).
     pub exchange_id: i64,
     /// Checks to run (default: all but request_smuggling, file_upload and
-    /// race_condition, which need approval and run only when named). See
-    /// `pm_scan::active::CHECKS` and `pm_scan::oob::CHECKS`.
+    /// race_condition, which need approval and run only when named).
+    #[schemars(extend("items" = {"type": "string", "enum": ["sql_error", "cmd_injection", "reflected_input",
+        "open_redirect", "path_traversal", "ssti", "sql_boolean", "sql_time", "cmd_time", "ssrf_oob", "xxe_oob",
+        "sql_oob", "cmd_oob", "ssti_oob", "log4shell", "code_oob", "crlf", "host_header", "cors", "nosql_operator",
+        "auth_bypass", "hidden_params", "stored_xss", "dom_xss", "csrf", "jwt", "graphql", "cache_poisoning",
+        "cache_deception", "mass_assignment", "proto_pollution", "oauth", "deserialization", "request_smuggling",
+        "file_upload", "race_condition", "password_change", "user_enumeration"]}))]
     pub checks: Vec<String>,
     /// Most probe requests (default 300, max 2000).
+    #[schemars(range(min = 1, max = 2000))]
     pub max_requests: Option<usize>,
     /// How long to wait for out-of-band callbacks after the last such
     /// probe (default 10 s, max 60).
+    #[schemars(range(min = 1, max = 60))]
     pub oob_wait_seconds: Option<u64>,
     /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,

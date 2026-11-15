@@ -289,6 +289,44 @@ mod tests {
         assert!(handled >= listed.len(), "found only {handled} handlers for {} tools", listed.len());
     }
 
+    /// Every tool schema says `additionalProperties: false`, and the server now holds to it: an argument the schema
+    /// does not list is an error that names it (no tool silently ignores it).
+    #[tokio::test]
+    async fn unknown_arguments_are_refused_by_name() {
+        let s = server();
+        for (name, args) in [
+            ("roe_get", json!({"verbose": true})),
+            ("site_map", json!({"hots": "app"})),
+            ("history_grep", json!({"query": "x", "partt": "request"})),
+            ("exchange_get", json!({"id": 1, "full": true})),
+            ("skill_get", json!({"name": "ssrf_hunt", "extra": 1})),
+            ("finding_list", json!({"state": "proven"})),
+        ] {
+            let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+            let r = s.handle(call).await.unwrap();
+            assert_eq!(r["result"]["isError"], true, "{name}");
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            let field = args.as_object().unwrap().keys().next_back().unwrap().clone();
+            assert!(text.contains(&field), "{name}: the error should name `{field}`: {text}");
+        }
+    }
+
+    /// Tools without arguments, and calls that leave `arguments` out or send null, still work.
+    #[tokio::test]
+    async fn tools_without_arguments_accept_missing_empty_or_null_arguments() {
+        let s = server();
+        for params in [
+            json!({"name":"roe_get"}),
+            json!({"name":"roe_get","arguments":{}}),
+            json!({"name":"roe_get","arguments":null}),
+            json!({"name":"identity_list","arguments":null}),
+        ] {
+            let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params});
+            let r = s.handle(call).await.unwrap();
+            assert_eq!(r["result"]["isError"], false, "{params}: {r}");
+        }
+    }
+
     #[tokio::test]
     async fn skills_are_prompts_and_tools() {
         let s = server();

@@ -19,6 +19,8 @@ pub const MAX_EXPORT: usize = 20_000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["har"]))]
 pub struct ImportRequest {
     /// The HAR document as text.
     pub har: String,

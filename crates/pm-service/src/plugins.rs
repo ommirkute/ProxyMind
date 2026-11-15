@@ -49,6 +49,8 @@ pub struct PluginsView {
 
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["plugin", "exchange_id"]))]
 pub struct PluginCheckRequest {
     /// Name of the plugin to run.
     pub plugin: String,

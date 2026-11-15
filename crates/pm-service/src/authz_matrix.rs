@@ -19,6 +19,7 @@ pub struct AuthzMatrixRequest {
     /// Prove each flagged cell (differential oracle) and record proven ones as findings.
     pub prove: bool,
     /// Most operations to test (default 40, max 200).
+    #[schemars(range(min = 1, max = 200))]
     pub max_operations: Option<usize>,
 }
 

@@ -22,6 +22,8 @@ use crate::{Authorization, Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["raw", "payload_sets"]))]
 pub struct FuzzerRequest {
     /// Recorded exchange whose target to use (scheme, host, port).
     pub exchange_id: Option<i64>,
@@ -40,8 +42,10 @@ pub struct FuzzerRequest {
     pub extract: Vec<Extract>,
     /// Requests in flight at once (1-20, default 1). The rules of
     /// engagement's rate limits still apply.
+    #[schemars(range(min = 1, max = 20))]
     pub concurrency: Option<usize>,
     /// Pause before each request, in milliseconds (0-60000).
+    #[schemars(range(max = 60000))]
     pub throttle_ms: Option<u64>,
     /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,

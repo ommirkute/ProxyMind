@@ -37,6 +37,7 @@ pub struct NewAttackPath {
     /// What an attacker gains at the end.
     pub impact: String,
     /// critical, high, medium, low or info: the severity of the whole chain.
+    #[schemars(extend("enum" = ["critical", "high", "medium", "low", "info"]))]
     pub severity: String,
     /// The steps, in order.
     pub steps: Vec<AttackStep>,

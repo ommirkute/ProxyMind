@@ -43,8 +43,11 @@ pub struct GroupItem {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["requests"]))]
 pub struct GroupRequest {
     /// The requests to send.
+    #[schemars(length(min = 2, max = 20))]
     pub requests: Vec<GroupItem>,
     /// Send one after another (`sequence`) or at once (`parallel`).
     pub mode: GroupMode,

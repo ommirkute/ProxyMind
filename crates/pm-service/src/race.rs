@@ -34,6 +34,7 @@ pub struct RaceRequest {
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
     /// How many copies to send at once (2 to 50, default 10).
+    #[schemars(range(min = 2, max = 50))]
     pub count: Option<usize>,
     /// How to send the copies at once (default auto).
     pub mode: RaceModeChoice,

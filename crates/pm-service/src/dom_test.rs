@@ -11,6 +11,8 @@ use crate::{Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct DomTestRequest {
     /// A recorded HTML page.
     pub exchange_id: i64,

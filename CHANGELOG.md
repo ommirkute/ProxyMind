@@ -8,6 +8,10 @@ version may change project files, APIs and the CLI.
 ### API contracts
 
 - An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **Every MCP tool's input schema now comes from the Rust types** the server reads the arguments into, so what an agent
+  is told and what the server accepts cannot differ. The schemas of 65 tools were written by hand before. As a result
+  an argument a tool does not list is now refused with an error naming it (14 tools already did this); `history_grep`
+  lists all the history filters it always accepted, and `scan_active` lists two checks it already ran.
 - **The OpenAPI document now covers every route of the REST API** (175 operations): each one lists its query
   parameters or request body and what it answers with. 125 answer with a full schema; the rest say in words which keys
   they return, or are downloads and the event stream. A test fails if a route is added or removed without the document

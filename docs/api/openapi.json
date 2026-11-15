@@ -59,8 +59,48 @@
           },
           "checks": {
             "default": [],
-            "description": "Checks to run (default: all but request_smuggling, file_upload and\nrace_condition, which need approval and run only when named). See\n`pm_scan::active::CHECKS` and `pm_scan::oob::CHECKS`.",
+            "description": "Checks to run (default: all but request_smuggling, file_upload and\nrace_condition, which need approval and run only when named).",
             "items": {
+              "enum": [
+                "sql_error",
+                "cmd_injection",
+                "reflected_input",
+                "open_redirect",
+                "path_traversal",
+                "ssti",
+                "sql_boolean",
+                "sql_time",
+                "cmd_time",
+                "ssrf_oob",
+                "xxe_oob",
+                "sql_oob",
+                "cmd_oob",
+                "ssti_oob",
+                "log4shell",
+                "code_oob",
+                "crlf",
+                "host_header",
+                "cors",
+                "nosql_operator",
+                "auth_bypass",
+                "hidden_params",
+                "stored_xss",
+                "dom_xss",
+                "csrf",
+                "jwt",
+                "graphql",
+                "cache_poisoning",
+                "cache_deception",
+                "mass_assignment",
+                "proto_pollution",
+                "oauth",
+                "deserialization",
+                "request_smuggling",
+                "file_upload",
+                "race_condition",
+                "password_change",
+                "user_enumeration"
+              ],
               "type": "string"
             },
             "type": "array"
@@ -92,7 +132,8 @@
             "default": null,
             "description": "Most probe requests (default 300, max 2000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 2000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -102,13 +143,17 @@
             "default": null,
             "description": "How long to wait for out-of-band callbacks after the last such\nprobe (default 10 s, max 60).",
             "format": "uint64",
-            "minimum": 0,
+            "maximum": 60,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           }
         },
+        "required": [
+          "exchange_id"
+        ],
         "type": "object"
       },
       "ActiveScanResult": {
@@ -1161,7 +1206,8 @@
             "default": null,
             "description": "Most operations to test (default 40, max 200).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 200,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -2194,6 +2240,7 @@
             "default": null,
             "description": "Most link hops from the start (default 3, max 10).",
             "format": "uint",
+            "maximum": 10,
             "minimum": 0,
             "type": [
               "integer",
@@ -2204,7 +2251,8 @@
             "default": null,
             "description": "Most pages to fetch (default 50, max 500).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 500,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -2224,6 +2272,9 @@
             "type": "string"
           }
         },
+        "required": [
+          "url"
+        ],
         "type": "object"
       },
       "CrawlResult": {
@@ -2604,7 +2655,8 @@
             "default": null,
             "description": "Most requests (default 200, max 2000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 2000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -2619,6 +2671,9 @@
             ]
           }
         },
+        "required": [
+          "exchange_id"
+        ],
         "type": "object"
       },
       "CustomScanResult": {
@@ -2718,6 +2773,9 @@
             "type": "array"
           }
         },
+        "required": [
+          "input"
+        ],
         "type": "object"
       },
       "DiscoverRequest": {
@@ -2756,7 +2814,8 @@
             "default": null,
             "description": "Most requests (default 500, max 5000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 5000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -2776,6 +2835,9 @@
             "type": "array"
           }
         },
+        "required": [
+          "url"
+        ],
         "type": "object"
       },
       "DiscoverResult": {
@@ -2928,6 +2990,9 @@
             "type": "boolean"
           }
         },
+        "required": [
+          "exchange_id"
+        ],
         "type": "object"
       },
       "DomTestResult": {
@@ -4029,7 +4094,8 @@
             "default": null,
             "description": "Requests in flight at once (1-20, default 1). The rules of\nengagement's rate limits still apply.",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 20,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -4111,6 +4177,7 @@
             "default": null,
             "description": "Pause before each request, in milliseconds (0-60000).",
             "format": "uint64",
+            "maximum": 60000,
             "minimum": 0,
             "type": [
               "integer",
@@ -4126,6 +4193,10 @@
             ]
           }
         },
+        "required": [
+          "raw",
+          "payload_sets"
+        ],
         "type": "object"
       },
       "FuzzerResult": {
@@ -4798,6 +4869,8 @@
             "items": {
               "$ref": "#/components/schemas/GroupItem"
             },
+            "maxItems": 20,
+            "minItems": 2,
             "type": "array"
           },
           "stop_on_error": {
@@ -4806,6 +4879,9 @@
             "type": "boolean"
           }
         },
+        "required": [
+          "requests"
+        ],
         "type": "object"
       },
       "GroupResult": {
@@ -5326,6 +5402,9 @@
             "type": "string"
           }
         },
+        "required": [
+          "har"
+        ],
         "type": "object"
       },
       "ImportResult": {
@@ -6423,6 +6502,13 @@
           },
           "severity": {
             "description": "critical, high, medium, low or info: the severity of the whole chain.",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
             "type": "string"
           },
           "steps": {
@@ -7201,7 +7287,15 @@
           },
           "builtin": {
             "default": null,
-            "description": "A built-in list: see [`BUILTINS`].",
+            "description": "A built-in list: ids, sqli, xss, traversal, ssti or methods_override.",
+            "enum": [
+              "ids",
+              "sqli",
+              "xss",
+              "traversal",
+              "ssti",
+              "methods_override"
+            ],
             "type": [
               "string",
               "null"
@@ -7329,6 +7423,10 @@
             "type": "string"
           }
         },
+        "required": [
+          "plugin",
+          "exchange_id"
+        ],
         "type": "object"
       },
       "PluginCheckResult": {
@@ -8073,7 +8171,8 @@
             "default": null,
             "description": "How many copies to send at once (2 to 50, default 10).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 50,
+            "minimum": 2,
             "type": [
               "integer",
               "null"
@@ -9314,7 +9413,8 @@
             "default": null,
             "description": "How many recent exchanges to look at (default 2000, max 20000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 20000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -9323,6 +9423,12 @@
           "min_severity": {
             "default": null,
             "description": "Only issues at least this severe: info, low, medium or high.",
+            "enum": [
+              "info",
+              "low",
+              "medium",
+              "high"
+            ],
             "type": [
               "string",
               "null"
@@ -9870,6 +9976,7 @@
         "type": "object"
       },
       "SearchRequest": {
+        "additionalProperties": false,
         "description": "Filters for searching history. All set fields must match.",
         "properties": {
           "actor": {
@@ -9972,7 +10079,8 @@
             "default": null,
             "description": "How many exchanges to look at, newest first (default 5000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 50000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -9989,6 +10097,17 @@
           "part": {
             "default": null,
             "description": "both (default), request, response, headers, bodies, request_headers,\nrequest_body, response_headers or response_body.",
+            "enum": [
+              "both",
+              "request",
+              "response",
+              "headers",
+              "bodies",
+              "request_headers",
+              "request_body",
+              "response_headers",
+              "response_body"
+            ],
             "type": [
               "string",
               "null"
@@ -10056,6 +10175,9 @@
             ]
           }
         },
+        "required": [
+          "query"
+        ],
         "type": "object"
       },
       "SearchResult": {
@@ -10705,13 +10827,18 @@
             "default": null,
             "description": "How many tokens to collect (default 100, 10–500).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 500,
+            "minimum": 10,
             "type": [
               "integer",
               "null"
             ]
           }
         },
+        "required": [
+          "exchange_id",
+          "locator"
+        ],
         "type": "object"
       },
       "TokenAnalyzerResult": {
@@ -11739,6 +11866,11 @@
           "direction": {
             "default": null,
             "description": "client (to the server), server, or both (default).",
+            "enum": [
+              "both",
+              "client",
+              "server"
+            ],
             "type": [
               "string",
               "null"
@@ -11769,7 +11901,8 @@
             "default": null,
             "description": "Most hits (default 50, max 500).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 500,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -11779,7 +11912,8 @@
             "default": null,
             "description": "Messages to look at, newest first (default 5000, max 50 000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 50000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -11796,6 +11930,9 @@
             "type": "boolean"
           }
         },
+        "required": [
+          "query"
+        ],
         "type": "object"
       },
       "WsSearchResult": {
@@ -17341,7 +17478,8 @@
             "schema": {
               "default": null,
               "format": "uint",
-              "minimum": 0,
+              "maximum": 20000,
+              "minimum": 1,
               "type": [
                 "integer",
                 "null"
@@ -17355,6 +17493,12 @@
             "required": false,
             "schema": {
               "default": null,
+              "enum": [
+                "info",
+                "low",
+                "medium",
+                "high"
+              ],
               "type": [
                 "string",
                 "null"

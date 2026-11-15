@@ -32,6 +32,7 @@ mod history;
 mod identity;
 mod intercept;
 mod login_record;
+pub mod mcp_args;
 mod memory;
 mod model;
 mod network;

@@ -21,6 +21,8 @@ pub struct SavedCustomCheck {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct CustomScanRequest {
     /// The recorded request to test.
     pub exchange_id: i64,
@@ -29,6 +31,7 @@ pub struct CustomScanRequest {
     /// A check to try without saving it.
     pub yaml: Option<String>,
     /// Most requests (default 200, max 2000).
+    #[schemars(range(min = 1, max = 2000))]
     pub max_requests: Option<usize>,
     /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,

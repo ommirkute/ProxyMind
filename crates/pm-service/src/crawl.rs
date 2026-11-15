@@ -13,12 +13,16 @@ pub const MAX_CRAWL_PAGES: usize = 500;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["url"]))]
 pub struct CrawlRequest {
     /// Where to start, e.g. https://app.example.com/
     pub url: String,
     /// Most pages to fetch (default 50, max 500).
+    #[schemars(range(min = 1, max = 500))]
     pub max_pages: Option<usize>,
     /// Most link hops from the start (default 3, max 10).
+    #[schemars(range(min = 0, max = 10))]
     pub max_depth: Option<usize>,
     /// Also read /robots.txt and sitemaps for paths (default true).
     pub robots: Option<bool>,

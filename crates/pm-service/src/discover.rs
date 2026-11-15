@@ -12,6 +12,8 @@ use crate::{Authorization, Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["url"]))]
 pub struct DiscoverRequest {
     /// The folder to look in, e.g. https://app.example.com/ or …/api/
     pub url: String,
@@ -22,6 +24,7 @@ pub struct DiscoverRequest {
     /// Extensions to add to words without one, e.g. ["bak", "old", "php"].
     pub extensions: Vec<String>,
     /// Most requests (default 500, max 5000).
+    #[schemars(range(min = 1, max = 5000))]
     pub max_requests: Option<usize>,
     /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
