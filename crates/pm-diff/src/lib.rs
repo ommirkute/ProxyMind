@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// Parts of a response that change between identical requests.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct NoiseMask {
     /// JSON paths whose values vary (e.g. `/timestamp`, `/items/0/requestId`).
     pub json_paths: BTreeSet<String>,

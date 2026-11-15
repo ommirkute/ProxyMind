@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::codec::base64_decode;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Hint {
     /// idor, ssrf, traversal, command, injection, xss, jwt, upload, graphql, unauthenticated, admin, error, debug
     pub kind: &'static str,

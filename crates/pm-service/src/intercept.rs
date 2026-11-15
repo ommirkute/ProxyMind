@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::{Event, Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct InterceptState {
     pub attached: bool,
     pub settings: InterceptSettings,

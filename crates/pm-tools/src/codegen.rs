@@ -3,11 +3,11 @@
 //! Redirects are not followed, so the snippet shows what the server said.
 
 use pm_http::{find_head_end, parse_request_head};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::har::split_url;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Lang {
     Python,

@@ -41,17 +41,20 @@ pub struct ScanTaskRequest {
     #[schemars(range(min = 1, max = 200))]
     pub max_targets: Option<usize>,
     /// Most requests per operation (default 150, max 2000).
+    #[schemars(range(min = 1, max = 2000))]
     pub max_requests: Option<usize>,
     /// Checks to run (default all; submissions only get stored_xss and csrf).
     pub checks: Vec<String>,
     /// Record strong issues as suspected findings (default true).
     pub record_findings: Option<bool>,
+    /// Crawl and scan as this test identity (names from identity_list). The task logs in again when the session
+    /// ends and stops if that keeps failing.
     pub identity: Option<String>,
     /// Approval for the crawl, if the gate asked for one.
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanTaskStatus {
     Crawling,
@@ -81,7 +84,7 @@ impl ScanTaskStatus {
 }
 
 /// One issue a task found.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScanTaskIssue {
     pub operation: String,
     pub check: String,
@@ -117,7 +120,7 @@ impl ScanTaskIssue {
 }
 
 /// A task's progress and issues so far.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScanTaskView {
     pub task_id: String,
     pub url: String,

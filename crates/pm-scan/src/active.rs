@@ -30,7 +30,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PointKind {
     Query,
@@ -52,7 +52,7 @@ pub enum PointKind {
 }
 
 /// Where a payload can go.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Point {
     pub kind: PointKind,
     pub name: String,
@@ -245,7 +245,7 @@ impl Seen {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct ActiveIssue {
     pub check: &'static str,
     pub title: &'static str,

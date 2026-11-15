@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsMessageView {
     pub id: i64,
     pub ts_ms: i64,
@@ -31,7 +31,7 @@ pub struct WsMessageView {
     pub possible_prompt_injection: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsPage {
     pub exchange_id: i64,
     pub total: i64,
@@ -92,7 +92,7 @@ impl Service {
 }
 
 /// A message in the history across connections.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsHistoryItem {
     pub exchange_id: i64,
     pub host: String,
@@ -101,7 +101,7 @@ pub struct WsHistoryItem {
     pub message: WsMessageView,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsHistoryPage {
     pub messages: Vec<WsHistoryItem>,
     /// Pass as `before_id` for older messages.

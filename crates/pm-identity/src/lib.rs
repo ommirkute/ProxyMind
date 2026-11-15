@@ -163,7 +163,7 @@ pub fn response_text(response: &[u8]) -> String {
 
 /// What a logged-out response looks like for one app, learned by sending a
 /// request with and without credentials. Any one part matching is enough.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LoggedOut {
     pub statuses: Vec<u16>,

@@ -10,7 +10,7 @@ use crate::{Result, Service, ServiceError};
 
 pub const ASSISTANT_SETTING: &str = "assistant";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     /// Anthropic Messages API.
@@ -20,23 +20,27 @@ pub enum ProviderKind {
     Openai,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AssistantConfig {
+    /// Which API style the server speaks.
     pub provider: ProviderKind,
     /// API base, e.g. `https://api.anthropic.com/v1` or `http://127.0.0.1:11434/v1`.
     pub base_url: String,
+    /// Model name the server knows.
     pub model: String,
     /// Name of the environment variable holding the API key (the key itself
     /// is never stored in the project). Empty: no key (local servers).
     pub api_key_env: String,
     /// Most model calls per message, so a confused model can't loop forever.
     pub max_steps: u32,
+    /// Most tokens the model may write per call.
     pub max_tokens: u32,
     /// USD per million input and output tokens, for the cost meter (0:
     /// unknown, only tokens are shown). Prices change: copy them from the
     /// provider's pricing page.
     pub price_input: f64,
+    /// USD per million output tokens (see `price_input`).
     pub price_output: f64,
     /// `full` (every tool) or `compact` (a core set, for small local models
     /// that struggle with a long tool list).
@@ -46,7 +50,7 @@ pub struct AssistantConfig {
     pub worker_model: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolProfile {
     #[default]
@@ -79,7 +83,7 @@ pub struct ChatSummary {
     pub updated_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Chat {
     pub id: i64,
     pub title: String,
@@ -93,7 +97,7 @@ pub struct Chat {
 const KEYS_FILE: &str = "model-keys.json";
 
 /// Where a model API key comes from (never the key itself).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct KeyStatus {
     /// environment, saved or none
     pub source: String,

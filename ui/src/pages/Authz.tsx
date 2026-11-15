@@ -10,14 +10,8 @@ import {
   type LoginRecording,
 } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav, usePref } from "../components";
+import type { MatrixCell, MatrixFlag, AuthzReport as Report } from "../api-types.gen";
 
-interface Report {
-  method: string;
-  url: string;
-  baseline_status: number | null;
-  results: AuthzRow[];
-  how_to_read: string;
-}
 
 export function AuthzTable({ rows }: { rows: AuthzRow[] }) {
   if (rows.length === 0) return <Empty>No results yet.</Empty>;
@@ -304,8 +298,6 @@ export default function Authz() {
   );
 }
 
-interface MatrixCell { verdict: string; status?: number; evidence_id?: number }
-interface MatrixFlag { identity: string; kind: string; why: string; proven?: boolean; finding_id?: number }
 interface MatrixRow { operation: string; exchange_id: number; owner?: string; cells: Record<string, MatrixCell>; flags: MatrixFlag[] }
 interface AuthzMatrixData { identities: [string, string][]; rows: MatrixRow[]; skipped: string[]; flagged: number; proven: number }
 

@@ -10,7 +10,7 @@ use crate::{Authorization, Result, Service, ServiceError};
 
 pub const OPENAPI_SETTING: &str = "openapi_import";
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpenApiImportRequest {
     /// The spec text (JSON or YAML)…
@@ -21,11 +21,13 @@ pub struct OpenApiImportRequest {
     pub base_url: Option<String>,
     /// Send each GET example once (in scope only) so the model learns them.
     pub send_examples: bool,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SentExample {
     pub method: String,
     pub path: String,
@@ -34,7 +36,7 @@ pub struct SentExample {
     pub status: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum OpenApiImportResult {
     Imported {

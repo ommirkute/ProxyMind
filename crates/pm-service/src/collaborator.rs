@@ -36,7 +36,7 @@ fn email_for(token: &str, dns_domain: Option<&str>, smtp: Option<&str>) -> Optio
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CollaboratorStatus {
     /// Where payloads call back (`oast_public_url`), if set.
     pub public_url: Option<String>,
@@ -55,7 +55,7 @@ pub struct CollaboratorStatus {
 }
 
 /// An out-of-band probe the scanner sent.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CollaboratorProbe {
     pub token: String,
     pub check: String,
@@ -66,7 +66,7 @@ pub struct CollaboratorProbe {
     pub finding_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CollaboratorPayload {
     pub token: String,
     pub note: String,
@@ -82,7 +82,7 @@ pub struct CollaboratorPayload {
     pub interactions: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CollaboratorInteraction {
     pub id: i64,
     pub token: String,

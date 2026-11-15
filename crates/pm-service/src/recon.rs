@@ -18,7 +18,7 @@ use crate::{Result, Service, ServiceError};
 const MAX_CAPTURES: usize = 5000;
 const ARCHIVE: &str = "https://web.archive.org";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DnsReport {
     pub host: String,
     pub resolver: String,
@@ -28,7 +28,7 @@ pub struct DnsReport {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WaybackCapture {
     #[serde(flatten)]
     pub capture: Capture,
@@ -36,7 +36,7 @@ pub struct WaybackCapture {
     pub known: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WaybackReport {
     pub host: String,
     /// Captures on this host (before `limit` cut the list).

@@ -44,7 +44,7 @@ pub enum AssistantError {
 pub type Result<T> = std::result::Result<T, AssistantError>;
 
 /// What one user message produced.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Turn {
     pub chat_id: i64,
     /// Messages added in this turn (user, assistant and tool results).

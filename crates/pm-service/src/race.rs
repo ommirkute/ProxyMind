@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::replay::ReplayRequest;
 use crate::{Authorization, Result, Service, ServiceError, now_ms};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RaceModeChoice {
     /// HTTP/2 single-packet for HTTPS servers that speak it, else last-byte.
@@ -24,7 +24,7 @@ pub enum RaceModeChoice {
     LastByte,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RaceRequest {
     /// Recorded exchange to race (its target is used).
@@ -34,16 +34,22 @@ pub struct RaceRequest {
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
     /// How many copies to send at once (2 to 50, default 10).
+    #[schemars(range(min = 2, max = 50))]
     pub count: Option<usize>,
+    /// How to send the copies at once (default auto).
     pub mode: RaceModeChoice,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Update Content-Length to match the body (default true).
     pub fix_content_length: Option<bool>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// Hypothesis this request tests (links the exchanges as evidence).
     pub hypothesis_id: Option<i64>,
 }
 
 /// Responses that look alike (same status and body length).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RaceGroup {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
@@ -54,7 +60,7 @@ pub struct RaceGroup {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RaceResult {
     Done {

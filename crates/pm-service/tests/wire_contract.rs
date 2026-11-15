@@ -167,6 +167,120 @@ fn ws_replay_request() {
     rejects_unknown::<WsOut>(r#"{"nope":1}"#);
 }
 
+/// The request bodies and query strings that used to live in `pm-api` (`pm_service::api_types`): what each reads
+/// from JSON, what it fills in for a missing field, and whether an unknown field is an error. The strings are
+/// the parsed value written back out, so a renamed field, a changed default or a dropped `deny_unknown_fields`
+/// fails here.
+#[test]
+fn api_types_wire_format() {
+    use pm_service::api_types::*;
+
+    /// (what the client sent, what the service understood). `reject` lists bodies that must fail.
+    fn check<T: DeserializeOwned + Serialize>(cases: &[(&str, &str)], reject: &[&str]) {
+        for (sent, understood) in cases {
+            assert_eq!(reparsed::<T>(sent), *understood, "{} reading {sent}", std::any::type_name::<T>());
+        }
+        for sent in reject {
+            assert!(serde_json::from_str::<T>(sent).is_err(), "{} must reject {sent}", std::any::type_name::<T>());
+        }
+    }
+    let unknown = r#"{"nope":1}"#;
+
+    // Required fields, unknown fields ignored (no `deny_unknown_fields`).
+    check::<CaptureBody>(
+        &[
+            (r#"{"name":"a","exchange_id":3}"#, r#"{"name":"a","role":null,"exchange_id":3}"#),
+            (r#"{"name":"a","exchange_id":3,"extra":1}"#, r#"{"name":"a","role":null,"exchange_id":3}"#),
+            (r#"{"name":"a","role":"admin","exchange_id":3}"#, r#"{"name":"a","role":"admin","exchange_id":3}"#),
+        ],
+        &[r#"{"name":"a"}"#, r#"{"exchange_id":3}"#],
+    );
+    check::<RecordLoginBody>(
+        &[(r#"{"name":"a","from":1}"#, r#"{"name":"a","role":null,"from":1,"to":null}"#)],
+        &[r#"{"name":"a"}"#],
+    );
+    check::<SendBody>(&[(r#"{"text":"hi"}"#, r#"{"chat_id":null,"text":"hi"}"#)], &[r#"{"chat_id":1}"#]);
+    check::<ForwardBody>(
+        &[
+            ("{}", r#"{"raw":null,"fix_content_length":null}"#),
+            (r#"{"raw":"x","fix_content_length":false}"#, r#"{"raw":"x","fix_content_length":false}"#),
+        ],
+        &[],
+    );
+    check::<AnnotationBody>(&[("{}", r#"{"highlight":null,"comment":null}"#)], &[]);
+    check::<CodeQuery>(&[(r#"{"lang":"javascript"}"#, r#"{"lang":"javascript"}"#)], &["{}", r#"{"lang":"ruby"}"#]);
+    check::<CompareBody>(&[(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":2}"#)], &[r#"{"a":1}"#]);
+    check::<TokensBody>(&[(r#"{"tokens":["a"]}"#, r#"{"tokens":["a"]}"#)], &["{}"]);
+    check::<RoeBody>(&[(r#"{"text":"t"}"#, r#"{"text":"t"}"#)], &["{}"]);
+
+    // Everything optional, unknown fields ignored.
+    check::<StatusQuery>(&[("{}", r#"{"status":null}"#)], &[]);
+    check::<OrganizerQuery>(&[("{}", r#"{"status":null}"#), (unknown, r#"{"status":null}"#)], &[]);
+    check::<CollabQuery>(&[("{}", r#"{"limit":null,"token":null}"#)], &[]);
+    check::<WsHistoryQuery>(&[("{}", r#"{"host":null,"before_id":null,"limit":null}"#)], &[]);
+
+    // `deny_unknown_fields`, with and without a container `default`.
+    check::<SnapshotBody>(&[(r#"{"name":"s"}"#, r#"{"name":"s"}"#)], &[unknown, r#"{"name":"s","nope":1}"#, "{}"]);
+    check::<ChangesQuery>(&[(r#"{"snapshot":2}"#, r#"{"snapshot":2}"#)], &[unknown, "{}"]);
+    check::<ProbesQuery>(&[("{}", r#"{"limit":null}"#)], &[unknown]);
+    check::<ListenBody>(
+        &[(r#"{"listen":"127.0.0.1:1"}"#, r#"{"listen":"127.0.0.1:1","public_url":null}"#)],
+        &[unknown, "{}"],
+    );
+    check::<SmtpBody>(&[(r#"{"listen":"127.0.0.1:2"}"#, r#"{"listen":"127.0.0.1:2"}"#)], &[unknown, "{}"]);
+    check::<PayloadBody>(&[("{}", r#"{"note":""}"#), (r#"{"note":"n"}"#, r#"{"note":"n"}"#)], &[unknown]);
+    check::<OrganizerAdd>(
+        &[(r#"{"exchange_id":4}"#, r#"{"exchange_id":4,"note":""}"#)],
+        &[unknown, r#"{"exchange_id":4,"nope":1}"#, "{}"],
+    );
+    check::<UpdateSet>(&[(r#"{"enabled":true}"#, r#"{"enabled":true}"#)], &[unknown, "{}"]);
+    check::<UpdateCheck>(&[("{}", r#"{"force":false}"#)], &[unknown]);
+    check::<ReconDns>(
+        &[
+            (r#"{"host":"a"}"#, r#"{"host":"a","resolver":null}"#),
+            (r#"{"host":"a","resolver":"1.1.1.1:53"}"#, r#"{"host":"a","resolver":"1.1.1.1:53"}"#),
+        ],
+        &[r#"{"host":"a","nope":1}"#, "{}", r#"{"host":"a","resolver":"not an address"}"#],
+    );
+    check::<ReconWayback>(&[(r#"{"host":"a"}"#, r#"{"host":"a","limit":null}"#)], &[r#"{"host":"a","nope":1}"#, "{}"]);
+    check::<TriageBody>(&[("{}", r#"{"host":null,"in_scope":null,"limit":null}"#)], &[unknown]);
+    check::<HostQuery>(&[("{}", r#"{"host":null}"#)], &[unknown]);
+    check::<ScanQuery>(&[("{}", r#"{"scan":null}"#)], &[unknown]);
+    check::<ExplainBody>(&[("{}", r#"{"framework":null}"#)], &[unknown]);
+    check::<PackQuery>(&[("{}", r#"{"all":false}"#), (r#"{"all":true}"#, r#"{"all":true}"#)], &[unknown]);
+    check::<EngageExchange>(
+        &[
+            (r#"{"exchange_id":5}"#, r#"{"exchange_id":5,"technique":"auto","auto_submit":false}"#),
+            (
+                r#"{"exchange_id":5,"technique":"text_plain","auto_submit":true}"#,
+                r#"{"exchange_id":5,"technique":"text_plain","auto_submit":true}"#,
+            ),
+        ],
+        &[r#"{"exchange_id":5,"nope":1}"#, "{}", r#"{"exchange_id":5,"technique":"Form"}"#],
+    );
+    check::<PluginSet>(&[(r#"{"enabled":false}"#, r#"{"enabled":false}"#)], &[unknown, "{}"]);
+    check::<CheckYaml>(&[(r#"{"yaml":"id: x"}"#, r#"{"yaml":"id: x"}"#)], &[unknown, "{}"]);
+    check::<CodeBody>(
+        &[(r#"{"url":"https://a","raw":"r","lang":"python"}"#, r#"{"url":"https://a","raw":"r","lang":"python"}"#)],
+        &[r#"{"url":"https://a","raw":"r","lang":"python","nope":1}"#, r#"{"url":"https://a","raw":"r"}"#],
+    );
+    check::<KeyBody>(
+        &[(r#"{"name":"N","key":"k"}"#, r#"{"name":"N","key":"k"}"#)],
+        &[r#"{"name":"N","key":"k","nope":1}"#, r#"{"name":"N"}"#],
+    );
+    check::<AiScanMessage>(&[(r#"{"text":"t"}"#, r#"{"text":"t"}"#)], &[unknown, "{}"]);
+
+    // Nested types keep their own rules.
+    check::<ListenersBody>(
+        &[(
+            r#"{"listeners":[{"bind":"127.0.0.1:1"}]}"#,
+            r#"{"listeners":[{"bind":"127.0.0.1:1","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]}"#,
+        )],
+        &["{}", r#"{"listeners":[{"nope":1}]}"#],
+    );
+    check::<RulesBody>(&[(r#"{"rules":[]}"#, r#"{"rules":[]}"#)], &["{}"]);
+}
+
 #[test]
 fn proof_result() {
     let done = ProofResult::Completed {

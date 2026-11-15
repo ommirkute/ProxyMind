@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::engage::{form_pairs, multipart_fields};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyEncoding {
     UrlEncoded,

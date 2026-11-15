@@ -128,7 +128,7 @@ pub fn hooks(m: &Markers, binding: &str, storage: bool) -> String {
 }
 
 /// A marker that reached a sink.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Flow {
     pub source: String,
     /// The parameter or storage key, for sources read by name.

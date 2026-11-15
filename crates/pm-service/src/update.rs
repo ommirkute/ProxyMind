@@ -21,7 +21,7 @@ const FILE: &str = "update-check.json";
 /// Fallback when no home directory is attached: a project setting.
 const SETTING: &str = "update_check";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct UpdateState {
     /// Check once a day when the UI is open.
@@ -36,7 +36,7 @@ pub struct UpdateState {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct UpdateStatus {
     pub current: &'static str,
     #[serde(flatten)]

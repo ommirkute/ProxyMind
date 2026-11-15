@@ -12,15 +12,17 @@ use crate::{Authorization, Result, Service, ServiceError};
 const SETTING: &str = "custom_checks";
 const MAX_SAVED: usize = 100;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SavedCustomCheck {
     pub id: String,
     pub yaml: String,
     pub check: CustomCheck,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct CustomScanRequest {
     /// The recorded request to test.
     pub exchange_id: i64,
@@ -29,13 +31,17 @@ pub struct CustomScanRequest {
     /// A check to try without saving it.
     pub yaml: Option<String>,
     /// Most requests (default 200, max 2000).
+    #[schemars(range(min = 1, max = 2000))]
     pub max_requests: Option<usize>,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// Hypothesis this request tests (links the exchanges as evidence).
     pub hypothesis_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CustomFinding {
     pub check: String,
     pub title: String,
@@ -48,7 +54,7 @@ pub struct CustomFinding {
     pub exchange_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CustomScanResult {
     Done { baseline_exchange_id: i64, requests: usize, findings: Vec<CustomFinding> },

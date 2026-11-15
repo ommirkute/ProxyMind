@@ -29,7 +29,7 @@ pub const MAX_PROBES: usize = 200;
 /// Longest check file.
 pub const MAX_YAML: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOn {
     /// Each payload at each insertion point (query, form, JSON, path, cookie, header values).
@@ -39,7 +39,7 @@ pub enum RunOn {
     PerRequest,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadMode {
     /// The payload replaces the value.
@@ -50,7 +50,7 @@ pub enum PayloadMode {
 }
 
 /// Changes to the request (per_request checks; also applied before payloads).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RequestChange {
     pub method: Option<String>,
@@ -62,7 +62,7 @@ pub struct RequestChange {
 }
 
 /// What makes a response a hit. Every condition given must hold.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Match {
     /// The status is one of these.
@@ -87,7 +87,7 @@ pub struct Match {
     pub min_time_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CustomCheck {
     /// Lower case letters, digits, '-' and '_' (1 to 40).

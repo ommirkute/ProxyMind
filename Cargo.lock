@@ -1328,6 +1328,7 @@ dependencies = [
  "pm-http",
  "pm-mcp",
  "pm-service",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -1387,6 +1388,7 @@ version = "0.2.0"
 name = "pm-crawl"
 version = "0.2.0"
 dependencies = [
+ "schemars",
  "serde",
  "url",
 ]
@@ -1409,6 +1411,7 @@ version = "0.2.0"
 dependencies = [
  "pm-ai",
  "pm-http",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1420,6 +1423,7 @@ dependencies = [
  "pm-core",
  "regex",
  "ring",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1428,6 +1432,7 @@ dependencies = [
 name = "pm-graphql"
 version = "0.2.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1446,6 +1451,7 @@ version = "0.2.0"
 dependencies = [
  "pm-http",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1454,6 +1460,7 @@ dependencies = [
 name = "pm-ledger"
 version = "0.2.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1478,6 +1485,7 @@ dependencies = [
  "pm-ai",
  "pm-core",
  "pm-http",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -1498,6 +1506,7 @@ name = "pm-openapi"
 version = "0.2.0"
 dependencies = [
  "pm-http",
+ "schemars",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -1511,6 +1520,7 @@ dependencies = [
  "pm-core",
  "pm-http",
  "ring",
+ "schemars",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -1560,6 +1570,7 @@ dependencies = [
  "regex",
  "ring",
  "rustls",
+ "schemars",
  "serde",
  "tokio",
  "tokio-rustls",
@@ -1580,6 +1591,7 @@ dependencies = [
  "pm-tls",
  "rcgen",
  "rustls",
+ "schemars",
  "serde",
  "tokio",
  "tracing",
@@ -1592,6 +1604,7 @@ dependencies = [
  "pm-http",
  "regex",
  "ring",
+ "schemars",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -1685,6 +1698,7 @@ dependencies = [
  "pm-http",
  "regex",
  "ring",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -2672,6 +2686,7 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "pm-api",
+ "serde_json",
 ]
 
 [[package]]

@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["exchange_id"]))]
 pub struct DomTestRequest {
     /// A recorded HTML page.
     pub exchange_id: i64,
@@ -20,7 +22,7 @@ pub struct DomTestRequest {
     pub pollution: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DomTestResult {
     pub url: String,
     /// Sources that reached sinks, exploitable ones first.

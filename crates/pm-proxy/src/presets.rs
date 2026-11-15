@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::rewrite::{Part, Rule};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Preset {
     pub id: &'static str,
     pub title: &'static str,

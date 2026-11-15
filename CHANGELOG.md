@@ -3,11 +3,30 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
-## Unreleased
+## 0.2.0 (2026-11-15)
+
+First release since 0.1.0. Everything below ships in it; the version number did not change while it was prepared.
 
 ### API contracts
 
-- An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **An OpenAPI document for the REST API,** generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **Typed clients.** The same command generates TypeScript types (`ui/src/api-types.gen.ts`, `sdk/typescript/src/types.gen.ts`)
+  and Python `TypedDict`s (`sdk/python/proxymind/types.py`) from the API description. The TypeScript SDK exports them and
+  its methods return them; the Python SDK's methods are annotated with them. Types only: no runtime change.
+- **Every MCP tool's input schema now comes from the Rust types** the server reads the arguments into, so what an agent
+  is told and what the server accepts cannot differ. The schemas of 65 tools were written by hand before. As a result
+  an argument a tool does not list is now refused with an error naming it (14 tools already did this); `history_grep`
+  lists all the history filters it always accepted, and `scan_active` lists two checks it already ran.
+- **The OpenAPI document now covers every route of the REST API** (175 operations): each one lists its query
+  parameters or request body and what it answers with. 125 answer with a full schema; the rest say in words which keys
+  they return, or are downloads and the event stream. A test fails if a route is added or removed without the document
+  following. Nothing the API accepts or returns has changed.
+- **Agents see 8 more fields, by name.** `history_search` now lists `status_class`, `hide_ext`, `annotated`, `identity`,
+  `hypothesis_id` and `text`, and `scan_task_start` lists `browser` and `record_findings`. They already worked, but the
+  tool descriptions did not mention them, so agents never used them. The input schemas of these 14 MCP tools
+  (`history_search`, `scan_task_start`, `engage_*`, `ws_send`, `replay_send`, `authz_check`, `model_get`, `proof_run`,
+  `finding_create`, `finding_update`) are now generated from the same Rust types as the API, so they cannot drift
+  apart again, and they carry the real limits (for example `max_requests` 1 to 2000).
 
 ### Live events
 
@@ -129,8 +148,10 @@ version may change project files, APIs and the CLI.
   and a test keeps the list and the handlers in step.
 - Proofs for error-based SQL injection, path traversal and Host-header reflection read the response body after
   de-chunking and decompressing it (a compressed response could hide the marker and miss a proof).
+- Discovery's guessed-parameter probe sent the path without its query.
+- Absolute-form targets with an empty path are split correctly.
+- The out-of-band deadline uses one clock, so a callback at the deadline counts.
 
-## 0.2.0 (2026-11-12)
 
 ### AI testing
 
@@ -162,12 +183,6 @@ version may change project files, APIs and the CLI.
   positives.
 - Out-of-band callbacks that arrive late are still counted.
 - Opt-in update check.
-
-### Fixes
-
-- Discovery's guessed-parameter probe sent the path without its query.
-- Absolute-form targets with an empty path are split correctly.
-- The out-of-band deadline uses one clock, so a callback at the deadline counts.
 
 ## 0.1.0 (2026-11-07)
 

@@ -20,8 +20,10 @@ use crate::events::{Event, Rate};
 use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["raw", "payload_sets"]))]
 pub struct FuzzerRequest {
     /// Recorded exchange whose target to use (scheme, host, port).
     pub exchange_id: Option<i64>,
@@ -40,16 +42,22 @@ pub struct FuzzerRequest {
     pub extract: Vec<Extract>,
     /// Requests in flight at once (1-20, default 1). The rules of
     /// engagement's rate limits still apply.
+    #[schemars(range(min = 1, max = 20))]
     pub concurrency: Option<usize>,
     /// Pause before each request, in milliseconds (0-60000).
+    #[schemars(range(max = 60000))]
     pub throttle_ms: Option<u64>,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Update Content-Length to match the body (default true).
     pub fix_content_length: Option<bool>,
+    /// Hypothesis this request tests (links the exchanges as evidence).
     pub hypothesis_id: Option<i64>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FuzzerRow {
     /// Position in the attack (0-based; the baseline has none).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,7 +79,7 @@ pub struct FuzzerRow {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum FuzzerResult {
     Done {
@@ -95,7 +103,7 @@ pub enum FuzzerResult {
 }
 
 /// What starting a background attack did.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum FuzzerStart {
     Started { attack_id: String, total: usize },
@@ -103,7 +111,7 @@ pub enum FuzzerStart {
     Denied { reasons: Vec<String> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AttackStatus {
     Running,
@@ -114,7 +122,7 @@ pub enum AttackStatus {
 }
 
 /// An attack's progress and results so far.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AttackView {
     pub attack_id: String,
     pub summary: String,
@@ -137,7 +145,7 @@ pub struct AttackView {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AttackSummary {
     pub attack_id: String,
     pub summary: String,

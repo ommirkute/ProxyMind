@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct IssueType {
     /// Stable id, e.g. `sqli`.
     pub id: &'static str,

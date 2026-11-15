@@ -21,7 +21,7 @@ pub const MAX_RACE: usize = 50;
 /// so the first parts have certainly left (and been processed) first.
 const SETTLE: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RaceMode {
     /// HTTP/2, final frames of all requests in one packet.

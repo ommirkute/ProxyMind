@@ -19,7 +19,7 @@ use pm_replay::Endpoint;
 const ACTION: &str = "plugin_check";
 
 /// An installed plugin, for lists.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
@@ -37,7 +37,7 @@ pub struct PluginInfo {
     pub signature: pm_plugin::sign::Signature,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PluginsView {
     pub plugins: Vec<PluginInfo>,
     /// What the sandbox does on this machine.
@@ -47,9 +47,12 @@ pub struct PluginsView {
     pub registry: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+// `default` makes every field optional to serde; the schema still lists what a call needs.
+#[schemars(extend("required" = ["plugin", "exchange_id"]))]
 pub struct PluginCheckRequest {
+    /// Name of the plugin to run.
     pub plugin: String,
     /// The recorded exchange to check.
     pub exchange_id: i64,
@@ -59,7 +62,7 @@ pub struct PluginCheckRequest {
     pub approval_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PluginCheckIssue {
     /// `<plugin>/<check>`.
     pub check: String,
@@ -69,7 +72,7 @@ pub struct PluginCheckIssue {
     pub exchange_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PluginCheckResult {
     Done {

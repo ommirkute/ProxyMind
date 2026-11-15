@@ -1,26 +1,26 @@
-//! The OpenAPI document for the typed part of the API (ADR-0019).
+//! The OpenAPI document for the whole API (ADR-0019).
 //!
-//! The routes listed in [`operations`] are the ones whose request (and, where the handler's result is a
-//! named Rust type, response) is a type deriving `schemars::JsonSchema`. Everything else is not described
-//! yet. `cargo xtask contracts` writes [`openapi_json`] to `docs/api/openapi.json`, and the test below
-//! fails when that file is stale, so a changed Rust type cannot leave the document behind.
-//!
-//! The paths and methods here repeat `routes.rs`; the handler extractors there are the source of truth
-//! for which type each route reads. Step 5 of the ADR derives this table from the router instead.
+//! [`operations`] (in `contract_table.rs`) lists one operation for every method of every route that
+//! `routes::api()` registers; the test `route_table_matches_router` fails when the two disagree. Where a
+//! request or response is a Rust type deriving `schemars::JsonSchema` the document carries its schema; a handler
+//! that builds its JSON on the spot is described as untyped JSON with a description of what it writes.
+//! `cargo xtask contracts` writes [`openapi_json`] to `docs/api/openapi.json`, and the test below fails when that
+//! file is stale, so a changed Rust type cannot leave the document behind.
 
 use std::collections::BTreeMap;
 
-use pm_service::pm_store::HistoryFilter;
-use pm_service::{
-    AuthzCheckRequest, EngageFilter, FindingUpdate, ModelFilter, NewFinding, ProofRequest, ProofResult, ReplayRequest,
-    ReplayResult, ScanTaskRequest, WsReplayRequest,
-};
 use schemars::generate::SchemaSettings;
-use schemars::{Schema, SchemaGenerator};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde_json::{Map, Value, json};
 
+pub use crate::contract_table::operations;
+
 /// Builds the schema (or a `$ref` into the generator's definitions) of one type.
-type SchemaFn = fn(&mut SchemaGenerator) -> Schema;
+pub type SchemaFn = fn(&mut SchemaGenerator) -> Schema;
+
+fn schema_fn<T: JsonSchema + ?Sized>(g: &mut SchemaGenerator) -> Schema {
+    g.subschema_for::<T>()
+}
 
 /// Where a route reads its request from.
 #[derive(Clone, Copy)]
@@ -28,134 +28,119 @@ pub enum Input {
     None,
     /// JSON request body of this type.
     Body(SchemaFn),
+    /// JSON request body that is any JSON value (described in words).
+    AnyBody(&'static str),
+    /// Request body that is raw bytes of this media type.
+    RawBody(&'static str, &'static str),
     /// Query string; each property of this type becomes one parameter.
     Query(SchemaFn),
 }
 
-/// One row of the route table.
+/// What a route answers with.
 #[derive(Clone, Copy)]
+pub enum Output {
+    /// JSON of a Rust type.
+    Typed(SchemaFn),
+    /// An object the handler builds on the spot; the text says which keys it has.
+    Object(&'static str),
+    /// A JSON array the handler builds on the spot.
+    List(&'static str),
+    /// Any JSON value.
+    Any(&'static str),
+    /// A file download; the media types (comma-separated when it depends on the request) and what it holds.
+    Download(&'static str, &'static str),
+    /// Server-sent events.
+    Events,
+}
+
+/// One row of the route table.
+#[derive(Clone)]
 pub struct Operation {
     /// Lower-case HTTP method.
     pub method: &'static str,
     /// Path including the `/api/v1` prefix; `{name}` marks path parameters.
-    pub path: &'static str,
+    pub path: String,
+    /// The handler's name in `routes.rs`.
     pub operation_id: &'static str,
     pub summary: &'static str,
-    /// Path parameters as (name, JSON type).
-    pub path_params: &'static [(&'static str, &'static str)],
+    /// The `{id}` path parameter is text, not an integer.
+    pub id_is_string: bool,
     pub input: Input,
-    /// The type of a successful response. `None` while the handler's result is still untyped JSON.
-    pub output: Option<SchemaFn>,
+    pub output: Output,
 }
 
-macro_rules! schema_of {
-    ($t:ty) => {
-        |g: &mut SchemaGenerator| g.subschema_for::<$t>()
-    };
-}
-
-const NO_PARAMS: &[(&str, &str)] = &[];
-
-/// The routes described so far: (method, path, request type, response type). Responses that are still
-/// `Value`, or a service type without a schema yet, are `None`.
-pub fn operations() -> Vec<Operation> {
-    let engage = |path, operation_id, summary| Operation {
-        method: "post",
-        path,
+/// Starts a row. `path` is relative to `/api/v1`. Every row must then say what comes back: `.out::<T>()`, `.json(..)`, `.download(..)` or `.sse()`
+/// (`every_response_is_described` fails on a row that does not).
+pub fn op(method: &'static str, path: &str, operation_id: &'static str, summary: &'static str) -> Operation {
+    Operation {
+        method,
+        path: format!("/api/v1{path}"),
         operation_id,
         summary,
-        path_params: NO_PARAMS,
-        input: Input::Body(schema_of!(EngageFilter)),
-        output: None,
-    };
-    vec![
-        Operation {
-            method: "get",
-            path: "/api/v1/exchanges",
-            operation_id: "exchanges_list",
-            summary: "Search recorded exchanges, newest first.",
-            path_params: NO_PARAMS,
-            input: Input::Query(schema_of!(HistoryFilter)),
-            output: None, // ExchangePage has no schema yet
-        },
-        Operation {
-            method: "post",
-            path: "/api/v1/replay",
-            operation_id: "replay_send",
-            summary: "Send a request, as recorded or edited, through the policy gate.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(ReplayRequest)),
-            output: Some(schema_of!(ReplayResult)),
-        },
-        Operation {
-            method: "post",
-            path: "/api/v1/proofs",
-            operation_id: "proof_run",
-            summary: "Run a proof oracle and store the result.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(ProofRequest)),
-            output: Some(schema_of!(ProofResult)),
-        },
-        Operation {
-            method: "post",
-            path: "/api/v1/authz/check",
-            operation_id: "authz_check",
-            summary: "Replay one recorded request as several identities and classify the responses.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(AuthzCheckRequest)),
-            output: None, // AuthzReport has no schema yet
-        },
-        Operation {
-            method: "post",
-            path: "/api/v1/scan/tasks",
-            operation_id: "scan_task_start",
-            summary: "Start a crawl-and-audit background task.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(ScanTaskRequest)),
-            output: None, // ScanTaskView has no schema yet
-        },
-        Operation {
-            method: "post",
-            path: "/api/v1/findings",
-            operation_id: "finding_create",
-            summary: "Record a finding.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(NewFinding)),
-            output: None, // untyped Value
-        },
-        Operation {
-            method: "patch",
-            path: "/api/v1/findings/{id}",
-            operation_id: "finding_update",
-            summary: "Update a finding. The body must still carry `id` (the handler overwrites it with the path id).",
-            path_params: &[("id", "integer")],
-            input: Input::Body(schema_of!(FindingUpdate)),
-            output: None, // untyped Value
-        },
-        engage("/api/v1/engage/comments", "engage_comments", "Comments found in recorded responses."),
-        engage("/api/v1/engage/scripts", "engage_scripts", "Scripts found in recorded responses."),
-        engage("/api/v1/engage/js-endpoints", "engage_js_endpoints", "Endpoints referenced from recorded JavaScript."),
-        engage("/api/v1/engage/logic", "engage_logic", "Business-logic leads from recorded traffic."),
-        engage("/api/v1/engage/analyze", "engage_analyze", "Summary analysis of a target's recorded traffic."),
-        Operation {
-            method: "post",
-            path: "/api/v1/ws/replay",
-            operation_id: "ws_replay",
-            summary: "Replay a recorded WebSocket session with edited messages.",
-            path_params: NO_PARAMS,
-            input: Input::Body(schema_of!(WsReplayRequest)),
-            output: None, // WsReplayResult has no schema yet
-        },
-        Operation {
-            method: "get",
-            path: "/api/v1/model",
-            operation_id: "model_get",
-            summary: "The application model built from recorded traffic.",
-            path_params: NO_PARAMS,
-            input: Input::Query(schema_of!(ModelFilter)),
-            output: None, // untyped Value
-        },
-    ]
+        id_is_string: false,
+        input: Input::None,
+        output: Output::Any(""),
+    }
+}
+
+impl Operation {
+    pub fn body<T: JsonSchema + ?Sized>(mut self) -> Self {
+        self.input = Input::Body(schema_fn::<T>);
+        self
+    }
+    pub fn any_body(mut self, what: &'static str) -> Self {
+        self.input = Input::AnyBody(what);
+        self
+    }
+    pub fn raw_body(mut self, media_type: &'static str, what: &'static str) -> Self {
+        self.input = Input::RawBody(media_type, what);
+        self
+    }
+    pub fn query<T: JsonSchema + ?Sized>(mut self) -> Self {
+        self.input = Input::Query(schema_fn::<T>);
+        self
+    }
+    pub fn out<T: JsonSchema + ?Sized>(mut self) -> Self {
+        self.output = Output::Typed(schema_fn::<T>);
+        self
+    }
+    pub fn json(mut self, what: &'static str) -> Self {
+        self.output = Output::Object(what);
+        self
+    }
+    pub fn json_list(mut self, what: &'static str) -> Self {
+        self.output = Output::List(what);
+        self
+    }
+    pub fn json_any(mut self, what: &'static str) -> Self {
+        self.output = Output::Any(what);
+        self
+    }
+    pub fn download(mut self, media_type: &'static str, what: &'static str) -> Self {
+        self.output = Output::Download(media_type, what);
+        self
+    }
+    pub fn sse(mut self) -> Self {
+        self.output = Output::Events;
+        self
+    }
+    pub fn id_is_string(mut self) -> Self {
+        self.id_is_string = true;
+        self
+    }
+
+    /// Path parameters in order: `id` is an integer unless `id_is_string`, everything else is text.
+    pub fn path_params(&self) -> Vec<(&str, &'static str)> {
+        let mut out = Vec::new();
+        let mut rest = self.path.as_str();
+        while let Some(start) = rest.find('{') {
+            let end = rest[start..].find('}').expect("balanced braces") + start;
+            let name = &rest[start + 1..end];
+            out.push((name, if name == "id" && !self.id_is_string { "integer" } else { "string" }));
+            rest = &rest[end + 1..];
+        }
+        out
+    }
 }
 
 /// Generators for the two directions: what clients send is described as it is deserialized, what the
@@ -216,6 +201,40 @@ fn sorted(v: Value) -> Value {
     }
 }
 
+/// The `responses` of one operation.
+fn responses_of(op: &Operation, typed: Option<Value>) -> Value {
+    let json_ok =
+        |schema: Value| json!({ "description": "OK", "content": { "application/json": { "schema": schema } } });
+    let ok = match (op.output, typed) {
+        (Output::Typed(_), Some(schema)) => json_ok(schema),
+        (Output::Object(what), _) => json_ok(json!({ "type": "object", "description": what })),
+        (Output::List(what), _) => {
+            json_ok(json!({ "type": "array", "items": { "type": "object" }, "description": what }))
+        }
+        (Output::Any(what), _) => json_ok(json!({ "description": what })),
+        (Output::Download(types, what), _) => {
+            let content: Map<String, Value> = types
+                .split(", ")
+                .map(|t| (t.to_string(), json!({ "schema": { "type": "string", "format": "binary" } })))
+                .collect();
+            json!({ "description": format!("OK: a file download. {what}"), "content": content })
+        }
+        (Output::Events, _) => json!({
+            "description": "OK: a stream of server-sent events (`text/event-stream`).",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } },
+        }),
+        (Output::Typed(_), None) => unreachable!("typed outputs have a schema"),
+    };
+    json!({
+        "200": ok,
+        "default": {
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, \
+                            5xx failure.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } },
+        },
+    })
+}
+
 /// The OpenAPI 3.1 document.
 pub fn openapi_document() -> Value {
     let mut requests = generator(false);
@@ -227,25 +246,38 @@ pub fn openapi_document() -> Value {
     let request_schemas: Vec<Option<Value>> = ops
         .iter()
         .map(|op| match op.input {
-            Input::None => None,
             Input::Body(f) | Input::Query(f) => Some(serde_json::to_value(f(&mut requests)).unwrap()),
+            Input::None | Input::AnyBody(_) | Input::RawBody(..) => None,
         })
         .collect();
-    let response_schemas: Vec<Option<Value>> =
-        ops.iter().map(|op| op.output.map(|f| serde_json::to_value(f(&mut responses)).unwrap())).collect();
+    let response_schemas: Vec<Option<Value>> = ops
+        .iter()
+        .map(|op| match op.output {
+            Output::Typed(f) => Some(serde_json::to_value(f(&mut responses)).unwrap()),
+            _ => None,
+        })
+        .collect();
 
     let mut definitions = requests.take_definitions(true);
     for (name, schema) in responses.take_definitions(true) {
-        // A type used in both directions (e.g. `View`) must read the same either way.
-        if let Some(existing) = definitions.get(&name) {
-            assert_eq!(existing, &schema, "schema `{name}` differs between request and response use");
-        }
-        definitions.insert(name, schema);
+        // A type used in both directions reads the same either way except that fields with a serde default are
+        // optional in a request. Where the two differ the request reading wins: it is the looser description of
+        // a response (a field may be missing) and the only correct one of a request.
+        definitions.entry(name).or_insert(schema);
     }
+    definitions.insert(
+        "ApiError".into(),
+        json!({
+            "type": "object",
+            "description": "Body of every error response.",
+            "properties": { "error": { "type": "string", "description": "What went wrong." } },
+            "required": ["error"],
+        }),
+    );
 
     for ((op, request), response) in ops.iter().zip(request_schemas).zip(response_schemas) {
         let mut parameters: Vec<Value> = op
-            .path_params
+            .path_params()
             .iter()
             .map(|(name, ty)| json!({ "name": name, "in": "path", "required": true, "schema": { "type": ty } }))
             .collect();
@@ -255,19 +287,25 @@ pub fn openapi_document() -> Value {
             (Input::Body(_), Some(schema)) => {
                 body = Some(json!({ "required": true, "content": { "application/json": { "schema": schema } } }));
             }
+            (Input::AnyBody(what), _) => {
+                body = Some(json!({
+                    "required": true,
+                    "content": { "application/json": { "schema": { "description": what } } },
+                }));
+            }
+            (Input::RawBody(media_type, what), _) => {
+                body = Some(json!({
+                    "required": true,
+                    "description": what,
+                    "content": { media_type: { "schema": { "type": "string", "format": "binary" } } },
+                }));
+            }
             _ => {}
         }
-        let ok = match response {
-            Some(schema) => json!({ "description": "OK", "content": { "application/json": { "schema": schema } } }),
-            // Still untyped JSON: the document says so by leaving the media type without a schema.
-            None => {
-                json!({ "description": "OK (response schema not yet typed)", "content": { "application/json": {} } })
-            }
-        };
         let mut operation = json!({
             "operationId": op.operation_id,
             "summary": op.summary,
-            "responses": { "200": ok },
+            "responses": responses_of(op, response),
         });
         if !parameters.is_empty() {
             operation["parameters"] = Value::Array(parameters);
@@ -275,7 +313,7 @@ pub fn openapi_document() -> Value {
         if let Some(body) = body {
             operation["requestBody"] = body;
         }
-        paths.entry(op.path).or_default().insert(op.method.to_string(), operation);
+        paths.entry(op.path.as_str()).or_default().insert(op.method.to_string(), operation);
     }
 
     let paths: Map<String, Value> = paths.into_iter().map(|(k, v)| (k.to_string(), Value::Object(v))).collect();
@@ -284,10 +322,11 @@ pub fn openapi_document() -> Value {
         "info": {
             "title": "ProxyMind API",
             "version": "v1",
-            "summary": "REST API of the local ProxyMind app (part of it; see docs/adr/0019-typed-api-contracts.md).",
+            "summary": "REST API of the local ProxyMind app (every route; see docs/adr/0019-typed-api-contracts.md).",
             "description": "Generated from the Rust types by `cargo xtask contracts`; do not edit by hand. Every \
                             request needs the per-install token, and requests that change anything must carry the \
-                            header `X-ProxyMind: 1`. Only the routes listed here are described so far.",
+                            header `X-ProxyMind: 1`. Responses described only by a sentence come from handlers that \
+                            build their JSON on the spot; the sentence lists the keys they write.",
             "license": { "name": "AGPL-3.0-only", "identifier": "AGPL-3.0-only" },
         },
         "security": [{ "bearerAuth": [] }],
@@ -349,9 +388,102 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), ops.len());
-        let mut keys: Vec<_> = ops.iter().map(|o| (o.method, o.path)).collect();
+        let mut keys: Vec<_> = ops.iter().map(|o| (o.method, o.path.clone())).collect();
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), ops.len());
+    }
+
+    /// Every row says what comes back: an untyped answer needs words (the keys the handler writes), not silence.
+    #[test]
+    fn every_response_is_described() {
+        for op in operations() {
+            let words = match op.output {
+                Output::Object(w) | Output::List(w) | Output::Any(w) | Output::Download(_, w) => w,
+                Output::Typed(_) | Output::Events => "ok",
+            };
+            assert!(!words.trim().is_empty(), "{} {} has no response description", op.method, op.path);
+            assert!(!op.summary.trim().is_empty(), "{} {} has no summary", op.method, op.path);
+        }
+    }
+
+    /// The (method, path, handler) triples `routes::api()` registers, read from its source: each `.route("path", ..)`
+    /// and the `get`/`post`/`put`/`patch`/`delete` calls inside its second argument.
+    fn registered_routes() -> Vec<(String, String, String)> {
+        let src = include_str!("routes.rs");
+        let start = src.find("pub fn api() -> Router<AppState> {").expect("api() exists");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("api() ends")];
+        let mut out = Vec::new();
+        for chunk in body.split(".route(").skip(1) {
+            let rest = chunk.trim_start();
+            let rest = rest.strip_prefix('"').expect("a route starts with its path");
+            let (path, rest) = rest.split_once('"').expect("path ends");
+            // The handler expression: up to the `)` that closes `.route(`.
+            let mut depth = 1;
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let expr = &rest[..end];
+            let bytes = expr.as_bytes();
+            for method in ["get", "post", "put", "patch", "delete"] {
+                let mut from = 0;
+                while let Some(pos) = expr[from..].find(&format!("{method}(")) {
+                    let at = from + pos;
+                    from = at + method.len();
+                    let before = if at == 0 { b' ' } else { bytes[at - 1] };
+                    if before.is_ascii_alphanumeric() || before == b'_' {
+                        continue; // part of a longer name, e.g. `ui_get(`
+                    }
+                    let handler: String = expr[at + method.len() + 1..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    out.push((method.to_string(), format!("/api/v1{path}"), handler));
+                }
+            }
+        }
+        out
+    }
+
+    /// A route cannot be added, renamed or removed in `routes.rs` without the contract table (and so the OpenAPI
+    /// document) following, and the other way round.
+    #[test]
+    fn route_table_matches_router() {
+        let mut router = registered_routes();
+        let mut table: Vec<(String, String, String)> =
+            operations().into_iter().map(|o| (o.method.to_string(), o.path, o.operation_id.to_string())).collect();
+        assert!(router.len() > 150, "the router parser found only {} operations", router.len());
+        router.sort();
+        table.sort();
+        let missing: Vec<_> = router.iter().filter(|r| !table.contains(r)).collect();
+        let extra: Vec<_> = table.iter().filter(|t| !router.contains(t)).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "contract_table.rs and routes::api() disagree (method, path, handler).\n\
+             In the router only: {missing:#?}\nIn the table only: {extra:#?}"
+        );
+    }
+
+    /// Every operation of the router is in the generated document, with a response.
+    #[test]
+    fn document_covers_every_route() {
+        let doc = openapi_document();
+        for (method, path, handler) in registered_routes() {
+            let op = &doc["paths"][&path][&method];
+            assert_eq!(op["operationId"], handler.as_str(), "{method} {path} is missing from openapi.json");
+            assert!(op["responses"]["200"].is_object(), "{method} {path} has no 200 response");
+        }
     }
 }

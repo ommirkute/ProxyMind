@@ -22,7 +22,7 @@ const DAY: i64 = 24 * HOUR;
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 /// How often a schedule runs (times are UTC, "HH:MM").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Every {
     Hourly,
@@ -83,21 +83,28 @@ pub fn next_run_after(every: &Every, now_ms: i64) -> i64 {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ScanSchedule {
     /// 0 for a new schedule.
     pub id: i64,
+    /// Name shown in the schedule list.
     pub name: String,
+    /// How often to run.
     pub every: Every,
     /// What to run (a profile can fill in the rest).
     pub request: ScanTaskRequest,
+    /// Run on schedule (false: paused).
     pub enabled: bool,
     /// Set by the service.
     pub created_by: String,
+    /// When it runs next, in ms since the epoch. Set by the service.
     pub next_run_ms: i64,
+    /// When it last ran, in ms since the epoch. Set by the service.
     pub last_run_ms: Option<i64>,
+    /// Id of the task the last run started. Set by the service.
     pub last_task: Option<String>,
+    /// Why the last run could not start, if it could not. Set by the service.
     pub last_error: Option<String>,
 }
 

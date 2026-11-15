@@ -10,7 +10,7 @@ use serde::Serialize;
 pub const TYPES: &[(&str, u16)] =
     &[("A", 1), ("AAAA", 28), ("CNAME", 5), ("MX", 15), ("TXT", 16), ("NS", 2), ("SOA", 6), ("CAA", 257)];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Record {
     pub name: String,
     #[serde(rename = "type")]

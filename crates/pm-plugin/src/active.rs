@@ -45,7 +45,7 @@ impl Active {
 }
 
 /// A request a plugin wants sent, after checking.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Probe {
     /// HTTP/1.1 request text (CRLF or LF line ends).
     pub raw: String,

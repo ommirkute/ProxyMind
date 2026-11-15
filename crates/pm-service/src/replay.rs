@@ -29,7 +29,7 @@ pub struct ReplayRequest {
     /// Target as scheme://host[:port], used when there is no `exchange_id`.
     pub url: Option<String>,
     /// Send with this test identity's credentials instead of the request's own
-    /// (use "anonymous" for none).
+    /// (names from identity_list; use "anonymous" for none).
     pub identity: Option<String>,
     /// Update Content-Length to match the body (default true).
     pub fix_content_length: Option<bool>,
@@ -41,6 +41,8 @@ pub struct ReplayRequest {
     pub hypothesis_id: Option<i64>,
     /// View of the response to return (default summary).
     pub view: Option<View>,
+    /// Token budget of the returned view (default 1500; at least 200).
+    #[schemars(range(min = 200))]
     pub max_tokens: Option<usize>,
 }
 

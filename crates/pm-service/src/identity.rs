@@ -10,7 +10,7 @@ use crate::replay::parse_url_endpoint;
 use crate::{Authorization, Result, Service, ServiceError, now_ms};
 
 /// What anyone (including agents) may see about an identity: names, never values.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct IdentityInfo {
     pub name: String,
     pub role: String,
@@ -26,7 +26,7 @@ pub struct IdentityInfo {
     pub created_by: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct IdentityCheck {
     pub name: String,
     /// ok, logged_out, or unknown (no health check configured)

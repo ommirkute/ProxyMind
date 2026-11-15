@@ -48,7 +48,8 @@ pub struct WsReplayRequest {
     /// Edited upgrade request (HTTP/1.1). Default: the recorded one.
     /// ProxyMind sets a fresh Sec-WebSocket-Key and turns compression off.
     pub raw: Option<String>,
-    /// Sent in order, each followed by `wait_ms` of listening.
+    /// Sent in order, each followed by `wait_ms` of listening (at most 50).
+    #[schemars(length(max = 50))]
     pub messages: Vec<WsOut>,
     /// How long to listen after each message (and after opening). Default
     /// 1000, at most 10000; a whole session ends after 60 s.
@@ -56,13 +57,15 @@ pub struct WsReplayRequest {
     pub wait_ms: Option<u64>,
     /// Open the socket as this test identity.
     pub identity: Option<String>,
+    /// From a previous pending_approval result: runs the approved send. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// Hypothesis this session tests (links the exchange as evidence).
     pub hypothesis_id: Option<i64>,
     /// Characters of each message shown back (default 2000).
     pub max_chars: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WsReplayResult {
     /// The socket opened; everything sent and received is recorded under

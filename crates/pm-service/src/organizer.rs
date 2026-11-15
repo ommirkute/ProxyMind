@@ -14,7 +14,7 @@ pub const ORGANIZER_STATUSES: &[&str] = &["new", "in_progress", "postponed", "do
 const MAX_ITEMS: u64 = 20_000;
 const MAX_NOTE: usize = 10_000;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct OrganizerItem {
     pub id: i64,
     pub exchange_id: i64,
@@ -29,10 +29,12 @@ pub struct OrganizerItem {
 }
 
 /// Changes to an item; unset fields stay as they are.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrganizerUpdate {
+    /// New status; one of the organizer statuses.
     pub status: Option<String>,
+    /// New note (replaces the old one).
     pub note: Option<String>,
 }
 

@@ -20,30 +20,35 @@ pub(crate) const MODEL_WINDOW: usize = 20_000;
 pub struct ModelFilter {
     /// Only operations whose key contains this text.
     pub contains: Option<String>,
-    /// Include objects (default false; there can be many).
+    /// Also list objects with their owners (default false; there can be many).
     pub include_objects: Option<bool>,
     /// Only objects of this type, e.g. Order.
     pub object_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewHypothesis {
     /// Operation key from model_get, e.g. "GET http://shop/api/orders/{id}".
     pub operation: String,
+    /// Parameter tested, if any.
     #[serde(default)]
     pub param: String,
     /// idor, bfla, authn, sqli, xss, ssrf, mass_assignment, business_logic, or your own.
     pub vuln_class: String,
+    /// Why you expect the issue: what you saw that makes it worth testing.
     pub rationale: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HypothesisUpdate {
+    /// Id of the hypothesis.
     pub id: i64,
-    /// open, testing, confirmed, refuted
+    /// open, testing, confirmed or refuted.
+    #[schemars(extend("enum" = ["open", "testing", "confirmed", "refuted"]))]
     pub status: Option<String>,
+    /// A note to add to the hypothesis.
     pub note: Option<String>,
 }
 

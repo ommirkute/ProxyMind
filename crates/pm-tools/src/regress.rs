@@ -31,7 +31,7 @@ pub fn supported(format: &str) -> bool {
     format == FORMAT || format == FORMAT_2
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TestFinding {
     pub id: i64,
     pub title: String,
@@ -42,7 +42,7 @@ pub struct TestFinding {
 
 /// What the response looks like while the finding is still there (all set
 /// conditions must hold).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VulnerableIf {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,7 +63,7 @@ pub struct VulnerableIf {
 
 /// How this app answers when credentials are not accepted, beyond the usual
 /// signs (401, a redirect to a login page). Any one part matching is enough.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LoggedOutLook {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -79,7 +79,7 @@ pub struct LoggedOutLook {
 /// A request the test's identity is allowed to make. It is sent before a test
 /// is called fixed: if it fails, the credentials stopped working and the test
 /// can't tell (apps that answer 403 or a page for an expired session).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AuthCheck {
     pub request: String,
     /// Expected status (default: any 2xx).
@@ -123,7 +123,7 @@ pub fn credentials_rejected(status: u16, location: Option<&str>, body: &str, loo
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RegressionTest {
     pub format: String,
     pub finding: TestFinding,

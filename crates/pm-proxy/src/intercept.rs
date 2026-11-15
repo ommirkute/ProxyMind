@@ -19,11 +19,14 @@ use tokio::sync::oneshot;
 pub const DEFAULT_SKIP_EXTENSIONS: &[&str] =
     &["js", "css", "png", "jpg", "jpeg", "gif", "svg", "ico", "woff", "woff2", "ttf", "map", "webp"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct InterceptSettings {
+    /// Hold traffic at all.
     pub enabled: bool,
+    /// Hold requests.
     pub requests: bool,
+    /// Hold responses.
     pub responses: bool,
     /// Hold WebSocket messages (both directions) on connections opened while
     /// this is on. Those connections are opened without compression so
@@ -54,7 +57,7 @@ impl Default for InterceptSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Request,
@@ -72,7 +75,7 @@ impl Kind {
 }
 
 /// A message waiting for a decision.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Held {
     pub id: u64,
     pub kind: Kind,

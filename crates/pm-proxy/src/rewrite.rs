@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::intercept::ScopeFn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Part {
     RequestFirstLine,
@@ -33,7 +33,7 @@ impl Part {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Rule {
     pub enabled: bool,

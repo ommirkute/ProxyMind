@@ -11,20 +11,27 @@ use crate::{Result, ScanTaskRequest, Service, ServiceError};
 /// Project setting that holds the saved (not built-in) profiles as JSON.
 pub const PROFILES_SETTING: &str = "scan_profiles";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScanProfile {
+    /// Name of the profile (built-in names are reserved).
     pub name: String,
+    /// What the profile is for.
     pub description: String,
     /// Checks to run; empty: every check except those that need approval.
     pub checks: Vec<String>,
     /// Also run the checks that need approval (request smuggling, file
     /// upload, race conditions) when `checks` is empty.
     pub approval_checks: bool,
+    /// Crawl first (the task's default when unset).
     pub crawl: Option<bool>,
+    /// Most pages to crawl.
     pub max_pages: Option<usize>,
+    /// Crawl in a headless browser that runs the app's JavaScript.
     pub browser: Option<bool>,
+    /// Most operations to scan.
     pub max_targets: Option<usize>,
+    /// Most requests per operation.
     pub max_requests: Option<usize>,
     /// Set by the service for the built-in profiles (they can't be changed).
     pub builtin: bool,

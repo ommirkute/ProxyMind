@@ -63,7 +63,7 @@ impl Matcher {
 }
 
 /// A short, single-line excerpt around `range`, plus where the match sits in it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Snippet {
     pub text: String,
     /// Character offsets of the match within `text`.

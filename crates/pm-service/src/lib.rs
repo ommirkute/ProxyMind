@@ -5,6 +5,7 @@
 //! allowed, sent for approval or denied.
 
 mod ai_scan;
+pub mod api_types;
 mod approvals;
 mod assistant;
 mod attack_paths;
@@ -31,6 +32,7 @@ mod history;
 mod identity;
 mod intercept;
 mod login_record;
+pub mod mcp_args;
 mod memory;
 mod model;
 mod network;

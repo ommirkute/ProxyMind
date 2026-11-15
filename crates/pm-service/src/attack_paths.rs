@@ -16,7 +16,7 @@ use crate::{Result, Service, ServiceError, scan_of};
 const MAX_STEPS: usize = 12;
 const MAX_TEXT: usize = 300;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttackStep {
     /// What happens at this step ("read the API key from /static/app.js").
@@ -29,18 +29,21 @@ pub struct AttackStep {
     pub exchange_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewAttackPath {
+    /// Short name of the chain.
     pub title: String,
     /// What an attacker gains at the end.
     pub impact: String,
     /// critical, high, medium, low or info: the severity of the whole chain.
+    #[schemars(extend("enum" = ["critical", "high", "medium", "low", "info"]))]
     pub severity: String,
+    /// The steps, in order.
     pub steps: Vec<AttackStep>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AttackPath {
     pub id: i64,
     /// The AI scan that recorded it, if one did.
@@ -53,7 +56,7 @@ pub struct AttackPath {
     pub created_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GraphNode {
     pub id: String,
     pub label: String,
@@ -68,7 +71,7 @@ pub struct GraphNode {
     pub impact: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
@@ -76,7 +79,7 @@ pub struct GraphEdge {
     pub paths: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AttackGraph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,

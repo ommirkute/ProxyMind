@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::engage::ParamSummary;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct LogicCandidate {
     pub param: String,
     /// price, quantity, discount, limit, identity, role, state, flow

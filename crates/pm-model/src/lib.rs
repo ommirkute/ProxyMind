@@ -77,7 +77,7 @@ pub struct AppModel {
 
 /// A suggested authorization test: replay `exchange_id` (made by `owner`)
 /// as each of `try_as`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AuthzCandidate {
     pub operation: String,
     pub object: String,

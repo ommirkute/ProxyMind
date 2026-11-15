@@ -1,7 +1,12 @@
 //! `cargo xtask contracts [--check]`: regenerates the committed API contracts from the Rust types
 //! (ADR-0019). This crate sits above all others; nothing depends on it.
 //!
-//! Generated so far: `docs/api/openapi.json`. The MCP, UI and SDK outputs are later migration steps.
+//! Generated: `docs/api/openapi.json`, and the UI and SDK type files made from it (`ui/src/api-types.gen.ts`,
+//! `sdk/typescript/src/types.gen.ts`, `sdk/python/proxymind/types.py`). The MCP schemas are written by `pm-mcp`.
+
+mod py;
+mod schema;
+mod ts;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,7 +18,14 @@ struct Output {
 }
 
 fn outputs() -> Vec<Output> {
-    vec![Output { path: "docs/api/openapi.json", content: pm_api::contracts::openapi_json() }]
+    let defs = schema::definitions(&pm_api::contracts::openapi_document());
+    let ts = ts::render(&defs);
+    vec![
+        Output { path: "docs/api/openapi.json", content: pm_api::contracts::openapi_json() },
+        Output { path: "ui/src/api-types.gen.ts", content: ts.clone() },
+        Output { path: "sdk/typescript/src/types.gen.ts", content: ts },
+        Output { path: "sdk/python/proxymind/types.py", content: py::render(&defs) },
+    ]
 }
 
 fn repo_root() -> PathBuf {
@@ -54,3 +66,6 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -106,7 +106,7 @@ struct FullType {
 }
 
 /// One argument of an operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Arg {
     pub name: String,
     #[serde(rename = "type")]
@@ -115,7 +115,7 @@ pub struct Arg {
 }
 
 /// A root field: a query, mutation or subscription.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct Operation {
     /// query, mutation or subscription
     pub kind: String,

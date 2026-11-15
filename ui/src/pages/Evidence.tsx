@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, toast } from "../api";
 import { Chip, Empty, ErrorBox, Panel, copyText, useAction } from "../components";
+import type { RegressionTest, Check } from "../api-types.gen";
 
-interface Check { name: string; ok: boolean; detail: string }
 interface Verification {
   ok: boolean; fingerprint?: string | null; engagement: { name?: string | null; client?: string | null } | null;
   checks: Check[]; findings: number; exchanges: number;
@@ -147,7 +147,6 @@ function Coverage() {
   );
 }
 
-interface RegressionTest { finding: { id: number; title: string; severity: string }; oracle: string; origin: string; auth?: string[] }
 interface RegressionExport { tests: RegressionTest[]; skipped: { finding_id: number; title: string; reason: string }[] }
 
 const envName = (id: string) => "PM_AUTH_" + id.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();

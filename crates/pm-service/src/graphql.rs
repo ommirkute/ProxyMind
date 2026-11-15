@@ -10,7 +10,7 @@ use crate::{Authorization, Result, Service, ServiceError};
 
 pub const GRAPHQL_SETTING: &str = "graphql_import";
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphQlImportRequest {
     /// The GraphQL endpoint, e.g. https://app.example.com/graphql. Needed to
@@ -22,12 +22,14 @@ pub struct GraphQlImportRequest {
     pub exchange_id: Option<i64>,
     /// …or send the introspection query to `url` (through the policy gate).
     pub fetch: bool,
+    /// Send with this test identity's credentials (names from the identities list; "anonymous" for none).
     pub identity: Option<String>,
+    /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 
 /// An operation with a ready-to-send example request.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct GraphQlOperation {
     #[serde(flatten)]
     pub op: pm_graphql::Operation,
@@ -36,7 +38,7 @@ pub struct GraphQlOperation {
     pub example_request: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GraphQlImportResult {
     Imported {
