@@ -115,7 +115,9 @@ impl TierPolicy {
 pub struct DataRules {
     #[serde(default = "yes")]
     pub redact_before_llm: bool,
-    #[serde(default)]
+    /// Cloud model APIs (Anthropic, OpenAI, ...) may see project data. On by default, since most people use one;
+    /// an engagement whose data must stay on the machine sets `false` and only local model servers are used.
+    #[serde(default = "yes")]
     pub allow_cloud_models: bool,
 }
 
@@ -125,7 +127,7 @@ fn yes() -> bool {
 
 impl Default for DataRules {
     fn default() -> Self {
-        Self { redact_before_llm: true, allow_cloud_models: false }
+        Self { redact_before_llm: true, allow_cloud_models: true }
     }
 }
 

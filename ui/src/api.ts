@@ -108,6 +108,9 @@ export interface ExchangeDetail {
   /** Full length when the text was cut (`?max=`). */
   request_truncated?: number;
   response_truncated?: number;
+  /** Body as people read it: de-chunked, decompressed, markup kept (null when absent or binary). For Pretty/Render. */
+  request_body?: string | null;
+  response_body?: string | null;
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };

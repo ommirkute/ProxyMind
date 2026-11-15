@@ -14281,7 +14281,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `summary`, `request`, `response`, `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
+                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
                   "type": "object"
                 }
               }

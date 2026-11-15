@@ -491,10 +491,15 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
     let max = q.max.map(|m| m.max(1024));
     let (request, request_truncated) = capped(&ex.request, max);
     let response = ex.response.as_deref().map(|r| capped(r, max));
+    // The bodies as people read them (de-chunked, decompressed, markup kept), for the Pretty and Render views; the
+    // `view` is the model's, cut to a token budget and with HTML reduced to its visible text.
+    let decoded = |raw: &[u8]| pm_service::pm_ai::body::decoded_text(raw).map(|t| capped(t.as_bytes(), max).0);
     let mut v = json!({
         "summary": ex.summary,
         "request": request,
         "response": response.as_ref().map(|r| &r.0),
+        "request_body": decoded(&ex.request),
+        "response_body": ex.response.as_deref().and_then(decoded),
         "view": view,
     });
     if let Some(n) = request_truncated {

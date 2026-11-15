@@ -651,12 +651,12 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         </>
       )}
       {tab === "request" && (
-        <MessageView text={ex.request} decodedBody={ex.view.request.body?.text} loadB64={loadBytes("request_b64")} truncated={ex.request_truncated} onShowAll={() => setFull(true)} testid="request-view" />
+        <MessageView text={ex.request} decodedBody={ex.request_body} loadB64={loadBytes("request_b64")} truncated={ex.request_truncated} onShowAll={() => setFull(true)} testid="request-view" />
       )}
       {tab === "response" && (
         <MessageView
           text={ex.response ?? s.error}
-          decodedBody={ex.response ? resp?.text : undefined}
+          decodedBody={ex.response ? ex.response_body : undefined}
           loadB64={ex.response ? loadBytes("response_b64") : undefined}
           truncated={ex.response_truncated}
           onShowAll={() => setFull(true)}

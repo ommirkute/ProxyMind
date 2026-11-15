@@ -9,6 +9,7 @@ Many testers won't wire up an external agent. A built-in assistant lowers the ba
 - The assistant (`pm-assistant`) acts as `agent:assistant` and uses exactly the MCP tool set through `pm_mcp::call_tool`, so scope, tiers, approvals, rate limits, redaction, untrusted-content tagging and audit apply unchanged.
 - Two wire formats cover the field: Anthropic Messages and OpenAI Chat Completions (also Ollama, LM Studio, vLLM). Calls go through ProxyMind's own sender (no extra HTTP client); cloud calls follow the project's network settings, local ones are direct.
 - Local by default. A model server that isn't loopback, private or link-local counts as cloud and is refused unless the ROE sets `data.allow_cloud_models: true`; refusals are audited.
+  **Amended 2026-11-15 (owner decision):** cloud models are allowed by default, because most people use one; an ROE that sets `data.allow_cloud_models: false` keeps the old behaviour (local model servers only, refusals audited). Secrets are still replaced before any model sees traffic (`redact_before_llm`, on by default), and target content is still tagged untrusted.
 - API keys come from an environment variable named in the settings, never from the project file. Every model call is audited (provider, host, model, bytes sent; never content).
 - Each message runs at most `max_steps` model calls. Chats are saved in the project.
 

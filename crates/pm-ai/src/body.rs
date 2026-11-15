@@ -28,6 +28,26 @@ pub struct Decoded {
     pub notes: Vec<String>,
 }
 
+/// The body of a raw HTTP message as people read it: de-chunked and decompressed, all of it (up to
+/// [`MAX_DECODED`]), with nothing stripped. `None` when there is no body or it is binary. Unlike the model views in
+/// [`crate::view`], this is not cut to a token budget, HTML keeps its markup, and nothing is wrapped or redacted, so a
+/// viewer can pretty-print JSON or render HTML from it.
+pub fn decoded_text(raw: &[u8]) -> Option<String> {
+    let (head, body) = pm_http::split_message(raw);
+    if body.is_empty() {
+        return None;
+    }
+    let headers = pm_http::parse_request_head(head)
+        .map(|h| h.headers)
+        .or_else(|_| pm_http::parse_response_head(head).map(|h| h.headers))
+        .unwrap_or_default();
+    let d = decode(&headers, body);
+    match d.kind {
+        Kind::Binary | Kind::Empty => None,
+        _ => Some(String::from_utf8_lossy(&d.bytes).into_owned()),
+    }
+}
+
 pub fn decode(headers: &[Header], body: &[u8]) -> Decoded {
     let mut notes = Vec::new();
     let mut bytes = body.to_vec();
@@ -144,6 +164,30 @@ mod tests {
         );
         assert_eq!(d.bytes, br#"{"user":"alice"}"#);
         assert_eq!(d.kind, Kind::Json);
+    }
+
+    #[test]
+    fn decoded_text_keeps_markup_and_all_of_the_body() {
+        // HTML keeps its tags (the model view keeps only visible text) and is not cut to a token budget.
+        let page = format!("<html><body><form action=\"/login\">{}</form></body></html>", "x".repeat(50_000));
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n{page}");
+        assert_eq!(decoded_text(raw.as_bytes()).as_deref(), Some(page.as_str()));
+        // Chunked and gzip are undone.
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(br#"{"user":"alice"}"#).unwrap();
+        let gz = gz.finish().unwrap();
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\
+                        Transfer-Encoding: chunked\r\n\r\n"
+            .to_vec();
+        raw.extend_from_slice(format!("{:x}\r\n", gz.len()).as_bytes());
+        raw.extend_from_slice(&gz);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(decoded_text(&raw).as_deref(), Some(r#"{"user":"alice"}"#));
+        // Requests too; no body or a binary one gives nothing.
+        let req = b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\r\n{\"a\":1}";
+        assert_eq!(decoded_text(req).as_deref(), Some("{\"a\":1}"));
+        assert_eq!(decoded_text(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), None);
+        assert_eq!(decoded_text(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n\x89PNG\0\x01\x02"), None);
     }
 
     #[test]

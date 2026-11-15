@@ -602,7 +602,7 @@ function Results({
             </div>
             {!detail && <p className="muted">Loading…</p>}
             {detail && tab === "response" && (
-              <MessageView text={detail.response} decodedBody={detail.view.response?.body?.text} empty="No response"
+              <MessageView text={detail.response} decodedBody={detail.response_body} empty="No response"
                 loadB64={() => api.get<ExchangeDetail>(`/exchanges/${sel.exchange_id}?bytes=1`).then((d) => d.response_b64)} />
             )}
             {detail && tab === "request" && <MessageView text={detail.request} />}

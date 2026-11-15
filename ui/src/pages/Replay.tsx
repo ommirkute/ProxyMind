@@ -418,7 +418,7 @@ export default function Replay() {
               </div>
               <MessageView
                 text={detail?.response ?? (step.error ? null : undefined) ?? null}
-                decodedBody={detail?.view.response?.body?.text}
+                decodedBody={detail?.response_body}
                 loadB64={step.exchange_id != null ? () => api.get<ExchangeDetail>(`/exchanges/${step.exchange_id}?bytes=1`).then((d) => d.response_b64) : undefined}
                 empty={step.error ? "No response" : "Loading…"}
                 testid="replay-response"
