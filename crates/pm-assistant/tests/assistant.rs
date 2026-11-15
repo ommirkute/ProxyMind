@@ -203,6 +203,7 @@ async fn a_key_saved_in_proxymind_is_used_and_never_shown() {
 
     // On disk in the home folder, owner-only, never in the project or the audit log.
     let path = home.join("model-keys.json");
+    assert!(path.is_file(), "the key is saved in the home folder");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

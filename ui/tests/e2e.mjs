@@ -95,6 +95,21 @@ function viaProxy(proxyPort, shopPort, raw) {
     setTimeout(() => s.destroy(), 5000);
   });
 }
+/**
+ * The id of the newest recorded exchange whose path contains `path`. The proxy records in the background, in short
+ * batches, so a request sent a moment ago may not be listed yet: poll for up to 5 s. Returns null if it never shows.
+ */
+function recordedId(path) {
+  return page.evaluate(async (path) => {
+    for (let i = 0; i < 50; i++) {
+      const q = new URLSearchParams({ path, limit: "1" });
+      const row = (await (await fetch(`/api/v1/exchanges?${q}`)).json()).exchanges[0];
+      if (row) return row.id;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+  }, path);
+}
 /** One raw request straight to a port (an invisible client), returns the raw response. */
 function rawTo(port, raw) {
   return new Promise((resolve, reject) => {
@@ -567,7 +582,7 @@ try {
     check(true, "mail to a payload address shows up as an interaction");
     await page.screenshot({ path: join(SHOTS, "5d-collaborator.png") });
     await viaProxy(proxy, shop, "GET /search?q=render-check HTTP/1.1\r\nHost: shop\r\n\r\n");
-    const htmlId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=render-check&limit=1")).json()).exchanges[0].id);
+    const htmlId = await recordedId("render-check");
     await open(`history/${htmlId}`);
     await page.locator('[data-testid="response-view"] button', { hasText: "Render" }).click();
     const renderFrame = page.getByTestId("render-frame");
@@ -1017,7 +1032,7 @@ try {
 
   await section("OpenAPI import", async () => {
     await viaProxy(proxy, shop, "GET /openapi.json HTTP/1.1\r\nHost: shop\r\n\r\n");
-    const specId = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?path=/openapi.json&limit=1")).json()).exchanges[0].id);
+    const specId = await recordedId("/openapi.json");
     await page.getByRole("button", { name: "Import OpenAPI…" }).click();
     await page.getByLabel("Spec exchange").fill(String(specId));
     await page.getByTestId("openapi-import").click();
@@ -1055,10 +1070,8 @@ try {
 
   await section("Active scan", async () => {
     await viaProxy(proxy, shop, "GET /greet?name=ann HTTP/1.1\r\nHost: shop\r\n\r\n");
-    const greet = await page.evaluate(async () => {
-      const r = await fetch("/api/v1/exchanges?path=/greet&limit=1");
-      return (await r.json()).exchanges[0].id;
-    });
+    const greet = await recordedId("/greet");
+    check(greet !== null, "the proxied /greet request is recorded");
     await page.goto(link.replace(/\/auth.*/, `/#/issues/${greet}`));
     await page.getByTestId("active-scan").click();
     await page.waitForSelector('[data-testid="active-summary"]', { timeout: 60000 });
@@ -1087,15 +1100,7 @@ try {
     await page.waitForSelector('[data-testid="decode-step"]');
     check(await page.getByTestId("decode-step").last().textContent() === "<script>", "smart decode peels base64 then URL encoding");
     await viaProxy(proxy, shop, "POST /api/password/reset HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\n\r\n");
-    const resetId = await page.evaluate(async () => {
-      // The proxy records in the background: wait for the row.
-      for (let i = 0; i < 50; i++) {
-        const row = (await (await fetch("/api/v1/exchanges?path=/api/password/reset&limit=1")).json()).exchanges[0];
-        if (row) return row.id;
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      return null;
-    });
+    const resetId = await recordedId("/api/password/reset");
     await page.getByLabel("Token exchange").fill(String(resetId));
     await page.getByLabel("Samples").fill("20");
     await page.getByLabel("Token locator").fill("json:/debug_code");
