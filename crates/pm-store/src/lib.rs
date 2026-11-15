@@ -623,34 +623,43 @@ pub struct HistoryFilter {
     pub host: Option<String>,
     /// Path (including query) contains this text (case-insensitive).
     pub path: Option<String>,
+    /// HTTP method (case-insensitive), e.g. GET.
     pub method: Option<String>,
+    /// Exact response status, e.g. 404.
     pub status: Option<u16>,
-    /// e.g. proxy, replay
+    /// Where the exchange came from: proxy (browser traffic) or replay (sent via ProxyMind).
     pub source: Option<String>,
-    /// e.g. agent:claude-1
+    /// Who sent it, e.g. human:local or agent:claude.
     pub actor: Option<String>,
-    /// Exchanges sent while testing this hypothesis.
+    /// Exchanges sent while testing this hypothesis (its id).
     pub hypothesis_id: Option<i64>,
-    /// Exchanges sent with this identity's credentials.
+    /// Exchanges sent with this identity's credentials (the exact identity name).
     pub identity: Option<String>,
-    /// Only exchanges with an id greater than this (for paging forward).
+    /// Only exchanges with an id greater than this (newer ones; for paging forward).
     pub after_id: Option<i64>,
-    /// Only exchanges with an id less than this (for paging back).
+    /// Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
+    /// previous result.
     pub before_id: Option<i64>,
     /// Maximum rows (default 50, max 500).
     #[schemars(range(min = 1, max = 500))]
     pub limit: Option<usize>,
-    /// Status classes to show, e.g. "2,3" for 2xx and 3xx ("0" means no response).
+    /// Only these status classes, as digits: "2,3" for 2xx and 3xx, "4,5" for errors, "0" for exchanges with no
+    /// response. Combine with `status` and `q` as usual (all must match).
     pub status_class: Option<String>,
-    /// File extensions to hide, comma-separated, e.g. "png,jpg,css,js".
+    /// File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
+    /// query; a leading dot is allowed and case is ignored.
     pub hide_ext: Option<String>,
-    /// Only rows with a highlight or a comment.
+    /// With true: only exchanges that have a highlight or a comment (false is the same as leaving it out).
     pub annotated: Option<bool>,
-    /// Only targets in the rules of engagement (applied by the service).
+    /// With true: only targets in scope (the rules of engagement); applied by the service.
     pub in_scope: Option<bool>,
-    /// Host, path or comment contains this text (case-insensitive).
+    /// Free text: the host, the path (with query) or the comment contains it (case-insensitive).
     pub text: Option<String>,
-    /// A history query (`pm_tools::hql`), applied by the service.
+    /// A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
+    /// parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    /// comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
+    /// E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
+    /// early (see `scanned` and `next_before_id` in the result).
     pub q: Option<String>,
     /// Only these exchange ids (set by the service, never by clients).
     #[serde(skip)]

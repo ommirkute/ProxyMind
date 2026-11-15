@@ -197,6 +197,7 @@
         "properties": {
           "add_evidence": {
             "default": [],
+            "description": "Exchange ids to add to the evidence.",
             "items": {
               "format": "int64",
               "type": "integer"
@@ -205,17 +206,27 @@
           },
           "description": {
             "default": null,
+            "description": "New description (replaces the old one).",
             "type": [
               "string",
               "null"
             ]
           },
           "id": {
+            "description": "The finding to update.",
             "format": "int64",
             "type": "integer"
           },
           "severity": {
             "default": null,
+            "description": "critical, high, medium, low or info",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
             "type": [
               "string",
               "null"
@@ -241,7 +252,7 @@
         "properties": {
           "actor": {
             "default": null,
-            "description": "e.g. agent:claude-1",
+            "description": "Who sent it, e.g. human:local or agent:claude.",
             "type": [
               "string",
               "null"
@@ -249,7 +260,7 @@
           },
           "after_id": {
             "default": null,
-            "description": "Only exchanges with an id greater than this (for paging forward).",
+            "description": "Only exchanges with an id greater than this (newer ones; for paging forward).",
             "format": "int64",
             "type": [
               "integer",
@@ -258,7 +269,7 @@
           },
           "annotated": {
             "default": null,
-            "description": "Only rows with a highlight or a comment.",
+            "description": "With true: only exchanges that have a highlight or a comment (false is the same as leaving it out).",
             "type": [
               "boolean",
               "null"
@@ -266,7 +277,7 @@
           },
           "before_id": {
             "default": null,
-            "description": "Only exchanges with an id less than this (for paging back).",
+            "description": "Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the\nprevious result.",
             "format": "int64",
             "type": [
               "integer",
@@ -275,7 +286,7 @@
           },
           "hide_ext": {
             "default": null,
-            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\".",
+            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
             "type": [
               "string",
               "null"
@@ -291,7 +302,7 @@
           },
           "hypothesis_id": {
             "default": null,
-            "description": "Exchanges sent while testing this hypothesis.",
+            "description": "Exchanges sent while testing this hypothesis (its id).",
             "format": "int64",
             "type": [
               "integer",
@@ -300,7 +311,7 @@
           },
           "identity": {
             "default": null,
-            "description": "Exchanges sent with this identity's credentials.",
+            "description": "Exchanges sent with this identity's credentials (the exact identity name).",
             "type": [
               "string",
               "null"
@@ -308,7 +319,7 @@
           },
           "in_scope": {
             "default": null,
-            "description": "Only targets in the rules of engagement (applied by the service).",
+            "description": "With true: only targets in scope (the rules of engagement); applied by the service.",
             "type": [
               "boolean",
               "null"
@@ -327,6 +338,7 @@
           },
           "method": {
             "default": null,
+            "description": "HTTP method (case-insensitive), e.g. GET.",
             "type": [
               "string",
               "null"
@@ -342,7 +354,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service.",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -350,7 +362,7 @@
           },
           "source": {
             "default": null,
-            "description": "e.g. proxy, replay",
+            "description": "Where the exchange came from: proxy (browser traffic) or replay (sent via ProxyMind).",
             "type": [
               "string",
               "null"
@@ -358,6 +370,7 @@
           },
           "status": {
             "default": null,
+            "description": "Exact response status, e.g. 404.",
             "format": "uint16",
             "maximum": 65535,
             "minimum": 0,
@@ -368,7 +381,7 @@
           },
           "status_class": {
             "default": null,
-            "description": "Status classes to show, e.g. \"2,3\" for 2xx and 3xx (\"0\" means no response).",
+            "description": "Only these status classes, as digits: \"2,3\" for 2xx and 3xx, \"4,5\" for errors, \"0\" for exchanges with no\nresponse. Combine with `status` and `q` as usual (all must match).",
             "type": [
               "string",
               "null"
@@ -376,7 +389,7 @@
           },
           "text": {
             "default": null,
-            "description": "Host, path or comment contains this text (case-insensitive).",
+            "description": "Free text: the host, the path (with query) or the comment contains it (case-insensitive).",
             "type": [
               "string",
               "null"
@@ -435,7 +448,7 @@
           },
           "include_objects": {
             "default": null,
-            "description": "Include objects (default false; there can be many).",
+            "description": "Also list objects with their owners (default false; there can be many).",
             "type": [
               "boolean",
               "null"
@@ -456,6 +469,7 @@
         "additionalProperties": false,
         "properties": {
           "description": {
+            "description": "What is wrong, impact, and how to reproduce.",
             "type": "string"
           },
           "evidence": {
@@ -469,6 +483,7 @@
           },
           "hypothesis_id": {
             "default": null,
+            "description": "Hypothesis this finding comes from (kept with the finding).",
             "format": "int64",
             "type": [
               "integer",
@@ -477,9 +492,17 @@
           },
           "severity": {
             "description": "critical, high, medium, low or info",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
             "type": "string"
           },
           "title": {
+            "description": "Short title of the issue.",
             "type": "string"
           },
           "url": {
@@ -508,6 +531,7 @@
         "properties": {
           "approval_id": {
             "default": null,
+            "description": "From a previous pending_approval result: runs the approved proof. All other fields must be identical.",
             "type": [
               "string",
               "null"
@@ -567,6 +591,12 @@
           "marker_kind": {
             "default": null,
             "description": "marker: what to prove — \"redirect\" (open redirect), \"crlf\" (CRLF header\ninjection), \"host\" (Host-header injection: the marker comes back in an\nabsolute URL) or \"cors\" (an `Origin` carrying the marker is trusted with\ncredentials). The request goes in `raw` with `{{marker}}` where a fresh\nrandom value should be placed.",
+            "enum": [
+              "redirect",
+              "crlf",
+              "host",
+              "cors"
+            ],
             "type": [
               "string",
               "null"
@@ -591,6 +621,17 @@
           "oracle": {
             "default": "",
             "description": "differential_authz, timing, oast, reflection, sql_error,\nboolean_injection, path_traversal, expression or marker",
+            "enum": [
+              "differential_authz",
+              "timing",
+              "oast",
+              "reflection",
+              "sql_error",
+              "boolean_injection",
+              "path_traversal",
+              "expression",
+              "marker"
+            ],
             "type": "string"
           },
           "owner": {
@@ -804,7 +845,7 @@
           },
           "identity": {
             "default": null,
-            "description": "Send with this test identity's credentials instead of the request's own\n(use \"anonymous\" for none).",
+            "description": "Send with this test identity's credentials instead of the request's own\n(names from identity_list; use \"anonymous\" for none).",
             "type": [
               "string",
               "null"
@@ -812,8 +853,9 @@
           },
           "max_tokens": {
             "default": null,
+            "description": "Token budget of the returned view (default 1500; at least 200).",
             "format": "uint",
-            "minimum": 0,
+            "minimum": 200,
             "type": [
               "integer",
               "null"
@@ -1002,6 +1044,7 @@
           },
           "identity": {
             "default": null,
+            "description": "Crawl and scan as this test identity (names from identity_list). The task logs in again when the session\nends and stops if that keeps failing.",
             "type": [
               "string",
               "null"
@@ -1022,7 +1065,8 @@
             "default": null,
             "description": "Most requests per operation (default 150, max 2000).",
             "format": "uint",
-            "minimum": 0,
+            "maximum": 2000,
+            "minimum": 1,
             "type": [
               "integer",
               "null"
@@ -1113,6 +1157,7 @@
         "properties": {
           "approval_id": {
             "default": null,
+            "description": "From a previous pending_approval result: runs the approved send. All other fields must be identical.",
             "type": [
               "string",
               "null"
@@ -1126,6 +1171,7 @@
           },
           "hypothesis_id": {
             "default": null,
+            "description": "Hypothesis this session tests (links the exchange as evidence).",
             "format": "int64",
             "type": [
               "integer",
@@ -1152,10 +1198,11 @@
           },
           "messages": {
             "default": [],
-            "description": "Sent in order, each followed by `wait_ms` of listening.",
+            "description": "Sent in order, each followed by `wait_ms` of listening (at most 50).",
             "items": {
               "$ref": "#/components/schemas/WsOut"
             },
+            "maxItems": 50,
             "type": "array"
           },
           "raw": {
@@ -1378,6 +1425,7 @@
             }
           },
           {
+            "description": "HTTP method (case-insensitive), e.g. GET.",
             "in": "query",
             "name": "method",
             "required": false,
@@ -1390,6 +1438,7 @@
             }
           },
           {
+            "description": "Exact response status, e.g. 404.",
             "in": "query",
             "name": "status",
             "required": false,
@@ -1405,7 +1454,7 @@
             }
           },
           {
-            "description": "e.g. proxy, replay",
+            "description": "Where the exchange came from: proxy (browser traffic) or replay (sent via ProxyMind).",
             "in": "query",
             "name": "source",
             "required": false,
@@ -1418,7 +1467,7 @@
             }
           },
           {
-            "description": "e.g. agent:claude-1",
+            "description": "Who sent it, e.g. human:local or agent:claude.",
             "in": "query",
             "name": "actor",
             "required": false,
@@ -1431,7 +1480,7 @@
             }
           },
           {
-            "description": "Exchanges sent while testing this hypothesis.",
+            "description": "Exchanges sent while testing this hypothesis (its id).",
             "in": "query",
             "name": "hypothesis_id",
             "required": false,
@@ -1445,7 +1494,7 @@
             }
           },
           {
-            "description": "Exchanges sent with this identity's credentials.",
+            "description": "Exchanges sent with this identity's credentials (the exact identity name).",
             "in": "query",
             "name": "identity",
             "required": false,
@@ -1458,7 +1507,7 @@
             }
           },
           {
-            "description": "Only exchanges with an id greater than this (for paging forward).",
+            "description": "Only exchanges with an id greater than this (newer ones; for paging forward).",
             "in": "query",
             "name": "after_id",
             "required": false,
@@ -1472,7 +1521,7 @@
             }
           },
           {
-            "description": "Only exchanges with an id less than this (for paging back).",
+            "description": "Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the\nprevious result.",
             "in": "query",
             "name": "before_id",
             "required": false,
@@ -1502,7 +1551,7 @@
             }
           },
           {
-            "description": "Status classes to show, e.g. \"2,3\" for 2xx and 3xx (\"0\" means no response).",
+            "description": "Only these status classes, as digits: \"2,3\" for 2xx and 3xx, \"4,5\" for errors, \"0\" for exchanges with no\nresponse. Combine with `status` and `q` as usual (all must match).",
             "in": "query",
             "name": "status_class",
             "required": false,
@@ -1515,7 +1564,7 @@
             }
           },
           {
-            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\".",
+            "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
             "in": "query",
             "name": "hide_ext",
             "required": false,
@@ -1528,7 +1577,7 @@
             }
           },
           {
-            "description": "Only rows with a highlight or a comment.",
+            "description": "With true: only exchanges that have a highlight or a comment (false is the same as leaving it out).",
             "in": "query",
             "name": "annotated",
             "required": false,
@@ -1541,7 +1590,7 @@
             }
           },
           {
-            "description": "Only targets in the rules of engagement (applied by the service).",
+            "description": "With true: only targets in scope (the rules of engagement); applied by the service.",
             "in": "query",
             "name": "in_scope",
             "required": false,
@@ -1554,7 +1603,7 @@
             }
           },
           {
-            "description": "Host, path or comment contains this text (case-insensitive).",
+            "description": "Free text: the host, the path (with query) or the comment contains it (case-insensitive).",
             "in": "query",
             "name": "text",
             "required": false,
@@ -1567,7 +1616,7 @@
             }
           },
           {
-            "description": "A history query (`pm_tools::hql`), applied by the service.",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "in": "query",
             "name": "q",
             "required": false,
@@ -1667,7 +1716,7 @@
             }
           },
           {
-            "description": "Include objects (default false; there can be many).",
+            "description": "Also list objects with their owners (default false; there can be many).",
             "in": "query",
             "name": "include_objects",
             "required": false,

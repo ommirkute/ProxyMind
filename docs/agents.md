@@ -84,7 +84,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | Tool | What it does |
 |---|---|
 | `roe_get` | Scope, limits and the agent's permissions |
-| `history_search` | Search recorded traffic (host, path, method, status, source, actor; paging) |
+| `history_search` | Search recorded traffic: host, path, method, status, `status_class` (e.g. `2,3`), source, actor, `identity`, `hypothesis_id`, `text` (host, path or comment), `hide_ext` (e.g. `png,css`), `annotated`, `in_scope`, an HQL `q`, and paging (`after_id`, `before_id`, `limit`) |
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |

@@ -20,7 +20,7 @@ pub(crate) const MODEL_WINDOW: usize = 20_000;
 pub struct ModelFilter {
     /// Only operations whose key contains this text.
     pub contains: Option<String>,
-    /// Include objects (default false; there can be many).
+    /// Also list objects with their owners (default false; there can be many).
     pub include_objects: Option<bool>,
     /// Only objects of this type, e.g. Order.
     pub object_type: Option<String>,

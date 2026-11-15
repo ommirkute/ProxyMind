@@ -23,6 +23,8 @@ pub const OAST_DNS_SETTING: &str = "oast_dns_domain";
 pub struct ProofRequest {
     /// differential_authz, timing, oast, reflection, sql_error,
     /// boolean_injection, path_traversal, expression or marker
+    #[schemars(extend("enum" = ["differential_authz", "timing", "oast", "reflection", "sql_error",
+        "boolean_injection", "path_traversal", "expression", "marker"]))]
     pub oracle: String,
     /// Recorded exchange to work from (the owner's request for
     /// differential_authz; the baseline for timing; the target for oast).
@@ -71,6 +73,7 @@ pub struct ProofRequest {
     /// absolute URL) or "cors" (an `Origin` carrying the marker is trusted with
     /// credentials). The request goes in `raw` with `{{marker}}` where a fresh
     /// random value should be placed.
+    #[schemars(extend("enum" = ["redirect", "crlf", "host", "cors"]))]
     pub marker_kind: Option<String>,
     /// reflection: a request for the page that shows what `raw` stored
     /// (stored XSS). `raw` is sent first, then this, and this page is the one
@@ -82,6 +85,7 @@ pub struct ProofRequest {
     pub finding_id: Option<i64>,
     /// Mark this hypothesis as confirmed if the proof succeeds.
     pub hypothesis_id: Option<i64>,
+    /// From a previous pending_approval result: runs the approved proof. All other fields must be identical.
     pub approval_id: Option<String>,
 }
 

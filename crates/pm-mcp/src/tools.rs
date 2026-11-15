@@ -3,7 +3,12 @@
 use pm_service::pm_ai::View;
 use pm_service::pm_policy::{Actor, ActorKind, Tier};
 use pm_service::pm_store::HistoryFilter;
-use pm_service::{ReplayRequest, Service};
+use pm_service::{
+    AuthzCheckRequest, EngageFilter, FindingUpdate, ModelFilter, NewFinding, ProofRequest, ReplayRequest,
+    ScanTaskRequest, Service, WsReplayRequest,
+};
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -13,6 +18,98 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         "description": description,
         "inputSchema": { "type": "object", "properties": properties, "required": required, "additionalProperties": false },
     })
+}
+
+/// An `inputSchema` generated from the Rust type the dispatcher deserializes the arguments into (ADR-0019), so
+/// the schema and the serde rules cannot drift. Subschemas are inlined (many MCP clients do not resolve `$ref`),
+/// and `Option<T>` is written as plain `T`: an argument is left out, not sent as null.
+fn input_schema<T: JsonSchema>() -> Value {
+    let mut settings = SchemaSettings::draft2020_12();
+    settings.inline_subschemas = true;
+    settings.meta_schema = None;
+    let schema = settings.into_generator().into_root_schema_for::<T>();
+    let mut v = serde_json::to_value(schema).expect("schema serializes");
+    let o = v.as_object_mut().expect("object schema");
+    o.remove("title");
+    o.remove("$defs");
+    o.remove("description");
+    tidy(&mut v);
+    if v.get("required").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+        v.as_object_mut().expect("object schema").remove("required");
+    }
+    v
+}
+
+/// Drops what only adds noise for a model: null alternatives of optional values, numeric `format` names and
+/// `default` (the container-level serde default makes every field's default null, 0 or empty, which says nothing
+/// about the value the service uses; the doc comments state those). A `oneOf` of string constants becomes an `enum`
+/// that keeps each constant's description.
+fn tidy(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.remove("default");
+            if let Some(Value::String(d)) = o.get_mut("description") {
+                // Doc comments are wrapped at the source's line width; one paragraph is one line here.
+                *d = d.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+            for key in ["anyOf", "oneOf"] {
+                let Some(Value::Array(alts)) = o.get_mut(key) else { continue };
+                alts.retain(|a| a.get("type") != Some(&json!("null")));
+                if alts.len() == 1 {
+                    let Some(Value::Object(only)) = alts.pop() else { continue };
+                    o.remove(key);
+                    for (k, val) in only {
+                        o.entry(k).or_insert(val);
+                    }
+                }
+            }
+            if let Some(Value::Array(alts)) = o.get("oneOf") {
+                let consts: Option<Vec<(&str, Option<&str>)>> = alts
+                    .iter()
+                    .map(|a| Some((a.get("const")?.as_str()?, a.get("description").and_then(Value::as_str))))
+                    .collect();
+                if let Some(consts) = consts.filter(|c| !c.is_empty()) {
+                    let values: Vec<Value> = consts.iter().map(|(c, _)| json!(c)).collect();
+                    let mut text = o.get("description").and_then(Value::as_str).unwrap_or_default().to_string();
+                    for (c, d) in &consts {
+                        if let Some(d) = d {
+                            text.push_str(&format!(" {c}: {}.", d.trim_end_matches('.')));
+                        }
+                    }
+                    o.remove("oneOf");
+                    o.insert("type".into(), json!("string"));
+                    o.insert("enum".into(), Value::Array(values));
+                    if !text.trim().is_empty() {
+                        o.insert("description".into(), json!(text.trim()));
+                    }
+                }
+            }
+            if let Some(Value::Array(types)) = o.get_mut("type") {
+                types.retain(|t| t != "null");
+                if types.len() == 1 {
+                    let t = types.remove(0);
+                    o.insert("type".into(), t);
+                }
+            }
+            if o.get("format").and_then(Value::as_str).is_some_and(|f| f.starts_with("int") || f.starts_with("uint")) {
+                o.remove("format");
+            }
+            for (key, val) in o.iter_mut() {
+                match (key.as_str(), val) {
+                    // A map of field names, not a schema: a field may be called `description` or `default`.
+                    ("properties", Value::Object(fields)) => fields.values_mut().for_each(tidy),
+                    (_, val) => tidy(val),
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(tidy),
+        _ => {}
+    }
+}
+
+/// A tool whose arguments are the Rust type `T`. The description stays hand-written, for models.
+fn typed_tool<T: JsonSchema>(name: &str, description: &str) -> Value {
+    json!({ "name": name, "description": description, "inputSchema": input_schema::<T>() })
 }
 
 const VIEW_SCHEMA: &str = r#"{"type":"string","enum":["summary","headers","full"],"description":"summary (default): key headers and a short body preview. headers: all headers. full: everything within max_tokens."}"#;
@@ -27,27 +124,9 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({}),
             &[],
         ),
-        tool(
+        typed_tool::<HistoryFilter>(
             "history_search",
             "Search recorded HTTP traffic, newest first. Returns summaries (no bodies). Combine filters to narrow down.",
-            json!({
-                "host": {"type":"string","description":"Host contains this text"},
-                "path": {"type":"string","description":"Path or query contains this text"},
-                "method": {"type":"string"},
-                "status": {"type":"integer"},
-                "source": {"type":"string","description":"proxy (browser traffic) or replay (sent via ProxyMind)"},
-                "actor": {"type":"string","description":"e.g. human:local or agent:claude"},
-                "before_id": {"type":"integer","description":"Paging: pass next_before_id from the previous result"},
-                "after_id": {"type":"integer","description":"Only exchanges newer than this id"},
-                "limit": {"type":"integer","minimum":1,"maximum":500,"description":"Default 50"},
-                "q": {"type":"string","description":"Query: field:value terms (all must match), OR, -term, \
-                      parentheses; field~regex. Fields: host path url method status ext len reqlen time id source \
-                      actor identity comment highlight mime req resp any reqheader respheader param is. Numbers take \
-                      >N <=N N..M, status 4xx. E.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. \
-                      Text terms read messages: a page may stop early (see scanned, next_before_id)."},
-                "in_scope": {"type":"boolean","description":"Only targets in scope"},
-            }),
-            &[],
         ),
         tool(
             "history_grep",
@@ -207,47 +286,21 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
             &["raw", "payload_sets"],
         ),
-        tool(
+        typed_tool::<WsReplayRequest>(
             "ws_send",
             "Open a new WebSocket like a recorded one (exchange_id of a status-101 upgrade), send messages in order and \
              get every message both ways. ProxyMind listens wait_ms after opening and after each message, answers pings \
              and closes at the end; the session is recorded as a new exchange. Opening only is usually allowed; sending \
              messages may return status=pending_approval: ask the user, then call again with identical arguments plus \
              approval_id. Use {{secret:...}} placeholders as shown to you.",
-            json!({
-                "exchange_id": {"type":"integer","description":"Recorded WebSocket upgrade (status 101)"},
-                "raw": {"type":"string","description":"Edited upgrade request (HTTP/1.1); default: the recorded one"},
-                "messages": {"type":"array","maxItems":50,"description":"Sent in order","items":{"type":"object",
-                    "properties":{"text":{"type":"string"},"hex":{"type":"string","description":"Binary payload as hex"}},
-                    "additionalProperties":false}},
-                "wait_ms": {"type":"integer","minimum":0,"maximum":10000,"description":"Listen time after each message (default 1000)"},
-                "identity": {"type":"string","description":"Open the socket as this identity"},
-                "approval_id": {"type":"string"},
-                "hypothesis_id": {"type":"integer"},
-                "max_chars": {"type":"integer","minimum":100,"maximum":20000,"description":"Per message shown; default 2000"},
-            }),
-            &["exchange_id"],
         ),
-        tool(
+        typed_tool::<ReplayRequest>(
             "replay_send",
             "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 in the request line for HTTP/2, \
              with a host: header for :authority). Give exchange_id to resend or edit a recorded \
              request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
              to you. GET/HEAD/OPTIONS usually run directly; other methods may return status=pending_approval: ask the \
              user to approve, then call again with identical arguments plus approval_id.",
-            json!({
-                "exchange_id": {"type":"integer","description":"Recorded exchange to resend or base this on"},
-                "url": {"type":"string","description":"scheme://host[:port] when not using exchange_id"},
-                "identity": {"type":"string","description":"Send with this identity's credentials (see identity_list), or 'anonymous'"},
-                "raw": {"type":"string","description":"Full raw request (request line, headers, blank line, body)"},
-                "fix_content_length": {"type":"boolean","description":"Set Content-Length to the body length (default true)"},
-                "normalize_newlines": {"type":"boolean","description":"Turn \\n into \\r\\n in the head (default true)"},
-                "approval_id": {"type":"string","description":"From a previous pending_approval result"},
-                "hypothesis_id": {"type":"integer","description":"Hypothesis this send tests (links evidence)"},
-                "view": view,
-                "max_tokens": {"type":"integer","minimum":200,"maximum":20000},
-            }),
-            &[],
         ),
         tool(
             "identity_list",
@@ -280,17 +333,11 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "name": {"type":"string"} }),
             &["name"],
         ),
-        tool(
+        typed_tool::<AuthzCheckRequest>(
             "authz_check",
             "Authorization test: re-send a recorded GET (made by the data's owner) as other identities and as an \
              anonymous user, and compare each response with the owner's while ignoring noise such as timestamps. \
              Verdicts: denied, same_as_owner (possible broken access control), allowed_different, inconclusive.",
-            json!({
-                "exchange_id": {"type":"integer","description":"A GET/HEAD/OPTIONS exchange made by the owner"},
-                "identities": {"type":"array","items":{"type":"string"},"description":"Identity names to try"},
-                "include_anonymous": {"type":"boolean","description":"Also try without credentials (default true)"},
-            }),
-            &["exchange_id"],
         ),
         tool(
             "authz_results",
@@ -434,25 +481,13 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
             &["url"],
         ),
-        tool(
+        typed_tool::<ScanTaskRequest>(
             "scan_task_start",
             "Crawl and audit a site as one background task: crawl from url, then run the active scanner over each \
              operation of its origin, recording strong issues as suspected findings. A profile (light, default, \
              thorough, api-only, or a saved one; see scan_profiles) fills in what you leave out. Poll with \
              scan_task_status; a paused or interrupted task continues with scan_task_resume, skipping operations \
              already scanned.",
-            json!({
-                "url": {"type":"string"},
-                "profile": {"type":"string"},
-                "checks": {"type":"array","items":{"type":"string"}},
-                "crawl": {"type":"boolean"},
-                "max_pages": {"type":"integer"},
-                "max_targets": {"type":"integer"},
-                "max_requests": {"type":"integer"},
-                "identity": {"type":"string"},
-                "approval_id": {"type":"string"},
-            }),
-            &["url"],
         ),
         tool(
             "scan_task_status",
@@ -524,18 +559,14 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "token": {"type":"string"}, "limit": {"type":"integer"} }),
             &[],
         ),
-        tool(
+        typed_tool::<EngageFilter>(
             "engage_comments",
             "Comments left in recorded HTML/JS/CSS responses (TODOs, old endpoints, credentials), de-duplicated. \
              Sends nothing.",
-            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
-            &[],
         ),
-        tool(
+        typed_tool::<EngageFilter>(
             "engage_scripts",
             "Scripts in recorded pages: external script URLs, inline scripts and event handlers. Sends nothing.",
-            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
-            &[],
         ),
         tool(
             "skills_list",
@@ -552,13 +583,11 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "name": {"type":"string"}, "focus": {"type":"string"} }),
             &["name"],
         ),
-        tool(
+        typed_tool::<EngageFilter>(
             "engage_js_endpoints",
             "Endpoints that recorded JavaScript mentions (API paths and URLs in scripts and inline page scripts), with \
              query parameters and the method when the call site shows it. `known: false` means traffic hasn't shown \
              it yet: often routes no page links to. Sends nothing.",
-            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
-            &[],
         ),
         tool(
             "attack_path_record",
@@ -579,15 +608,13 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "scan_id": {"type":"integer"} }),
             &[],
         ),
-        tool(
+        typed_tool::<EngageFilter>(
             "engage_logic",
             "Business-logic test candidates from recorded traffic: parameters that look like prices, quantities, \
              discounts, limits, identities, roles or workflow state, each with abuse cases to try (negative \
              quantities, coupon reuse, jumping to a paid state…), and URLs that look like steps of a flow (cart, \
              checkout, transfer) for step-skipping tests. Scanners miss these: compare the outcome with what the \
              business allows. Sends nothing.",
-            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
-            &[],
         ),
         tool(
             "authz_matrix",
@@ -648,12 +675,10 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "host": {"type":"string"}, "limit": {"type":"integer"} }),
             &["host"],
         ),
-        tool(
+        typed_tool::<EngageFilter>(
             "engage_analyze",
             "Analyze the target from recorded traffic: URL counts, dynamic URLs, methods, statuses, content types, and \
              every parameter (query/body/JSON/cookie/multipart, how often, examples, paths). Sends nothing.",
-            json!({ "host": {"type":"string"}, "in_scope": {"type":"boolean"}, "max_scan": {"type":"integer"} }),
-            &[],
         ),
         tool(
             "engage_references",
@@ -741,16 +766,10 @@ pub fn tool_definitions() -> Vec<Value> {
             }),
             &["url"],
         ),
-        tool(
+        typed_tool::<ModelFilter>(
             "model_get",
             "The application model built from traffic: operations (method + path template such as \
              /api/orders/{id}, kind, params, identities seen) and object counts. Start here to understand the app.",
-            json!({
-                "contains": {"type":"string","description":"Only operations whose key contains this text"},
-                "include_objects": {"type":"boolean","description":"Also list objects with their owners (default false)"},
-                "object_type": {"type":"string","description":"Only objects of this type, e.g. Order"},
-            }),
-            &[],
         ),
         tool(
             "authz_candidates",
@@ -795,7 +814,7 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "untested_only": {"type":"boolean","description":"Only untested/open cells (default true)"} }),
             &[],
         ),
-        tool(
+        typed_tool::<ProofRequest>(
             "proof_run",
             "Have ProxyMind verify a suspected vulnerability itself. Oracles: differential_authz (exchange_id of the \
              owner's GET + attacker identity: proves IDOR/BOLA or missing role checks), timing (exchange_id or url, \
@@ -810,29 +829,6 @@ pub fn tool_definitions() -> Vec<Value> {
              describes), path_traversal and expression also `markers`; marker takes `raw` with {{marker}} and a \
              `marker_kind`. \
              Pass finding_id/hypothesis_id to update them when proven. Payload oracles may need human approval.",
-            json!({
-                "oracle": {"type":"string","enum":["differential_authz","timing","oast","reflection","sql_error",
-                    "boolean_injection","path_traversal","expression","marker"]},
-                "exchange_id": {"type":"integer"},
-                "attacker": {"type":"string"},
-                "owner": {"type":"string"},
-                "url": {"type":"string"},
-                "baseline_raw": {"type":"string"},
-                "payload_raw": {"type":"string"},
-                "samples": {"type":"integer","minimum":5,"maximum":30},
-                "min_effect_ms": {"type":"number"},
-                "raw": {"type":"string"},
-                "view_raw": {"type":"string","description":"reflection: the request for the page that shows what raw stored (stored XSS); that page is rendered"},
-                "raws": {"type":"array","items":{"type":"string"},"description":"sql_error: baseline, the value with a quote, with a second quote, with a harmless change. boolean_injection: baseline, a true condition, a false condition. path_traversal: baseline, a made-up file name, then one request per known file. expression (template injection): baseline, the bare numbers without template syntax, then one request per expression on fresh random numbers"},
-                "markers": {"type":"array","items":{"type":"string"},"description":"path_traversal: text that shows each file request read its file, one per file request. expression: what each expression evaluates to (5+ digits)"},
-                "marker_kind": {"type":"string","enum":["redirect","crlf","host","cors"],"description":"marker: where the fresh value must not land (the redirect target, a response header, an absolute URL, or Access-Control-Allow-Origin with credentials for an Origin header)"},
-                "wait_seconds": {"type":"integer","minimum":1,"maximum":60},
-                "identity": {"type":"string"},
-                "finding_id": {"type":"integer"},
-                "hypothesis_id": {"type":"integer"},
-                "approval_id": {"type":"string"},
-            }),
-            &["oracle"],
         ),
         tool(
             "proof_get",
@@ -840,20 +836,10 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "proof_id": {"type":"integer"} }),
             &["proof_id"],
         ),
-        tool(
+        typed_tool::<NewFinding>(
             "finding_create",
             "Record a suspected vulnerability with evidence exchange ids. It becomes 'proven' only via proof_run; \
              humans confirm it.",
-            json!({
-                "title": {"type":"string"},
-                "vuln_class": {"type":"string"},
-                "severity": {"type":"string","enum":["critical","high","medium","low","info"]},
-                "description": {"type":"string","description":"What is wrong, impact, and how to reproduce"},
-                "url": {"type":"string"},
-                "evidence": {"type":"array","items":{"type":"integer"}},
-                "hypothesis_id": {"type":"integer"},
-            }),
-            &["title", "vuln_class", "severity", "description"],
         ),
         tool(
             "finding_retest",
@@ -878,17 +864,9 @@ pub fn tool_definitions() -> Vec<Value> {
             json!({ "class": {"type":"string"} }),
             &[],
         ),
-        tool(
+        typed_tool::<FindingUpdate>(
             "finding_update",
             "Update a finding's description, severity or evidence. Agents may only set status to suspected.",
-            json!({
-                "id": {"type":"integer"},
-                "status": {"type":"string"},
-                "severity": {"type":"string","enum":["critical","high","medium","low","info"]},
-                "description": {"type":"string"},
-                "add_evidence": {"type":"array","items":{"type":"integer"}},
-            }),
-            &["id"],
         ),
         tool(
             "finding_list",

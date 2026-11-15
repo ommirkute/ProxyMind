@@ -48,11 +48,14 @@ pub struct Retest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewFinding {
+    /// Short title of the issue.
     pub title: String,
     /// idor, bfla, sqli, ssrf, xss, …
     pub vuln_class: String,
     /// critical, high, medium, low or info
+    #[schemars(extend("enum" = ["critical", "high", "medium", "low", "info"]))]
     pub severity: String,
+    /// What is wrong, impact, and how to reproduce.
     pub description: String,
     /// Affected URL; defaults to the first evidence exchange's URL.
     #[serde(default)]
@@ -60,6 +63,7 @@ pub struct NewFinding {
     /// Exchange ids that show the issue.
     #[serde(default)]
     pub evidence: Vec<i64>,
+    /// Hypothesis this finding comes from (kept with the finding).
     #[serde(default)]
     pub hypothesis_id: Option<i64>,
 }
@@ -67,14 +71,19 @@ pub struct NewFinding {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FindingUpdate {
+    /// The finding to update.
     pub id: i64,
     /// Humans: suspected, confirmed, false_positive, reported, fixed, accepted_risk. Agents: suspected.
     #[serde(default)]
     pub status: Option<String>,
+    /// critical, high, medium, low or info
     #[serde(default)]
+    #[schemars(extend("enum" = ["critical", "high", "medium", "low", "info"]))]
     pub severity: Option<String>,
+    /// New description (replaces the old one).
     #[serde(default)]
     pub description: Option<String>,
+    /// Exchange ids to add to the evidence.
     #[serde(default)]
     pub add_evidence: Vec<i64>,
 }

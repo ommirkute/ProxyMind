@@ -1,8 +1,7 @@
-//! ADR-0019 step 3: for each MCP tool whose input is one of the typed request structs, the property
-//! names of the hand-written `inputSchema` must match the schema generated from the Rust type (the
-//! type serde actually deserializes, `deny_unknown_fields` included). Descriptions, formatting and
-//! constraint details are not compared; this is the cheap "same fields" check before the hand-written
-//! schemas are replaced (step 4).
+//! ADR-0019 step 4: for each MCP tool whose input is one of the typed request structs, the `inputSchema` is
+//! generated from that type (`input_schema` in `tools.rs`). This test checks the tool really lists the type's
+//! fields and required set (the type serde actually deserializes, `deny_unknown_fields` included), that every
+//! property has a description, and that no tool schema in the server needs `$ref` resolution.
 
 use std::collections::BTreeSet;
 
@@ -30,20 +29,6 @@ fn required_names(schema: &Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Fields the Rust type accepts that the hand-written tool schema does not list, so a model that follows the
-/// schema never learns of them. The type is right and the schema is behind; step 4 (generated schemas) removes
-/// these entries. The list is exact: a new omission fails the test, and so does fixing one without deleting it.
-const UNLISTED_BY_TOOL: &[(&str, &str)] = &[
-    ("history_search", "annotated"),
-    ("history_search", "hide_ext"),
-    ("history_search", "hypothesis_id"),
-    ("history_search", "identity"),
-    ("history_search", "status_class"),
-    ("history_search", "text"),
-    ("scan_task_start", "browser"),
-    ("scan_task_start", "record_findings"),
-];
-
 /// Each tool and the type its dispatch arm in `tools.rs` deserializes its arguments into.
 fn tool_types() -> Vec<(&'static str, Value)> {
     vec![
@@ -64,34 +49,57 @@ fn tool_types() -> Vec<(&'static str, Value)> {
     ]
 }
 
+fn contains_ref(v: &Value) -> Option<String> {
+    match v {
+        Value::Object(o) => o.iter().find_map(|(k, v)| {
+            if matches!(k.as_str(), "$ref" | "$defs" | "definitions") { Some(k.clone()) } else { contains_ref(v) }
+        }),
+        Value::Array(a) => a.iter().find_map(contains_ref),
+        _ => None,
+    }
+}
+
 #[test]
-fn hand_written_input_schemas_list_the_same_fields_as_the_rust_types() {
+fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
     let tools = pm_mcp::tool_definitions();
     let mut problems = Vec::new();
     for (name, schema) in tool_types() {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("no tool named {name}"));
-        let hand = &tool["inputSchema"];
-        let (hand_props, gen_props) = (property_names(hand), property_names(&schema));
-        for p in hand_props.difference(&gen_props) {
-            problems.push(format!("{name}: the tool schema lists `{p}`, which the type does not accept"));
-        }
-        for p in gen_props.difference(&hand_props) {
-            if !UNLISTED_BY_TOOL.contains(&(name, p.as_str())) {
-                problems.push(format!("{name}: the type accepts `{p}`, which the tool schema does not list"));
-            }
-        }
-        for (_, p) in UNLISTED_BY_TOOL.iter().filter(|(n, _)| *n == name) {
-            if !gen_props.contains(*p) || hand_props.contains(*p) {
-                problems.push(format!("{name}: `{p}` is no longer a known omission; remove it from UNLISTED_BY_TOOL"));
-            }
-        }
-        // Both sides reject unknown fields.
-        assert_eq!(hand["additionalProperties"], false, "{name}");
+        let input = &tool["inputSchema"];
+        assert_eq!(input["type"], "object", "{name}");
+        assert_eq!(input["additionalProperties"], false, "{name}: the tool must reject unknown fields");
         assert_eq!(schema["additionalProperties"], false, "{name}: the type must deny unknown fields");
-        let (hand_req, gen_req) = (required_names(hand), required_names(&schema));
-        if hand_req != gen_req {
-            problems.push(format!("{name}: required differs: tool {hand_req:?}, type {gen_req:?}"));
+        for key in ["$schema", "title"] {
+            assert!(input.get(key).is_none(), "{name}: inputSchema has a top-level `{key}`");
+        }
+        let (tool_props, type_props) = (property_names(input), property_names(&schema));
+        if tool_props != type_props {
+            problems.push(format!("{name}: properties differ: tool {tool_props:?}, type {type_props:?}"));
+        }
+        let (tool_req, type_req) = (required_names(input), required_names(&schema));
+        if tool_req != type_req {
+            problems.push(format!("{name}: required differs: tool {tool_req:?}, type {type_req:?}"));
+        }
+        if input.get("required").is_some() != !type_req.is_empty() {
+            problems.push(format!("{name}: `required` must be present exactly when it is not empty"));
+        }
+        // Every property says what it is for.
+        for (prop, def) in input["properties"].as_object().into_iter().flatten() {
+            if def.get("description").and_then(Value::as_str).is_none_or(|d| d.trim().is_empty()) {
+                problems.push(format!("{name}.{prop}: no description (add a doc comment to the field)"));
+            }
         }
     }
     assert!(problems.is_empty(), "MCP schemas differ from the Rust types:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn no_tool_input_schema_needs_ref_resolution() {
+    let tools = pm_mcp::tool_definitions();
+    assert_eq!(tools.len(), 79);
+    for t in &tools {
+        if let Some(key) = contains_ref(&t["inputSchema"]) {
+            panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);
+        }
+    }
 }

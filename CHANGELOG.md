@@ -8,6 +8,12 @@ version may change project files, APIs and the CLI.
 ### API contracts
 
 - An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **Agents see 8 more fields, by name.** `history_search` now lists `status_class`, `hide_ext`, `annotated`, `identity`,
+  `hypothesis_id` and `text`, and `scan_task_start` lists `browser` and `record_findings`. They already worked, but the
+  tool descriptions did not mention them, so agents never used them. The input schemas of these 14 MCP tools
+  (`history_search`, `scan_task_start`, `engage_*`, `ws_send`, `replay_send`, `authz_check`, `model_get`, `proof_run`,
+  `finding_create`, `finding_update`) are now generated from the same Rust types as the API, so they cannot drift
+  apart again, and they carry the real limits (for example `max_requests` 1 to 2000).
 
 ### Live events
 
