@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { ErrorBox, Panel, useAction, useLoad } from "../components";
+import type { ListenerStatus } from "../api-types.gen";
 
 interface ListenerConfig {
   bind: string;
@@ -10,11 +11,6 @@ interface ListenerConfig {
   force_tls: boolean;
 }
 
-interface ListenerStatus {
-  bind: string;
-  running: boolean;
-  error?: string;
-}
 
 interface ListenersView {
   primary: string | null;

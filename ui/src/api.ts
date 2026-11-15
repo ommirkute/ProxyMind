@@ -65,7 +65,14 @@ export function qs(params: Record<string, string | number | boolean | undefined 
   return s ? `?${s}` : "";
 }
 
-// ---- types (mirroring the Rust structs) ----------------------------------
+// ---- types ----------------------------------------------------------------
+// Types that match the API contract come from api-types.gen.ts (cargo xtask contracts).
+
+import type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
+export type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, Approval };
+
+// Hand-written types: narrower than the contract or shaped for the UI.
+
 
 export interface Counters {
   exchanges: number;
@@ -85,42 +92,11 @@ export interface Status {
   counters: Counters;
 }
 
-export interface ExchangeSummary {
-  id: number;
-  ts_ms: number;
-  duration_ms: number | null;
-  source: string;
-  actor_id: string;
-  scheme: string;
-  host: string;
-  port: number;
-  method: string;
-  path: string;
-  status: number | null;
-  req_len: number;
-  resp_len: number | null;
-  error: string | null;
-  identity?: string;
-  hypothesis_id?: number;
-  highlight?: string;
-  comment?: string;
-}
-
 export interface ExchangePage {
   /** With a query: how many exchanges were looked at. */
   scanned?: number;
   exchanges: ExchangeSummary[];
   next_before_id?: number;
-}
-
-export interface BodyView {
-  kind: string;
-  content_type?: string;
-  size: number;
-  outline?: string;
-  text?: string;
-  truncated: boolean;
-  notes?: string[];
 }
 
 export interface ExchangeDetail {
@@ -153,79 +129,6 @@ export interface WsMessage {
   possible_prompt_injection?: string[];
 }
 
-export interface WsPage {
-  exchange_id: number;
-  total: number;
-  messages: WsMessage[];
-  next_after_id?: number;
-}
-
-export interface Approval {
-  id: string;
-  created_ms: number;
-  actor: string;
-  action: string;
-  tier: string;
-  target: string | null;
-  summary: string;
-  params: string;
-  status: string;
-  decided_by: string | null;
-}
-
-export interface IdentityInfo {
-  name: string;
-  role: string;
-  status: string;
-  cookies: string[];
-  headers: string[];
-  has_health_check: boolean;
-  has_login: boolean;
-  logged_out: boolean;
-  login_steps: number;
-  created_by: string;
-}
-
-export interface LoginRecording {
-  name: string;
-  steps: { exchange_id: number; method: string; url: string; extracts: string[]; uses: string[] }[];
-  cookies: string[];
-  headers: string[];
-  health_check: number | null;
-  notes: string[];
-}
-
-export interface LoggedOutLearned {
-  name: string;
-  logged_out: { statuses: number[]; location_contains: string; body_contains: string };
-  health_contains: string | null;
-  exchange_ids: number[];
-}
-
-export interface AuthzRow {
-  id: number;
-  exchange_id: number;
-  method: string;
-  url: string;
-  identity: string;
-  verdict: string;
-  status: number | null;
-  similarity: number | null;
-  evidence_id: number | null;
-  summary: string;
-  checked_by: string;
-  checked_ms: number;
-}
-
-export interface AuthzCandidate {
-  operation: string;
-  object: string;
-  owner: string;
-  exchange_id: number;
-  try_as: string[];
-  reason: string;
-}
-
 export interface Operation {
   key: string;
   method: string;
@@ -248,20 +151,6 @@ export interface ModelObject {
   owner?: string;
   owner_source?: string;
   accessed_by: string[];
-}
-
-export interface CoverageCell {
-  operation: string;
-  vuln_class: string;
-  param?: string;
-  status: string;
-  hypotheses?: number[];
-}
-
-export interface Coverage {
-  cells: CoverageCell[];
-  totals: Record<string, number>;
-  percent_tested: number;
 }
 
 export interface Proof {
@@ -294,30 +183,6 @@ export interface Finding {
   explanation?: string;
 }
 
-export interface IssueType {
-  id: string;
-  name: string;
-  severity: string;
-  cwe: number[];
-  owasp: string;
-  owasp_api?: string;
-  aliases: string[];
-  background: string;
-  impact: string;
-  remediation: string;
-  references: string[];
-}
-
-export interface Retest {
-  finding_id: number;
-  method: string;
-  reproduced: boolean | null;
-  summary: string;
-  exchange_ids: number[];
-  ts_ms: number;
-  by: string;
-}
-
 export interface ReportTemplate {
   name: string;
   description: string;
@@ -326,36 +191,7 @@ export interface ReportTemplate {
   builtin: boolean;
 }
 
-export interface FindingProve {
-  finding_id: number;
-  vuln_class: string;
-  proven: boolean;
-  reasons: string[];
-  oracle: string | null;
-  proof_id: number | null;
-}
-
 export const cweUrl = (n: number) => `https://cwe.mitre.org/data/definitions/${n}.html`;
-
-export type ProofResult =
-  | { status: "completed"; proof_id: number; proven: boolean; confidence: string; reasons: string[]; exchange_ids: number[] }
-  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
-  | { status: "denied"; reasons: string[] };
-
-export type ReplayResult =
-  | { status: "sent"; exchange_id: number; elapsed_ms: number; notes?: string[] }
-  | { status: "failed"; exchange_id: number; error: string }
-  | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
-  | { status: "denied"; reasons: string[] };
-
-export interface AuditRecord {
-  seq: number;
-  ts_ms: number;
-  actor: string;
-  action: string;
-  detail: string;
-  decision: string;
-}
 
 export const fmtTime = (ms: number) => new Date(ms).toLocaleTimeString();
 export const fmtDateTime = (ms: number) => new Date(ms).toLocaleString();
@@ -366,13 +202,6 @@ export const originOf = (e: ExchangeSummary) => {
   const host = e.host.includes(":") ? `[${e.host}]` : e.host;
   return `${e.scheme}://${host}${e.port === def ? "" : `:${e.port}`}`;
 };
-
-export interface BrowserOpened {
-  url: string;
-  proxy: string;
-  pid: number | null;
-  profile: string;
-}
 
 /** Opens ProxyMind's browser window (through the proxy, trusting its CA). */
 export const openBrowser = (url?: string) => api.post<BrowserOpened>("/browser/open", url ? { url } : {});

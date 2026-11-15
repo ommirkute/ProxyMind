@@ -2686,6 +2686,7 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "pm-api",
+ "serde_json",
 ]
 
 [[package]]

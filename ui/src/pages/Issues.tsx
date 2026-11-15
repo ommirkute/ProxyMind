@@ -2,17 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useLiveEvent } from "../live";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
+import type { ActiveFinding, ScanIssue as Issue } from "../api-types.gen";
 
-interface Issue {
-  check: string;
-  title: string;
-  severity: "info" | "low" | "medium" | "high";
-  origin: string;
-  path: string;
-  evidence: string;
-  count: number;
-  exchange_ids: number[];
-}
 
 /** Passive issues in recorded traffic: leads to test, not findings. */
 export default function Issues() {
@@ -76,16 +67,6 @@ export default function Issues() {
   );
 }
 
-interface ActiveFinding {
-  check: string;
-  title: string;
-  severity: string;
-  point: string;
-  payload: string;
-  evidence: string;
-  prove_with?: string;
-  exchange_id: number;
-}
 type ActiveResult =
   | { status: "done"; baseline_exchange_id: number; requests: number; issues: ActiveFinding[]; insertion_points: { kind: string; name: string }[] }
   | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }

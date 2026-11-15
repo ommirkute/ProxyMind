@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, fmtTime, toast } from "../api";
 import { Empty, ErrorBox, useAction, useLoad, useNav } from "../components";
+import type { Turn, Skill } from "../api-types.gen";
 
 type Block =
   | { type: "text"; text: string }
@@ -41,11 +42,6 @@ interface Chat {
   messages: Message[];
 }
 
-interface Turn {
-  chat_id: number;
-  messages: Message[];
-  note?: string;
-}
 
 const PRESETS: { label: string; cfg: Partial<Config> }[] = [
   { label: "Ollama (local)", cfg: { provider: "openai", base_url: "http://127.0.0.1:11434/v1", api_key_env: "", tools: "compact", price_input: 0, price_output: 0 } },
@@ -271,7 +267,6 @@ function MessageView({ m }: { m: Message }) {
   );
 }
 
-interface Skill { name: string; title: string; description: string; args: string[]; source: string }
 
 /** Testing playbooks (skills): picking one puts its steps in the message box, with an optional focus. */
 function Playbooks({ onPick }: { onPick: (text: string) => void }) {
