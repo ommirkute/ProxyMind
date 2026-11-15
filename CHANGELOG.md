@@ -3,11 +3,13 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
-## Unreleased
+## 0.2.0 (2026-11-15)
+
+First release since 0.1.0. Everything below ships in it; the version number did not change while it was prepared.
 
 ### API contracts
 
-- An OpenAPI document for part of the API, generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
+- **An OpenAPI document for the REST API,** generated from the Rust types (`docs/api/openapi.json`, `cargo xtask contracts`).
 - **Typed clients.** The same command generates TypeScript types (`ui/src/api-types.gen.ts`, `sdk/typescript/src/types.gen.ts`)
   and Python `TypedDict`s (`sdk/python/proxymind/types.py`) from the API description. The TypeScript SDK exports them and
   its methods return them; the Python SDK's methods are annotated with them. Types only: no runtime change.
@@ -146,8 +148,10 @@ version may change project files, APIs and the CLI.
   and a test keeps the list and the handlers in step.
 - Proofs for error-based SQL injection, path traversal and Host-header reflection read the response body after
   de-chunking and decompressing it (a compressed response could hide the marker and miss a proof).
+- Discovery's guessed-parameter probe sent the path without its query.
+- Absolute-form targets with an empty path are split correctly.
+- The out-of-band deadline uses one clock, so a callback at the deadline counts.
 
-## 0.2.0 (2026-11-12)
 
 ### AI testing
 
@@ -179,12 +183,6 @@ version may change project files, APIs and the CLI.
   positives.
 - Out-of-band callbacks that arrive late are still counted.
 - Opt-in update check.
-
-### Fixes
-
-- Discovery's guessed-parameter probe sent the path without its query.
-- Absolute-form targets with an empty path are split correctly.
-- The out-of-band deadline uses one clock, so a callback at the deadline counts.
 
 ## 0.1.0 (2026-11-07)
 
