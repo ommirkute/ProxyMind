@@ -120,6 +120,8 @@ pub fn api() -> Router<AppState> {
         .route("/crawl", post(crawl))
         .route("/discover", post(discover))
         .route("/tools/decode", post(tools_decode))
+        .route("/tools/protobuf/decode", post(tools_protobuf_decode))
+        .route("/tools/protobuf/encode", post(tools_protobuf_encode))
         .route("/tools/request-transform", post(tools_request_transform))
         .route("/tools/compare", post(tools_compare))
         .route("/tools/token-analyzer", post(tools_token_analyzer))
@@ -502,6 +504,14 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
         "response_body": ex.response.as_deref().and_then(decoded),
         "view": view,
     });
+    // gRPC and Protobuf bodies as text (per message, with the status from the trailers); absent for other traffic.
+    let proto = |raw: &[u8]| pm_service::pm_ai::body::protobuf_view(raw, true).map(|(_, r)| r.text);
+    if let Some(t) = proto(&ex.request) {
+        v["request_protobuf"] = json!(t);
+    }
+    if let Some(t) = ex.response.as_deref().and_then(proto) {
+        v["response_protobuf"] = json!(t);
+    }
     if let Some(n) = request_truncated {
         v["request_truncated"] = json!(n);
     }
@@ -1129,6 +1139,20 @@ async fn openapi_import(State(st): State<AppState>, Json(r): Json<pm_service::Op
 
 async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::DecodeRequest>) -> ApiResult {
     ok(st.service.decode(&r)?)
+}
+
+async fn tools_protobuf_decode(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::api_types::ProtobufDecodeRequest>,
+) -> ApiResult {
+    ok(st.service.protobuf_decode(&st.actor, &r)?)
+}
+
+async fn tools_protobuf_encode(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::api_types::ProtobufEncodeRequest>,
+) -> ApiResult {
+    ok(st.service.protobuf_encode(&r)?)
 }
 
 async fn tools_request_transform(State(st): State<AppState>, Json(t): Json<pm_service::RequestTransform>) -> ApiResult {

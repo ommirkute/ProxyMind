@@ -28,6 +28,7 @@ fn rejects_unknown<T: DeserializeOwned>(body: &str) {
 fn replay_request() {
     let sample = ReplayRequest {
         raw: Some("GET / HTTP/1.1\r\nHost: a\r\n\r\n".into()),
+        body_b64: None,
         exchange_id: Some(7),
         url: Some("https://a".into()),
         identity: Some("alice".into()),

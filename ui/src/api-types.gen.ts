@@ -1353,6 +1353,8 @@ export interface GraphQlOperation {
 }
 
 export interface GroupItem {
+  /** Replace the request's body with these bytes (base64), as in `replay_send`. */
+  body_b64?: string | null;
   /** The recorded exchange to send. */
   exchange_id?: number | null;
   /** A label for the result (e.g. the Replay tab name). */
@@ -2377,6 +2379,86 @@ export type ProofResult =
       status: "denied";
     };
 
+/**
+ * Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+ * Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+ */
+export interface ProtobufDecodeRequest {
+  /** Add comments with other readings of numbers (zigzag, signed, float). Default true. */
+  annotate?: boolean | null;
+  /** The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`. */
+  body_b64?: string | null;
+  /** The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`. */
+  body_text?: string | null;
+  /**
+   * The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+   * `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+   */
+  content_type?: string | null;
+  /** Decode the body of this recorded exchange (its content type says how the body is framed). */
+  exchange_id?: number | null;
+  /** How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`. */
+  grpc_encoding?: string | null;
+  /** How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`. */
+  kind?: string | null;
+  /** With `exchange_id`: the `request` or the `response` (default). */
+  part?: ProtobufPart | null;
+}
+
+/** Response of `POST /tools/protobuf/decode`. */
+export interface ProtobufDecoded {
+  /**
+   * Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+   * is edited (see `notes`).
+   */
+  exact: boolean;
+  /** `grpc-message` from the trailers, when present. */
+  grpc_message: string | null;
+  /** `grpc-status` from the trailers, when present. */
+  grpc_status: string | null;
+  /** How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`. */
+  kind: string;
+  /** Messages decoded (gRPC trailers not counted). */
+  messages: number;
+  /** What could not be decoded or will not round-trip. */
+  notes: string[];
+  /** Present for agents: how to treat `text`. */
+  notice?: string | null;
+  /**
+   * The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+   * is redacted and wrapped as untrusted target content.
+   */
+  text: string;
+}
+
+/** Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent). */
+export interface ProtobufEncodeRequest {
+  /**
+   * How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+   * message uncompressed.
+   */
+  kind?: string | null;
+  /** The text, as returned by the decode route (with edits). */
+  text: string;
+}
+
+/** Response of `POST /tools/protobuf/encode`. */
+export interface ProtobufEncoded {
+  /** The body bytes, base64. */
+  body_b64: string;
+  /** The framing used. */
+  kind: string;
+  /** Length of the body in bytes. */
+  length: number;
+}
+
+/** Which message of an exchange `POST /tools/protobuf/decode` reads. */
+export type ProtobufPart =
+  /** The request. */
+  | "request"
+  /** The response (the default). */
+  | "response";
+
 /** A run of [`Service::auto_prove`]. */
 export interface ProveSweep {
   attempted: number;
@@ -2417,6 +2499,8 @@ export type RaceModeChoice =
 export interface RaceRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
+  /** Replace the request's body with these bytes (base64), as in `replay_send`. */
+  body_b64?: string | null;
   /** How many copies to send at once (2 to 50, default 10). */
   count?: number | null;
   /** Recorded exchange to race (its target is used). */
@@ -2583,6 +2667,11 @@ export interface RegressionTest {
 export interface ReplayRequest {
   /** Run a previously approved send. All other fields must be identical. */
   approval_id?: string | null;
+  /**
+   * Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+   * bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+   */
+  body_b64?: string | null;
   /** Recorded exchange to base this on (its target is used). */
   exchange_id?: number | null;
   /** Update Content-Length to match the body (default true). */

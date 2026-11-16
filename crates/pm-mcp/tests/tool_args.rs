@@ -2,6 +2,7 @@
 //! now takes, and an argument no schema lists is refused. One representative call per tool family; the arguments are
 //! the ones the old schemas described.
 
+use pm_service::api_types::ProtobufDecodeRequest;
 use pm_service::mcp_args::*;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
@@ -125,6 +126,12 @@ fn import_and_conversion_tools() {
         "approval_id": "a1"
     }));
     accepts::<DecodeRequest>(json!({"input": "aGk=", "ops": ["base64_decode"]}));
+    accepts::<ProtobufDecodeRequest>(json!({
+        "exchange_id": 5, "part": "request", "body_b64": "CAE=", "body_text": "x", "content_type": "application/grpc",
+        "kind": "grpc", "grpc_encoding": "gzip", "annotate": false
+    }));
+    refuses::<ProtobufDecodeRequest>(json!({"exchange_id": 5, "part": "both"}));
+    refuses::<ProtobufDecodeRequest>(json!({"exchange": 5}));
     accepts::<GraphQlImportRequest>(json!({
         "url": "https://a.example/graphql", "schema": "{}", "exchange_id": 5, "fetch": true, "identity": "alice",
         "approval_id": "a1"

@@ -421,3 +421,85 @@ pub struct RulesBody {
     /// The complete list of match-and-replace rules.
     pub rules: Vec<Rule>,
 }
+
+/// Which message of an exchange `POST /tools/protobuf/decode` reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProtobufPart {
+    /// The request.
+    Request,
+    /// The response (the default).
+    #[default]
+    Response,
+}
+
+/// Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+/// Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProtobufDecodeRequest {
+    /// Decode the body of this recorded exchange (its content type says how the body is framed).
+    pub exchange_id: Option<i64>,
+    /// With `exchange_id`: the `request` or the `response` (default).
+    pub part: Option<ProtobufPart>,
+    /// The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.
+    pub body_b64: Option<String>,
+    /// The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.
+    pub body_text: Option<String>,
+    /// The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+    /// `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+    pub content_type: Option<String>,
+    /// How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    pub kind: Option<String>,
+    /// How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.
+    pub grpc_encoding: Option<String>,
+    /// Add comments with other readings of numbers (zigzag, signed, float). Default true.
+    pub annotate: Option<bool>,
+}
+
+/// Response of `POST /tools/protobuf/decode`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProtobufDecoded {
+    /// How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    pub kind: String,
+    /// The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+    /// is redacted and wrapped as untrusted target content.
+    pub text: String,
+    /// Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+    /// is edited (see `notes`).
+    pub exact: bool,
+    /// Messages decoded (gRPC trailers not counted).
+    pub messages: usize,
+    /// `grpc-status` from the trailers, when present.
+    pub grpc_status: Option<String>,
+    /// `grpc-message` from the trailers, when present.
+    pub grpc_message: Option<String>,
+    /// What could not be decoded or will not round-trip.
+    pub notes: Vec<String>,
+    /// Present for agents: how to treat `text`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProtobufEncodeRequest {
+    /// The text, as returned by the decode route (with edits).
+    pub text: String,
+    /// How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+    /// message uncompressed.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Response of `POST /tools/protobuf/encode`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProtobufEncoded {
+    /// The framing used.
+    pub kind: String,
+    /// The body bytes, base64.
+    pub body_b64: String,
+    /// Length of the body in bytes.
+    pub length: usize,
+}

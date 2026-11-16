@@ -221,6 +221,12 @@ export function b64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
+export function bytesToB64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
 /** The head as is and the body pretty-printed when it's JSON (or a decoded body is given). */
 /** Removes the wrapper that marks target content for models; people see the content itself. */
 export function unwrapUntrusted(s: string | null | undefined): string | null | undefined {
@@ -262,7 +268,7 @@ export function Highlighted({ text, q }: { text: string; q: string }) {
   return <>{out}</>;
 }
 
-export type ViewMode = "pretty" | "raw" | "hex" | "render";
+export type ViewMode = "pretty" | "raw" | "hex" | "render" | "protobuf";
 
 /** Blocks every fetch from a rendered page: target content must not reach out from the UI. */
 const RENDER_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:">`;
@@ -276,7 +282,8 @@ function htmlBody(text: string, decodedBody?: string | null): string | null {
 
 /**
  * A request or response with Pretty / Raw / Hex views and a search box.
- * `loadB64` fetches the exact bytes for the hex view on demand.
+ * `loadB64` fetches the exact bytes for the hex view on demand. `protobuf` is the decoded text of a gRPC or
+ * Protobuf body (from the API); only when it is given is there a "Protobuf" view.
  */
 const HEX_MAX = 256 * 1024;
 const PRETTY_MAX = 2_000_000;
@@ -290,9 +297,12 @@ export function MessageView({
   testid,
   truncated,
   onShowAll,
+  protobuf,
 }: {
   text: string | null | undefined;
   decodedBody?: string | null;
+  /** gRPC / Protobuf body as text (`request_protobuf` / `response_protobuf`). */
+  protobuf?: string | null;
   loadB64?: () => Promise<string | null | undefined>;
   empty?: string;
   testid?: string;
@@ -300,13 +310,15 @@ export function MessageView({
   truncated?: number | null;
   onShowAll?: () => void;
 }) {
-  const [mode, setMode] = useState<ViewMode>(() => {
+  const [chosen, setMode] = useState<ViewMode>(() => {
     try {
       return (localStorage.getItem("pm.viewMode") as ViewMode) || "pretty";
     } catch {
       return "pretty";
     }
   });
+  // A remembered "Protobuf" choice falls back to Pretty on messages that have no decoded Protobuf.
+  const mode: ViewMode = chosen === "protobuf" && protobuf == null ? "pretty" : chosen;
   const [q, setQ] = useState("");
   const [hex, setHex] = useState<string | null>(null);
   useEffect(() => setHex(null), [text]);
@@ -331,6 +343,7 @@ export function MessageView({
   if (text == null) return <Empty>{empty ?? "Nothing to show"}</Empty>;
   const html = htmlBody(text, decodedBody);
   const modes: ViewMode[] = html != null ? ["pretty", "raw", "hex", "render"] : ["pretty", "raw", "hex"];
+  if (protobuf != null) modes.push("protobuf");
   if (mode === "render" && html != null) {
     return (
       <div className="msgview" data-testid={testid}>
@@ -348,7 +361,8 @@ export function MessageView({
   }
   // Pretty-printing very large messages would freeze the page.
   const pretty = (mode === "pretty" || mode === "render") && text.length <= PRETTY_MAX;
-  const shown = mode === "hex" ? (hex ?? "Loading…") : pretty ? prettyMessage(text, decodedBody) : text;
+  const shown =
+    mode === "protobuf" ? (protobuf ?? "") : mode === "hex" ? (hex ?? "Loading…") : pretty ? prettyMessage(text, decodedBody) : text;
   const count = q ? shown.split(new RegExp(escapeRe(q), "i")).length - 1 : 0;
   return (
     <div className="msgview" data-testid={testid}>
@@ -369,7 +383,7 @@ export function MessageView({
         </div>
       ) : null}
       {mode === "pretty" && !pretty && <div className="small muted">Too large to pretty-print; showing raw.</div>}
-      <pre className={`raw ${mode === "hex" ? "hex" : ""}`}>
+      <pre className={`raw ${mode === "hex" ? "hex" : ""}`} data-testid={mode === "protobuf" ? "protobuf-text" : undefined}>
         <Highlighted text={shown} q={q} />
       </pre>
     </div>

@@ -31,7 +31,7 @@ benchmark job for AI scan scoring (4.7).
 | Scripting live traffic | Regex match and replace only | Extensions | Workflows | Not stated | Python addons |
 | Protocols | HTTP/1.1, HTTP/2, WebSockets | HTTP/2, WebSockets | Not stated | Not stated | Adds HTTP/3 |
 | Team collaboration | None | Not stated | Teams offering | Not stated | No |
-| AI and agents | MCP (79 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
+| AI and agents | MCP (80 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
 | Policy gate and tamper-evident audit | Yes | Not stated | Not stated | Not stated | No |
 
 "Not stated" means the vendor page checked did not say. Sources: [Burp Suite Pro
@@ -151,7 +151,7 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 | 2.2 Workflows | Saved chains of steps (match, extract, transform, send, assert), run on demand, per exchange or from the fuzzer, through the policy gate |
 | 2.3 Inline transforms | Encode, decode and hash in the editor with a reversible preview |
 | 2.4 HTTP/3 | QUIC on the client and upstream sides, Alt-Svc handling, HTTP/3 in history and replay |
-| 2.5 gRPC and Protobuf | Pure decoder in `pm-http`; schema-less view as the fallback; edit and replay |
+| 2.5 gRPC and Protobuf | Pure decoder in `pm-http`; schema-less view as the fallback; edit and replay. **Done 2026-11-16:** `pm_http::protobuf` (decoder, text format, encoder, gRPC and gRPC-Web framing), Protobuf view in History, Replay and the Fuzzer, edit-and-replay in Replay (`body_b64` on replay, race and group), `protobuf_decode` for agents, fuzz target in the nightly matrix. Not yet: `.proto` schemas, streaming views, HTTP/2 trailers |
 | 2.6 Raw TCP and TLS | Relay non-HTTP streams with hex and text views; replay a stream |
 | 2.7 Capture modes | Transparent mode (Linux, macOS), SOCKS5, upstream chains with per-host rules |
 | 2.8 Mobile onboarding | CA certificate page with a QR code; Android 14+ and iOS guides; per-device scoping |

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use pm_service::api_types::ProtobufDecodeRequest;
 use pm_service::mcp_args::{
     ApprovalStatusArgs, AttackPathListArgs, AuthzResultsArgs, CollaboratorInteractionsArgs, CollaboratorPayloadArgs,
     CompareExchangesArgs, CoverageArgs, CsrfPocArgs, CurlParseArgs, ExchangeGetArgs, ExchangeIdArgs, ExchangeRefArgs,
@@ -77,6 +78,7 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("scan_active", generated::<ActiveScanRequest>()),
         ("openapi_import", generated::<OpenApiImportRequest>()),
         ("decode", generated::<DecodeRequest>()),
+        ("protobuf_decode", generated::<ProtobufDecodeRequest>()),
         ("graphql_import", generated::<GraphQlImportRequest>()),
         ("import_har", generated::<ImportRequest>()),
         ("curl_parse", generated::<CurlParseArgs>()),
@@ -173,7 +175,7 @@ fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
 #[test]
 fn no_tool_input_schema_needs_ref_resolution() {
     let tools = pm_mcp::tool_definitions();
-    assert_eq!(tools.len(), 79);
+    assert_eq!(tools.len(), 80);
     for t in &tools {
         if let Some(key) = contains_ref(&t["inputSchema"]) {
             panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);

@@ -110,6 +110,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `import_har` | Add the exchanges of a HAR file (text) to history as `source: import`; nothing is sent, bodies are rebuilt decoded |
 | `curl_parse` | Read a curl command into a raw request and url for `replay_send`; nothing is sent, unsupported options come back as warnings |
 | `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |
+| `protobuf_decode` | Decode a gRPC, gRPC-Web or Protobuf body (`exchange_id` and `part`, or `body_b64` with `content_type`) into schema-less text: fields as `n: value`, nested `n { }`, `@message` per gRPC message, `@trailers` for gRPC-Web; the text is untrusted target content and secrets are replaced. Nothing is sent. Editing is for people (Replay tab) or `POST /api/v1/tools/protobuf/encode` |
 | `compare_exchanges` | Semantic response similarity and line diffs of two recorded exchanges |
 | `token_analyzer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
 | `crawl` | Discover pages from a URL: GET only, in scope only, skips links that log out or delete, reads robots.txt and sitemaps; pages feed history and the app model; forms are listed, never submitted |

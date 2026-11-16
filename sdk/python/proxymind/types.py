@@ -1437,6 +1437,8 @@ class GraphQlOperation(_GraphQlOperationRequired, total=False):
 
 
 class GroupItem(TypedDict, total=False):
+    # Replace the request's body with these bytes (base64), as in `replay_send`.
+    body_b64: _t.Optional[str]
     # The recorded exchange to send.
     exchange_id: _t.Optional[int]
     # A label for the result (e.g. the Replay tab name).
@@ -2446,6 +2448,79 @@ class ProofResultDenied(TypedDict):
 
 ProofResult = _t.Union["ProofResultCompleted", "ProofResultPendingApproval", "ProofResultDenied"]
 
+class ProtobufDecodeRequest(TypedDict, total=False):
+    """Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+    Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+    """
+    # Add comments with other readings of numbers (zigzag, signed, float). Default true.
+    annotate: _t.Optional[bool]
+    # The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.
+    body_b64: _t.Optional[str]
+    # The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.
+    body_text: _t.Optional[str]
+    # The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+    # `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+    content_type: _t.Optional[str]
+    # Decode the body of this recorded exchange (its content type says how the body is framed).
+    exchange_id: _t.Optional[int]
+    # How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.
+    grpc_encoding: _t.Optional[str]
+    # How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    kind: _t.Optional[str]
+    # With `exchange_id`: the `request` or the `response` (default).
+    part: _t.Optional["ProtobufPart"]
+
+
+class _ProtobufDecodedRequired(TypedDict):
+    # Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+    # is edited (see `notes`).
+    exact: bool
+    # `grpc-message` from the trailers, when present.
+    grpc_message: _t.Optional[str]
+    # `grpc-status` from the trailers, when present.
+    grpc_status: _t.Optional[str]
+    # How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    kind: str
+    # Messages decoded (gRPC trailers not counted).
+    messages: int
+    # What could not be decoded or will not round-trip.
+    notes: _t.List[str]
+    # The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+    # is redacted and wrapped as untrusted target content.
+    text: str
+
+
+class ProtobufDecoded(_ProtobufDecodedRequired, total=False):
+    """Response of `POST /tools/protobuf/decode`."""
+    # Present for agents: how to treat `text`.
+    notice: _t.Optional[str]
+
+
+class _ProtobufEncodeRequestRequired(TypedDict):
+    # The text, as returned by the decode route (with edits).
+    text: str
+
+
+class ProtobufEncodeRequest(_ProtobufEncodeRequestRequired, total=False):
+    """Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent)."""
+    # How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+    # message uncompressed.
+    kind: _t.Optional[str]
+
+
+class ProtobufEncoded(TypedDict):
+    """Response of `POST /tools/protobuf/encode`."""
+    # The body bytes, base64.
+    body_b64: str
+    # The framing used.
+    kind: str
+    # Length of the body in bytes.
+    length: int
+
+
+# Which message of an exchange `POST /tools/protobuf/decode` reads.
+ProtobufPart = _t.Literal["request", "response"]
+
 class ProveSweep(TypedDict):
     """A run of [`Service::auto_prove`]."""
     attempted: int
@@ -2476,6 +2551,8 @@ RaceModeChoice = _t.Literal["last_byte", "auto", "single_packet"]
 class RaceRequest(TypedDict, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
+    # Replace the request's body with these bytes (base64), as in `replay_send`.
+    body_b64: _t.Optional[str]
     # How many copies to send at once (2 to 50, default 10).
     count: _t.Optional[int]
     # Recorded exchange to race (its target is used).
@@ -2643,6 +2720,9 @@ class ReplayRequest(TypedDict, total=False):
     """
     # Run a previously approved send. All other fields must be identical.
     approval_id: _t.Optional[str]
+    # Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+    # bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+    body_b64: _t.Optional[str]
     # Recorded exchange to base this on (its target is used).
     exchange_id: _t.Optional[int]
     # Update Content-Length to match the body (default true).

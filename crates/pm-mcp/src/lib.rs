@@ -327,6 +327,28 @@ mod tests {
         }
     }
 
+    /// `protobuf_decode` decodes a gRPC frame without a schema, and hands the text to the agent as untrusted target
+    /// content; bad input is a tool error, not a crash.
+    #[tokio::test]
+    async fn protobuf_decode_returns_wrapped_text() {
+        let s = server();
+        let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"protobuf_decode","arguments":args}});
+        // One gRPC frame holding `1: 150`.
+        let r = s.handle(call(json!({"body_b64": "AAAAAAMIlgE=", "content_type": "application/grpc"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let out: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let text = out["text"].as_str().unwrap();
+        assert!(text.starts_with("<untrusted_target_content>\n@message\n1: 150"), "{text}");
+        assert_eq!(out["kind"], "grpc");
+        assert_eq!(out["exact"], true);
+        assert!(out["notice"].as_str().unwrap().contains("untrusted_target_content"));
+        // Not framed as gRPC, and no body at all.
+        let r = s.handle(call(json!({"body_b64": "AAAAAAMIlgE=", "content_type": "text/html"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        let r = s.handle(call(json!({"content_type": "application/grpc"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], true);
+    }
+
     #[tokio::test]
     async fn skills_are_prompts_and_tools() {
         let s = server();

@@ -511,6 +511,9 @@ table.grid tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent);
 .pane { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; min-width: 0; display: flex; flex-direction: column; box-shadow: var(--shadow); }
 .pane-title { font-size: 11px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 650; display: flex; gap: 8px; align-items: center; }
 textarea.editor { min-height: 52vh; flex: 1; }
+textarea.editor.editor-head { min-height: 22vh; flex: none; }
+.pbedit { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+textarea.editor.editor-pb { min-height: 24vh; flex: none; font-family: var(--mono, monospace); }
 .pane pre.raw { max-height: 58vh; }
 .inspector details { margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
 .inspector summary { cursor: pointer; font-weight: 600; font-size: 12.5px; padding: 4px 0; }

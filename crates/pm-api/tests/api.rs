@@ -446,3 +446,89 @@ async fn assistant_settings_and_refusals() {
     let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
     assert!(audit.contains("assistant_model_call") && audit.contains("assistant_settings"));
 }
+
+/// gRPC and Protobuf: the two tool routes, and `request_protobuf` / `response_protobuf` on an exchange.
+#[tokio::test]
+async fn protobuf_tools_and_exchange_fields() {
+    let (port, shop) = start().await;
+    let post = |path: &'static str, body: Value| async move {
+        let (st, _, b) = http(port, "POST", path, &[AUTH, CHANGE], Some(body)).await;
+        (st, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+    };
+
+    // Decode: one gRPC frame holding `1: "world"`, as base64 (flag 0, length 7).
+    let body = pm_http_frame(&[0x0a, 5, b'w', b'o', b'r', b'l', b'd']);
+    let (st, v) = post(
+        "/api/v1/tools/protobuf/decode",
+        json!({"body_b64": body, "content_type": "application/grpc", "annotate": false}),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["kind"], "grpc");
+    assert_eq!(v["text"], "@message\n1: \"world\"\n");
+    assert_eq!((v["exact"].clone(), v["messages"].clone()), (json!(true), json!(1)));
+
+    // Encode the edited text back; the bytes are re-framed.
+    let (st, e) =
+        post("/api/v1/tools/protobuf/encode", json!({"kind": "grpc", "text": "@message\n1: \"galaxy\"\n2: 300\n"}))
+            .await;
+    assert_eq!(st, 200, "{e}");
+    let want = pm_http_frame(&[0x0a, 6, b'g', b'a', b'l', b'a', b'x', b'y', 0x10, 0xac, 0x02]);
+    assert_eq!(e["body_b64"], json!(want));
+    assert_eq!(e["length"], 5 + 11);
+    // Plain Protobuf is not framed.
+    let (_, e) = post("/api/v1/tools/protobuf/encode", json!({"text": "1: 150"})).await;
+    assert_eq!(e["body_b64"], "CJYB");
+
+    // Mistakes are 400s that say what is wrong.
+    let (st, v) = post("/api/v1/tools/protobuf/encode", json!({"text": "1: nope"})).await;
+    assert_eq!(st, 400);
+    assert!(v["error"].as_str().unwrap().contains("line 1"), "{v}");
+    let (st, _) = post("/api/v1/tools/protobuf/decode", json!({"body_b64": body})).await;
+    assert_eq!(st, 400, "no content type");
+    let (st, _) = post("/api/v1/tools/protobuf/decode", json!({})).await;
+    assert_eq!(st, 400, "no body");
+    let (st, _) = post("/api/v1/tools/protobuf/decode", json!({"body_b64": "@@", "kind": "grpc"})).await;
+    assert_eq!(st, 400, "bad base64");
+    let (st, _) = post("/api/v1/tools/protobuf/decode", json!({"exchange_id": 1, "oops": 1})).await;
+    assert_eq!(st, 422, "unknown field");
+
+    // Replay a gRPC call to the demo shop: the head is text, the body travels as base64 (it is not UTF-8). The
+    // exchange then shows both sides as text.
+    let (st, r) = post(
+        "/api/v1/replay",
+        json!({
+            "url": format!("http://127.0.0.1:{shop}"),
+            "raw": "POST /grpc/demo.Greeter/SayHello HTTP/1.1\r\nHost: x\r\nContent-Type: application/grpc\r\n\r\n",
+            "body_b64": body,
+        }),
+    )
+    .await;
+    assert_eq!(st, 200, "{r}");
+    let id = r["exchange_id"].as_i64().unwrap();
+    let (st, _, b) = http(port, "GET", &format!("/api/v1/exchanges/{id}"), &[AUTH], None).await;
+    assert_eq!(st, 200);
+    let ex: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(ex["request_protobuf"], "@message\n1: \"world\"\n", "{ex}");
+    let resp = ex["response_protobuf"].as_str().unwrap();
+    assert!(resp.starts_with("@message\n1: \"Hello, world\"\n2: 5"), "{resp}");
+    assert!(resp.contains("# grpc-status: 0"), "{resp}");
+
+    // The same through the decode route by exchange id.
+    let (st, v) = post("/api/v1/tools/protobuf/decode", json!({"exchange_id": id, "part": "response"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["grpc_status"], "0");
+    assert!(v["text"].as_str().unwrap().contains("Hello, world"));
+
+    // Other traffic has no protobuf fields.
+    let (_, _, b) = http(port, "GET", "/api/v1/exchanges?limit=1", &[AUTH], None).await;
+    assert!(serde_json::from_str::<Value>(&b).is_ok());
+}
+
+fn pm_http_frame(payload: &[u8]) -> String {
+    pm_core_b64(&pm_service::pm_http::protobuf::frame_message(0, payload))
+}
+
+fn pm_core_b64(b: &[u8]) -> String {
+    pm_service::pm_http::protobuf::base64_encode(b)
+}

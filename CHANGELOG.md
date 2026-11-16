@@ -3,6 +3,27 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
+## Unreleased
+
+### Added
+
+- **gRPC and Protobuf traffic is readable and editable.** Requests and responses with a gRPC, gRPC-Web (also the
+  base64 text form) or Protobuf content type get a **Protobuf** view in HTTP history, Replay and the Fuzzer: one field
+  per line, nested messages indented, strings and numbers shown the way they most likely were meant (a number can
+  also be read as signed, zigzag, float or double in a comment). A gRPC call with several messages shows each one, and
+  gRPC-Web trailers or a `grpc-status` header show the call's status. No `.proto` file is needed; field names are
+  not part of the wire format, so fields show as numbers.
+- **Edit and replay a gRPC call.** Opening a gRPC request in Replay shows the head as text and the message as
+  editable Protobuf text. Sent unedited, the original bytes go out untouched; edited, the text is turned back into
+  Protobuf, framed again, and Content-Length is fixed (HTTP/2 requests get none added). Messages that were compressed
+  are sent uncompressed after an edit. Race and Send group carry the message too.
+- **A Protobuf tool in the API and for agents:** `POST /api/v1/tools/protobuf/decode` and `/encode`, an MCP tool
+  `protobuf_decode` (agents get the text as untrusted content, with secrets replaced), `request_protobuf` and
+  `response_protobuf` on `GET /api/v1/exchanges/{id}`, and `body_b64` on `replay_send`, `race_send` and `replay_group`
+  for bodies that are not text.
+- The demo shop has a small gRPC call (`/grpc/demo.Greeter/SayHello`) to try this on, and the decoder has a fuzz
+  target that runs nightly.
+
 ## 0.2.0 (2026-11-15)
 
 First release since 0.1.0. Everything below ships in it; the version number did not change while it was prepared.

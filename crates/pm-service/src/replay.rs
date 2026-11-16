@@ -24,6 +24,10 @@ pub struct ReplayRequest {
     /// Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
     /// If omitted, the request of `exchange_id` is resent unchanged.
     pub raw: Option<String>,
+    /// Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+    /// bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// Recorded exchange to base this on (its target is used).
     pub exchange_id: Option<i64>,
     /// Target as scheme://host[:port], used when there is no `exchange_id`.
@@ -172,10 +176,20 @@ impl Service {
                 (parse_url_endpoint(url)?, raw.as_bytes().to_vec())
             }
         };
-        let raw = match &req.raw {
+        let mut raw = match &req.raw {
             Some(r) => r.as_bytes().to_vec(),
             None => base_raw,
         };
+        if let Some(b64) = &req.body_b64 {
+            let body = pm_http::protobuf::base64_decode(b64.as_bytes())
+                .map_err(|_| ServiceError::Invalid("body_b64 is not valid base64".into()))?;
+            let end = pm_http::find_head_end(&raw)
+                .ok()
+                .flatten()
+                .ok_or_else(|| ServiceError::Invalid("body_b64 needs a request with a complete head".into()))?;
+            raw.truncate(end);
+            raw.extend_from_slice(&body);
+        }
         let mut out = self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
         out.hypothesis_id = req.hypothesis_id;
         Ok(out)

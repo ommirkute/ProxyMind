@@ -111,6 +111,9 @@ export interface ExchangeDetail {
   /** Body as people read it: de-chunked, decompressed, markup kept (null when absent or binary). For Pretty/Render. */
   request_body?: string | null;
   response_body?: string | null;
+  /** gRPC / Protobuf message as editable text (one `@message` per gRPC message); absent for other traffic. */
+  request_protobuf?: string;
+  response_protobuf?: string;
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };

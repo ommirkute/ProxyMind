@@ -871,6 +871,50 @@ try {
     await page.screenshot({ path: join(SHOTS, "6h-group.png") });
   });
 
+  await section("gRPC and Protobuf (view, edit in Replay)", async () => {
+    // A unary gRPC call through the proxy: one framed message, field 1 = "world" (ASCII only, so a JS string is safe).
+    const framed = "\x00\x00\x00\x00\x07\x0a\x05world";
+    await viaProxy(
+      proxy,
+      shop,
+      `POST /grpc/demo.Greeter/SayHello HTTP/1.1\r\nHost: shop\r\nContent-Type: application/grpc\r\nContent-Length: ${framed.length}\r\n\r\n${framed}`,
+    );
+    const gid = await recordedId("/grpc/demo.Greeter/SayHello");
+    check(gid != null, "the gRPC call is recorded");
+    await page.goto(link.replace(/\/auth.*/, `/#/history/${gid}`));
+    await page.getByTestId("response-view").waitFor();
+    // History: the response has a Protobuf view with the decoded fields and the status from the headers.
+    await page.getByTestId("response-view").getByRole("button", { name: "Protobuf" }).click();
+    const shownResponse = await page.getByTestId("protobuf-text").textContent();
+    check(shownResponse.includes('1: "Hello, world"') && shownResponse.includes("2: 5") && shownResponse.includes("grpc-status: 0"),
+      "History decodes a gRPC response in the Protobuf view");
+    await page.getByRole("tab", { name: "Request" }).click();
+    await page.getByTestId("request-view").getByRole("button", { name: "Protobuf" }).click();
+    check(await page.getByTestId("protobuf-text").textContent().then((t) => t.includes("@message") && t.includes('1: "world"')),
+      "History decodes the gRPC request in the Protobuf view");
+    await page.screenshot({ path: join(SHOTS, "6i-protobuf-history.png") });
+
+    // Replay: the request opens with the head as text and the message as editable text.
+    await page.goto(link.replace(/\/auth.*/, `/#/replay/${gid}`));
+    const editor = page.getByTestId("protobuf-editor");
+    await editor.waitFor();
+    const original = await editor.inputValue();
+    check(original.includes("@message") && original.includes('1: "world"'), "Replay shows the gRPC request as Protobuf text");
+    // Unedited, the original bytes are sent: the server greets "world".
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="replay-result"]', { hasText: "200" }).waitFor();
+    await page.locator('[data-testid="replay-response"] button', { hasText: "Protobuf" }).click();
+    await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]', { hasText: "Hello, world" }).waitFor();
+    check(true, "an unedited gRPC request is replayed as it was");
+    // Edited: the text is encoded, re-framed, and Content-Length follows.
+    await editor.fill('@message\n1: "galaxy"\n');
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]', { hasText: "Hello, galaxy" }).waitFor({ timeout: 10000 });
+    check(await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]').textContent().then((t) => t.includes("2: 6")),
+      "editing a field in Replay changes what the server answers (re-encoded and re-framed)");
+    await page.screenshot({ path: join(SHOTS, "6j-protobuf-replay.png") });
+  });
+
   await section("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)", async () => {
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
       "-keyout", join(dir, "h2.key"), "-out", join(dir, "h2.crt")], { stdio: "ignore" });

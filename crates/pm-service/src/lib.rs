@@ -40,6 +40,7 @@ mod openapi;
 mod organizer;
 mod plugins;
 mod proof;
+mod protobuf;
 mod prove_auto;
 mod race;
 mod recon;
@@ -141,8 +142,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi, pm_plugin,
-    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
+    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_http, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi,
+    pm_plugin, pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
 };
 
 #[derive(Debug, Error)]

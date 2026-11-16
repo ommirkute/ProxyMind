@@ -4717,6 +4717,13 @@
       "GroupItem": {
         "additionalProperties": false,
         "properties": {
+          "body_b64": {
+            "description": "Replace the request's body with these bytes (base64), as in `replay_send`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "exchange_id": {
             "default": null,
             "description": "The recorded exchange to send.",
@@ -8031,6 +8038,205 @@
           }
         ]
       },
+      "ProtobufDecodeRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or\nProtobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.",
+        "properties": {
+          "annotate": {
+            "default": null,
+            "description": "Add comments with other readings of numbers (zigzag, signed, float). Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "body_b64": {
+            "default": null,
+            "description": "The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body_text": {
+            "default": null,
+            "description": "The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_type": {
+            "default": null,
+            "description": "The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,\n`application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Decode the body of this recorded exchange (its content type says how the body is framed).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grpc_encoding": {
+            "default": null,
+            "description": "How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "default": null,
+            "description": "How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "part": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProtobufPart"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "With `exchange_id`: the `request` or the `response` (default)."
+          }
+        },
+        "type": "object"
+      },
+      "ProtobufDecoded": {
+        "description": "Response of `POST /tools/protobuf/decode`.",
+        "properties": {
+          "exact": {
+            "description": "Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text\nis edited (see `notes`).",
+            "type": "boolean"
+          },
+          "grpc_message": {
+            "description": "`grpc-message` from the trailers, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grpc_status": {
+            "description": "`grpc-status` from the trailers, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.",
+            "type": "string"
+          },
+          "messages": {
+            "description": "Messages decoded (gRPC trailers not counted).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "notes": {
+            "description": "What could not be decoded or will not round-trip.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "notice": {
+            "description": "Present for agents: how to treat `text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it\nis redacted and wrapped as untrusted target content.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "exact",
+          "messages",
+          "grpc_status",
+          "grpc_message",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "ProtobufEncodeRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent).",
+        "properties": {
+          "kind": {
+            "default": null,
+            "description": "How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every\nmessage uncompressed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "The text, as returned by the decode route (with edits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "ProtobufEncoded": {
+        "description": "Response of `POST /tools/protobuf/encode`.",
+        "properties": {
+          "body_b64": {
+            "description": "The body bytes, base64.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The framing used.",
+            "type": "string"
+          },
+          "length": {
+            "description": "Length of the body in bytes.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "body_b64",
+          "length"
+        ],
+        "type": "object"
+      },
+      "ProtobufPart": {
+        "description": "Which message of an exchange `POST /tools/protobuf/decode` reads.",
+        "oneOf": [
+          {
+            "const": "request",
+            "description": "The request.",
+            "type": "string"
+          },
+          {
+            "const": "response",
+            "description": "The response (the default).",
+            "type": "string"
+          }
+        ]
+      },
       "ProveSweep": {
         "description": "A run of [`Service::auto_prove`].",
         "properties": {
@@ -8162,6 +8368,13 @@
           "approval_id": {
             "default": null,
             "description": "Run a previously approved request. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body_b64": {
+            "description": "Replace the request's body with these bytes (base64), as in `replay_send`.",
             "type": [
               "string",
               "null"
@@ -8650,6 +8863,13 @@
           "approval_id": {
             "default": null,
             "description": "Run a previously approved send. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body_b64": {
+            "description": "Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these\nbytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.",
             "type": [
               "string",
               "null"
@@ -14281,7 +14501,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
+                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
                   "type": "object"
                 }
               }
@@ -18579,6 +18799,82 @@
           }
         },
         "summary": "Encode or decode text locally."
+      }
+    },
+    "/api/v1/tools/protobuf/decode": {
+      "post": {
+        "operationId": "tools_protobuf_decode",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtobufDecodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtobufDecoded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Decode a gRPC or Protobuf body into editable text, without a schema."
+      }
+    },
+    "/api/v1/tools/protobuf/encode": {
+      "post": {
+        "operationId": "tools_protobuf_encode",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtobufEncodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtobufEncoded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Encode edited Protobuf text back into body bytes (framed for gRPC if asked)."
       }
     },
     "/api/v1/tools/request-transform": {

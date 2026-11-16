@@ -33,6 +33,9 @@ pub struct RaceRequest {
     pub url: Option<String>,
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
+    /// Replace the request's body with these bytes (base64), as in `replay_send`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// How many copies to send at once (2 to 50, default 10).
     #[schemars(range(min = 2, max = 50))]
     pub count: Option<usize>,
@@ -96,6 +99,7 @@ impl Service {
         }
         let base = ReplayRequest {
             raw: req.raw.clone(),
+            body_b64: req.body_b64.clone(),
             exchange_id: req.exchange_id,
             url: req.url.clone(),
             hypothesis_id: req.hypothesis_id,

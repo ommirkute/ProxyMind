@@ -36,7 +36,7 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/exchanges", "exchanges", "Search recorded exchanges, newest first.").query::<HistoryFilter>().out::<ExchangePage>(),
         op("get", "/exchanges/{id}", "exchange", "One exchange: summary, request and response text, and a model-safe view.")
             .query::<BytesQuery>()
-            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
+            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
         op("post", "/search", "search", "Search recorded traffic for text or a regular expression.")
             .body::<SearchRequest>().out::<SearchResult>(),
         op("post", "/search/ws", "search_ws", "Search recorded WebSocket messages.").body::<WsSearchRequest>().out::<WsSearchResult>(),
@@ -71,6 +71,10 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/discover", "discover", "Look for files and folders by trying words.").body::<DiscoverRequest>().out::<DiscoverResult>(),
         op("post", "/tools/decode", "tools_decode", "Encode or decode text locally.").body::<DecodeRequest>()
             .json("Object with `steps` (each decoding step) and `ops` (the available operations)."),
+        op("post", "/tools/protobuf/decode", "tools_protobuf_decode", "Decode a gRPC or Protobuf body into editable text, without a schema.")
+            .body::<ProtobufDecodeRequest>().out::<ProtobufDecoded>(),
+        op("post", "/tools/protobuf/encode", "tools_protobuf_encode", "Encode edited Protobuf text back into body bytes (framed for gRPC if asked).")
+            .body::<ProtobufEncodeRequest>().out::<ProtobufEncoded>(),
         op("post", "/tools/request-transform", "tools_request_transform", "Change the method or body encoding of a request text.")
             .body::<RequestTransform>().json("Object with `raw` (the rewritten request)."),
         op("post", "/tools/compare", "tools_compare", "Compare two recorded exchanges.").body::<CompareBody>()

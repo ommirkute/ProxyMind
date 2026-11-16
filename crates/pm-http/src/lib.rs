@@ -6,6 +6,7 @@
 //! (the interesting ones in pentesting) pass through untouched.
 
 pub mod h2text;
+pub mod protobuf;
 pub mod ws;
 
 use thiserror::Error;
