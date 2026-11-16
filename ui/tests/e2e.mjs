@@ -487,7 +487,9 @@ try {
     check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "a second Undo restores the original text");
     check(await page.getByTestId("transform-undo").isDisabled(), "Undo is disabled when the stack is empty");
     await page.getByLabel("Transform operation").selectOption("base64_decode");
-    check(await page.getByTestId("transform-error").isVisible() && await page.getByTestId("transform-apply").isDisabled(),
+    // The preview is computed after the choice renders: wait for it like the other previews above.
+    const decodeError = await page.getByTestId("transform-error").waitFor({ timeout: 5000 }).then(() => true, () => false);
+    check(decodeError && await page.getByTestId("transform-apply").isDisabled(),
       "an invalid decode shows an error in the preview and cannot be applied");
     await page.getByTestId("transform-close").click();
     await page.getByRole("button", { name: "New tab" }).click();
