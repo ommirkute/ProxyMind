@@ -92,6 +92,7 @@ fn exchange(i: usize) -> NewExchange {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

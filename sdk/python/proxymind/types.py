@@ -490,6 +490,20 @@ class CaptureBody(_CaptureBodyRequired, total=False):
     role: _t.Optional[str]
 
 
+class _ChangeRequired(TypedDict):
+    # What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.
+    by: str
+    # The rule (its comment, or its part and match) or a label for the editor.
+    name: str
+    # Which message changed: `request` or `response`.
+    phase: str
+
+
+class Change(_ChangeRequired, total=False):
+    """One change made to an exchange's traffic in flight."""
+    note: _t.Optional[str]
+
+
 class ChangesQuery(TypedDict):
     """Query of `GET /model/changes`."""
     # Snapshot id to compare the current model with.
@@ -1056,6 +1070,8 @@ class ExchangeSummary(_ExchangeSummaryRequired, total=False):
     highlight: _t.Optional[str]
     hypothesis_id: _t.Optional[int]
     identity: _t.Optional[str]
+    # Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.
+    modified: bool
 
 
 class _ExchangeViewRequired(TypedDict):
@@ -1070,11 +1086,19 @@ class _ExchangeViewRequired(TypedDict):
 
 
 class ExchangeView(_ExchangeViewRequired, total=False):
+    # What changed the traffic: which rules or edits.
+    changes: _t.List["Change"]
     duration_ms: _t.Optional[int]
     error: _t.Optional[str]
     # Phrases in target content that look like attempts to instruct a model.
     possible_prompt_injection: _t.List[str]
+    # The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is
+    # what was sent to the server). Same untrusted-content rules as `request`.
+    request_original: _t.Optional["MessageView"]
     response: _t.Optional["MessageView"]
+    # The response as delivered to the client, when rules or an edit changed it (`response` is what the server
+    # sent). Derived from target content, so wrapped as untrusted like `response`.
+    response_delivered: _t.Optional["MessageView"]
     status: _t.Optional[int]
 
 

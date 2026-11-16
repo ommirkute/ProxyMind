@@ -365,8 +365,8 @@ pre.raw {
 .filters input.wide { flex: 1; min-width: 160px; }
 .vlist { flex: 1; overflow: auto; position: relative; min-height: 0; }
 .vrow {
-  position: absolute; left: 0; right: 0; height: 28px; display: grid; min-width: 840px;
-  grid-template-columns: 48px minmax(90px, 1fr) 56px minmax(140px, 2.6fr) 50px 62px 40px 58px 58px minmax(60px, .8fr) minmax(50px, 1fr);
+  position: absolute; left: 0; right: 0; height: 28px; display: grid; min-width: 900px;
+  grid-template-columns: 48px minmax(90px, 1fr) 56px minmax(140px, 2.6fr) 50px 58px 62px 40px 58px 58px minmax(60px, .8fr) minmax(50px, 1fr);
   gap: 8px; align-items: center; padding: 0 14px; font-size: 12.5px; border-bottom: 1px solid var(--border); cursor: pointer;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }

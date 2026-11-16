@@ -39,6 +39,7 @@ async fn setup() -> (Service, i64) {
                 error: None,
                 identity: None,
                 hypothesis_id: None,
+                ..Default::default()
             })
             .unwrap()
     };

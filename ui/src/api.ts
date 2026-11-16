@@ -99,6 +99,18 @@ export interface ExchangePage {
   next_before_id?: number;
 }
 
+export interface DiffLine { op: "same" | "added" | "removed"; text: string }
+export interface LineDiff { lines: DiffLine[]; added: number; removed: number; truncated: boolean }
+
+/** One change rules or the intercept editor made to an exchange's traffic. */
+export interface TrafficChange {
+  phase: "request" | "response";
+  by: "rule" | "intercept" | "hook";
+  /** The rule (its comment, or part and match) or a label for the editor. */
+  name: string;
+  note?: string;
+}
+
 export interface ExchangeDetail {
   summary: ExchangeSummary;
   request: string;
@@ -114,6 +126,20 @@ export interface ExchangeDetail {
   /** gRPC / Protobuf message as editable text (one `@message` per gRPC message); absent for other traffic. */
   request_protobuf?: string;
   response_protobuf?: string;
+  /** When rules or the intercept editor changed the traffic: `request` is what went to the server and `response` is
+   *  what the server sent. `request_original` is the request as the browser sent it, `response_delivered` the response
+   *  as the browser received it. Each is absent when unchanged. */
+  request_original?: string;
+  response_delivered?: string;
+  request_original_truncated?: number;
+  response_delivered_truncated?: number;
+  request_original_b64?: string;
+  response_delivered_b64?: string;
+  /** What changed the traffic; empty when nothing did. */
+  changes: TrafficChange[];
+  /** One line diff per changed message: request from the browser's to the one sent, response from the server's to the
+   *  delivered one. */
+  diffs: { phase: "request" | "response"; from_label: string; to_label: string; lines: LineDiff }[];
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };

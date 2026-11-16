@@ -249,7 +249,7 @@ try {
     check(await page.getByRole("columnheader", { name: /Status/ }).getAttribute("aria-sort") === "ascending", "columns sort");
     await page.getByRole("columnheader", { name: /^#/ }).click();
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "Response" }).click();
+    await page.getByRole("tab", { name: "Response", exact: true }).click();
     await page.locator('[data-testid="response-view"]').getByRole("button", { name: "Hex" }).click();
     await page.locator('[data-testid="response-view"] pre', { hasText: "00000000  48 54 54 50" }).waitFor();
     check(true, "hex view shows the exact bytes");
@@ -754,13 +754,40 @@ try {
     await page.getByLabel("Filter", { exact: true }).fill("rules-check");
     await sleep(500);
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "request" }).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
     const sent = await page
       .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "X-E2E: rewritten" })
       .first()
       .waitFor({ timeout: 5000 })
       .then(() => true, () => false);
     check(sent, "history shows the request as sent, with the added header");
+
+    // ADR-0020: the rules changed this exchange, so History marks it and keeps what was received next to it.
+    const row = page.locator('[data-testid^="row-"]').first();
+    check(await row.getByTestId("modified-mark").isVisible(), "history marks the rewritten row as edited");
+    check(await page.getByTestId("modified-note").isVisible(), "the exchange says it was changed in flight");
+    await page.getByTestId("tab-original_request").click();
+    const origReq = await page.getByTestId("original-request-view").locator("pre.raw").first().textContent();
+    check(origReq.includes("/api/products/search?q=rules-check") && !origReq.includes("X-E2E"), "the Original request tab has no added header (as the browser sent it)");
+    await page.getByRole("tab", { name: "Response", exact: true }).click();
+    const serverResp = await page.getByTestId("response-view").locator("pre.raw").first().textContent();
+    check(serverResp.includes("results") && !serverResp.includes("REWRITTEN"), "History's Response tab still shows what the server sent");
+    await page.getByTestId("tab-delivered_response").click();
+    const deliveredResp = await page.getByTestId("delivered-response-view").locator("pre.raw").first().textContent();
+    check(deliveredResp.includes("REWRITTEN") && !deliveredResp.includes("results"), "the Delivered response tab shows the rewritten copy the browser got");
+    await page.getByTestId("tab-changes").click();
+    const changesText = await page.getByTestId("changes-list").textContent();
+    check(changesText.includes("add request header X-E2E") && changesText.includes("response body matching results"), "the changes name both rules");
+    const added = await page.getByTestId("request-diff").locator('[data-op="added"]').allTextContents();
+    check(added.length === 1 && added[0].includes("X-E2E: rewritten"), "the diff shows the added header");
+    const removed = await page.getByTestId("response-diff").locator('[data-op="removed"]').allTextContents();
+    check(removed.some((l) => l.includes("results")), "the diff shows what the response rule replaced");
+    await page.screenshot({ path: join(SHOTS, "6d-original-and-diff.png") });
+    await page.getByLabel("Query", { exact: true }).fill("is:modified");
+    await page.getByTestId("apply-query").click();
+    await sleep(500);
+    check(await page.locator('[data-testid^="row-"]').count() >= 1 && (await page.locator('[data-testid="modified-mark"]').count()) === (await page.locator('[data-testid^="row-"]').count()), "is:modified lists only edited rows");
+    await page.getByTestId("clear-query").click();
   });
 
   await section("WebSocket (a real browser chats through the proxy)", async () => {
@@ -925,7 +952,7 @@ try {
     const shownResponse = await page.getByTestId("protobuf-text").textContent();
     check(shownResponse.includes('1: "Hello, world"') && shownResponse.includes("2: 5") && shownResponse.includes("grpc-status: 0"),
       "History decodes a gRPC response in the Protobuf view");
-    await page.getByRole("tab", { name: "Request" }).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
     await page.getByTestId("request-view").getByRole("button", { name: "Protobuf" }).click();
     check(await page.getByTestId("protobuf-text").textContent().then((t) => t.includes("@message") && t.includes('1: "world"')),
       "History decodes the gRPC request in the Protobuf view");
@@ -978,7 +1005,7 @@ try {
     await page.getByLabel("Filter", { exact: true }).fill("/h2-check");
     await sleep(500);
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "request" }).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
     const h2text = await page
       .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "GET /h2-check HTTP/2" })
       .waitFor({ timeout: 5000 })

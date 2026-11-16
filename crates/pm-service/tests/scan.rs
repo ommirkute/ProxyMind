@@ -66,6 +66,7 @@ fn plugins_add_issues_to_the_passive_scan() {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
     let roe = "version: 1\nscope:\n  include: [\"https://api.example/\"]\n";

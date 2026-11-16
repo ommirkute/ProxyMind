@@ -374,6 +374,16 @@ UPDATE text_index_state SET indexed_through = (SELECT COALESCE(MAX(id), 0) FROM 
 ALTER TABLE exchanges ADD COLUMN client_addr TEXT;
 CREATE INDEX exchanges_client ON exchanges(client_addr);
 "#,
+    r#"
+-- Traffic that rules or the intercept editor changed keeps both ends. req_hash and resp_hash stay what the target
+-- saw and produced (the request as sent to the server, the response as the server sent it). Extras (blob hashes,
+-- stored and compressed like those; NULL when unchanged): req_orig_hash is the request as the client sent it,
+-- resp_deliv_hash the response as delivered to the client. changes is a JSON list of what changed them (NULL when
+-- nothing did).
+ALTER TABLE exchanges ADD COLUMN req_orig_hash BLOB REFERENCES blobs(hash);
+ALTER TABLE exchanges ADD COLUMN resp_deliv_hash BLOB REFERENCES blobs(hash);
+ALTER TABLE exchanges ADD COLUMN changes TEXT;
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -498,8 +508,21 @@ fn from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<u
         .collect()
 }
 
+/// One change made to an exchange's traffic in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct Change {
+    /// Which message changed: `request` or `response`.
+    pub phase: String,
+    /// What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.
+    pub by: String,
+    /// The rule (its comment, or its part and match) or a label for the editor.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// A finished (or failed) request/response pair to record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewExchange {
     pub ts_ms: i64,
     pub duration_ms: Option<i64>,
@@ -521,6 +544,14 @@ pub struct NewExchange {
     /// The IP address (no port) of the client that sent it through the proxy; None for exchanges ProxyMind sent
     /// itself.
     pub client_addr: Option<String>,
+    /// The request as the client sent it, when a rule or the intercept editor changed it (`request` is then what
+    /// was sent to the server).
+    pub request_original: Option<Vec<u8>>,
+    /// The response as delivered to the client, when a rule or the intercept editor changed it (`response` stays
+    /// what the server sent).
+    pub response_delivered: Option<Vec<u8>>,
+    /// What changed the traffic; empty when nothing did.
+    pub changes: Vec<Change>,
 }
 
 /// A WebSocket message to record.
@@ -594,6 +625,9 @@ pub struct ExchangeSummary {
     /// this was tracked and for ones ProxyMind sent itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_addr: Option<String>,
+    /// Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub modified: bool,
 }
 
 /// A client address seen in history (see [`Store::client_summary`]).
@@ -634,6 +668,11 @@ pub struct Exchange {
     pub summary: ExchangeSummary,
     pub request: Vec<u8>,
     pub response: Option<Vec<u8>>,
+    /// The request as the client sent it, when it was changed before it went to the server.
+    pub request_original: Option<Vec<u8>>,
+    /// The response as delivered to the client, when it was changed (`response` is the server's).
+    pub response_delivered: Option<Vec<u8>>,
+    pub changes: Vec<Change>,
 }
 
 /// Filters for searching history. All set fields must match.
@@ -1142,11 +1181,14 @@ impl Store {
     ) -> Result<i64> {
         let req_hash = Self::put_blob(tx, &ex.request)?;
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let req_orig_hash = ex.request_original.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let resp_deliv_hash = ex.response_delivered.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let changes = if ex.changes.is_empty() { None } else { Some(serde_json::to_string(&ex.changes)?) };
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
                                     status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id,
-                                    client_addr)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                    client_addr, req_orig_hash, resp_deliv_hash, changes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -1166,6 +1208,9 @@ impl Store {
                 ex.identity,
                 ex.hypothesis_id,
                 ex.client_addr,
+                req_orig_hash,
+                resp_deliv_hash,
+                changes,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -1183,7 +1228,7 @@ impl Store {
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
                                         status, req_len, resp_len, error, identity, hypothesis_id, tags, notes, \
-                                        client_addr";
+                                        client_addr, (changes IS NOT NULL)";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -1206,6 +1251,7 @@ impl Store {
             highlight: highlight_of(&r.get::<_, String>(16)?),
             comment: r.get::<_, Option<String>>(17)?.filter(|c| !c.is_empty()),
             client_addr: r.get(18)?,
+            modified: r.get(19)?,
         })
     }
 
@@ -1385,20 +1431,28 @@ impl Store {
     }
 
     pub fn get_exchange(&self, id: i64) -> Result<Option<Exchange>> {
-        let sql = format!("SELECT {}, req_hash, resp_hash FROM exchanges WHERE id = ?1", Self::SUMMARY_COLS);
+        type Hashes = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+        let sql = format!(
+            "SELECT {}, req_hash, resp_hash, req_orig_hash, resp_deliv_hash, changes FROM exchanges WHERE id = ?1",
+            Self::SUMMARY_COLS
+        );
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(19)?, r.get::<_, Option<Vec<u8>>>(20)?))
+                let hashes: Hashes = (r.get(20)?, r.get(21)?, r.get(22)?, r.get(23)?, r.get(24)?);
+                Ok((Self::summary_from_row(r)?, hashes))
             })
             .optional()?;
-        let Some((summary, req_hash, resp_hash)) = row else {
+        let Some((summary, (req_hash, resp_hash, req_orig, resp_deliv, changes))) = row else {
             return Ok(None);
         };
         Ok(Some(Exchange {
             summary,
             request: self.get_blob(&req_hash)?,
             response: resp_hash.map(|h| self.get_blob(&h)).transpose()?,
+            request_original: req_orig.map(|h| self.get_blob(&h)).transpose()?,
+            response_delivered: resp_deliv.map(|h| self.get_blob(&h)).transpose()?,
+            changes: changes.map(|c| serde_json::from_str(&c)).transpose()?.unwrap_or_default(),
         }))
     }
 
@@ -2478,8 +2532,13 @@ mod tests {
         {
             // Put the file back as the previous release left it: no column, no index, one version lower.
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch("DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;").unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                 ALTER TABLE exchanges DROP COLUMN changes;
+                 DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 2) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2496,6 +2555,83 @@ mod tests {
         assert_eq!(s.client_summary().unwrap().len(), 1);
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project made before originals were kept opens, reads its rows with no originals and no changes, and stores
+    /// originals and changes for new rows.
+    #[test]
+    fn originals_migration_upgrades_an_existing_project() {
+        let (dir, path) = temp_project("originals-migration");
+        let old_id = {
+            let mut s = Store::open(&path).unwrap();
+            s.insert_exchange(&sample("/old", b"old")).unwrap()
+        };
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                 ALTER TABLE exchanges DROP COLUMN changes;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64).unwrap();
+        }
+        let mut s = Store::open(&path).unwrap();
+        let old = s.get_exchange(old_id).unwrap().unwrap();
+        assert_eq!(old.summary.path, "/old");
+        assert!(!old.summary.modified);
+        assert!(old.request_original.is_none() && old.response_delivered.is_none() && old.changes.is_empty());
+        let new_id = s.insert_exchange(&changed("/new")).unwrap();
+        let new = s.get_exchange(new_id).unwrap().unwrap();
+        assert!(new.summary.modified);
+        assert_eq!(new.request_original.as_deref(), Some(&b"GET /new HTTP/1.1\r\n\r\n"[..]));
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn changed(path: &str) -> NewExchange {
+        NewExchange {
+            request_original: Some(format!("GET {path} HTTP/1.1\r\n\r\n").into_bytes()),
+            response_delivered: Some(b"HTTP/1.1 200 OK\r\n\r\npublic".to_vec()),
+            changes: vec![
+                Change { phase: "request".into(), by: "rule".into(), name: "add header".into(), note: None },
+                Change {
+                    phase: "response".into(),
+                    by: "intercept".into(),
+                    name: "intercept editor".into(),
+                    note: Some("edited by hand".into()),
+                },
+            ],
+            ..sample(path, b"HTTP/1.1 200 OK\r\n\r\nsecret")
+        }
+    }
+
+    #[test]
+    fn originals_and_changes_round_trip_through_single_and_batch_inserts() {
+        let mut s = Store::open_in_memory().unwrap();
+        let plain = s.insert_exchange(&sample("/plain", b"x")).unwrap();
+        let ids = s.insert_exchanges(&[changed("/a"), sample("/b", b"y")]).unwrap();
+        let one = s.insert_exchange(&changed("/c")).unwrap();
+        for id in [ids[0], one] {
+            let e = s.get_exchange(id).unwrap().unwrap();
+            assert!(e.summary.modified);
+            assert!(e.request_original.as_deref().unwrap().starts_with(b"GET /"));
+            assert_eq!(e.response_delivered.as_deref(), Some(&b"HTTP/1.1 200 OK\r\n\r\npublic"[..]));
+            assert!(e.response.as_deref().unwrap().ends_with(b"secret"), "response stays the server's bytes");
+            assert_eq!(e.changes.len(), 2);
+            assert_eq!(e.changes[1].by, "intercept");
+            assert_eq!(e.changes[1].note.as_deref(), Some("edited by hand"));
+        }
+        for id in [plain, ids[1]] {
+            let e = s.get_exchange(id).unwrap().unwrap();
+            assert!(!e.summary.modified && e.request_original.is_none() && e.changes.is_empty());
+        }
+        // Rows list as modified, and the flag is left out of the JSON when false.
+        let rows = s.search_exchanges(&HistoryFilter::default()).unwrap();
+        assert_eq!(rows.iter().filter(|r| r.modified).count(), 2);
+        let json = serde_json::to_value(rows.iter().find(|r| !r.modified).unwrap()).unwrap();
+        assert!(json.get("modified").is_none());
+        let json = serde_json::to_value(rows.iter().find(|r| r.modified).unwrap()).unwrap();
+        assert_eq!(json["modified"], true);
     }
 
     #[test]
@@ -2528,6 +2664,7 @@ mod tests {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         }
     }
 

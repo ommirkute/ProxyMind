@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
 import type { DevicesView } from "../api-types.gen";
-import { Chip, ContextMenu, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
+import { Chip, ContextMenu, DiffView, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
 import { useLiveEvent } from "../live";
 
 const ROW = 28;
@@ -57,7 +57,7 @@ const QUERY_FIELDS: [string, string][] = [
   ["reqheader", "request header name, or name=value"],
   ["respheader", "response header name, or name=value"],
   ["param", "query or form parameter name"],
-  ["is", "error, annotated, inscope, response, redirect"],
+  ["is", "error, annotated, inscope, response, redirect, modified"],
 ];
 
 function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
@@ -105,7 +105,7 @@ const INITIAL: Filters = {
   q: "",
 };
 
-type SortKey = "id" | "host" | "method" | "path" | "status" | "resp_len" | "ext" | "duration_ms" | "source" | "client_addr" | "comment";
+type SortKey = "id" | "host" | "method" | "path" | "status" | "modified" | "resp_len" | "ext" | "duration_ms" | "source" | "client_addr" | "comment";
 
 const extOf = (path: string) => {
   const p = path.split(/[?#]/)[0];
@@ -226,6 +226,8 @@ export default function History() {
           return extOf(r.path);
         case "status":
           return r.status ?? 0;
+        case "modified":
+          return r.modified ? 1 : 0;
         case "resp_len":
           return r.resp_len ?? -1;
         case "duration_ms":
@@ -473,6 +475,7 @@ const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "method", label: "Method" },
   { key: "path", label: "URL" },
   { key: "status", label: "Status" },
+  { key: "modified", label: "Edited" },
   { key: "resp_len", label: "Length" },
   { key: "ext", label: "Ext" },
   { key: "duration_ms", label: "Time" },
@@ -548,6 +551,9 @@ function VirtualRows({
             <span>{r.method}</span>
             <span>{r.path}</span>
             <span><StatusCode status={r.status} error={r.error} /></span>
+            <span data-testid="modified-cell">
+              {r.modified && <span className="chip accent plain" data-testid="modified-mark" title="Rules or an edit in the intercept queue changed this exchange; History shows what the server saw and sent, with the browser's side beside it">edited</span>}
+            </span>
             <span className="muted">{fmtBytes(r.resp_len)}</span>
             <span className="muted">{extOf(r.path)}</span>
             <span className="muted">{r.duration_ms != null ? `${r.duration_ms} ms` : ""}</span>
@@ -565,7 +571,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   const { go } = useNav();
   const [ex, setEx] = useState<ExchangeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"request" | "response" | "summary" | "websocket">("response");
+  const [tab, setTab] = useState<"request" | "response" | "summary" | "websocket" | "original_request" | "delivered_response" | "changes">("response");
   const [capture, setCapture] = useState({ open: false, name: "", role: "user" });
   const action = useAction();
   const [note, setNote] = useState<string | null>(null);
@@ -592,6 +598,18 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   // The list may have newer annotations (set from the right-click menu).
   const s = live ? { ...ex.summary, highlight: live.highlight, comment: live.comment } : ex.summary;
   const resp = ex.view.response?.body;
+  const changes = ex.changes ?? [];
+  const tabs = [
+    ...(s.status === 101 ? ["websocket"] : []),
+    "response",
+    "request",
+    ...(ex.request_original != null ? ["original_request"] : []),
+    ...(ex.response_delivered != null ? ["delivered_response"] : []),
+    ...(changes.length ? ["changes"] : []),
+    "summary",
+  ] as (typeof tab)[];
+  const tabLabel = (t: typeof tab) =>
+    t === "websocket" ? "WebSocket" : t === "original_request" ? "Original request" : t === "delivered_response" ? "Delivered response" : t[0].toUpperCase() + t.slice(1);
 
   const doCapture = () =>
     action.run(async () => {
@@ -608,7 +626,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
     });
 
   // Exact bytes for the hex view, fetched once when first asked for.
-  const loadBytes = (k: "request_b64" | "response_b64") => () =>
+  const loadBytes = (k: "request_b64" | "response_b64" | "request_original_b64" | "response_delivered_b64") => () =>
     api.get<ExchangeDetail>(`/exchanges/${id}?bytes=1${cap ? `&${cap}` : ""}`).then((d) => d[k] ?? null);
 
   const saveAnnotation = (highlight: string | null | undefined, comment: string | null | undefined) =>
@@ -667,13 +685,19 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
       )}
       <ErrorBox error={action.error} />
       {note && <div className="notice">{note}</div>}
+      {changes.length > 0 && (
+        <div className="notice small" data-testid="modified-note">
+          Changed in flight ({changes.map((c) => `${c.phase}: ${c.name}`).join("; ")}). The record shows what the server saw and sent; the browser's side of each changed message is under Original request and Delivered response.{" "}
+          <button className="btn" onClick={() => setTab("changes")}>See changes</button>
+        </div>
+      )}
       {ex.view.possible_prompt_injection?.length ? (
         <div className="error">Possible prompt injection in the response: {ex.view.possible_prompt_injection.join(" · ")}</div>
       ) : null}
       <div className="tabs" role="tablist">
-        {([...(s.status === 101 ? ["websocket"] : []), "response", "request", "summary"] as const).map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t as typeof tab)}>
-            {t === "websocket" ? "WebSocket" : t[0].toUpperCase() + t.slice(1)}
+        {tabs.map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} data-testid={`tab-${t}`} onClick={() => setTab(t)}>
+            {tabLabel(t)}
           </button>
         ))}
       </div>
@@ -697,6 +721,30 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
           empty="No response"
           testid="response-view"
         />
+      )}
+      {tab === "original_request" && ex.request_original != null && (
+        <MessageView text={ex.request_original} loadB64={loadBytes("request_original_b64")} truncated={ex.request_original_truncated} onShowAll={() => setFull(true)} testid="original-request-view" />
+      )}
+      {tab === "delivered_response" && ex.response_delivered != null && (
+        <MessageView text={ex.response_delivered} loadB64={loadBytes("response_delivered_b64")} truncated={ex.response_delivered_truncated} onShowAll={() => setFull(true)} testid="delivered-response-view" />
+      )}
+      {tab === "changes" && (
+        <div data-testid="changes-view">
+          <ul className="small" data-testid="changes-list">
+            {changes.map((c, i) => (
+              <li key={i}>
+                <Chip value={c.phase} /> <strong>{c.name}</strong>{" "}
+                <span className="muted">{c.by === "rule" ? "match-and-replace rule" : c.by === "intercept" ? "edited in the intercept queue" : "hook"}{c.note ? `: ${c.note}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+          {(ex.diffs ?? []).map((d) => (
+            <div key={d.phase} data-testid={`${d.phase}-diff`}>
+              <h3>{d.phase === "request" ? "Request" : "Response"}: {d.from_label} → {d.to_label} (+{d.lines.added} −{d.lines.removed})</h3>
+              <DiffView d={d.lines} />
+            </div>
+          ))}
+        </div>
       )}
       {tab === "summary" && (
         <dl className="kv">

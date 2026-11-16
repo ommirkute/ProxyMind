@@ -66,6 +66,7 @@ fn service() -> Service {
                 error: None,
                 identity: None,
                 hypothesis_id: None,
+                ..Default::default()
             })
             .unwrap();
     }
@@ -175,6 +176,7 @@ fn insert(store: &mut Store, host: &str, path: &str, req: Vec<u8>, resp: Vec<u8>
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
 }

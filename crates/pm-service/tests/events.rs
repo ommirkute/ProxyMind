@@ -28,6 +28,7 @@ fn exchange(host: &str, i: usize) -> NewExchange {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

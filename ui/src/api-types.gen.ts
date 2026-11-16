@@ -463,6 +463,17 @@ export interface CaptureBody {
   role?: string | null;
 }
 
+/** One change made to an exchange's traffic in flight. */
+export interface Change {
+  /** What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`. */
+  by: string;
+  /** The rule (its comment, or its part and match) or a label for the editor. */
+  name: string;
+  note?: string | null;
+  /** Which message changed: `request` or `response`. */
+  phase: string;
+}
+
 /** Query of `GET /model/changes`. */
 export interface ChangesQuery {
   /** Snapshot id to compare the current model with. */
@@ -989,6 +1000,8 @@ export interface ExchangeSummary {
   id: number;
   identity?: string | null;
   method: string;
+  /** Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not. */
+  modified?: boolean;
   path: string;
   port: number;
   req_len: number;
@@ -1001,6 +1014,8 @@ export interface ExchangeSummary {
 
 export interface ExchangeView {
   actor: string;
+  /** What changed the traffic: which rules or edits. */
+  changes?: Change[];
   duration_ms?: number | null;
   error?: string | null;
   id: number;
@@ -1010,7 +1025,17 @@ export interface ExchangeView {
   possible_prompt_injection?: string[];
   redacted: boolean;
   request: MessageView;
+  /**
+   * The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is
+   * what was sent to the server). Same untrusted-content rules as `request`.
+   */
+  request_original?: MessageView | null;
   response?: MessageView | null;
+  /**
+   * The response as delivered to the client, when rules or an edit changed it (`response` is what the server
+   * sent). Derived from target content, so wrapped as untrusted like `response`.
+   */
+  response_delivered?: MessageView | null;
   source: string;
   status?: number | null;
   url: string;

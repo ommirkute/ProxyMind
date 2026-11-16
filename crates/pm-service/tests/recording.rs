@@ -79,6 +79,7 @@ async fn out_of_scope_traffic_is_forwarded_but_not_recorded() {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     };
     eprintln!("DEBUG should_record: {}", svc.should_record(&ex));
     assert!(get(port, outside, "/elsewhere").await.ends_with("ok"), "still proxied");

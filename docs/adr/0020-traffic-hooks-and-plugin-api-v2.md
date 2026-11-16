@@ -75,6 +75,20 @@ Constraints:
 ## Migration
 1. Store: original/sent bytes and the list of changes (migration); recorder and history show both. Match-and-replace
    rules start using it, which already improves today's record of rewritten traffic.
+   **Done.** Principle: the primary recorded bytes are always what the target saw or produced, because passive checks,
+   the scanner, proofs, reports and evidence read them (a rule that strips CSP for the browser must not make a check
+   report CSP missing). So `request` is the request as sent to the server and `response` is the response as the server
+   sent it (unchanged from before); the client's side is stored beside them, only when the bytes differ: `request_original`
+   (the request as the client sent it) and `response_delivered` (the response as delivered to the client). Migration 22
+   adds `req_orig_hash`, `resp_deliv_hash` (hashes into `blobs`, so deduplicated and compressed like `req_hash` and
+   `resp_hash`) and `changes` (JSON list of `{phase, by, name, note?}`; `by` is `rule`, `intercept` or later `hook`).
+   Full-text indexing still reads only `request` and `response`. Rules and intercept edits fill them on the HTTP/1.1
+   and HTTP/2 paths (WebSocket handshakes go through the same step; WebSocket messages are not touched by rules). A
+   rule that matches without changing the bytes, or an edit that ends where it began, records nothing. History marks
+   edited rows (`is:modified`), the exchange view lists the changes and diffs them (request: client's to sent;
+   response: server's to delivered), and agents get the same, redacted and untrusted. Evidence packs and reports still
+   embed `request` and `response` only.
+
 2. Plugin API v2: manifest `api: 2`, permissions, enforcement in `pm-service`, install and UI review.
 3. Hook workers in `pm-plugin` (protocol, deadlines, bypass, pause), wired into the proxy after rules and before
    intercept; UI to turn on, order, pause and resume.

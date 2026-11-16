@@ -322,6 +322,7 @@ impl Service {
             error: None,
             identity: identity.map(|i| i.name.clone()),
             hypothesis_id: out.hypothesis_id,
+            ..Default::default()
         };
         let (status, error, elapsed_ms) = match result {
             Ok(resp) => {

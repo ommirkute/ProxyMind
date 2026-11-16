@@ -44,7 +44,7 @@ pub const FIELDS: &[(&str, &str)] = &[
     ("reqheader", "request header name, or name=value"),
     ("respheader", "response header name, or name=value"),
     ("param", "query or form parameter name"),
-    ("is", "error, annotated, inscope, response, redirect"),
+    ("is", "error, annotated, inscope, response, redirect, modified"),
 ];
 
 /// A row's metadata (no bytes).
@@ -70,6 +70,8 @@ pub struct Meta<'a> {
     pub comment: Option<&'a str>,
     pub highlight: Option<&'a str>,
     pub error: Option<&'a str>,
+    /// Rules or the intercept editor changed the request or response.
+    pub modified: bool,
 }
 
 /// Loads what metadata doesn't have, on demand.
@@ -494,8 +496,8 @@ fn term(field: Option<&str>, value: &str, lit: Lit) -> Result<Expr, String> {
         Test::Nums(value.split(',').map(|v| num(v, field == Field::Status)).collect::<Result<_, _>>()?)
     } else if field == Field::Is {
         let v = value.to_ascii_lowercase();
-        if !["error", "annotated", "inscope", "response", "redirect"].contains(&v.as_str()) {
-            return Err(format!("is:{v}? use error, annotated, inscope, response or redirect"));
+        if !["error", "annotated", "inscope", "response", "redirect", "modified"].contains(&v.as_str()) {
+            return Err(format!("is:{v}? use error, annotated, inscope, response, redirect or modified"));
         }
         Test::Flag(v)
     } else if matches!(field, Field::ReqHeader | Field::RespHeader) {
@@ -672,6 +674,7 @@ fn eval_term(field: Field, test: &Test, m: &Meta<'_>, f: &mut dyn Fetch) -> bool
             match flag.as_str() {
                 "error" => m.error.is_some(),
                 "annotated" => m.comment.is_some_and(|c| !c.is_empty()) || m.highlight.is_some(),
+                "modified" => m.modified,
                 "response" => m.status.is_some(),
                 "redirect" => m.status.is_some_and(|s| (300..400).contains(&s)),
                 "inscope" => f.in_scope(),
@@ -745,6 +748,7 @@ mod tests {
             comment: Some("IDOR?"),
             highlight: Some("red"),
             error: None,
+            modified: true,
         }
     }
 
@@ -810,6 +814,7 @@ mod tests {
             "path~\"debug=\\d\"",
             "path~orders/\\d+",
             "is:annotated is:response -is:error -is:redirect",
+            "is:modified",
         ] {
             assert!(check(yes), "{yes}");
         }
@@ -824,6 +829,7 @@ mod tests {
             "client:10.0.0.9",
             "client:192.168.1",
             "-client:\"pixel 8\"",
+            "-is:modified",
         ] {
             assert!(!check(no), "{no}");
         }

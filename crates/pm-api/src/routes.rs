@@ -521,10 +521,31 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
     if let Some(n) = response.and_then(|r| r.1) {
         v["response_truncated"] = json!(n);
     }
+    // What rules or the intercept editor changed: the request as the client sent it (`request` is what went to
+    // the server) and the response as delivered to the client (`response` is the server's), the list of changes
+    // and a diff per changed message.
+    v["changes"] = json!(ex.changes);
+    v["diffs"] = json!(st.service.change_diffs(&st.actor, &ex));
+    for (key, original) in [("request_original", &ex.request_original), ("response_delivered", &ex.response_delivered)]
+    {
+        if let Some(raw) = original {
+            let (text, cut) = capped(raw, max);
+            v[key] = json!(text);
+            if let Some(n) = cut {
+                v[format!("{key}_truncated")] = json!(n);
+            }
+        }
+    }
     if q.bytes == Some(1) {
         let cut = |b: &[u8]| pm_core::base64(&b[..max.map_or(b.len(), |m| m.min(b.len()))]);
         v["request_b64"] = json!(cut(&ex.request));
         v["response_b64"] = json!(ex.response.as_deref().map(cut));
+        if let Some(b) = &ex.request_original {
+            v["request_original_b64"] = json!(cut(b));
+        }
+        if let Some(b) = &ex.response_delivered {
+            v["response_delivered_b64"] = json!(cut(b));
+        }
     }
     Ok(Json(v))
 }

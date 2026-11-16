@@ -22,6 +22,7 @@ fn ex(path: &str, ts: i64, client: Option<&str>) -> NewExchange {
         identity: None,
         hypothesis_id: None,
         client_addr: client.map(str::to_string),
+        ..Default::default()
     }
 }
 

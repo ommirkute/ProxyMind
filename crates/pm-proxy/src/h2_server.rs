@@ -87,7 +87,8 @@ impl Proxy {
             body: data,
         });
 
-        let Some((request, method, path)) = self.before_send("https", host, port, request, &method, &path).await else {
+        let Some((request, method, path, edits)) = self.before_send("https", host, port, request, &method, &path).await
+        else {
             return reply(&mut respond, 403, DROPPED_MSG.as_bytes());
         };
 
@@ -95,7 +96,7 @@ impl Proxy {
         let guard = self.loop_guard(&me, host, port);
         let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
         if pm_http::h2text::is_http2_request(&request) && !self.buffers_response("https", host, port, &path) {
-            return self.h2_streamed(respond, host, port, request, method, path, check, started, peer).await;
+            return self.h2_streamed(respond, host, port, (request, edits), method, path, check, started, peer).await;
         }
         let result = self.sender.send(&Endpoint::new("https", host, port), &request, &method, check).await;
         let mut record = NewExchange {
@@ -115,7 +116,9 @@ impl Proxy {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         };
+        edits.note_on(&mut record);
         match result {
             Ok(resp) => {
                 if let Some(sent) = resp.sent {
@@ -124,14 +127,13 @@ impl Proxy {
                 record.status = Some(resp.head.status);
                 let decision = self.before_respond("https", host, port, &method, &path, &resp.raw).await;
                 record.response = Some(resp.raw);
-                let to_client = match decision {
-                    None => {
-                        self.recorder.record(record);
-                        respond.send_reset(h2::Reason::CANCEL);
-                        return Ok(());
-                    }
-                    Some(edited) => edited.unwrap_or_else(|| record.response.clone().unwrap_or_default()),
+                let Some(edit) = decision else {
+                    self.recorder.record(record);
+                    respond.send_reset(h2::Reason::CANCEL);
+                    return Ok(());
                 };
+                let to_client = edit.bytes.clone().unwrap_or_else(|| record.response.clone().unwrap_or_default());
+                edit.note_on(&mut record);
                 self.recorder.record(record);
                 let r = match h2_response(&to_client) {
                     Ok(r) => r,
@@ -175,7 +177,7 @@ impl Proxy {
         mut respond: SendResponse<Bytes>,
         host: &str,
         port: u16,
-        request: Vec<u8>,
+        (request, edits): (Vec<u8>, crate::Edits),
         method: String,
         path: String,
         check: Option<pm_replay::AddrCheck<'_>>,
@@ -199,7 +201,9 @@ impl Proxy {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         };
+        edits.note_on(&mut record);
         let ep = Endpoint::new("https", host, port);
         let mut r = match self.sender.send_h2_start(&ep, &record.request, &method, check, crate::HEAD_TIMEOUT).await {
             Ok(r) => r,

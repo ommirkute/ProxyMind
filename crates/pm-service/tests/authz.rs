@@ -140,6 +140,7 @@ async fn authz_check_refuses_state_changing_requests() {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
     let roe = format!("version: 1\nscope:\n  include: [\"{url}/\"]\n");

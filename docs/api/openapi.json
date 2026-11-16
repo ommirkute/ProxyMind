@@ -1637,6 +1637,35 @@
         ],
         "type": "object"
       },
+      "Change": {
+        "description": "One change made to an exchange's traffic in flight.",
+        "properties": {
+          "by": {
+            "description": "What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The rule (its comment, or its part and match) or a label for the editor.",
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "description": "Which message changed: `request` or `response`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase",
+          "by",
+          "name"
+        ],
+        "type": "object"
+      },
       "ChangesQuery": {
         "additionalProperties": false,
         "description": "Query of `GET /model/changes`.",
@@ -3395,6 +3424,10 @@
           "method": {
             "type": "string"
           },
+          "modified": {
+            "description": "Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.",
+            "type": "boolean"
+          },
           "path": {
             "type": "string"
           },
@@ -3458,6 +3491,13 @@
           "actor": {
             "type": "string"
           },
+          "changes": {
+            "description": "What changed the traffic: which rules or edits.",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            },
+            "type": "array"
+          },
           "duration_ms": {
             "format": "int64",
             "type": [
@@ -3494,6 +3534,17 @@
           "request": {
             "$ref": "#/components/schemas/MessageView"
           },
+          "request_original": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is\nwhat was sent to the server). Same untrusted-content rules as `request`."
+          },
           "response": {
             "anyOf": [
               {
@@ -3503,6 +3554,17 @@
                 "type": "null"
               }
             ]
+          },
+          "response_delivered": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The response as delivered to the client, when rules or an edit changed it (`response` is what the server\nsent). Derived from target content, so wrapped as untrusted like `response`."
           },
           "source": {
             "type": "string"
@@ -14803,7 +14865,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
+                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`. When rules or an edit in the intercept queue changed the traffic, `request` is what was sent to the server and `response` is what the server sent, as always; `request_original` is the request as the client sent it and `response_delivered` is the response as delivered to the client (text, cut by `max` like the others, with `*_truncated`; also `request_original_b64` / `response_delivered_b64` with `bytes=1`; each absent when unchanged). `changes` lists what changed them (`phase`, `by` rule, intercept or hook, `name`, optional `note`; empty when nothing did). `diffs` has one line diff per changed message (`phase`, `from_label`, `to_label`, `lines` in the shape of `/tools/compare`): the request from the client's to the one sent, the response from the server's to the delivered one. The `view` carries `request_original` and `response_delivered` too, redacted and marked untrusted for agents.",
                   "type": "object"
                 }
               }

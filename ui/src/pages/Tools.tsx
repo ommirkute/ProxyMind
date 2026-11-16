@@ -1,10 +1,9 @@
 import { useState } from "react";
 import { api } from "../api";
-import { Chip, ErrorBox, ExchangeLink, Panel, useAction } from "../components";
+import type { LineDiff } from "../api";
+import { Chip, DiffView, ErrorBox, ExchangeLink, Panel, useAction } from "../components";
 
 interface Step { op: string; output: string }
-interface DiffLine { op: "same" | "added" | "removed"; text: string }
-interface LineDiff { lines: DiffLine[]; added: number; removed: number; truncated: boolean }
 interface Analysis {
   samples: number; unique: number; min_len: number; max_len: number; alphabet: string;
   estimated_bits: number; sample_limit_bits: number; constant_positions: number[]; sequential_step?: number;
@@ -55,18 +54,6 @@ function Codec() {
         </div>
       ))}
     </Panel>
-  );
-}
-
-function DiffView({ d }: { d: LineDiff }) {
-  return (
-    <pre className="mono small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 300, overflow: "auto" }}>
-      {d.lines.map((l, i) => (
-        <div key={i} style={{ background: l.op === "added" ? "rgba(34,160,90,.15)" : l.op === "removed" ? "rgba(210,60,60,.15)" : undefined }}>
-          {l.op === "added" ? "+ " : l.op === "removed" ? "- " : "  "}{l.text}
-        </div>
-      ))}
-    </pre>
   );
 }
 

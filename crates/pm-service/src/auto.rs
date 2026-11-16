@@ -1031,6 +1031,7 @@ mod tests {
                     error: None,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 })
             })
             .unwrap();

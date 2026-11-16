@@ -38,6 +38,7 @@ fn agents_get_redacted_untrusted_text_and_humans_get_it_as_is() {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
     let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl";

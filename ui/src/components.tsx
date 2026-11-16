@@ -1,5 +1,5 @@
 import { Component, createContext, useCallback, useContext, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
-import type { Counters } from "./api";
+import type { Counters, LineDiff } from "./api";
 
 export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
 
@@ -467,4 +467,17 @@ export function usePref<T>(key: string, initial: T): [T, (v: T) => void] {
     }
   };
   return [v, set];
+}
+
+/** A line diff (`+` added, `-` removed), as the API returns it. */
+export function DiffView({ d }: { d: LineDiff }) {
+  return (
+    <pre className="mono small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 300, overflow: "auto" }}>
+      {d.lines.map((l, i) => (
+        <div key={i} data-op={l.op} style={{ background: l.op === "added" ? "rgba(34,160,90,.15)" : l.op === "removed" ? "rgba(210,60,60,.15)" : undefined }}>
+          {l.op === "added" ? "+ " : l.op === "removed" ? "- " : "  "}{l.text}
+        </div>
+      ))}
+    </pre>
+  );
 }

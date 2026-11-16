@@ -205,6 +205,7 @@ async fn a_recorded_login_runs_again_with_fresh_tokens_and_expiry_is_noticed() {
                     error: None,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 })
                 .unwrap(),
         );

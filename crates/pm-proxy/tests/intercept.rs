@@ -65,6 +65,18 @@ async fn send(proxy: u16, req: String) -> tokio::task::JoinHandle<String> {
     })
 }
 
+/// The newest recorded exchange, once there is one.
+async fn recorded(project: &std::path::Path) -> pm_store::Exchange {
+    for _ in 0..100 {
+        let s = Store::open(project).unwrap();
+        if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
+            return s.get_exchange(e.id).unwrap().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("not recorded");
+}
+
 async fn wait_held(q: &InterceptQueue) -> pm_proxy::intercept::Held {
     for _ in 0..200 {
         if let Some(h) = q.held().pop() {
@@ -79,7 +91,7 @@ async fn wait_held(q: &InterceptQueue) -> pm_proxy::intercept::Held {
 async fn edited_request_reaches_the_server_byte_for_byte() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let port = backend(seen.clone()).await;
-    let (proxy, q, _) = setup("edit").await;
+    let (proxy, q, project) = setup("edit").await;
     let client = send(proxy, format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: x\r\n\r\n")).await;
     let held = wait_held(&q).await;
     assert_eq!(held.path, "/a");
@@ -88,6 +100,30 @@ async fn edited_request_reaches_the_server_byte_for_byte() {
     q.decide(held.id, Decision::Forward(Some(edited.clone())));
     assert!(client.await.unwrap().ends_with("original"));
     assert_eq!(seen.lock().unwrap()[0], edited);
+    let ex = recorded(&project).await;
+    assert_eq!(ex.request, edited, "records what was sent");
+    assert_eq!(ex.request_original.as_deref(), Some(&b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"[..]));
+    assert!(ex.response_delivered.is_none());
+    let by: Vec<_> = ex.changes.iter().map(|c| (c.phase.as_str(), c.by.as_str())).collect();
+    assert_eq!(by, [("request", "intercept")]);
+    assert!(ex.summary.modified);
+}
+
+#[tokio::test]
+async fn forwarding_a_held_request_unedited_records_no_change() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let port = backend(seen.clone()).await;
+    let (proxy, q, project) = setup("same").await;
+    let raw = "GET /a HTTP/1.1\r\nHost: x\r\n\r\n";
+    let client = send(proxy, format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+    let held = wait_held(&q).await;
+    // Saved without a change: the same bytes come back as an edit.
+    q.decide(held.id, Decision::Forward(Some(raw.as_bytes().to_vec())));
+    assert!(client.await.unwrap().ends_with("original"));
+    assert_eq!(seen.lock().unwrap()[0], raw.as_bytes());
+    let ex = recorded(&project).await;
+    assert!(ex.request_original.is_none() && ex.response_delivered.is_none() && ex.changes.is_empty());
+    assert!(!ex.summary.modified);
 }
 
 #[tokio::test]
@@ -119,16 +155,12 @@ async fn edited_response_reaches_the_browser_and_the_original_is_recorded() {
     assert!(held.raw.ends_with("original"));
     q.decide(held.id, Decision::Forward(Some(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nEDITED".to_vec())));
     assert!(client.await.unwrap().ends_with("EDITED"));
-    for _ in 0..50 {
-        let s = Store::open(&project).unwrap();
-        if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
-            let ex = s.get_exchange(e.id).unwrap().unwrap();
-            assert!(ex.response.unwrap().ends_with(b"original"));
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("not recorded");
+    let ex = recorded(&project).await;
+    assert!(ex.response.unwrap().ends_with(b"original"), "records what the server said");
+    assert!(ex.response_delivered.unwrap().ends_with(b"EDITED"), "and the copy the browser got");
+    assert!(ex.request_original.is_none());
+    let by: Vec<_> = ex.changes.iter().map(|c| (c.phase.as_str(), c.by.as_str(), c.name.as_str())).collect();
+    assert_eq!(by, [("response", "intercept", "intercept editor")]);
 }
 
 #[tokio::test]
@@ -153,17 +185,50 @@ async fn rules_rewrite_traffic_before_the_intercept_queue_sees_it() {
     assert!(held.raw.contains("X-Pentest: proxymind"), "the human sees the rewritten request: {}", held.raw);
     q.decide(held.id, Decision::Forward(None));
     let out = client.await.unwrap();
-    assert!(out.contains("Content-Length: 10\r\n") && out.ends_with("rewritten!"), "{out}");
+    // The browser gets exactly the rewritten response: only the record changed, not the bytes on the wire.
+    assert_eq!(out, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nrewritten!");
     assert_eq!(seen.lock().unwrap()[0], b"GET /a HTTP/1.1\r\nHost: x\r\nX-Pentest: proxymind\r\n\r\n".to_vec());
-    for _ in 0..50 {
-        let s = Store::open(&project).unwrap();
-        if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
-            let ex = s.get_exchange(e.id).unwrap().unwrap();
-            assert!(ex.request.ends_with(b"X-Pentest: proxymind\r\n\r\n"), "records what was sent");
-            assert!(ex.response.unwrap().ends_with(b"original"), "records what the server said");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("not recorded");
+    let ex = recorded(&project).await;
+    assert!(ex.request.ends_with(b"X-Pentest: proxymind\r\n\r\n"), "records what was sent");
+    assert_eq!(ex.request_original.as_deref(), Some(&b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"[..]));
+    assert!(ex.response.unwrap().ends_with(b"original"), "records what the server said");
+    assert!(ex.response_delivered.unwrap().ends_with(b"rewritten!"), "and the copy the browser got");
+    let by: Vec<_> = ex.changes.iter().map(|c| (c.phase.as_str(), c.by.as_str(), c.name.as_str())).collect();
+    assert_eq!(
+        by,
+        [("request", "rule", "add request header X-Pentest"), ("response", "rule", "response body matching original")]
+    );
+}
+
+#[tokio::test]
+async fn rules_that_change_nothing_record_nothing() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let port = backend(seen.clone()).await;
+    let rw = Arc::new(Rewriter::new());
+    // Matches, but replaces the text with itself; the other never matches.
+    rw.set_rules(vec![
+        RewriteRule {
+            part: Part::ResponseBody,
+            pattern: "original".into(),
+            replace: "original".into(),
+            in_scope_only: false,
+            ..Default::default()
+        },
+        RewriteRule {
+            part: Part::RequestHeader,
+            pattern: "X-Never: .*".into(),
+            regex: true,
+            in_scope_only: false,
+            ..Default::default()
+        },
+    ])
+    .unwrap();
+    let (proxy, q, project) = setup_with("noop", Some(rw)).await;
+    q.set_settings(InterceptSettings { enabled: false, ..Default::default() });
+    let client = send(proxy, format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+    let out = client.await.unwrap();
+    assert!(out.contains("Content-Length: 8\r\n") && out.ends_with("original"), "{out}");
+    let ex = recorded(&project).await;
+    assert!(ex.request_original.is_none() && ex.response_delivered.is_none() && ex.changes.is_empty());
+    assert!(ex.response.unwrap().ends_with(b"original"));
 }

@@ -341,6 +341,7 @@ async fn the_websockets_topic_reports_each_exchange_once_per_batch() {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     };
     let msg = || NewWsMessage {
         exchange_id: 0,
@@ -616,6 +617,7 @@ async fn devices_can_be_named_listed_filtered_and_recorded_alone() {
                 identity: None,
                 hypothesis_id: None,
                 client_addr: Some(ip.into()),
+                ..Default::default()
             })
             .unwrap();
         }
@@ -677,4 +679,98 @@ async fn devices_can_be_named_listed_filtered_and_recorded_alone() {
     assert_eq!((st, body.as_str()), (200, r#"{"deleted":"192.168.1.23"}"#));
     assert_eq!(http(port, "DELETE", "/api/v1/devices/192.168.1.23", &rw, None).await.0, 404);
     assert!(get("/api/v1/devices").await["devices"][0].get("name").is_none());
+}
+
+#[tokio::test]
+async fn changed_traffic_shows_its_originals_and_changes_and_matches_is_modified() {
+    let svc = service_with_proxy(None);
+    let ids = svc.store_handle().write(|s| {
+        let base = |path: &str| pm_service::pm_store::NewExchange {
+            ts_ms: 1,
+            source: "proxy".into(),
+            actor_id: "human:local".into(),
+            scheme: "http".into(),
+            host: "shop.test".into(),
+            port: 80,
+            method: "GET".into(),
+            path: path.into(),
+            status: Some(200),
+            request: format!("GET {path} HTTP/1.1\r\nHost: shop.test\r\nX-Added: 1\r\n\r\n").into_bytes(),
+            response: Some(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecret".to_vec()),
+            ..Default::default()
+        };
+        let plain = s.insert_exchange(&base("/plain")).unwrap();
+        let changed = s
+            .insert_exchange(&pm_service::pm_store::NewExchange {
+                request_original: Some(b"GET /changed HTTP/1.1\r\nHost: shop.test\r\n\r\n".to_vec()),
+                response_delivered: Some(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\npublic".to_vec()),
+                changes: vec![
+                    pm_service::pm_store::Change {
+                        phase: "request".into(),
+                        by: "rule".into(),
+                        name: "add request header X-Added".into(),
+                        note: None,
+                    },
+                    pm_service::pm_store::Change {
+                        phase: "response".into(),
+                        by: "rule".into(),
+                        name: "hide secret".into(),
+                        note: None,
+                    },
+                ],
+                ..base("/changed")
+            })
+            .unwrap();
+        (plain, changed)
+    });
+    let port = serve(svc).await;
+    let get = |path: String| async move {
+        let (st, _, body) = http(port, "GET", &path, &[AUTH], None).await;
+        assert_eq!(st, 200, "{path}: {body}");
+        serde_json::from_str::<Value>(&body).unwrap()
+    };
+    let v = get(format!("/api/v1/exchanges/{}", ids.1)).await;
+    assert!(v["request"].as_str().unwrap().contains("X-Added: 1"), "what was sent");
+    assert!(!v["request_original"].as_str().unwrap().contains("X-Added"));
+    assert!(v["response"].as_str().unwrap().ends_with("secret"), "the server's response stays the record");
+    assert!(v["response_delivered"].as_str().unwrap().ends_with("public"));
+    assert_eq!(v["changes"][0], json!({"phase": "request", "by": "rule", "name": "add request header X-Added"}));
+    assert_eq!(v["changes"][1]["name"], "hide secret");
+    assert_eq!(v["summary"]["modified"], true);
+    let diffs = v["diffs"].as_array().unwrap();
+    assert_eq!(diffs.len(), 2);
+    assert_eq!(diffs[0]["phase"], "request");
+    assert_eq!(diffs[0]["from_label"], "as the browser sent it");
+    assert_eq!(diffs[0]["to_label"], "as sent to the server");
+    let lines = &diffs[0]["lines"];
+    assert_eq!((lines["added"].clone(), lines["removed"].clone()), (json!(1), json!(0)), "the added header");
+    assert!(lines["lines"].as_array().unwrap().contains(&json!({"op": "added", "text": "X-Added: 1"})));
+    assert_eq!((diffs[1]["phase"].clone(), diffs[1]["lines"]["removed"].clone()), (json!("response"), json!(1)));
+    assert_eq!(diffs[1]["from_label"], "as the server sent it");
+    assert_eq!(diffs[1]["to_label"], "as delivered to the browser");
+    assert!(v.get("request_b64").is_none() && v.get("request_original_b64").is_none());
+    // The model's view carries them too, as target content.
+    assert!(v["view"]["response_delivered"].is_object() && v["view"]["changes"].is_array());
+
+    // `max` cuts originals like the rest, and bytes=1 adds them as base64.
+    let v = get(format!("/api/v1/exchanges/{}?max=1024&bytes=1", ids.1)).await;
+    assert!(v.get("request_original_truncated").is_none());
+    let b64 = v["response_delivered_b64"].as_str().unwrap();
+    assert_eq!(b64, pm_core::base64(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\npublic"));
+    assert!(v["request_original_b64"].is_string());
+
+    // An unchanged exchange has no originals and an empty list; History leaves `modified` out for it.
+    let v = get(format!("/api/v1/exchanges/{}", ids.0)).await;
+    assert!(v.get("request_original").is_none() && v.get("response_delivered").is_none());
+    assert_eq!(v["changes"], json!([]));
+    assert_eq!(v["diffs"], json!([]));
+    assert!(v["summary"].get("modified").is_none());
+
+    let v = get("/api/v1/exchanges?q=is%3Amodified".into()).await;
+    let paths: Vec<&str> = v["exchanges"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/changed"]);
+    assert_eq!(v["exchanges"][0]["modified"], true);
+    let v = get("/api/v1/exchanges?q=-is%3Amodified".into()).await;
+    assert_eq!(v["exchanges"][0]["path"], "/plain");
+    assert_eq!(v["exchanges"].as_array().unwrap().len(), 1);
 }

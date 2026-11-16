@@ -27,6 +27,7 @@ fn exchange(host: &str, path: &str, request: &str, response: &str) -> NewExchang
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

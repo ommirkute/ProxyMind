@@ -139,6 +139,35 @@ impl Service {
         Ok(out)
     }
 
+    /// Line diffs for an exchange that rules or the intercept editor changed, one entry per changed message:
+    /// `{phase, from_label, to_label, lines}` where `lines` has the shape of `compare_exchanges`. The request goes
+    /// from the client's (`request_original`) to the one sent to the server; the response from the server's to the
+    /// one delivered to the client. Empty when nothing changed. Redacted for agents.
+    pub fn change_diffs(&self, actor: &Actor, ex: &pm_store::Exchange) -> Vec<Value> {
+        let redact = |s: String| match self.redactor_for(actor) {
+            Some(r) => r.redact(&s),
+            None => s,
+        };
+        let mut out = Vec::new();
+        if let Some(orig) = &ex.request_original {
+            let lines =
+                pm_tools::linediff::diff(&redact(text_of(orig, 200_000)), &redact(text_of(&ex.request, 200_000)));
+            out.push(json!({
+                "phase": "request", "from_label": "as the browser sent it", "to_label": "as sent to the server",
+                "lines": lines,
+            }));
+        }
+        if let (Some(server), Some(delivered)) = (&ex.response, &ex.response_delivered) {
+            let lines =
+                pm_tools::linediff::diff(&redact(text_of(server, 200_000)), &redact(text_of(delivered, 200_000)));
+            out.push(json!({
+                "phase": "response", "from_label": "as the server sent it", "to_label": "as delivered to the browser",
+                "lines": lines,
+            }));
+        }
+        out
+    }
+
     /// Analyses pasted tokens (nothing is sent).
     pub fn token_analyzer_analyze(&self, tokens: &[String]) -> Result<pm_tools::token_analyzer::Analysis> {
         if tokens.len() < 2 || tokens.len() > 100_000 {

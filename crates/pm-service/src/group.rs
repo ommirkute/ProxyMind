@@ -273,6 +273,7 @@ impl Service {
                 error: None,
                 identity: identity.map(str::to_string),
                 hypothesis_id: o.hypothesis_id,
+                ..Default::default()
             };
             let mut elapsed_ms = 0;
             match r {

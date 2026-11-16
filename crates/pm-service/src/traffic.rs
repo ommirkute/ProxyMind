@@ -84,6 +84,7 @@ impl Service {
                     error,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 };
                 match store.insert_exchange(&row) {
                     Ok(id) => {

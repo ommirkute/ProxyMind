@@ -91,6 +91,7 @@ fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTreeMap<String
         comment: r.comment.as_deref(),
         highlight: r.highlight.as_deref(),
         error: r.error.as_deref(),
+        modified: r.modified,
     }
 }
 

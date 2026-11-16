@@ -24,6 +24,7 @@ fn ex(host: &str, method: &str, path: &str, status: u16, body: &str) -> NewExcha
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

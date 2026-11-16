@@ -509,7 +509,8 @@ impl Proxy {
 
     /// Match-and-replace rules, then the intercept queue, where a human may
     /// forward, edit or drop the request. Returns the request to send with
-    /// its method and path, or None if it was dropped.
+    /// its method and path, and what changed it (the request as received and
+    /// the rules or edits that changed it); None if it was dropped.
     async fn before_send(
         &self,
         scheme: &str,
@@ -518,20 +519,31 @@ impl Proxy {
         request: Vec<u8>,
         method: &str,
         path: &str,
-    ) -> Option<(Vec<u8>, String, String)> {
+    ) -> Option<(Vec<u8>, String, String, Edits)> {
         let mut edited = None;
-        if let Some(r) = &self.hooks.rewrite {
-            edited = r.apply_request(scheme, host, port, path, &request);
+        let mut changes = Vec::new();
+        if let Some(r) = &self.hooks.rewrite
+            && let Some(done) = r.rewrite_request(scheme, host, port, path, &request)
+        {
+            changes.extend(done.names.into_iter().map(|name| change("request", "rule", name)));
+            edited = Some(done.bytes);
         }
         if let Some(q) = &self.hooks.intercept {
             let current = edited.as_deref().unwrap_or(&request);
             match q.hold(Kind::Request, scheme, host, port, method, path, current).await {
                 Decision::Forward(None) => {}
-                Decision::Forward(Some(e)) => edited = Some(e),
+                Decision::Forward(Some(e)) => {
+                    if e != current {
+                        changes.push(change("request", "intercept", INTERCEPT_LABEL.into()));
+                    }
+                    edited = Some(e);
+                }
                 Decision::Drop => return None,
             }
         }
-        let Some(edited) = edited else { return Some((request, method.to_string(), path.to_string())) };
+        let Some(edited) = edited else {
+            return Some((request, method.to_string(), path.to_string(), Edits::default()));
+        };
         let (mut method, mut path) = (method.to_string(), path.to_string());
         if let Ok(Some(end)) = pm_http::find_head_end(&edited)
             && let Ok(h) = pm_http::parse_request_head(&edited[..end])
@@ -540,11 +552,14 @@ impl Proxy {
                 pm_http::split_absolute_target(&h.target).map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
             method = h.method;
         }
-        Some((edited, method, path))
+        // Edits that end where they began (a human put it back) leave nothing to record.
+        let edits = if edited == request { Edits::default() } else { Edits { original: Some(request), changes } };
+        Some((edited, method, path, edits))
     }
 
-    /// Rules and the intercept queue for a response. `Some(None)`: send the
-    /// original; `Some(Some(bytes))`: send these instead; None: dropped.
+    /// Rules and the intercept queue for a response. `Some(edit)`: forward
+    /// it (`edit.bytes` is what to send instead of the original, if it
+    /// changed); None: dropped.
     async fn before_respond(
         &self,
         scheme: &str,
@@ -553,20 +568,33 @@ impl Proxy {
         method: &str,
         path: &str,
         raw: &[u8],
-    ) -> Option<Option<Vec<u8>>> {
+    ) -> Option<ResponseEdit> {
         let mut to_client = None;
-        if let Some(r) = &self.hooks.rewrite {
-            to_client = r.apply_response(scheme, host, port, path, raw);
+        let mut changes = Vec::new();
+        if let Some(r) = &self.hooks.rewrite
+            && let Some(done) = r.rewrite_response(scheme, host, port, path, raw)
+        {
+            changes.extend(done.names.into_iter().map(|name| change("response", "rule", name)));
+            to_client = Some(done.bytes);
         }
         if let Some(q) = &self.hooks.intercept {
             let current = to_client.as_deref().unwrap_or(raw);
             match q.hold(Kind::Response, scheme, host, port, method, path, current).await {
                 Decision::Forward(None) => {}
-                Decision::Forward(Some(edited)) => to_client = Some(edited),
+                Decision::Forward(Some(edited)) => {
+                    if edited != current {
+                        changes.push(change("response", "intercept", INTERCEPT_LABEL.into()));
+                    }
+                    to_client = Some(edited);
+                }
                 Decision::Drop => return None,
             }
         }
-        Some(to_client)
+        // Edits that end where they began leave nothing to record.
+        if to_client.as_deref() == Some(raw) {
+            return Some(ResponseEdit { bytes: to_client, changes: Vec::new() });
+        }
+        Some(ResponseEdit { bytes: to_client, changes })
     }
 
     /// Serves requests on one client connection until it closes.
@@ -624,7 +652,7 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
-            let (mut request, method, path) = match self
+            let (mut request, method, path, edits) = match self
                 .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
                 .await
             {
@@ -680,7 +708,9 @@ impl Proxy {
                 error: None,
                 identity: None,
                 hypothesis_id: None,
+                ..Default::default()
             };
+            edits.note_on(&mut record);
 
             let buffered = pm_http::h2text::is_http2_request(&record.request)
                 || self.buffers_response(&target.scheme, &target.host, target.port, &path);
@@ -766,15 +796,19 @@ impl Proxy {
                         record.request = sent.clone();
                     }
                     // Rules and intercept apply to responses too. The project
-                    // keeps the server's original; the browser gets the edit.
+                    // keeps the server's response, and the copy the browser got beside it.
                     let upgraded = matches!(resp.conn, AfterResponse::Upgraded(_));
                     let mut to_client = None;
+                    let mut edit = None;
                     if !upgraded {
                         match self
                             .before_respond(&target.scheme, &target.host, target.port, &method, &path, &resp.raw)
                             .await
                         {
-                            Some(edited) => to_client = edited,
+                            Some(e) => {
+                                to_client.clone_from(&e.bytes);
+                                edit = Some(e);
+                            }
                             None => {
                                 record.status = Some(resp.head.status);
                                 record.response = Some(resp.raw);
@@ -797,6 +831,9 @@ impl Proxy {
                     record.status = Some(resp.head.status);
                     record.error = resp.cut_short.clone();
                     record.response = Some(resp.raw);
+                    if let Some(edit) = edit {
+                        edit.note_on(&mut record);
+                    }
                     if let AfterResponse::Upgraded(up) = resp.conn {
                         return self.finish_upgrade(client, up, &resp.head, record, ws_hold).await;
                     }
@@ -888,6 +925,47 @@ async fn peek_sni(tcp: &TcpStream) -> Option<String> {
     }
 }
 
+/// The label of a change made by hand in the intercept queue.
+const INTERCEPT_LABEL: &str = "intercept editor";
+
+fn change(phase: &str, by: &str, name: String) -> pm_store::Change {
+    pm_store::Change { phase: phase.into(), by: by.into(), name, note: None }
+}
+
+/// What rules or the intercept queue did to a request before it was sent.
+#[derive(Default)]
+pub(crate) struct Edits {
+    /// The request as received, when it was changed.
+    original: Option<Vec<u8>>,
+    changes: Vec<pm_store::Change>,
+}
+
+impl Edits {
+    /// Notes them on the record, which holds the request as sent to the server.
+    fn note_on(self, record: &mut NewExchange) {
+        record.request_original = self.original;
+        record.changes.extend(self.changes);
+    }
+}
+
+/// What rules or the intercept queue did to a response before the client got it.
+pub(crate) struct ResponseEdit {
+    /// What the client gets instead of the server's response; None when it is unchanged.
+    bytes: Option<Vec<u8>>,
+    changes: Vec<pm_store::Change>,
+}
+
+impl ResponseEdit {
+    /// Notes the change on the record, whose `response` keeps the server's bytes: the copy the client got goes
+    /// next to it.
+    fn note_on(self, record: &mut NewExchange) {
+        if let Some(sent) = self.bytes.filter(|_| !self.changes.is_empty()) {
+            record.response_delivered = Some(sent);
+            record.changes.extend(self.changes);
+        }
+    }
+}
+
 /// Where a request goes, and the head bytes to send there.
 struct Target {
     scheme: String,
@@ -956,6 +1034,7 @@ mod recorder_tests {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         }
     }
 

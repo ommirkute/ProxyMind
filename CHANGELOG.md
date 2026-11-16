@@ -40,6 +40,20 @@ version may change project files, APIs and the CLI.
   for bodies that are not text.
 - The demo shop has a small gRPC call (`/grpc/demo.Greeter/SayHello`) to try this on, and the decoder has a fuzz
   target that runs nightly.
+- **History keeps both sides when a rule or an edit changed the traffic.** The record itself still shows what the
+  server saw and sent: the request as sent to the server and the response as the server sent it. When a
+  match-and-replace rule or an edit in the intercept queue changes a request, History also keeps the request as the
+  browser sent it; when it changes a response, it keeps the copy the browser received. It lists what changed them (the
+  rule's comment or a short description, or "intercept editor"). Edited rows show an *edited* mark in a new column;
+  the exchange has **Original request** and **Delivered response** views and a **Changes** view with a line-by-line
+  diff for each changed message. Find them with `is:modified` in the query bar. A rule that matches but leaves the
+  bytes as they were records nothing. What goes over the wire is unchanged; only the record is richer. Scans, passive
+  checks, proofs, reports and evidence keep reading the server's response, so a rule that removes a security header
+  for the browser does not make a check report it missing. Also in the API (`request_original`, `response_delivered`,
+  `changes` and `diffs` on `GET /api/v1/exchanges/{id}`, `modified` on history rows) and for agents, whose view of an
+  exchange shows them with secrets replaced and marked as untrusted content. Existing projects are upgraded on
+  opening; older rows simply have none of these. Evidence packs and reports still embed the server's response and the
+  request as sent.
 
 ## 0.2.0 (2026-11-15)
 

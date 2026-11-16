@@ -263,6 +263,7 @@ impl Service {
             error: None,
             identity: identity.map(str::to_string),
             hypothesis_id: out.hypothesis_id,
+            ..Default::default()
         };
         let resp = match result {
             Ok(r) => r,
