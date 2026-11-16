@@ -19,7 +19,8 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0013](0013-sealed-projects.md) | Projects are encrypted at rest by sealing, before transparent encryption | Accepted |
 | [0014](0014-plugins.md) | Plugins act through the gate or analyse recordings, and are installed per user | Extended by 0015 |
 | [0015](0015-active-plugins-and-sandbox.md) | Active-check plugins propose requests that ProxyMind sends; plugin processes run sandboxed | Extended by 0016 |
-| [0016](0016-signed-plugins-and-panels.md) | Signed plugins, install-time integrity checks, and data-only plugin panels; no WASM runtime yet | Accepted |
+| [0016](0016-signed-plugins-and-panels.md) | Signed plugins, install-time integrity checks, and data-only plugin panels; no WASM runtime yet | Extended by 0020 |
 | [0017](0017-store-concurrency.md) | Store concurrency: a read pool and one writer | Accepted |
 | [0018](0018-event-bus.md) | Typed events from the service layer | Accepted |
 | [0019](0019-typed-api-contracts.md) | One source of truth for API contracts | Accepted |
+| [0020](0020-traffic-hooks-and-plugin-api-v2.md) | Traffic hooks run in long-lived sandboxed plugin processes; plugin API v2 declares permissions | Accepted |
