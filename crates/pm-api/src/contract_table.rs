@@ -25,6 +25,8 @@ pub fn operations() -> Vec<Operation> {
         op("put", "/roe", "roe_put", "Replace the rules of engagement.").body::<RoeBody>().out::<RoeView>(),
         op("get", "/setup", "setup", "How to point a browser at the proxy: address, CA availability and fingerprint.")
             .json("Object with `proxy`, `ca_available`, `ca_sha256` and `browser_available`."),
+        op("get", "/setup/mobile", "setup_mobile", "How a phone or tablet reaches ProxyMind's setup page: URLs on the LAN, a QR code (SVG) of the first, and the CA fingerprint.")
+            .out::<MobileSetup>(),
         op("get", "/ca.pem", "ca_pem", "The proxy's CA certificate (PEM) as a download.")
             .download("application/x-pem-file", "The CA certificate."),
         op("post", "/browser/open", "browser_open", "Open the built-in browser through the proxy.")
@@ -215,6 +217,9 @@ pub fn operations() -> Vec<Operation> {
         op("put", "/proxy/listeners", "listeners_put", "Replace the proxy listeners.").body::<ListenersBody>().out::<ListenersView>(),
         op("get", "/history/recording", "recording_get", "What the proxy records.").out::<RecordingSettings>(),
         op("put", "/history/recording", "recording_put", "Change what the proxy records.").body::<RecordingSettings>().out::<RecordingSettings>(),
+        op("get", "/devices", "devices_get", "Client addresses (phones, tablets) seen in history, with their names and counts.").out::<DevicesView>(),
+        op("put", "/devices/{addr}", "device_put", "Give a client address a name, e.g. Pixel 8.").body::<DeviceNameBody>().out::<DeviceView>(),
+        op("delete", "/devices/{addr}", "device_delete", "Remove a device's name.").json("Object with `deleted` (the address)."),
         op("get", "/session", "session_get", "Session handling: cookie jar, macros and rules.").out::<SessionView>(),
         op("put", "/session", "session_put", "Change session handling.").body::<SessionConfig>().out::<SessionView>(),
         op("get", "/session/jar", "session_jar", "Cookies in the jar.").json("Object with `cookies` (list of cookies)."),

@@ -14,6 +14,7 @@ pub mod intercept;
 pub mod listeners;
 pub mod presets;
 pub mod rewrite;
+pub mod setup_page;
 mod ws_relay;
 
 use std::net::SocketAddr;
@@ -317,6 +318,8 @@ impl SelfAddr {
 #[derive(Clone, Default)]
 pub(crate) struct Ctx {
     me: Option<SelfAddr>,
+    /// The IP address of the client on this connection (no port).
+    peer: Option<std::net::IpAddr>,
     redirect: Option<Redirect>,
 }
 
@@ -381,7 +384,8 @@ impl Proxy {
         loop {
             let (tcp, peer) = listener.accept().await?;
             let this = self.clone();
-            let ctx = Ctx { me: SelfAddr::of(&tcp), redirect: redirect.read().clone() };
+            let ctx =
+                Ctx { me: SelfAddr::of(&tcp), peer: Some(peer.ip().to_canonical()), redirect: redirect.read().clone() };
             tokio::spawn(async move {
                 if let Err(e) = this.handle_client(tcp, ctx).await {
                     tracing::debug!(%peer, error = %e, "client connection ended with error");
@@ -440,7 +444,8 @@ impl Proxy {
 
     /// Whether TLS to this host is passed through without interception.
     fn passthrough(&self, host: &str) -> bool {
-        self.sender.network().passthrough(host)
+        // ProxyMind's own setup page is never tunnelled anywhere.
+        !setup_page::is_setup_host(host) && self.sender.network().passthrough(host)
     }
 
     /// Passes bytes both ways between the client and `host:port`, untouched
@@ -457,7 +462,8 @@ impl Proxy {
     /// The certificate (and ALPN) ProxyMind presents for a host.
     fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
         let mut cfg = self.ca.server_config(host)?;
-        if self.hooks.http2 {
+        // The setup page is answered by the HTTP/1.1 path, which is where it is looked for.
+        if self.hooks.http2 && !setup_page::is_setup_host(host) {
             let mut c = (*cfg).clone();
             c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             cfg = Arc::new(c);
@@ -582,6 +588,20 @@ impl Proxy {
             };
             let head = pm_http::parse_request_head(&head_raw)?;
             let mut target = resolve_target(&head, &head_raw, scheme, tunnel_target.as_ref())?;
+            // ProxyMind's own setup page (the reserved host, or this listener's own address): answered here,
+            // never forwarded, never recorded, and not touched by rules or the intercept queue.
+            if setup_page::is_local(&target.host, target.port, ctx.me) {
+                let kind = head.body_kind()?;
+                client.read_body(kind).await?;
+                let resp = setup_page::respond(&self.ca, &head.method, &target.path, ctx.me);
+                client.io.write_all(&resp).await?;
+                client.io.flush().await?;
+                if head.wants_close() {
+                    let _ = client.io.shutdown().await;
+                    return Ok(());
+                }
+                continue;
+            }
             if let Some(r) = &ctx.redirect {
                 target.host.clone_from(&r.host);
                 target.port = r.port;
@@ -644,6 +664,7 @@ impl Proxy {
             let guard = self.loop_guard(&ctx.me, &target.host, target.port);
             let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
             let mut record = NewExchange {
+                client_addr: ctx.peer.map(|ip| ip.to_string()),
                 ts_ms: now_ms(),
                 duration_ms: None,
                 source: "proxy".into(),
@@ -915,6 +936,7 @@ mod recorder_tests {
 
     fn exchange(i: usize) -> NewExchange {
         NewExchange {
+            client_addr: None,
             ts_ms: i as i64,
             duration_ms: Some(1),
             source: "proxy".into(),

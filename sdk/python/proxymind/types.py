@@ -844,6 +844,35 @@ class DecodeRequest(_DecodeRequestRequired, total=False):
     ops: _t.List[str]
 
 
+class DeviceNameBody(TypedDict):
+    """Body of `PUT /devices/{addr}`."""
+    # The name to show for this address (1 to 60 characters).
+    name: str
+
+
+class _DeviceViewRequired(TypedDict):
+    # The client's IP address (no port).
+    addr: str
+    # Exchanges recorded from it.
+    exchanges: int
+    # Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).
+    record_only: bool
+
+
+class DeviceView(_DeviceViewRequired, total=False):
+    """A client address seen in history, possibly with a name."""
+    # When the latest one was recorded (milliseconds since the epoch); absent if none is in history.
+    last_seen_ms: _t.Optional[int]
+    # The name a person gave it, e.g. `Pixel 8`.
+    name: _t.Optional[str]
+
+
+class DevicesView(TypedDict):
+    """Response of `GET /devices`."""
+    # Devices seen in history (most recent first), then named or selected ones not seen yet.
+    devices: _t.List["DeviceView"]
+
+
 class _DiscoverRequestRequired(TypedDict):
     # The folder to look in, e.g. https://app.example.com/ or …/api/
     url: str
@@ -1019,6 +1048,9 @@ class _ExchangeSummaryRequired(TypedDict):
 
 class ExchangeSummary(_ExchangeSummaryRequired, total=False):
     """One row of history, without the raw bytes."""
+    # The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+    # this was tracked and for ones ProxyMind sent itself.
+    client_addr: _t.Optional[str]
     comment: _t.Optional[str]
     # Row colour set by a person: red, orange, yellow, green, blue, purple, gray.
     highlight: _t.Optional[str]
@@ -1063,6 +1095,8 @@ class ExportRequest(TypedDict, total=False):
     # Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
     # previous result.
     before_id: _t.Optional[int]
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -1083,7 +1117,7 @@ class ExportRequest(TypedDict, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
@@ -1550,6 +1584,8 @@ class HistoryFilter(TypedDict, total=False):
     # Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
     # previous result.
     before_id: _t.Optional[int]
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -1568,7 +1604,7 @@ class HistoryFilter(TypedDict, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
@@ -1940,6 +1976,33 @@ class _MessageViewRequired(TypedDict):
 class MessageView(_MessageViewRequired, total=False):
     body: _t.Optional["BodyView"]
     headers: _t.List[_t.Tuple[str, str]]
+
+
+class _MobileSetupRequired(TypedDict):
+    # Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+    # interface. False when the proxy listens only on loopback (a phone cannot reach that).
+    listener_reachable: bool
+    # The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.
+    listeners: _t.List[str]
+    # The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.
+    proxy_addresses: _t.List[str]
+    # Whether this process runs the proxy at all (false with `--no-proxy`).
+    proxy_running: bool
+    # The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.
+    setup_host_url: str
+    # Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+    # first. Empty when no listener is reachable or no LAN address was found.
+    urls: _t.List[str]
+
+
+class MobileSetup(_MobileSetupRequired, total=False):
+    """Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page."""
+    # SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.
+    ca_fingerprint: _t.Optional[str]
+    # SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.
+    qr_svg: _t.Optional[str]
+    # The URL the QR code holds.
+    qr_url: _t.Optional[str]
 
 
 # How payloads are placed in the positions.
@@ -2658,6 +2721,9 @@ class RecordingSettings(TypedDict, total=False):
     # Keep only exchanges whose target is in the rules of engagement's
     # scope (everything else is still proxied, just not recorded).
     in_scope_only: bool
+    # Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other
+    # clients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.
+    record_devices: _t.List[str]
 
 
 class RecursiveGrep(TypedDict):
@@ -3155,6 +3221,8 @@ class SearchRequest(_SearchRequestRequired, total=False):
     before_id: _t.Optional[int]
     # Match letter case.
     case_sensitive: bool
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -3180,7 +3248,7 @@ class SearchRequest(_SearchRequestRequired, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).

@@ -2778,6 +2778,75 @@
         ],
         "type": "object"
       },
+      "DeviceNameBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /devices/{addr}`.",
+        "properties": {
+          "name": {
+            "description": "The name to show for this address (1 to 60 characters).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeviceView": {
+        "description": "A client address seen in history, possibly with a name.",
+        "properties": {
+          "addr": {
+            "description": "The client's IP address (no port).",
+            "type": "string"
+          },
+          "exchanges": {
+            "description": "Exchanges recorded from it.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_seen_ms": {
+            "description": "When the latest one was recorded (milliseconds since the epoch); absent if none is in history.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The name a person gave it, e.g. `Pixel 8`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "record_only": {
+            "description": "Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "addr",
+          "exchanges",
+          "record_only"
+        ],
+        "type": "object"
+      },
+      "DevicesView": {
+        "description": "Response of `GET /devices`.",
+        "properties": {
+          "devices": {
+            "description": "Devices seen in history (most recent first), then named or selected ones not seen yet.",
+            "items": {
+              "$ref": "#/components/schemas/DeviceView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "type": "object"
+      },
       "DiscoverRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3270,6 +3339,13 @@
           "actor_id": {
             "type": "string"
           },
+          "client_addr": {
+            "description": "The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before\nthis was tracked and for ones ProxyMind sent itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "comment": {
             "type": [
               "string",
@@ -3508,6 +3584,14 @@
               "null"
             ]
           },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hide_ext": {
             "default": null,
             "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
@@ -3590,7 +3674,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -5099,6 +5183,14 @@
               "null"
             ]
           },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hide_ext": {
             "default": null,
             "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
@@ -5169,7 +5261,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -6353,6 +6445,74 @@
         },
         "required": [
           "start_line"
+        ],
+        "type": "object"
+      },
+      "MobileSetup": {
+        "description": "Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page.",
+        "properties": {
+          "ca_fingerprint": {
+            "description": "SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listener_reachable": {
+            "description": "Whether some proxy listener can be reached from another device: it listens on a LAN address or on every\ninterface. False when the proxy listens only on loopback (a phone cannot reach that).",
+            "type": "boolean"
+          },
+          "listeners": {
+            "description": "The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "proxy_addresses": {
+            "description": "The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "proxy_running": {
+            "description": "Whether this process runs the proxy at all (false with `--no-proxy`).",
+            "type": "boolean"
+          },
+          "qr_svg": {
+            "description": "SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qr_url": {
+            "description": "The URL the QR code holds.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "setup_host_url": {
+            "description": "The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess\nfirst. Empty when no listener is reachable or no LAN address was found.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "proxy_running",
+          "listener_reachable",
+          "urls",
+          "proxy_addresses",
+          "setup_host_url",
+          "listeners"
         ],
         "type": "object"
       },
@@ -8707,6 +8867,14 @@
             "default": false,
             "description": "Keep only exchanges whose target is in the rules of engagement's\nscope (everything else is still proxied, just not recorded).",
             "type": "boolean"
+          },
+          "record_devices": {
+            "default": [],
+            "description": "Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other\nclients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -10238,6 +10406,14 @@
             "description": "Match letter case.",
             "type": "boolean"
           },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hide_ext": {
             "default": null,
             "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
@@ -10343,7 +10519,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -13647,6 +13823,119 @@
         "summary": "Crawl a site and record what it finds."
       }
     },
+    "/api/v1/devices": {
+      "get": {
+        "operationId": "devices_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicesView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Client addresses (phones, tablets) seen in history, with their names and counts."
+      }
+    },
+    "/api/v1/devices/{addr}": {
+      "delete": {
+        "operationId": "device_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the address).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Remove a device's name."
+      },
+      "put": {
+        "operationId": "device_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceNameBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Give a client address a name, e.g. Pixel 8."
+      }
+    },
     "/api/v1/discover": {
       "post": {
         "operationId": "discover",
@@ -14305,6 +14594,19 @@
             }
           },
           {
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "in": "query",
+            "name": "client",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "description": "Only exchanges with an id greater than this (newer ones; for paging forward).",
             "in": "query",
             "name": "after_id",
@@ -14414,7 +14716,7 @@
             }
           },
           {
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "in": "query",
             "name": "q",
             "required": false,
@@ -18487,6 +18789,34 @@
           }
         },
         "summary": "How to point a browser at the proxy: address, CA availability and fingerprint."
+      }
+    },
+    "/api/v1/setup/mobile": {
+      "get": {
+        "operationId": "setup_mobile",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSetup"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "How a phone or tablet reaches ProxyMind's setup page: URLs on the LAN, a QR code (SVG) of the first, and the CA fingerprint."
       }
     },
     "/api/v1/sitemap": {

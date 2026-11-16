@@ -12,6 +12,7 @@ const ROE: &str = "version: 1\nscope:\n  include: [\"https://**.example.com/\", 
 
 fn exchange(host: &str, i: usize) -> NewExchange {
     NewExchange {
+        client_addr: None,
         ts_ms: i as i64,
         duration_ms: Some(1),
         source: "proxy".into(),

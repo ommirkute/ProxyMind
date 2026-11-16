@@ -325,6 +325,7 @@ async fn the_websockets_topic_reports_each_exchange_once_per_batch() {
     read_until(&mut ws, &mut got, "\r\n\r\n").await;
     read_until(&mut all, &mut got_all, "\r\n\r\n").await;
     let ex = NewExchange {
+        client_addr: None,
         ts_ms: 1,
         duration_ms: None,
         source: "proxy".into(),
@@ -531,4 +532,149 @@ fn pm_http_frame(payload: &[u8]) -> String {
 
 fn pm_core_b64(b: &[u8]) -> String {
     pm_service::pm_http::protobuf::base64_encode(b)
+}
+
+/// A server over this service (no demo target); returns the API port.
+async fn serve(svc: Service) -> u16 {
+    let state =
+        pm_api::AppState::new(Arc::new(svc), Actor::parse("human:tester").unwrap(), TOKEN.into(), "test.pmproj".into())
+            .unwrap();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(l, pm_api::router(state)).await.unwrap() });
+    port
+}
+
+fn service_with_proxy(proxy: Option<&str>) -> Service {
+    let roe = "version: 1\nscope:\n  include: [\"http://shop.test/\"]\n";
+    let svc = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(roe).unwrap())).unwrap();
+    if let Some(addr) = proxy {
+        let dir =
+            std::env::temp_dir().join(format!("pm-api-ca-{}-{}", std::process::id(), addr.replace([':', '.'], "-")));
+        let ca = pm_service::pm_tls::CertAuthority::load_or_create(&dir).unwrap();
+        svc.attach_proxy_info(pm_service::ProxyInfo {
+            addr: addr.into(),
+            ca_pem: ca.ca_pem().to_string(),
+            profile_dir: dir,
+        });
+    }
+    svc
+}
+
+#[tokio::test]
+async fn mobile_setup_route_gives_urls_a_qr_image_and_the_fingerprint() {
+    // A listener a phone can reach.
+    let port = serve(service_with_proxy(Some("192.168.1.5:8080"))).await;
+    assert_eq!(http(port, "GET", "/api/v1/setup/mobile", &[], None).await.0, 401, "behind the token like the rest");
+    let (st, _, body) = http(port, "GET", "/api/v1/setup/mobile", &[AUTH], None).await;
+    assert_eq!(st, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["proxy_running"], true);
+    assert_eq!(v["listener_reachable"], true);
+    assert_eq!(v["urls"], json!(["http://192.168.1.5:8080/"]));
+    assert_eq!(v["proxy_addresses"], json!(["192.168.1.5:8080"]));
+    assert_eq!(v["qr_url"], "http://192.168.1.5:8080/");
+    assert_eq!(v["setup_host_url"], "http://proxymind.setup/");
+    let svg = v["qr_svg"].as_str().unwrap();
+    assert!(svg.starts_with("<svg ") && !svg.contains("<script"));
+    let fp = v["ca_fingerprint"].as_str().unwrap();
+    assert_eq!(fp.split(':').count(), 32, "{fp}");
+    assert!(!body.contains(TOKEN), "the API token never appears");
+
+    // A loopback-only proxy cannot be reached from a phone: no URL, no QR code.
+    let port = serve(service_with_proxy(Some("127.0.0.1:8080"))).await;
+    let v: Value = serde_json::from_str(&http(port, "GET", "/api/v1/setup/mobile", &[AUTH], None).await.2).unwrap();
+    assert_eq!((v["proxy_running"].clone(), v["listener_reachable"].clone()), (json!(true), json!(false)));
+    assert_eq!(v["urls"], json!([]));
+    assert!(v.get("qr_svg").is_none());
+
+    // No proxy in the process.
+    let port = serve(service_with_proxy(None)).await;
+    let v: Value = serde_json::from_str(&http(port, "GET", "/api/v1/setup/mobile", &[AUTH], None).await.2).unwrap();
+    assert_eq!(v["proxy_running"], false);
+}
+
+#[tokio::test]
+async fn devices_can_be_named_listed_filtered_and_recorded_alone() {
+    let svc = service_with_proxy(None);
+    svc.store_handle().write(|s| {
+        for (path, ts, ip) in [("/a", 10, "192.168.1.23"), ("/b", 20, "192.168.1.24"), ("/c", 30, "192.168.1.23")] {
+            s.insert_exchange(&pm_service::pm_store::NewExchange {
+                ts_ms: ts,
+                duration_ms: None,
+                source: "proxy".into(),
+                actor_id: "human:local".into(),
+                scheme: "http".into(),
+                host: "shop.test".into(),
+                port: 80,
+                method: "GET".into(),
+                path: path.into(),
+                status: Some(200),
+                request: format!("GET {path} HTTP/1.1\r\nHost: shop.test\r\n\r\n").into_bytes(),
+                response: Some(b"HTTP/1.1 200 OK\r\n\r\n".to_vec()),
+                error: None,
+                identity: None,
+                hypothesis_id: None,
+                client_addr: Some(ip.into()),
+            })
+            .unwrap();
+        }
+    });
+    let port = serve(svc).await;
+    let rw = [AUTH, CHANGE];
+    let get = |path: &'static str| async move {
+        let (st, _, body) = http(port, "GET", path, &[AUTH], None).await;
+        assert_eq!(st, 200, "{path}: {body}");
+        serde_json::from_str::<Value>(&body).unwrap()
+    };
+
+    let v = get("/api/v1/devices").await;
+    assert_eq!(
+        v["devices"][0],
+        json!({"addr": "192.168.1.23", "exchanges": 2, "last_seen_ms": 30, "record_only": false})
+    );
+    assert_eq!(v["devices"][1]["addr"], "192.168.1.24");
+
+    // Naming needs the header that marks a deliberate change; the name must be sensible and the address valid.
+    assert_eq!(
+        http(port, "PUT", "/api/v1/devices/192.168.1.23", &[AUTH], Some(json!({"name": "Pixel 8"}))).await.0,
+        403
+    );
+    let bad = http(port, "PUT", "/api/v1/devices/not-an-ip", &rw, Some(json!({"name": "x"}))).await;
+    assert_eq!(bad.0, 400, "{}", bad.2);
+    assert_eq!(http(port, "PUT", "/api/v1/devices/192.168.1.23", &rw, Some(json!({"name": ""}))).await.0, 400);
+    assert_eq!(
+        http(port, "PUT", "/api/v1/devices/192.168.1.23", &rw, Some(json!({"name": "x", "extra": 1}))).await.0,
+        422
+    );
+    let (st, _, body) = http(port, "PUT", "/api/v1/devices/192.168.1.23", &rw, Some(json!({"name": "Pixel 8"}))).await;
+    assert_eq!(st, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!((v["name"].clone(), v["exchanges"].clone()), (json!("Pixel 8"), json!(2)));
+    assert_eq!(get("/api/v1/devices").await["devices"][0]["name"], "Pixel 8");
+
+    // History filters by address or by name, and shows the address.
+    let v = get("/api/v1/exchanges?client=Pixel%208").await;
+    let paths: Vec<&str> = v["exchanges"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/c", "/a"]);
+    assert_eq!(v["exchanges"][0]["client_addr"], "192.168.1.23");
+    assert_eq!(get("/api/v1/exchanges?client=192.168.1.24").await["exchanges"][0]["path"], "/b");
+    let v = get("/api/v1/exchanges?q=client%3A%22pixel%208%22").await;
+    assert_eq!(v["exchanges"].as_array().unwrap().len(), 2);
+
+    // Record only one device.
+    let (st, _, body) =
+        http(port, "PUT", "/api/v1/history/recording", &rw, Some(json!({"record_devices": ["192.168.1.24"]}))).await;
+    assert_eq!(st, 200, "{body}");
+    let v = get("/api/v1/history/recording").await;
+    assert_eq!(v, json!({"in_scope_only": false, "record_devices": ["192.168.1.24"]}));
+    assert_eq!(get("/api/v1/devices").await["devices"][1]["record_only"], true);
+    let bad = http(port, "PUT", "/api/v1/history/recording", &rw, Some(json!({"record_devices": ["nope"]}))).await;
+    assert_eq!(bad.0, 400);
+
+    // Removing a name.
+    let (st, _, body) = http(port, "DELETE", "/api/v1/devices/192.168.1.23", &rw, None).await;
+    assert_eq!((st, body.as_str()), (200, r#"{"deleted":"192.168.1.23"}"#));
+    assert_eq!(http(port, "DELETE", "/api/v1/devices/192.168.1.23", &rw, None).await.0, 404);
+    assert!(get("/api/v1/devices").await["devices"][0].get("name").is_none());
 }

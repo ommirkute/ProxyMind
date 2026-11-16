@@ -309,6 +309,7 @@ fuzz/          fuzz targets for the parsers
 | | |
 |---|---|
 | [docs/agents.md](docs/agents.md) | Connecting AI agents (MCP) |
+| [docs/mobile.md](docs/mobile.md) | Testing from an Android or iOS device: CA setup page and QR code, per-device history |
 | [docs/plan.md](docs/plan.md) | Roadmap and status |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 | [docs/scanner-matrix.md](docs/scanner-matrix.md) | Scanner coverage, check by check |

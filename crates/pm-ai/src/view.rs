@@ -321,6 +321,7 @@ mod tests {
     fn exchange(resp: &str) -> Exchange {
         Exchange {
             summary: ExchangeSummary {
+                client_addr: None,
                 id: 7,
                 ts_ms: 0,
                 duration_ms: Some(12),

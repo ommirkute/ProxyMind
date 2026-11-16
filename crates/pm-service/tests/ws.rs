@@ -22,6 +22,7 @@ fn agents_get_redacted_untrusted_text_and_humans_get_it_as_is() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store
         .insert_exchange(&NewExchange {
+            client_addr: None,
             ts_ms: 1,
             duration_ms: None,
             source: "proxy".into(),

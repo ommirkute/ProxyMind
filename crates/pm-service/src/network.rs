@@ -190,12 +190,26 @@ impl Service {
 /// Project setting: what the proxy records in history.
 pub const RECORDING_SETTING: &str = "history_recording";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecordingSettings {
     /// Keep only exchanges whose target is in the rules of engagement's
     /// scope (everything else is still proxied, just not recorded).
     pub in_scope_only: bool,
+    /// Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other
+    /// clients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.
+    pub record_devices: Vec<String>,
+}
+
+/// Most devices `record_devices` can name.
+pub const MAX_RECORD_DEVICES: usize = 64;
+
+/// Checks and normalises an IP address (no port) typed or sent for a client: IPv4-mapped IPv6 becomes IPv4.
+pub(crate) fn normalize_client_ip(text: &str) -> Result<String> {
+    let t = text.trim().trim_matches(['[', ']']);
+    t.parse::<std::net::IpAddr>()
+        .map(|ip| ip.to_canonical().to_string())
+        .map_err(|_| ServiceError::Invalid(format!("{text:?} is not an IP address (e.g. 192.168.1.23)")))
 }
 
 fn load_recording(store: &Store) -> Result<RecordingSettings> {
@@ -216,22 +230,45 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change what is recorded".into()));
         }
+        if s.record_devices.len() > MAX_RECORD_DEVICES {
+            return Err(ServiceError::Invalid(format!("at most {MAX_RECORD_DEVICES} devices")));
+        }
+        let mut s = s;
+        let mut devices = Vec::new();
+        for d in &s.record_devices {
+            let ip = normalize_client_ip(d)?;
+            if !devices.contains(&ip) {
+                devices.push(ip);
+            }
+        }
+        s.record_devices = devices;
         let text = serde_json::to_string(&s).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         self.store.write(|db| db.set_setting(RECORDING_SETTING, &text))?;
-        self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
+        self.apply_recording(&s);
         self.audit(&actor.id(), "history_recording", json!(s), "allow")?;
         Ok(s)
+    }
+
+    fn apply_recording(&self, s: &RecordingSettings) {
+        self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
+        *self.record_devices.write() = s.record_devices.iter().cloned().collect();
     }
 
     /// Re-reads the recording settings (changes from another process).
     pub fn sync_recording(&self) -> Result<()> {
         let s = self.store.read(load_recording)?;
-        self.record_in_scope_only.store(s.in_scope_only, std::sync::atomic::Ordering::Relaxed);
+        self.apply_recording(&s);
         Ok(())
     }
 
     /// Whether the proxy should record this exchange.
     pub fn should_record(&self, ex: &pm_store::NewExchange) -> bool {
+        {
+            let only = self.record_devices.read();
+            if !only.is_empty() && !ex.client_addr.as_deref().is_some_and(|a| only.contains(a)) {
+                return false;
+            }
+        }
         !self.record_in_scope_only.load(std::sync::atomic::Ordering::Relaxed)
             || pm_policy::Target::from_parts(&ex.scheme, &ex.host, ex.port, &ex.path)
                 .is_ok_and(|t| self.policy.scope_check(&t).is_ok())

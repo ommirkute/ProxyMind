@@ -503,3 +503,63 @@ pub struct ProtobufEncoded {
     /// Length of the body in bytes.
     pub length: usize,
 }
+
+/// Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct MobileSetup {
+    /// Whether this process runs the proxy at all (false with `--no-proxy`).
+    pub proxy_running: bool,
+    /// Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+    /// interface. False when the proxy listens only on loopback (a phone cannot reach that).
+    pub listener_reachable: bool,
+    /// Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+    /// first. Empty when no listener is reachable or no LAN address was found.
+    pub urls: Vec<String>,
+    /// The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.
+    pub proxy_addresses: Vec<String>,
+    /// The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.
+    pub setup_host_url: String,
+    /// The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.
+    pub listeners: Vec<String>,
+    /// SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_svg: Option<String>,
+    /// The URL the QR code holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_url: Option<String>,
+    /// SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_fingerprint: Option<String>,
+}
+
+/// A client address seen in history, possibly with a name.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeviceView {
+    /// The client's IP address (no port).
+    pub addr: String,
+    /// The name a person gave it, e.g. `Pixel 8`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Exchanges recorded from it.
+    pub exchanges: i64,
+    /// When the latest one was recorded (milliseconds since the epoch); absent if none is in history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<i64>,
+    /// Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).
+    pub record_only: bool,
+}
+
+/// Response of `GET /devices`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct DevicesView {
+    /// Devices seen in history (most recent first), then named or selected ones not seen yet.
+    pub devices: Vec<DeviceView>,
+}
+
+/// Body of `PUT /devices/{addr}`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceNameBody {
+    /// The name to show for this address (1 to 60 characters).
+    pub name: String,
+}

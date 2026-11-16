@@ -17,6 +17,7 @@ mod changes;
 mod collaborator;
 mod crawl;
 mod custom_checks;
+mod devices;
 mod discover;
 mod dom_test;
 mod engage;
@@ -34,6 +35,7 @@ mod intercept;
 mod login_record;
 pub mod mcp_args;
 mod memory;
+mod mobile;
 mod model;
 mod network;
 mod openapi;
@@ -143,7 +145,7 @@ use thiserror::Error;
 
 pub use {
     pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_http, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi,
-    pm_plugin, pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
+    pm_plugin, pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tls, pm_tools,
 };
 
 #[derive(Debug, Error)]
@@ -208,6 +210,8 @@ pub struct Service {
     relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
+    /// With any entries: the proxy records only traffic from these client IPs.
+    record_devices: parking_lot::RwLock<std::collections::HashSet<String>>,
     /// Typed events published after writes commit (ADR-0018).
     bus: std::sync::Arc<events::Bus>,
 }
@@ -373,6 +377,7 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
+            record_devices: parking_lot::RwLock::new(std::collections::HashSet::new()),
             bus,
         };
         svc.load_scan_tasks();

@@ -2,7 +2,10 @@ import { useState } from "react";
 import { api, openBrowser, toast } from "../api";
 import { Icon } from "../icons";
 import { Empty, ErrorBox, Panel, useAction, useLoad, useNav } from "../components";
+import type { DeviceView, DevicesView, MobileSetup, RecordingSettings } from "../api-types.gen";
 import Listeners from "./Listeners";
+
+const MOBILE_GUIDE = "https://github.com/ommirkute/ProxyMind/blob/main/docs/mobile.md";
 
 interface SetupInfo {
   proxy: string | null;
@@ -103,7 +106,8 @@ export default function Setup() {
           )}
         </Panel>
       </div>
-      <Listeners />
+      <Phone />
+      <div id="listeners"><Listeners /></div>
       <Recording />
     </div>
   );
@@ -150,25 +154,152 @@ export NODE_EXTRA_CA_CERTS=$PWD/proxymind-ca.pem                                
   return <div className="small" data-testid="ca-instructions" style={{ marginTop: 8 }}>{steps[os]}</div>;
 }
 
+/** An SVG string as an image source (shown through <img>, so nothing in it can run). */
+const svgSrc = (svg: string) => `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`;
+
+/** Phones and tablets: the page to open (with a QR code) to install the CA, and whether they can reach the proxy. */
+function Phone() {
+  const m = useLoad(() => api.get<MobileSetup>("/setup/mobile"), []);
+  const d = m.data;
+  return (
+    <Panel title="Phone or tablet" actions={<a className="small" href={MOBILE_GUIDE} target="_blank" rel="noreferrer" data-testid="mobile-guide">Android and iOS guide</a>}>
+      <ErrorBox error={m.error} />
+      {d && !d.proxy_running && <Empty>This process doesn't run the proxy, so there is nothing for a phone to connect to.</Empty>}
+      {d?.proxy_running && !d.listener_reachable && (
+        <div data-testid="mobile-unreachable">
+          <p>
+            The proxy listens only on this computer ({d.listeners.join(", ")}), so a phone can't reach it. Add a listener on all
+            interfaces, for example <code>0.0.0.0:8081</code>, and use it only on a network you trust: anyone on it can send
+            traffic through the proxy.
+          </p>
+          <button className="btn" onClick={() => document.getElementById("listeners")?.scrollIntoView({ behavior: "smooth" })}>Go to the proxy listeners</button>
+        </div>
+      )}
+      {d?.proxy_running && d.listener_reachable && d.urls.length === 0 && (
+        <p data-testid="mobile-no-address">
+          The proxy listens beyond this computer ({d.listeners.join(", ")}) but no local network address was found. Connect
+          to Wi-Fi or Ethernet, or open the proxy's address on this computer from the phone.
+        </p>
+      )}
+      {d && d.urls.length > 0 && (
+        <div className="split" style={{ alignItems: "center" }}>
+          <div>
+            <p>With the phone on the same network, open this page on it (or scan the code), and install the certificate from there:</p>
+            <pre className="raw" data-testid="mobile-url">{d.urls[0]}</pre>
+            {d.urls.length > 1 && (
+              <p className="small muted">Other addresses of this computer: {d.urls.slice(1).map((u) => <code key={u} style={{ marginRight: 8 }}>{u}</code>)}</p>
+            )}
+            <p className="small">
+              Then set the phone's Wi-Fi proxy to <code data-testid="mobile-proxy">{d.proxy_addresses[0]}</code> (manual, host
+              and port). Once that is set, <code>{d.setup_host_url}</code> opens the same page.
+            </p>
+            {d.ca_fingerprint && (
+              <p className="small muted">The page shows the same fingerprint: <code className="mono" style={{ wordBreak: "break-all" }}>{d.ca_fingerprint}</code></p>
+            )}
+          </div>
+          {d.qr_svg && (
+            <img data-testid="mobile-qr" alt={`QR code for ${d.qr_url ?? d.urls[0]}`} src={svgSrc(d.qr_svg)} width={196} height={196} style={{ justifySelf: "center", background: "#fff", borderRadius: 8 }} />
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /** What the proxy keeps in HTTP history. */
 function Recording() {
-  const rec = useLoad(() => api.get<{ in_scope_only: boolean }>("/history/recording"), []);
+  const rec = useLoad(() => api.get<RecordingSettings>("/history/recording"), []);
+  const devs = useLoad(() => api.get<DevicesView>("/devices"), []);
   const action = useAction();
-  const set = (in_scope_only: boolean) => {
+  const only = rec.data?.record_devices ?? [];
+  const save = (next: RecordingSettings) => {
     const before = rec.data;
-    rec.setData({ in_scope_only }); // show the change at once; undo if saving fails
-    action
-      .run(() => api.put<{ in_scope_only: boolean }>("/history/recording", { in_scope_only }))
-      .then((r) => rec.setData(r ?? before));
+    rec.setData(next); // show the change at once; undo if saving fails
+    action.run(() => api.put<RecordingSettings>("/history/recording", next)).then((r) => {
+      rec.setData(r ?? before);
+      devs.reload();
+    });
   };
+  const toggleDevice = (addr: string, on: boolean) =>
+    save({ in_scope_only: !!rec.data?.in_scope_only, record_devices: on ? [...only.filter((a) => a !== addr), addr] : only.filter((a) => a !== addr) });
   return (
     <Panel title="4. What to record">
       <label className="row small" style={{ gap: 6 }}>
-        <input type="checkbox" data-testid="record-in-scope" checked={!!rec.data?.in_scope_only} disabled={!rec.data} onChange={(e) => set(e.target.checked)} />
+        <input type="checkbox" data-testid="record-in-scope" checked={!!rec.data?.in_scope_only} disabled={!rec.data} onChange={(e) => save({ in_scope_only: e.target.checked, record_devices: only })} />
         Record only in-scope traffic in HTTP history. Everything is still proxied; out-of-scope requests (and their
         WebSocket messages) just aren't saved, which keeps big projects small and fast.
       </label>
-      <ErrorBox error={rec.error ?? action.error} />
+      <h3 style={{ margin: "14px 0 4px", fontSize: 13 }}>Devices</h3>
+      <p className="small muted" style={{ marginTop: 0 }} data-testid="record-devices-note">
+        {only.length
+          ? `Only traffic from ${only.length === 1 ? "the ticked device" : `the ${only.length} ticked devices`} is recorded; other devices are still proxied but not saved.`
+          : "Every device's traffic is recorded. Tick \"record only\" on one or more devices to save just their traffic (everything is still proxied)."}
+      </p>
+      <Devices devices={devs.data?.devices ?? []} only={only} onToggle={toggleDevice} onChanged={devs.reload} />
+      <ErrorBox error={rec.error ?? devs.error ?? action.error} />
     </Panel>
+  );
+}
+
+/** Client addresses seen in history: give each a name, and pick the ones to record. */
+function Devices({ devices, only, onToggle, onChanged }: { devices: DeviceView[]; only: string[]; onToggle: (addr: string, on: boolean) => void; onChanged: () => void }) {
+  const [addr, setAddr] = useState("");
+  const [name, setName] = useState("");
+  const action = useAction();
+  const add = () =>
+    action.run(() => api.put(`/devices/${encodeURIComponent(addr.trim())}`, { name: name.trim() })).then((r) => {
+      if (r) {
+        setAddr("");
+        setName("");
+        onChanged();
+      }
+    });
+  return (
+    <div data-testid="devices">
+      {devices.length === 0 ? (
+        <p className="small muted">No device has used the proxy yet. Phones and tablets show up here once their traffic goes through it.</p>
+      ) : (
+        <table className="grid small">
+          <thead>
+            <tr><th>Address</th><th>Name</th><th>Requests</th><th>Last seen</th><th>Record only</th></tr>
+          </thead>
+          <tbody>
+            {devices.map((d) => (
+              <DeviceRow key={d.addr} d={d} checked={only.includes(d.addr)} onToggle={onToggle} onChanged={onChanged} />
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="row small" style={{ gap: 6, marginTop: 8 }}>
+        <input aria-label="Device address" placeholder="192.168.1.23" value={addr} onChange={(e) => setAddr(e.target.value)} style={{ width: 150 }} />
+        <input aria-label="Device name" placeholder="Pixel 8" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 150 }} />
+        <button className="btn" data-testid="device-add" disabled={!addr.trim() || !name.trim() || action.busy} onClick={add}>Name a device</button>
+      </div>
+      <ErrorBox error={action.error} />
+    </div>
+  );
+}
+
+function DeviceRow({ d, checked, onToggle, onChanged }: { d: DeviceView; checked: boolean; onToggle: (addr: string, on: boolean) => void; onChanged: () => void }) {
+  const [name, setName] = useState(d.name ?? "");
+  const action = useAction();
+  const commit = () => {
+    const next = name.trim();
+    if (next === (d.name ?? "")) return;
+    action
+      .run(() => (next ? api.put(`/devices/${encodeURIComponent(d.addr)}`, { name: next }) : api.del(`/devices/${encodeURIComponent(d.addr)}`)))
+      .then(() => onChanged());
+  };
+  return (
+    <tr data-testid={`device-${d.addr}`}>
+      <td className="mono">{d.addr}</td>
+      <td>
+        <input aria-label={`Name for ${d.addr}`} data-testid={`device-name-${d.addr}`} placeholder="name it" value={name} onChange={(e) => setName(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === "Enter" && commit()} style={{ width: 150 }} />
+        <ErrorBox error={action.error} />
+      </td>
+      <td>{d.exchanges}</td>
+      <td className="muted">{d.last_seen_ms ? new Date(d.last_seen_ms).toLocaleString() : ""}</td>
+      <td><input type="checkbox" aria-label={`Record only ${d.name ?? d.addr}`} data-testid={`device-record-${d.addr}`} checked={checked} onChange={(e) => onToggle(d.addr, e.target.checked)} /></td>
+    </tr>
   );
 }

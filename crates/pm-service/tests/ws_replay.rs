@@ -23,6 +23,7 @@ async fn setup() -> (Service, i64) {
     let mut ex = |path: &str, status: u16, request: String| {
         store
             .insert_exchange(&NewExchange {
+                client_addr: None,
                 ts_ms: 1,
                 duration_ms: None,
                 source: "proxy".into(),

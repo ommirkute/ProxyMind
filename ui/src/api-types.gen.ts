@@ -805,6 +805,32 @@ export interface DecodeRequest {
   ops?: string[];
 }
 
+/** Body of `PUT /devices/{addr}`. */
+export interface DeviceNameBody {
+  /** The name to show for this address (1 to 60 characters). */
+  name: string;
+}
+
+/** A client address seen in history, possibly with a name. */
+export interface DeviceView {
+  /** The client's IP address (no port). */
+  addr: string;
+  /** Exchanges recorded from it. */
+  exchanges: number;
+  /** When the latest one was recorded (milliseconds since the epoch); absent if none is in history. */
+  last_seen_ms?: number | null;
+  /** The name a person gave it, e.g. `Pixel 8`. */
+  name?: string | null;
+  /** Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`). */
+  record_only: boolean;
+}
+
+/** Response of `GET /devices`. */
+export interface DevicesView {
+  /** Devices seen in history (most recent first), then named or selected ones not seen yet. */
+  devices: DeviceView[];
+}
+
 export interface DiscoverRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
@@ -948,6 +974,11 @@ export interface ExchangeQuery {
 /** One row of history, without the raw bytes. */
 export interface ExchangeSummary {
   actor_id: string;
+  /**
+   * The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+   * this was tracked and for ones ProxyMind sent itself.
+   */
+  client_addr?: string | null;
   comment?: string | null;
   duration_ms: number | null;
   error: string | null;
@@ -1004,6 +1035,8 @@ export interface ExportRequest {
    * previous result.
    */
   before_id?: number | null;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -1027,7 +1060,7 @@ export interface ExportRequest {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).
@@ -1462,6 +1495,8 @@ export interface HistoryFilter {
    * previous result.
    */
   before_id?: number | null;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -1483,7 +1518,7 @@ export interface HistoryFilter {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).
@@ -1845,6 +1880,34 @@ export interface MessageView {
   body?: BodyView | null;
   headers?: [string, string][];
   start_line: string;
+}
+
+/** Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page. */
+export interface MobileSetup {
+  /** SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows. */
+  ca_fingerprint?: string | null;
+  /**
+   * Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+   * interface. False when the proxy listens only on loopback (a phone cannot reach that).
+   */
+  listener_reachable: boolean;
+  /** The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone. */
+  listeners: string[];
+  /** The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL. */
+  proxy_addresses: string[];
+  /** Whether this process runs the proxy at all (false with `--no-proxy`). */
+  proxy_running: boolean;
+  /** SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL. */
+  qr_svg?: string | null;
+  /** The URL the QR code holds. */
+  qr_url?: string | null;
+  /** The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`. */
+  setup_host_url: string;
+  /**
+   * Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+   * first. Empty when no listener is reachable or no LAN address was found.
+   */
+  urls: string[];
 }
 
 /** How payloads are placed in the positions. */
@@ -2598,6 +2661,11 @@ export interface RecordingSettings {
    * scope (everything else is still proxied, just not recorded).
    */
   in_scope_only?: boolean;
+  /**
+   * Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other
+   * clients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.
+   */
+  record_devices?: string[];
 }
 
 /**
@@ -3085,6 +3153,8 @@ export interface SearchRequest {
   before_id?: number | null;
   /** Match letter case. */
   case_sensitive?: boolean;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -3124,7 +3194,7 @@ export interface SearchRequest {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).

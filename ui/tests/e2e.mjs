@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
+import http from "node:http";
 import { X509Certificate } from "node:crypto";
 import { chromium } from "playwright-core";
 
@@ -19,6 +20,8 @@ process.env.PROXYMIND_BROWSER_HEADLESS ??= "1";
 // CI runners (non-root Ubuntu) can't use Chromium's sandbox for Playwright's build: the built-in
 // browser window would abort. The test runs in a throwaway machine, so run it without the sandbox.
 process.env.PROXYMIND_CHROMIUM_NO_SANDBOX ??= "1";
+// The machine's LAN address for phones: fixed, so the mobile section does not depend on the runner's network.
+process.env.PROXYMIND_LAN_ADDR ??= "192.0.2.10";
 const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
 const project = join(dir, "ui.pmproj");
 const children = [];
@@ -1360,6 +1363,124 @@ match:
     await page.getByTestId("listeners-save").click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
     check(await rawTo(extra, "GET / HTTP/1.1\r\n\r\n").then(() => false, () => true), "a removed listener stops");
+  });
+
+  await section("Mobile onboarding (setup page, QR code, devices)", async () => {
+    await open("setup");
+    // The main proxy listens on loopback only: a phone cannot reach it, and the page says so.
+    await page.getByTestId("mobile-unreachable").waitFor();
+    check((await page.getByTestId("mobile-qr").count()) === 0, "a loopback-only proxy gets no QR code, only how to fix it");
+    // Add a listener on every interface (as the page suggests).
+    const lan = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`0.0.0.0:${lan}`);
+    await page.getByTestId("listeners-save").click();
+    await page.locator('[data-testid="listener-status"]', { hasText: "listening" }).waitFor({ timeout: 5000 });
+    await page.reload();
+    await page.getByTestId("mobile-url").waitFor();
+    const url = (await page.getByTestId("mobile-url").textContent()).trim();
+    check(url === `http://${process.env.PROXYMIND_LAN_ADDR}:${lan}/`, `the page to open on the phone is shown (${url})`);
+    check((await page.getByTestId("mobile-proxy").textContent()) === `${process.env.PROXYMIND_LAN_ADDR}:${lan}`, "and the proxy address to type into the phone");
+    const qr = page.getByTestId("mobile-qr");
+    check(
+      (await qr.evaluate((i) => i.tagName === "IMG" && i.src.startsWith("data:image/svg+xml;base64,") && i.complete && i.naturalWidth > 0)) === true,
+      "the QR code is an image (an <img> with a data URL), not markup in the page",
+    );
+    check(await page.evaluate(() => !document.querySelector(".panel svg[viewBox]")), "the SVG is never inserted into the page itself");
+    check((await page.getByTestId("mobile-guide").getAttribute("href")).endsWith("docs/mobile.md"), "the setup page links the Android and iOS guide");
+    await page.screenshot({ path: join(SHOTS, "7e-mobile.png"), fullPage: true });
+
+    // The page a phone opens, fetched through the proxy by its reserved name, and straight from the listener.
+    const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
+    const fp = new X509Certificate(pem).fingerprint256;
+    const hit = await rawTo(proxy, "GET http://proxymind.setup/ HTTP/1.1\r\nHost: proxymind.setup\r\nConnection: close\r\n\r\n");
+    check(hit.startsWith("HTTP/1.1 200") && hit.includes('href="/ca.crt"') && hit.includes('href="/ca.pem"'), "http://proxymind.setup/ through the proxy shows the CA download links");
+    check(hit.includes(fp), "and the CA fingerprint the setup page shows");
+    check(!hit.includes("<script") && !/pm2_[0-9a-f]{20}/.test(hit), "with no scripts and nothing secret");
+    const direct = await rawTo(lan, `GET / HTTP/1.1\r\nHost: 127.0.0.1:${lan}\r\nConnection: close\r\n\r\n`);
+    check(direct.startsWith("HTTP/1.1 200") && direct.includes("ProxyMind setup"), "the listener's own address serves the same page (no proxy setting needed yet)");
+    const download = (path) =>
+      new Promise((resolve, reject) => {
+        const r = http.request({ host: "127.0.0.1", port: proxy, path: `http://proxymind.setup${path}`, headers: { Host: "proxymind.setup" } }, (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({ type: res.headers["content-type"], body: Buffer.concat(chunks) }));
+        });
+        r.on("error", reject).end();
+      });
+    const crt = await download("/ca.crt");
+    check(crt.type === "application/x-x509-ca-cert" && new X509Certificate(crt.body).fingerprint256 === fp, "/ca.crt is the CA in DER form, as a certificate download");
+    const pemDl = await download("/ca.pem");
+    check(pemDl.type === "application/x-pem-file" && pemDl.body.toString() === pem, "/ca.pem is the PEM file");
+    await sleep(500);
+    const local = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?host=proxymind&limit=5")).json()).exchanges.length);
+    check(local === 0, "none of that is recorded as target traffic");
+
+    // Devices: a second client address (127.0.0.2, where the OS allows it) shows up, can be named and filtered.
+    const from = (localAddress, raw) =>
+      new Promise((resolve, reject) => {
+        const sock = net.connect({ host: "127.0.0.1", port: proxy, localAddress }, () => sock.write(raw.replace(" /", ` http://127.0.0.1:${shop}/`)));
+        let out = "";
+        sock.on("data", (d) => (out += d));
+        sock.on("end", () => resolve(out));
+        sock.on("error", reject);
+        setTimeout(() => sock.destroy(), 5000);
+      });
+    const second = "127.0.0.2";
+    const reply = await from(second, "GET /api/products?from=second-device HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n").catch(() => "");
+    await viaProxy(proxy, shop, "GET /api/products?from=first-device HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    if (!reply.startsWith("HTTP/1.1 200")) {
+      console.log("  (this system cannot connect from 127.0.0.2: the second-device checks are skipped)");
+      check(true, "skipped: no second client address here");
+      return;
+    }
+    check((await recordedId("from=second-device")) !== null, "traffic from a second device is recorded");
+    await page.reload();
+    await page.getByTestId(`device-name-${second}`).waitFor();
+    check((await page.getByTestId("devices").textContent()).includes("127.0.0.1"), "the devices list shows both client addresses");
+    await page.getByTestId(`device-name-${second}`).fill("Pixel 8");
+    await page.getByTestId(`device-name-${second}`).press("Enter");
+    await page.waitForFunction(async () => (await (await fetch("/api/v1/devices")).json()).devices.some((d) => d.name === "Pixel 8"));
+    check(true, "a device can be given a name");
+
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("from=");
+    await page.locator('[data-testid="client-cell"]', { hasText: "Pixel 8" }).first().waitFor();
+    const cells = await page.locator('[data-testid="client-cell"]').allTextContents();
+    check(cells.includes("Pixel 8") && cells.includes("127.0.0.1"), `History has a Client column with the device name or address (${cells.join(", ")})`);
+    await page.getByTestId("client-filter").selectOption(second);
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="client-cell"]').length === 1);
+    check((await page.locator('[data-testid^="row-"]').first().textContent()).includes("from=second-device"), "the device filter shows only that device's traffic");
+    await page.getByTestId("client-filter").selectOption("");
+    await page.getByLabel("Query", { exact: true }).fill('client:"Pixel 8"');
+    await page.getByLabel("Query", { exact: true }).press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="client-cell"]').length === 1);
+    check(true, "the query language has client: (by name)");
+    await page.getByLabel("Query", { exact: true }).fill("client:127.0.0.1 from=");
+    await page.getByLabel("Query", { exact: true }).press("Enter");
+    await sleep(600);
+    check((await page.locator('[data-testid="client-cell"]').allTextContents()).every((t) => t === "127.0.0.1"), "client: also takes an address");
+    await page.getByTestId("clear-query").click();
+    await page.getByLabel("Filter", { exact: true }).fill("");
+    await page.screenshot({ path: join(SHOTS, "7f-devices-history.png") });
+
+    // Record only one device: the other is still proxied but not saved.
+    await open("setup");
+    await page.getByTestId(`device-record-${second}`).check();
+    await page.waitForFunction(async (a) => (await (await fetch("/api/v1/history/recording")).json()).record_devices?.includes(a), second);
+    check((await page.getByTestId("record-devices-note").textContent()).includes("Only traffic from"), "choosing a device to record is explained");
+    const firstReply = await viaProxy(proxy, shop, "GET /api/products?x=not-recorded HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    await from(second, "GET /api/products?x=recorded HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    check(firstReply.startsWith("HTTP/1.1 200"), "other devices are still proxied");
+    check((await recordedId("x=recorded")) !== null, "the chosen device's traffic is recorded");
+    check((await recordedId("x=not-recorded")) === null, "other devices' traffic is not");
+    await page.getByTestId(`device-record-${second}`).uncheck();
+    await page.waitForFunction(async () => ((await (await fetch("/api/v1/history/recording")).json()).record_devices ?? []).length === 0);
+
+    // Clean up the extra listener.
+    await page.getByLabel("Delete listener 1").click();
+    await page.getByTestId("listeners-save").click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
   });
 
   await section("Network: hostname overrides and TLS pass-through", async () => {

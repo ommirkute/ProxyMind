@@ -6,6 +6,7 @@ use pm_service::{ExportRequest, Service};
 
 fn ex(host: &str, method: &str, path: &str, status: u16, body: &str) -> NewExchange {
     NewExchange {
+        client_addr: None,
         ts_ms: 1,
         duration_ms: Some(10),
         source: "proxy".into(),

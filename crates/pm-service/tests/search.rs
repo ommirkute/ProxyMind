@@ -50,6 +50,7 @@ fn service() -> Service {
         let status = resp.as_ref().map(|r| String::from_utf8_lossy(&r[9..12]).parse().unwrap());
         store
             .insert_exchange(&NewExchange {
+                client_addr: None,
                 ts_ms: 1,
                 duration_ms: None,
                 source: "proxy".into(),
@@ -158,6 +159,7 @@ fn chunked(parts: &[&[u8]]) -> Vec<u8> {
 fn insert(store: &mut Store, host: &str, path: &str, req: Vec<u8>, resp: Vec<u8>) {
     store
         .insert_exchange(&NewExchange {
+            client_addr: None,
             ts_ms: 1,
             duration_ms: None,
             source: "proxy".into(),

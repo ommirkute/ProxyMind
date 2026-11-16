@@ -28,7 +28,7 @@ impl Proxy {
         port: u16,
         ctx: Ctx,
     ) -> Result<()> {
-        let me = ctx.me;
+        let (me, peer) = (ctx.me, ctx.peer);
         // Each stream may buffer a body: bound how many run at once.
         let mut conn = h2::server::Builder::new()
             .max_concurrent_streams(128)
@@ -40,7 +40,7 @@ impl Proxy {
             let this = self.clone();
             let host = host.clone();
             tokio::spawn(async move {
-                if let Err(e) = this.h2_stream(req, respond, &host, port, me).await {
+                if let Err(e) = this.h2_stream(req, respond, &host, port, me, peer).await {
                     tracing::debug!(error = %e, "HTTP/2 stream ended with error");
                 }
             });
@@ -55,6 +55,7 @@ impl Proxy {
         host: &str,
         port: u16,
         me: Option<SelfAddr>,
+        peer: Option<std::net::IpAddr>,
     ) -> Result<()> {
         let (parts, mut body) = req.into_parts();
         // Answer 100 Continue ourselves: the body goes upstream only once
@@ -94,10 +95,11 @@ impl Proxy {
         let guard = self.loop_guard(&me, host, port);
         let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
         if pm_http::h2text::is_http2_request(&request) && !self.buffers_response("https", host, port, &path) {
-            return self.h2_streamed(respond, host, port, request, method, path, check, started).await;
+            return self.h2_streamed(respond, host, port, request, method, path, check, started, peer).await;
         }
         let result = self.sender.send(&Endpoint::new("https", host, port), &request, &method, check).await;
         let mut record = NewExchange {
+            client_addr: peer.map(|ip| ip.to_string()),
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: "proxy".into(),
@@ -178,8 +180,10 @@ impl Proxy {
         path: String,
         check: Option<pm_replay::AddrCheck<'_>>,
         started: Instant,
+        peer: Option<std::net::IpAddr>,
     ) -> Result<()> {
         let mut record = NewExchange {
+            client_addr: peer.map(|ip| ip.to_string()),
             ts_ms: now_ms(),
             duration_ms: None,
             source: "proxy".into(),

@@ -71,7 +71,7 @@ impl hql::Fetch for Lazy<'_> {
     }
 }
 
-fn meta(r: &ExchangeSummary) -> hql::Meta<'_> {
+fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTreeMap<String, String>) -> hql::Meta<'a> {
     hql::Meta {
         id: r.id,
         scheme: &r.scheme,
@@ -86,6 +86,8 @@ fn meta(r: &ExchangeSummary) -> hql::Meta<'_> {
         source: &r.source,
         actor: &r.actor_id,
         identity: r.identity.as_deref(),
+        client: r.client_addr.as_deref(),
+        client_name: r.client_addr.as_ref().and_then(|a| names.get(a)).map(String::as_str),
         comment: r.comment.as_deref(),
         highlight: r.highlight.as_deref(),
         error: r.error.as_deref(),
@@ -96,6 +98,15 @@ impl Service {
     /// Searches history (a `read` action: always allowed, not audited).
     pub fn history_search(&self, actor: &Actor, filter: &HistoryFilter) -> Result<ExchangePage> {
         let limit = filter.limit.unwrap_or(50).clamp(1, 500);
+        let resolved;
+        let filter = match filter.client.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => {
+                // A device name means the addresses it was given to; an address means itself.
+                resolved = HistoryFilter { clients: Some(self.clients_matching(c)?), ..filter.clone() };
+                &resolved
+            }
+            None => filter,
+        };
         if let Some(q) = filter.q.as_deref().filter(|q| !q.trim().is_empty()) {
             let query = hql::Query::parse(q).map_err(|e| ServiceError::Invalid(format!("query: {e}")))?;
             return self.query_rows(actor, filter, &query, limit);
@@ -128,6 +139,8 @@ impl Service {
         limit: usize,
     ) -> Result<ExchangePage> {
         let deadline = std::time::Instant::now() + QUERY_BUDGET;
+        // Device names, so `client:` can match the name a person gave an address.
+        let names = self.device_names()?;
         let mut f = filter.clone();
         f.q = None;
         f.limit = Some(500);
@@ -135,7 +148,8 @@ impl Service {
         let (mut out, mut scanned, mut last, mut more) = (Vec::new(), 0usize, None, true);
         let eval = |row: &ExchangeSummary| {
             let mut lazy = Lazy { svc: self, actor, row, loaded: None, scope: None };
-            (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy)) && query.matches(&meta(row), &mut lazy)
+            (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy))
+                && query.matches(&meta(row, &names), &mut lazy)
         };
         match candidates {
             // Paging back: fetch the candidates' summaries, 500 at a time, newest first.

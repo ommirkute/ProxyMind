@@ -7,6 +7,20 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Set up a phone or tablet from a QR code.** The Proxy setup page has a new *Phone or tablet* section with the
+  address to open on the phone (built from this computer's network address and the proxy's port), a QR code for it, and
+  the proxy address to enter in the phone's Wi-Fi settings. The proxy itself serves that page, so it works before the
+  phone has any proxy setting: it offers the CA certificate as `.crt` and `.pem` downloads with its fingerprint and
+  short Android and iOS steps. Once the phone's proxy is set, `http://proxymind.setup/` shows the same page. These
+  requests are never forwarded or recorded. If the proxy only listens on this computer, the section says so and how to
+  add a listener on all interfaces. New guide: [docs/mobile.md](docs/mobile.md) (Android 14 and later, iOS, which apps
+  trust a user certificate).
+- **See and filter traffic per device.** History records which device (client address) each request came from, shows
+  it in a new *Client* column, and can filter by it, also in the query language (`client:192.168.1.23`,
+  `client:"Pixel 8"`). You can give an address a name on the Proxy setup page. *Record only* a chosen device or devices
+  to keep just their traffic in history (other devices are still proxied). Also in the API (`/setup/mobile`, `/devices`,
+  `client` on `/exchanges`, `record_devices` on `/history/recording`). Existing projects are upgraded on opening;
+  older rows simply have no client.
 - **Inline transforms in the Replay and Intercept editors.** Select text and URL-, Base64-, HTML-entity-, hex-,
   Unicode-escape- or JSON-string-encode or decode it, or hash it (MD5, SHA-1, SHA-256), with a before-and-after
   preview, chaining, an Undo list and Ctrl+Z (Ctrl+Shift+T or Alt+Shift+T opens the menu). Runs in the browser.

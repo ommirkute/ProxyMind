@@ -257,6 +257,7 @@ impl Service {
         for (i, r) in outcome.results.into_iter().enumerate() {
             let o = &outs[i];
             let mut record = NewExchange {
+                client_addr: None,
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 source: "replay".into(),

@@ -124,6 +124,7 @@ async fn authz_check_refuses_state_changing_requests() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store
         .insert_exchange(&NewExchange {
+            client_addr: None,
             ts_ms: 0,
             duration_ms: None,
             source: "proxy".into(),

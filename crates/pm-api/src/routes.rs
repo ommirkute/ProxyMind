@@ -84,6 +84,7 @@ pub fn api() -> Router<AppState> {
         .route("/status", get(status))
         .route("/roe", get(roe_get).put(roe_put))
         .route("/setup", get(setup))
+        .route("/setup/mobile", get(setup_mobile))
         .route("/ca.pem", get(ca_pem))
         .route("/browser/open", post(browser_open))
         .route("/roe/check", post(roe_check))
@@ -223,6 +224,8 @@ pub fn api() -> Router<AppState> {
         .route("/network", get(network_get).put(network_put))
         .route("/proxy/listeners", get(listeners_get).put(listeners_put))
         .route("/history/recording", get(recording_get).put(recording_put))
+        .route("/devices", get(devices_get))
+        .route("/devices/{addr}", axum::routing::put(device_put).delete(device_delete))
         .route("/session", get(session_get).put(session_put))
         .route("/session/jar", get(session_jar).delete(session_jar_clear))
         .route("/session/macros/{name}/run", post(session_macro_run))
@@ -1035,6 +1038,11 @@ async fn setup(State(st): State<AppState>) -> ApiResult {
     }))
 }
 
+/// How a phone reaches ProxyMind's setup page: addresses, a QR code (SVG) and the CA fingerprint.
+async fn setup_mobile(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.mobile_setup()?)
+}
+
 async fn browser_open(State(st): State<AppState>, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
     ok(st.service.browser_open(&st.actor, r).await?)
 }
@@ -1318,6 +1326,23 @@ async fn recording_get(State(st): State<AppState>) -> ApiResult {
 
 async fn recording_put(State(st): State<AppState>, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
     ok(st.service.recording_set(&st.actor, r)?)
+}
+
+async fn devices_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.devices_list()?)
+}
+
+async fn device_put(
+    State(st): State<AppState>,
+    Path(addr): Path<String>,
+    Json(b): Json<pm_service::api_types::DeviceNameBody>,
+) -> ApiResult {
+    ok(st.service.device_set_name(&st.actor, &addr, &b.name)?)
+}
+
+async fn device_delete(State(st): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    st.service.device_remove_name(&st.actor, &addr)?;
+    ok(json!({ "deleted": addr }))
 }
 
 async fn session_get(State(st): State<AppState>) -> ApiResult {

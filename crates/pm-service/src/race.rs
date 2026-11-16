@@ -175,6 +175,7 @@ impl Service {
         let (mut fastest, mut slowest, mut successes) = (u64::MAX, 0u64, 0usize);
         for r in outcome.results {
             let mut record = NewExchange {
+                client_addr: None,
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 source: "race".into(),

@@ -368,6 +368,12 @@ CREATE TABLE text_index_truncated (id INTEGER PRIMARY KEY);
 ALTER TABLE text_index_state ADD COLUMN indexed_through INTEGER NOT NULL DEFAULT 0;
 UPDATE text_index_state SET indexed_through = (SELECT COALESCE(MAX(id), 0) FROM exchanges);
 "#,
+    r#"
+-- The client (peer) address of each proxied exchange: the IP only, no port. NULL for rows recorded before this
+-- column existed and for exchanges ProxyMind sent itself. Used to tell phones and tablets apart in history.
+ALTER TABLE exchanges ADD COLUMN client_addr TEXT;
+CREATE INDEX exchanges_client ON exchanges(client_addr);
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -512,6 +518,9 @@ pub struct NewExchange {
     pub identity: Option<String>,
     /// Hypothesis this exchange was sent to test.
     pub hypothesis_id: Option<i64>,
+    /// The IP address (no port) of the client that sent it through the proxy; None for exchanges ProxyMind sent
+    /// itself.
+    pub client_addr: Option<String>,
 }
 
 /// A WebSocket message to record.
@@ -581,6 +590,18 @@ pub struct ExchangeSummary {
     pub highlight: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+    /// this was tracked and for ones ProxyMind sent itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_addr: Option<String>,
+}
+
+/// A client address seen in history (see [`Store::client_summary`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSeen {
+    pub addr: String,
+    pub exchanges: i64,
+    pub last_seen_ms: i64,
 }
 
 /// The columns the site map needs.
@@ -635,6 +656,8 @@ pub struct HistoryFilter {
     pub hypothesis_id: Option<i64>,
     /// Exchanges sent with this identity's credentials (the exact identity name).
     pub identity: Option<String>,
+    /// Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    pub client: Option<String>,
     /// Only exchanges with an id greater than this (newer ones; for paging forward).
     pub after_id: Option<i64>,
     /// Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
@@ -656,7 +679,7 @@ pub struct HistoryFilter {
     /// Free text: the host, the path (with query) or the comment contains it (case-insensitive).
     pub text: Option<String>,
     /// A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    /// parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    /// parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     /// comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     /// E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     /// early (see `scanned` and `next_before_id` in the result).
@@ -664,6 +687,10 @@ pub struct HistoryFilter {
     /// Only these exchange ids (set by the service, never by clients).
     #[serde(skip)]
     pub ids: Option<Vec<i64>>,
+    /// Only exchanges from these client IPs: `client` with a device name resolved (set by the service, never by
+    /// clients). Without it, `client` itself is matched as an IP address.
+    #[serde(skip)]
+    pub clients: Option<Vec<String>>,
 }
 
 pub struct Store {
@@ -1117,8 +1144,9 @@ impl Store {
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
-                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id,
+                                    client_addr)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -1137,6 +1165,7 @@ impl Store {
                 ex.error,
                 ex.identity,
                 ex.hypothesis_id,
+                ex.client_addr,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -1153,7 +1182,8 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error, identity, hypothesis_id, tags, notes";
+                                        status, req_len, resp_len, error, identity, hypothesis_id, tags, notes, \
+                                        client_addr";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -1175,6 +1205,7 @@ impl Store {
             hypothesis_id: r.get(15)?,
             highlight: highlight_of(&r.get::<_, String>(16)?),
             comment: r.get::<_, Option<String>>(17)?.filter(|c| !c.is_empty()),
+            client_addr: r.get(18)?,
         })
     }
 
@@ -1186,6 +1217,18 @@ impl Store {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![host_contains, limit as i64], Self::summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The client addresses seen in history, with how many exchanges each sent and when the last one was recorded,
+    /// most recently seen first.
+    pub fn client_summary(&self) -> Result<Vec<ClientSeen>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT client_addr, count(*), max(ts_ms) FROM exchanges WHERE client_addr IS NOT NULL
+             GROUP BY client_addr ORDER BY max(ts_ms) DESC, client_addr",
+        )?;
+        let rows =
+            stmt.query_map([], |r| Ok(ClientSeen { addr: r.get(0)?, exchanges: r.get(1)?, last_seen_ms: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1229,6 +1272,11 @@ impl Store {
         }
         if let Some(v) = text(&f.identity) {
             add("identity = @", v);
+        }
+        if let Some(list) = &f.clients {
+            add("client_addr IN (SELECT value FROM json_each(@))", V::Text(serde_json::to_string(list)?));
+        } else if let Some(v) = text(&f.client) {
+            add("client_addr = @", v);
         }
         if let Some(v) = text(&f.text) {
             add("(instr(lower(host || ' ' || path || ' ' || coalesce(notes, '')), lower(@)) > 0)", v);
@@ -1341,7 +1389,7 @@ impl Store {
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(18)?, r.get::<_, Option<Vec<u8>>>(19)?))
+                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(19)?, r.get::<_, Option<Vec<u8>>>(20)?))
             })
             .optional()?;
         let Some((summary, req_hash, resp_hash)) = row else {
@@ -2371,6 +2419,86 @@ mod tests {
     }
 
     #[test]
+    fn client_addr_round_trips_filters_and_summarises() {
+        let mut s = Store::open_in_memory().unwrap();
+        let from = |path: &str, ts: i64, ip: Option<&str>| NewExchange {
+            ts_ms: ts,
+            client_addr: ip.map(str::to_string),
+            ..sample(path, b"x")
+        };
+        let ids = s
+            .insert_exchanges(&[
+                from("/a", 10, Some("192.168.1.23")),
+                from("/b", 20, Some("192.168.1.24")),
+                from("/c", 30, Some("192.168.1.23")),
+                from("/d", 40, None),
+            ])
+            .unwrap();
+        let one = s.insert_exchange(&from("/e", 50, Some("fe80::1"))).unwrap();
+        assert_eq!(s.get_exchange(ids[0]).unwrap().unwrap().summary.client_addr.as_deref(), Some("192.168.1.23"));
+        assert_eq!(s.get_exchange(ids[3]).unwrap().unwrap().summary.client_addr, None);
+        assert_eq!(s.get_exchange(one).unwrap().unwrap().summary.client_addr.as_deref(), Some("fe80::1"));
+        let paths =
+            |f: &HistoryFilter| -> Vec<String> { s.search_exchanges(f).unwrap().into_iter().map(|e| e.path).collect() };
+        let by = |c: &str| HistoryFilter { client: Some(c.into()), ..Default::default() };
+        assert_eq!(paths(&by("192.168.1.23")), ["/c", "/a"]);
+        assert_eq!(paths(&by("192.168.1.2")), Vec::<String>::new(), "exact, not a prefix");
+        let many = HistoryFilter {
+            clients: Some(vec!["192.168.1.24".into(), "fe80::1".into()]),
+            client: Some("ignored when `clients` is set".into()),
+            ..Default::default()
+        };
+        assert_eq!(paths(&many), ["/e", "/b"]);
+        let none = HistoryFilter { clients: Some(vec![]), ..Default::default() };
+        assert!(paths(&none).is_empty());
+        // Old rows (NULL) never show in the summary; the rest are counted, newest first.
+        assert_eq!(
+            s.client_summary().unwrap(),
+            [
+                ClientSeen { addr: "fe80::1".into(), exchanges: 1, last_seen_ms: 50 },
+                ClientSeen { addr: "192.168.1.23".into(), exchanges: 2, last_seen_ms: 30 },
+                ClientSeen { addr: "192.168.1.24".into(), exchanges: 1, last_seen_ms: 20 },
+            ]
+        );
+        // The summary serialises the address only when there is one.
+        let json = serde_json::to_value(s.get_exchange(ids[3]).unwrap().unwrap().summary).unwrap();
+        assert!(json.get("client_addr").is_none());
+        let json = serde_json::to_value(s.get_exchange(ids[0]).unwrap().unwrap().summary).unwrap();
+        assert_eq!(json["client_addr"], "192.168.1.23");
+    }
+
+    /// A project made before `client_addr` existed opens, keeps its rows (with no client) and takes new ones.
+    #[test]
+    fn client_addr_migration_upgrades_an_existing_project() {
+        let (dir, path) = temp_project("client-migration");
+        let old_id = {
+            let mut s = Store::open(&path).unwrap();
+            s.insert_exchange(&sample("/old", b"old")).unwrap()
+        };
+        {
+            // Put the file back as the previous release left it: no column, no index, one version lower.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;").unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64).unwrap();
+            let has: i64 = conn
+                .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(has, 0);
+        }
+        let mut s = Store::open(&path).unwrap();
+        let old = s.get_exchange(old_id).unwrap().unwrap();
+        assert_eq!((old.summary.path.as_str(), old.summary.client_addr.clone()), ("/old", None));
+        let new_id =
+            s.insert_exchange(&NewExchange { client_addr: Some("10.0.0.7".into()), ..sample("/new", b"n") }).unwrap();
+        assert_eq!(s.get_exchange(new_id).unwrap().unwrap().summary.client_addr.as_deref(), Some("10.0.0.7"));
+        assert_eq!(s.client_summary().unwrap().len(), 1);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_due_schedule_is_claimed_once() {
         let mut s = Store::open_in_memory().unwrap();
         let row =
@@ -2384,6 +2512,7 @@ mod tests {
 
     fn sample(path: &str, body: &[u8]) -> NewExchange {
         NewExchange {
+            client_addr: None,
             ts_ms: 1,
             duration_ms: Some(5),
             source: "proxy".into(),
@@ -2858,6 +2987,7 @@ mod tests {
             actor: Some("agent:x".into()),
             hypothesis_id: Some(3),
             identity: Some("alice".into()),
+            client: Some("192.168.1.23".into()),
             after_id: Some(10),
             before_id: Some(20),
             limit: Some(50),
@@ -2869,6 +2999,7 @@ mod tests {
             q: Some("status:>=500".into()),
             // Never on the wire in either direction.
             ids: Some(vec![1, 2]),
+            clients: Some(vec!["192.168.1.23".into()]),
         };
         assert_eq!(serde_json::to_string(&sample).unwrap(), EXPECTED_SAMPLE);
         assert_eq!(serde_json::to_string(&HistoryFilter::default()).unwrap(), EXPECTED_EMPTY);
@@ -2877,14 +3008,16 @@ mod tests {
         // `ids` is `#[serde(skip)]`: a client cannot set it.
         let err = serde_json::from_str::<HistoryFilter>(r#"{"ids":[1]}"#).err().unwrap().to_string();
         assert!(err.contains("unknown field `ids`"), "{err}");
+        assert!(serde_json::from_str::<HistoryFilter>(r#"{"clients":["x"]}"#).is_err());
         assert!(serde_json::from_str::<HistoryFilter>(r#"{"nope":1}"#).is_err());
         // ... and it stays out of the generated schema.
         let schema = serde_json::to_value(schemars::schema_for!(HistoryFilter)).unwrap();
         assert!(schema["properties"].get("ids").is_none());
+        assert!(schema["properties"].get("clients").is_none());
         assert_eq!(schema["additionalProperties"], false);
     }
 
-    const EXPECTED_SAMPLE: &str = r#"{"host":"a.test","path":"/api","method":"POST","status":200,"source":"replay","actor":"agent:x","hypothesis_id":3,"identity":"alice","after_id":10,"before_id":20,"limit":50,"status_class":"2,3","hide_ext":"png,css","annotated":true,"in_scope":false,"text":"t","q":"status:>=500"}"#;
-    const EXPECTED_EMPTY: &str = r#"{"host":null,"path":null,"method":null,"status":null,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":null,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
-    const EXPECTED_PARSED: &str = r#"{"host":"a","path":null,"method":null,"status":404,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":5,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
+    const EXPECTED_SAMPLE: &str = r#"{"host":"a.test","path":"/api","method":"POST","status":200,"source":"replay","actor":"agent:x","hypothesis_id":3,"identity":"alice","client":"192.168.1.23","after_id":10,"before_id":20,"limit":50,"status_class":"2,3","hide_ext":"png,css","annotated":true,"in_scope":false,"text":"t","q":"status:>=500"}"#;
+    const EXPECTED_EMPTY: &str = r#"{"host":null,"path":null,"method":null,"status":null,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"client":null,"after_id":null,"before_id":null,"limit":null,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
+    const EXPECTED_PARSED: &str = r#"{"host":"a","path":null,"method":null,"status":404,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"client":null,"after_id":null,"before_id":null,"limit":5,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
 }

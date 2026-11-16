@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
+import type { DevicesView } from "../api-types.gen";
 import { Chip, ContextMenu, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
 import { useLiveEvent } from "../live";
 
@@ -20,6 +21,8 @@ interface Filters {
   hideList: string;
   inScope: boolean;
   annotated: boolean;
+  /** Only this device: an IP address or the name given on the Proxy setup page ("" = every device). */
+  client: string;
   /** Query language (see QueryHelp). */
   q: string;
 }
@@ -44,6 +47,7 @@ const QUERY_FIELDS: [string, string][] = [
   ["source", "proxy, replay, fuzzer…"],
   ["actor", "who sent it, e.g. agent:claude"],
   ["identity", "test identity used"],
+  ["client", "device that sent it: its IP address or the name you gave it"],
   ["comment", "your comment"],
   ["highlight", "highlight colour"],
   ["mime", "response Content-Type"],
@@ -64,6 +68,7 @@ function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
     "respheader:set-cookie -respheader:set-cookie=httponly",
     "len:>100000 time:>1000",
     "is:inscope -source:fuzzer comment:idor",
+    'client:"Pixel 8" status:>=400',
   ];
   return (
     <div className="query-help small" data-testid="query-help">
@@ -96,10 +101,11 @@ const INITIAL: Filters = {
   hideList: DEFAULT_HIDE,
   inScope: false,
   annotated: false,
+  client: "",
   q: "",
 };
 
-type SortKey = "id" | "host" | "method" | "path" | "status" | "resp_len" | "ext" | "duration_ms" | "source" | "comment";
+type SortKey = "id" | "host" | "method" | "path" | "status" | "resp_len" | "ext" | "duration_ms" | "source" | "client_addr" | "comment";
 
 const extOf = (path: string) => {
   const p = path.split(/[?#]/)[0];
@@ -112,6 +118,18 @@ export default function History() {
   const { arg, counters, go } = useNav();
   const [filters, setFiltersRaw] = usePref<Filters>("pm.history.filters", INITIAL);
   const [rows, setRows] = useState<ExchangeSummary[]>([]);
+  // Devices (client addresses and the names given to them), for the Client column and filter.
+  const [devices, setDevices] = useState<DevicesView["devices"]>([]);
+  const names = useMemo(() => Object.fromEntries(devices.flatMap((d) => (d.name ? [[d.addr, d.name]] : []))), [devices]);
+  const loadDevices = () => api.get<DevicesView>("/devices").then((d) => setDevices(d.devices)).catch(() => {});
+  useEffect(() => {
+    loadDevices();
+  }, []);
+  // A device that sent its first request after the list was loaded.
+  const unknownClient = rows.some((r) => r.client_addr && !devices.some((d) => d.addr === r.client_addr));
+  useEffect(() => {
+    if (unknownClient) loadDevices();
+  }, [unknownClient, rows.length]);
   const [olderFrom, setOlderFrom] = useState<number | undefined>();
   const [scanned, setScanned] = useState<number | undefined>();
   const [qDraft, setQDraft] = useState(filters.q ?? "");
@@ -140,6 +158,7 @@ export default function History() {
       hide_ext: filters.hideExt ? filters.hideList : "",
       in_scope: filters.inScope || undefined,
       annotated: filters.annotated || undefined,
+      client: filters.client || undefined,
       q: filters.q || undefined,
     }),
     [filters],
@@ -213,6 +232,8 @@ export default function History() {
           return r.duration_ms ?? -1;
         case "comment":
           return r.comment ?? "";
+        case "client_addr":
+          return (r.client_addr && names[r.client_addr]) || r.client_addr || "";
         default:
           return r[sort.key] as string | number;
       }
@@ -225,7 +246,7 @@ export default function History() {
       return (sort.desc ? -c : c) || b.id - a.id;
     });
     return out;
-  }, [rows, sort]);
+  }, [rows, sort, names]);
 
   const annotate = (row: ExchangeSummary, highlight: string | null | undefined, comment: string | null | undefined) =>
     api
@@ -321,6 +342,7 @@ export default function History() {
         hide_ext: query.hide_ext || undefined,
         annotated: query.annotated,
         in_scope: query.in_scope,
+        client: query.client,
         q: query.q,
       })
       .then((har) => saveText("proxymind.har", JSON.stringify(har)))
@@ -346,6 +368,11 @@ export default function History() {
               {["proxy", "replay", "import", "crawl", "discover", "scan", "fuzzer", "authz", "proof", "login", "health"].map((m) => (
                 <option key={m}>{m}</option>
               ))}
+            </select>
+            <select aria-label="Device" data-testid="client-filter" value={filters.client ?? ""} onChange={(e) => setFilters({ client: e.target.value })} title="Only traffic from one device (name them on the Proxy setup page)">
+              <option value="">any device</option>
+              {devices.map((d) => <option key={d.addr} value={d.addr}>{d.name ? `${d.name} (${d.addr})` : d.addr}</option>)}
+              {filters.client && !devices.some((d) => d.addr === filters.client) && <option value={filters.client}>{filters.client}</option>}
             </select>
             <label className="btn" title="Add a HAR file (browser devtools export) to history; nothing is sent">
               Import HAR
@@ -416,6 +443,7 @@ export default function History() {
           {note && <div className="notice" data-testid="import-note">{note}</div>}
           <VirtualRows
             rows={sorted}
+            names={names}
             selected={selected}
             onSelect={(id) => go("history", id)}
             sort={sort}
@@ -449,11 +477,13 @@ const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "ext", label: "Ext" },
   { key: "duration_ms", label: "Time" },
   { key: "source", label: "Tool" },
+  { key: "client_addr", label: "Client" },
   { key: "comment", label: "Comment" },
 ];
 
 function VirtualRows({
   rows,
+  names,
   selected,
   onSelect,
   sort,
@@ -461,6 +491,8 @@ function VirtualRows({
   onMenu,
 }: {
   rows: ExchangeSummary[];
+  /** Device names by client address. */
+  names: Record<string, string>;
   selected?: number;
   onSelect: (id: number) => void;
   sort: { key: SortKey; desc: boolean };
@@ -509,7 +541,7 @@ function VirtualRows({
             style={{ top: (first + i) * ROW }}
             onClick={() => onSelect(r.id)}
             onContextMenu={(e) => onMenu(e, r)}
-            title={`${fmtTime(r.ts_ms)} · ${r.source} · ${r.actor_id}${r.identity ? ` as ${r.identity}` : ""}`}
+            title={`${fmtTime(r.ts_ms)} · ${r.source} · ${r.actor_id}${r.identity ? ` as ${r.identity}` : ""}${r.client_addr ? ` · from ${r.client_addr}` : ""}`}
           >
             <span className="muted">{r.id}</span>
             <span>{r.host}{r.port !== 80 && r.port !== 443 ? `:${r.port}` : ""}</span>
@@ -520,6 +552,7 @@ function VirtualRows({
             <span className="muted">{extOf(r.path)}</span>
             <span className="muted">{r.duration_ms != null ? `${r.duration_ms} ms` : ""}</span>
             <span className="muted">{r.source}</span>
+            <span className="muted" data-testid="client-cell" title={r.client_addr ?? undefined}>{r.client_addr ? names[r.client_addr] ?? r.client_addr : ""}</span>
             <span data-testid="comment-cell">{r.comment ?? ""}</span>
           </div>
         ))}

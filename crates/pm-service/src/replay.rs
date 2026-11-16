@@ -306,6 +306,7 @@ impl Service {
             Err(why) => Err(anyhow::anyhow!("refused before sending: out of scope ({why})")),
         };
         let mut record = NewExchange {
+            client_addr: None,
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: source.into(),

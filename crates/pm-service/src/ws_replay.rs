@@ -247,6 +247,7 @@ impl Service {
         let started = Instant::now();
         let result = self.sender.send(&out.endpoint, &wire, "GET", Some(&check)).await;
         let mut record = NewExchange {
+            client_addr: None,
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: "ws_replay".into(),

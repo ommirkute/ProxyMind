@@ -1015,6 +1015,7 @@ mod tests {
         s.store
             .write(|db| {
                 db.insert_exchange(&NewExchange {
+                    client_addr: None,
                     ts_ms: 1,
                     duration_ms: None,
                     source: source.into(),
