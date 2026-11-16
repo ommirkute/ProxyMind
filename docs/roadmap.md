@@ -149,7 +149,7 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 | --- | --- |
 | 2.1 Traffic hooks | Request and response hooks in the proxy with time and memory limits (an ADR first: a new WASM runtime or the existing sandboxed plugin processes, ADR-0015/0016); changes recorded next to the original |
 | 2.2 Workflows | Saved chains of steps (match, extract, transform, send, assert), run on demand, per exchange or from the fuzzer, through the policy gate |
-| 2.3 Inline transforms | Encode, decode and hash in the editor with a reversible preview |
+| 2.3 Inline transforms | Encode, decode and hash in the editor with a reversible preview. **Done 2026-11-16:** browser-side transforms (`ui/src/transforms.ts`, menu `ui/src/TransformMenu.tsx`) in the Replay and Intercept editors, with preview, chaining, Undo and native Ctrl+Z; smart decode via `/tools/decode`; unit tests `npm run test:unit` |
 | 2.4 HTTP/3 | QUIC on the client and upstream sides, Alt-Svc handling, HTTP/3 in history and replay |
 | 2.5 gRPC and Protobuf | Pure decoder in `pm-http`; schema-less view as the fallback; edit and replay. **Done 2026-11-16:** `pm_http::protobuf` (decoder, text format, encoder, gRPC and gRPC-Web framing), Protobuf view in History, Replay and the Fuzzer, edit-and-replay in Replay (`body_b64` on replay, race and group), `protobuf_decode` for agents, fuzz target in the nightly matrix. Not yet: `.proto` schemas, streaming views, HTTP/2 trailers |
 | 2.6 Raw TCP and TLS | Relay non-HTTP streams with hex and text views; replay a stream |

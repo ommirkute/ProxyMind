@@ -7,6 +7,9 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Inline transforms in the Replay and Intercept editors.** Select text and URL-, Base64-, HTML-entity-, hex-,
+  Unicode-escape- or JSON-string-encode or decode it, or hash it (MD5, SHA-1, SHA-256), with a before-and-after
+  preview, chaining, an Undo list and Ctrl+Z (Ctrl+Shift+T or Alt+Shift+T opens the menu). Runs in the browser.
 - **gRPC and Protobuf traffic is readable and editable.** Requests and responses with a gRPC, gRPC-Web (also the
   base64 text form) or Protobuf content type get a **Protobuf** view in HTTP history, Replay and the Fuzzer: one field
   per line, nested messages indented, strings and numbers shown the way they most likely were meant (a number can
