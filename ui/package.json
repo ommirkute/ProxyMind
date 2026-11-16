@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
+    "test:unit": "node --experimental-strip-types tests/transforms.test.mjs",
     "test:e2e": "node tests/e2e.mjs"
   },
   "dependencies": {

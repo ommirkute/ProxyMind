@@ -667,3 +667,15 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); cur
 button.link:hover { text-decoration: underline; }
 .search-hit { margin-bottom: 6px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; }
 iframe.render { width: 100%; min-height: 420px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+
+/* ------------------------------------------------- editor transform menu -- */
+.transform-bar { display: flex; gap: 6px; align-items: center; position: relative; margin-bottom: 6px; flex-wrap: wrap; }
+.transform-pop {
+  position: absolute; top: 100%; left: 0; z-index: 30; margin-top: 4px; width: min(480px, 92vw);
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+}
+.transform-pop pre {
+  margin: 0; white-space: pre-wrap; word-break: break-all; max-height: 7.5em; overflow: auto; padding: 6px 8px;
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px;
+}

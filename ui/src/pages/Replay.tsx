@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import TransformMenu from "../TransformMenu";
 import { api, originOf, toast, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
 import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, b64ToBytes, bytesToB64, copyText, useAction, useLoad, useNav } from "../components";
 import {
@@ -182,6 +183,7 @@ export default function Replay() {
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
   const [groupOpen, setGroupOpen] = useState(false);
   const caret = useRef<[number, number] | null>(null);
+  const rawEditor = useRef<HTMLTextAreaElement>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
   const loaded = useRef(false);
@@ -476,7 +478,8 @@ export default function Replay() {
       <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
         <section className="pane">
           <h3 className="pane-title">Request</h3>
-          <textarea aria-label="Raw request" className={`editor ${pbKind ? "editor-head" : ""}`} value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
+          <TransformMenu target={rawEditor} resetKey={tab.id} />
+          <textarea ref={rawEditor} aria-label="Raw request" className={`editor ${pbKind ? "editor-head" : ""}`} value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
           {pbKind && (
             <div className="pbedit" data-testid="protobuf-panel">
               <div className="row small">

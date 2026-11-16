@@ -458,6 +458,38 @@ try {
     check(await rawBecomes('v.startsWith("GET /search?q=h2 HTTP/2\\n") && v.includes("host: other.test") && v.includes("cookie: a=1")'),
       "Inspector switches to HTTP/2 and edits :path and :authority");
     await page.getByLabel("Protocol").selectOption("HTTP/1.1");
+    // Inline transforms: select a value in the raw editor, preview Base64, apply, undo.
+    const rawEditor = page.getByLabel("Raw request");
+    await rawEditor.fill(`GET /search?q=boots&page=1 HTTP/1.1\nHost: shop\n\n`);
+    const selectRaw = (text) =>
+      rawEditor.evaluate((el, t) => { el.focus(); const i = el.value.indexOf(t); el.setSelectionRange(i, i + t.length); }, text);
+    await page.getByTestId("transform-open").click();
+    check(await page.getByTestId("transform-need-selection").isVisible(), "Transform without a selection explains that one is needed");
+    await page.getByTestId("transform-close").click();
+    await selectRaw("boots");
+    await page.getByRole("button", { name: "Transform", exact: true }).click();
+    check(await page.getByTestId("transform-before").textContent() === "boots", "Transform shows the selected text as the 'before'");
+    await page.getByLabel("Transform operation").selectOption("base64_encode");
+    await page.getByTestId("transform-after").waitFor();
+    check(await page.getByTestId("transform-after").textContent() === "Ym9vdHM=", "Transform previews the Base64 of the selection");
+    check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "the preview does not change the raw request");
+    await page.getByTestId("transform-apply").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM=&page=1 ")'), "Apply replaces the selection with the encoded value");
+    check(await rawEditor.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd)) === "Ym9vdHM=", "the applied result stays selected for chaining");
+    await page.getByLabel("Transform operation").selectOption("url_encode");
+    await page.getByTestId("transform-after").waitFor();
+    check(await page.getByTestId("transform-after").textContent() === "Ym9vdHM%3D", "a second transform chains onto the result");
+    await page.getByTestId("transform-apply").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM%3D&page=1 ")'), "the chained transform is applied");
+    await page.getByTestId("transform-undo").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM=&page=1 ")'), "Undo restores the previous text");
+    await page.getByTestId("transform-undo").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "a second Undo restores the original text");
+    check(await page.getByTestId("transform-undo").isDisabled(), "Undo is disabled when the stack is empty");
+    await page.getByLabel("Transform operation").selectOption("base64_decode");
+    check(await page.getByTestId("transform-error").isVisible() && await page.getByTestId("transform-apply").isDisabled(),
+      "an invalid decode shows an error in the preview and cannot be applied");
+    await page.getByTestId("transform-close").click();
     await page.getByRole("button", { name: "New tab" }).click();
     check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
     await page.screenshot({ path: join(SHOTS, "5-replay.png") });

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import TransformMenu from "../TransformMenu";
 import { api } from "../api";
 import { Chip, Empty, ErrorBox, Panel, useAction, useLoad } from "../components";
 import { useLiveTick } from "../live";
@@ -56,6 +57,7 @@ export default function Intercept() {
   const [text, setText] = useState("");
   const [fixCl, setFixCl] = useState(true);
   const action = useAction();
+  const editor = useRef<HTMLTextAreaElement>(null);
 
   const settings = draft ?? state.data?.settings ?? null;
   const held = state.data?.held ?? [];
@@ -177,7 +179,9 @@ export default function Intercept() {
           {!current && <Empty>Select a held message.</Empty>}
           {current && (
             <>
+              <TransformMenu target={editor} disabled={!current.editable} resetKey={current.id} />
               <textarea
+                ref={editor}
                 aria-label="Held message"
                 rows={20}
                 value={text}
