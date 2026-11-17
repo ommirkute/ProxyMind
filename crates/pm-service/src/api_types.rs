@@ -215,6 +215,31 @@ pub struct PluginSet {
     pub enabled: bool,
 }
 
+/// What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAction {
+    /// Turn the hook on (needs the plugin's permissions accepted and the plugin on).
+    Enable,
+    /// Turn the hook off.
+    Disable,
+    /// Stop sending messages to it for now.
+    Pause,
+    /// Start again after a pause (or after it paused itself) and forget its recent failures.
+    Resume,
+    /// Run earlier among the hooks of its kind.
+    Up,
+    /// Run later among the hooks of its kind.
+    Down,
+}
+
+/// Body of `PUT /plugins/{name}/hooks/{kind}`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHookSet {
+    pub action: HookAction,
+}
+
 /// Query of `GET /plugins/{name}/panels/{panel}`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct PanelQuery {

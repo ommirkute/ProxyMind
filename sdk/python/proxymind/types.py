@@ -491,7 +491,9 @@ class CaptureBody(_CaptureBodyRequired, total=False):
 
 
 class _ChangeRequired(TypedDict):
-    # What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.
+    # What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+    # hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+    # only: the hook did not change the message.
     by: str
     # The rule (its comment, or its part and match) or a label for the editor.
     name: str
@@ -1070,7 +1072,9 @@ class ExchangeSummary(_ExchangeSummaryRequired, total=False):
     highlight: _t.Optional[str]
     hypothesis_id: _t.Optional[int]
     identity: _t.Optional[str]
-    # Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.
+    # Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+    # recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+    # `changes` but doesn't make the row modified.
     modified: bool
 
 
@@ -1174,6 +1178,12 @@ class Extraction(TypedDict, total=False):
     kind: "ExtractKind"
     # Variable name: letters, digits and `_`.
     name: str
+
+
+class Failure(TypedDict):
+    """A recent failure of a hook."""
+    at_ms: int
+    reason: str
 
 
 class FindingProve(TypedDict):
@@ -1642,6 +1652,48 @@ class HistoryFilter(TypedDict, total=False):
     status_class: _t.Optional[str]
     # Free text: the host, the path (with query) or the comment contains it (case-insensitive).
     text: _t.Optional[str]
+
+
+# What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).
+HookAction = _t.Literal["enable", "disable", "pause", "resume", "up", "down"]
+
+class _HookInfoRequired(TypedDict):
+    # Messages sent to it and changed by it since the proxy started it (this process).
+    calls: int
+    changed: int
+    # A person turned it on.
+    enabled: bool
+    # Latest failures, newest last.
+    failures: _t.List["Failure"]
+    kind: "HookKind"
+    matcher: "HookMatch"
+    on_error: "OnError"
+    # Place among the hooks of its kind, first to run = 1.
+    order: int
+    # `off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`).
+    state: str
+    timeout_ms: int
+
+
+class HookInfo(_HookInfoRequired, total=False):
+    """A traffic hook of a plugin, as set up and as running."""
+    blocked_reason: _t.Optional[str]
+    paused_reason: _t.Optional[str]
+
+
+# Request hook or response hook.
+HookKind = _t.Literal["request", "response"]
+
+class HookMatch(TypedDict):
+    """Which messages a hook sees. Empty lists match everything."""
+    # Media types of the message's own `Content-Type` (`application/json`, or `text/*`).
+    content_types: _t.List[str]
+    # Host patterns; `*` matches any run of characters (`*.example.com`).
+    hosts: _t.List[str]
+    # Request methods.
+    methods: _t.List[str]
+    # Path prefixes (`/api/`).
+    paths: _t.List[str]
 
 
 class HostOverride(TypedDict):
@@ -2129,6 +2181,9 @@ class NoiseMask(TypedDict):
     words: _t.List[str]
 
 
+# What the proxy does with a message when its hook fails.
+OnError = _t.Literal["pass", "drop"]
+
 class _OpChangeRequired(TypedDict):
     # `METHOD /template`
     operation: str
@@ -2378,15 +2433,30 @@ class PluginCheckResultDenied(TypedDict):
 
 PluginCheckResult = _t.Union["PluginCheckResultDone", "PluginCheckResultPendingApproval", "PluginCheckResultDenied"]
 
+class PluginHookSet(TypedDict):
+    """Body of `PUT /plugins/{name}/hooks/{kind}`."""
+    action: "HookAction"
+
+
 class _PluginInfoRequired(TypedDict):
+    # The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted.
+    accepted_permissions: _t.List[str]
+    # Plugin API version: 1 (no permissions) or 2.
+    api: int
     description: str
     dir: str
     enabled: bool
+    # Traffic hooks the plugin declares.
+    hooks: _t.List["HookInfo"]
     # "passive" and/or "active".
     kinds: _t.List[str]
     name: str
+    # The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them.
+    needs_review: bool
     # Panels the plugin adds: (id, title).
     panels: _t.List[_t.Tuple[str, str]]
+    # The permissions a v2 plugin declares.
+    permissions: _t.List[str]
     # Who signed it, as checked at install.
     signature: "Signature"
     version: str

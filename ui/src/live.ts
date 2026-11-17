@@ -19,7 +19,8 @@ export type LiveTopic =
   | "scans"
   | "proofs"
   | "fuzzer"
-  | "ai_scan";
+  | "ai_scan"
+  | "plugins";
 
 const TOPICS: LiveTopic[] = [
   "exchanges",
@@ -33,6 +34,7 @@ const TOPICS: LiveTopic[] = [
   "proofs",
   "fuzzer",
   "ai_scan",
+  "plugins",
 ];
 
 /** What a subscriber gets: a typed event with its parsed JSON, or `resync` (refetch everything you show). */

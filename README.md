@@ -235,7 +235,7 @@ VulnShop's remaining five are on pages nothing links to or describes, or need a 
 
 ## 🧩 Extend it
 
-- **Plugins**: any program that speaks JSON lines. Passive checks, active checks and UI panels, run sandboxed, optionally signed (Ed25519). [Examples](examples/plugins) · [ADR-0014](docs/adr/0014-plugins.md)
+- **Plugins**: any program that speaks JSON lines. Passive checks, active checks and UI panels, run sandboxed, optionally signed (Ed25519). [Examples](examples/plugins) · [Writing plugins](docs/plugins.md) · [ADR-0014](docs/adr/0014-plugins.md)
 - **Custom checks**: declarative YAML scanner checks, edited in the UI.
 - **SDKs**: dependency-free REST clients for **Python** (`sdk/python`) and **TypeScript** (`sdk/typescript`), Apache-2.0.
 - **REST API** with live events: everything the UI does, you can script.

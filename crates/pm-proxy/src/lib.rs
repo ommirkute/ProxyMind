@@ -24,6 +24,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use pm_core::now_ms;
 use pm_http::{BodyKind, RequestHead, ResponseHead};
+use pm_plugin::hooks::{
+    HookEngine, MAX_MESSAGE as HOOK_MAX, Target as HookTarget, content_type as message_content_type,
+};
+use pm_plugin::v2::HookKind;
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
 use intercept::{Decision, Kind};
@@ -349,6 +353,8 @@ pub struct Hooks {
     pub network: Option<pm_replay::Network>,
     /// Offer HTTP/2 to browsers on intercepted TLS connections.
     pub http2: bool,
+    /// Plugin traffic hooks (ADR-0020): run after the rules and before the intercept queue.
+    pub plugin_hooks: Option<Arc<HookEngine>>,
 }
 
 impl Proxy {
@@ -519,7 +525,7 @@ impl Proxy {
         request: Vec<u8>,
         method: &str,
         path: &str,
-    ) -> Option<(Vec<u8>, String, String, Edits)> {
+    ) -> std::result::Result<(Vec<u8>, String, String, Edits), String> {
         let mut edited = None;
         let mut changes = Vec::new();
         if let Some(r) = &self.hooks.rewrite
@@ -527,6 +533,21 @@ impl Proxy {
         {
             changes.extend(done.names.into_iter().map(|name| change("request", "rule", name)));
             edited = Some(done.bytes);
+        }
+        if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Request)) {
+            let t = HookTarget { scheme, host, port, method, path };
+            let run = h.run(HookKind::Request, &t, edited.as_deref().unwrap_or(&request)).await;
+            changes.extend(hook_changes("request", run.notes));
+            if let Some(b) = run.block {
+                return Err(if b.dropped {
+                    format!("Request dropped by plugin hook {}.", b.name)
+                } else {
+                    format!("Request blocked: plugin hook {} failed ({}).", b.name, b.why)
+                });
+            }
+            if let Some(bytes) = run.bytes {
+                edited = Some(bytes);
+            }
         }
         if let Some(q) = &self.hooks.intercept {
             let current = edited.as_deref().unwrap_or(&request);
@@ -538,11 +559,12 @@ impl Proxy {
                     }
                     edited = Some(e);
                 }
-                Decision::Drop => return None,
+                Decision::Drop => return Err(DROPPED_MSG.to_string()),
             }
         }
         let Some(edited) = edited else {
-            return Some((request, method.to_string(), path.to_string(), Edits::default()));
+            let edits = Edits { original: None, changes };
+            return Ok((request, method.to_string(), path.to_string(), edits));
         };
         let (mut method, mut path) = (method.to_string(), path.to_string());
         if let Ok(Some(end)) = pm_http::find_head_end(&edited)
@@ -553,8 +575,13 @@ impl Proxy {
             method = h.method;
         }
         // Edits that end where they began (a human put it back) leave nothing to record.
-        let edits = if edited == request { Edits::default() } else { Edits { original: Some(request), changes } };
-        Some((edited, method, path, edits))
+        // (a hook that was bypassed or failed still leaves its note).
+        let edits = if edited == request {
+            Edits { original: None, changes: changes.into_iter().filter(is_note).collect() }
+        } else {
+            Edits { original: Some(request), changes }
+        };
+        Ok((edited, method, path, edits))
     }
 
     /// Rules and the intercept queue for a response. `Some(edit)`: forward
@@ -577,6 +604,27 @@ impl Proxy {
             changes.extend(done.names.into_iter().map(|name| change("response", "rule", name)));
             to_client = Some(done.bytes);
         }
+        if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Response)) {
+            let t = HookTarget { scheme, host, port, method, path };
+            let current = to_client.as_deref().unwrap_or(raw);
+            if message_content_type(current).as_deref() == Some("text/event-stream") {
+                changes.extend(hook_changes(
+                    "response",
+                    h.skipped(HookKind::Response, &t, current, "streamed (server-sent events) responses bypass hooks"),
+                ));
+            } else {
+                let run = h.run(HookKind::Response, &t, current).await;
+                changes.extend(hook_changes("response", run.notes));
+                if let Some(b) = run.block {
+                    let why = format!("ProxyMind blocked this response: plugin hook {} failed ({}).", b.name, b.why);
+                    changes.retain(is_note);
+                    return Some(ResponseEdit { bytes: None, changes, blocked: Some(why) });
+                }
+                if let Some(bytes) = run.bytes {
+                    to_client = Some(bytes);
+                }
+            }
+        }
         if let Some(q) = &self.hooks.intercept {
             let current = to_client.as_deref().unwrap_or(raw);
             match q.hold(Kind::Response, scheme, host, port, method, path, current).await {
@@ -590,11 +638,12 @@ impl Proxy {
                 Decision::Drop => return None,
             }
         }
-        // Edits that end where they began leave nothing to record.
-        if to_client.as_deref() == Some(raw) {
-            return Some(ResponseEdit { bytes: to_client, changes: Vec::new() });
+        // Edits that end where they began leave nothing to record (except a hook's bypass or failure notes).
+        if to_client.as_deref() == Some(raw) || !changes.iter().any(|c| !is_note(c)) {
+            changes.retain(is_note);
+            return Some(ResponseEdit { bytes: None, changes, blocked: None });
         }
-        Some(ResponseEdit { bytes: to_client, changes })
+        Some(ResponseEdit { bytes: to_client, changes, blocked: None })
     }
 
     /// Serves requests on one client connection until it closes.
@@ -656,9 +705,8 @@ impl Proxy {
                 .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
                 .await
             {
-                Some(r) => r,
-                None => {
-                    let msg = DROPPED_MSG;
+                Ok(r) => r,
+                Err(msg) => {
                     let resp = format!(
                         "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
                         msg.len()
@@ -724,7 +772,40 @@ impl Proxy {
                     record.request.clone_from(sent);
                 }
                 record.status = Some(start.head.status);
-                client.io.write_all(&start.raw_head).await?;
+                // A response hook needs the whole message: hold it back (up to 8 MB) while one matches.
+                let hook_target = HookTarget {
+                    scheme: &target.scheme,
+                    host: &target.host,
+                    port: target.port,
+                    method: &method,
+                    path: &path,
+                };
+                let mut holding = false;
+                if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Response))
+                    && h.may_apply(HookKind::Response, &hook_target, &start.raw_head)
+                {
+                    let why = if start.head.status == 101 {
+                        Some("WebSocket and other upgraded connections bypass hooks")
+                    } else if message_content_type(&start.raw_head).as_deref() == Some("text/event-stream") {
+                        Some("streamed (server-sent events) responses bypass hooks")
+                    } else {
+                        match start.head.body_kind(&method) {
+                            Ok(BodyKind::UntilClose) => Some("streamed responses bypass hooks"),
+                            Ok(BodyKind::ContentLength(n)) if n > HOOK_MAX as u64 => Some("message over 8 MB"),
+                            _ => None,
+                        }
+                    };
+                    match why {
+                        Some(why) => record.changes.extend(hook_changes(
+                            "response",
+                            h.skipped(HookKind::Response, &hook_target, &start.raw_head, why),
+                        )),
+                        None => holding = true,
+                    }
+                }
+                if !holding {
+                    client.io.write_all(&start.raw_head).await?;
+                }
                 if start.head.status == 101 {
                     client.io.flush().await?;
                     record.duration_ms = Some(started.elapsed().as_millis() as i64);
@@ -748,10 +829,60 @@ impl Proxy {
                     let room = RECORD_CAP.saturating_sub(capture.len());
                     truncated |= piece.len() > room;
                     capture.extend_from_slice(&piece[..piece.len().min(room)]);
+                    if holding {
+                        if capture.len() <= HOOK_MAX {
+                            continue;
+                        }
+                        // Too big for a hook after all: send what was held and stream the rest.
+                        holding = false;
+                        if let Some(h) = &self.hooks.plugin_hooks {
+                            record.changes.extend(hook_changes(
+                                "response",
+                                h.skipped(HookKind::Response, &hook_target, &capture, "message over 8 MB"),
+                            ));
+                        }
+                        if client.io.write_all(&capture).await.is_err() || client.io.flush().await.is_err() {
+                            client_gone = true;
+                            break;
+                        }
+                        continue;
+                    }
                     if client.io.write_all(&piece).await.is_err() || client.io.flush().await.is_err() {
                         client_gone = true;
                         break;
                     }
+                }
+                let mut hook_edit = None;
+                if holding {
+                    let complete = !failed && !client_gone && body.is_complete();
+                    let hooks = self.hooks.plugin_hooks.as_ref().filter(|_| complete);
+                    let edit = match hooks {
+                        Some(h) => {
+                            let run = h.run(HookKind::Response, &hook_target, &capture).await;
+                            Some(ResponseEdit::from_run(run, &capture))
+                        }
+                        None => None,
+                    };
+                    if let Some(msg) = edit.as_ref().and_then(|e| e.blocked.clone()) {
+                        record.duration_ms = Some(started.elapsed().as_millis() as i64);
+                        record.response = Some(capture);
+                        if let Some(e) = edit {
+                            e.note_on(&mut record);
+                        }
+                        let resp = format!(
+                            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                            msg.len()
+                        );
+                        let _ = client.io.write_all(resp.as_bytes()).await;
+                        let _ = client.io.shutdown().await;
+                        self.recorder.record(record);
+                        return Ok(());
+                    }
+                    let out = edit.as_ref().and_then(|e| e.bytes.as_deref()).unwrap_or(&capture);
+                    if client.io.write_all(out).await.is_err() || client.io.flush().await.is_err() {
+                        client_gone = true;
+                    }
+                    hook_edit = edit;
                 }
                 if record.error.is_none() {
                     record.error = body.cut_short.clone();
@@ -769,6 +900,9 @@ impl Proxy {
                 }
                 record.duration_ms = Some(started.elapsed().as_millis() as i64);
                 record.response = Some(capture);
+                if let Some(edit) = hook_edit {
+                    edit.note_on(&mut record);
+                }
                 self.recorder.record(record);
                 // A complete response leaves the server connection reusable.
                 if !client_gone && !failed && !server_close && body.is_complete() && body.kind() != BodyKind::UntilClose
@@ -805,6 +939,20 @@ impl Proxy {
                             .before_respond(&target.scheme, &target.host, target.port, &method, &path, &resp.raw)
                             .await
                         {
+                            Some(e) if e.blocked.is_some() => {
+                                let msg = e.blocked.clone().unwrap_or_default();
+                                record.status = Some(resp.head.status);
+                                record.response = Some(resp.raw);
+                                e.note_on(&mut record);
+                                self.recorder.record(record);
+                                let resp = format!(
+                                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                                    msg.len()
+                                );
+                                let _ = client.io.write_all(resp.as_bytes()).await;
+                                let _ = client.io.shutdown().await;
+                                return Ok(());
+                            }
                             Some(e) => {
                                 to_client.clone_from(&e.bytes);
                                 edit = Some(e);
@@ -932,6 +1080,19 @@ fn change(phase: &str, by: &str, name: String) -> pm_store::Change {
     pm_store::Change { phase: phase.into(), by: by.into(), name, note: None }
 }
 
+/// Hook notes as `changes` entries (`by: "hook"`).
+fn hook_changes(phase: &str, notes: Vec<pm_plugin::hooks::Note>) -> Vec<pm_store::Change> {
+    notes
+        .into_iter()
+        .map(|n| pm_store::Change { phase: phase.into(), by: "hook".into(), name: n.name, note: n.note })
+        .collect()
+}
+
+/// A hook entry that only says the hook was bypassed or failed: the message was not changed.
+fn is_note(c: &pm_store::Change) -> bool {
+    c.by == "hook" && c.note.as_deref().is_some_and(|n| n.starts_with("bypassed:") || n.starts_with("failed:"))
+}
+
 /// What rules or the intercept queue did to a request before it was sent.
 #[derive(Default)]
 pub(crate) struct Edits {
@@ -953,16 +1114,32 @@ pub(crate) struct ResponseEdit {
     /// What the client gets instead of the server's response; None when it is unchanged.
     bytes: Option<Vec<u8>>,
     changes: Vec<pm_store::Change>,
+    /// A hook failed with `on_error: drop`: answer the client with a 502 saying this instead of the response.
+    blocked: Option<String>,
 }
 
 impl ResponseEdit {
+    /// What response hooks did to `raw` (when no rule or intercept step ran before them).
+    fn from_run(run: pm_plugin::hooks::Run, raw: &[u8]) -> ResponseEdit {
+        let mut changes = hook_changes("response", run.notes);
+        let blocked = run.block.map(|b| {
+            changes.retain(is_note);
+            format!("ProxyMind blocked this response: plugin hook {} failed ({}).", b.name, b.why)
+        });
+        let bytes = run.bytes.filter(|b| b != raw && blocked.is_none());
+        if bytes.is_none() {
+            changes.retain(is_note);
+        }
+        ResponseEdit { bytes, changes, blocked }
+    }
+
     /// Notes the change on the record, whose `response` keeps the server's bytes: the copy the client got goes
     /// next to it.
     fn note_on(self, record: &mut NewExchange) {
-        if let Some(sent) = self.bytes.filter(|_| !self.changes.is_empty()) {
+        if let Some(sent) = self.bytes.filter(|_| self.changes.iter().any(|c| !is_note(c))) {
             record.response_delivered = Some(sent);
-            record.changes.extend(self.changes);
         }
+        record.changes.extend(self.changes);
     }
 }
 

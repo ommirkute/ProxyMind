@@ -42,10 +42,11 @@ pub enum Topic {
     Websockets,
     Fuzzer,
     AiScan,
+    Plugins,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 11] = [
+    pub const ALL: [Topic; 12] = [
         Topic::Exchanges,
         Topic::Findings,
         Topic::Scans,
@@ -57,6 +58,7 @@ impl Topic {
         Topic::Websockets,
         Topic::Fuzzer,
         Topic::AiScan,
+        Topic::Plugins,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -72,6 +74,7 @@ impl Topic {
             Topic::Websockets => "websockets",
             Topic::Fuzzer => "fuzzer",
             Topic::AiScan => "ai_scan",
+            Topic::Plugins => "plugins",
         }
     }
 
@@ -157,6 +160,13 @@ pub enum Event {
         state: String,
         phase: String,
     },
+    /// A plugin's state changed: `what` is one of `enabled`, `disabled`, `permissions_accepted`, `hook_enabled`,
+    /// `hook_disabled`, `hook_paused`, `hook_resumed` or `hook_order`. `plugin` is the plugin's name (from its own
+    /// manifest, not target traffic). The page refetches `GET /plugins`.
+    PluginsChanged {
+        plugin: String,
+        what: String,
+    },
 }
 
 impl Event {
@@ -174,6 +184,7 @@ impl Event {
             Event::ScanStateChanged { .. } => Topic::Scans,
             Event::FuzzerProgress { .. } => Topic::Fuzzer,
             Event::AiScanChanged { .. } => Topic::AiScan,
+            Event::PluginsChanged { .. } => Topic::Plugins,
         }
     }
 }

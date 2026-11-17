@@ -1517,6 +1517,7 @@ dependencies = [
 name = "pm-plugin"
 version = "0.2.0"
 dependencies = [
+ "parking_lot",
  "pm-core",
  "pm-http",
  "ring",
@@ -1525,6 +1526,8 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1563,6 +1566,7 @@ dependencies = [
  "parking_lot",
  "pm-core",
  "pm-http",
+ "pm-plugin",
  "pm-replay",
  "pm-store",
  "pm-tls",

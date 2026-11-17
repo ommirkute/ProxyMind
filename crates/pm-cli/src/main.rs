@@ -666,7 +666,10 @@ enum PluginAction {
     Trusted,
     /// Uninstall a plugin by name.
     Remove { name: String },
-    /// Turn a plugin on (installed plugins start on).
+    /// Accept the permissions a version 2 plugin declares (and turn it on). Needed after installing one, and
+    /// again when an update changes its permissions.
+    Accept { name: String },
+    /// Turn a plugin on (installed plugins start on; version 2 plugins need `accept` first).
     Enable { name: String },
     /// Turn a plugin off without uninstalling it.
     Disable { name: String },
@@ -1392,7 +1395,10 @@ async fn run() -> Result<()> {
             // In-scope-only rules need the rules of engagement; without
             // them only rules marked "any host" apply.
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
+            let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
             if let Some(service) = service {
+                attach_plugins(&cli, &service);
+                service.attach_hooks(plugin_hooks.clone());
                 service.attach_rewriter(rewriter.clone())?;
                 service.attach_recorder(&recorder)?;
                 pm_service::watch_roe(service);
@@ -1402,6 +1408,7 @@ async fn run() -> Result<()> {
                 rewrite: Some(rewriter.clone()),
                 network: Some(network.clone()),
                 http2: !*no_http2,
+                plugin_hooks: Some(plugin_hooks),
                 ..Default::default()
             };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
@@ -2061,11 +2068,14 @@ async fn run() -> Result<()> {
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());
                 service.attach_rewriter(rewriter.clone())?;
+                let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
+                service.attach_hooks(plugin_hooks.clone());
                 let hooks = pm_proxy::Hooks {
                     rewrite: Some(rewriter.clone()),
                     intercept: Some(queue),
                     network: Some(service.network().clone()),
                     http2: !*no_http2,
+                    plugin_hooks: Some(plugin_hooks),
                 };
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
@@ -2368,6 +2378,13 @@ async fn run() -> Result<()> {
                             )
                         }
                     }
+                    if p.manifest.is_v2() {
+                        out!(
+                            "  API 2: it asks for the permissions {}. It stays off until you accept them: `proxymind plugin accept {}` or the Plugins page.",
+                            p.manifest.declared_permissions().join(", "),
+                            p.manifest.name
+                        );
+                    }
                     if p.manifest.passive.is_some() {
                         out!("  Passive: runs with the passive scan (`proxymind scan`, the Issues page).");
                     }
@@ -2400,7 +2417,7 @@ async fn run() -> Result<()> {
                 }
                 PluginAction::Enable { name } | PluginAction::Disable { name } => {
                     let on = matches!(action, PluginAction::Enable { .. });
-                    anyhow::ensure!(reg.set_enabled(name, on), "no plugin named {name}");
+                    reg.set_enabled_checked(name, on)?;
                     reg.save()?;
                     out!("✓ {name} is {}", if on { "on" } else { "off" });
                 }
@@ -2444,6 +2461,15 @@ async fn run() -> Result<()> {
                             }
                         }
                     }
+                }
+                PluginAction::Accept { name } => {
+                    let service = open_service(&cli.project, None)?;
+                    service.attach_plugin_home(home.clone());
+                    let view = service.plugin_accept_permissions(&human_actor(None)?, name)?;
+                    if let Some(p) = view.plugins.iter().find(|p| p.name == *name) {
+                        out!("✓ accepted for {name}: {}; the plugin is on", p.accepted_permissions.join(", "));
+                    }
+                    out!("  Hooks stay off until you turn them on (the Plugins page, with `proxymind ui`).");
                 }
                 PluginAction::Remove { name } => {
                     anyhow::ensure!(reg.remove(name), "no plugin named {name}");

@@ -599,6 +599,10 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   const s = live ? { ...ex.summary, highlight: live.highlight, comment: live.comment } : ex.summary;
   const resp = ex.view.response?.body;
   const changes = ex.changes ?? [];
+  // A hook that was bypassed or failed leaves a note but changed nothing.
+  const isNote = (c: { by: string; note?: string | null }) => c.by === "hook" && /^(bypassed|failed):/.test(c.note ?? "");
+  const realChanges = changes.filter((c) => !isNote(c));
+  const hookNotes = changes.filter(isNote);
   const tabs = [
     ...(s.status === 101 ? ["websocket"] : []),
     "response",
@@ -685,9 +689,15 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
       )}
       <ErrorBox error={action.error} />
       {note && <div className="notice">{note}</div>}
-      {changes.length > 0 && (
+      {hookNotes.length > 0 && (
+        <div className="notice small" data-testid="hook-note">
+          Plugin hook not applied: {hookNotes.map((c) => `${c.phase}: ${c.name} (${c.note})`).join("; ")}.{" "}
+          <button className="btn" onClick={() => setTab("changes")}>See changes</button>
+        </div>
+      )}
+      {realChanges.length > 0 && (
         <div className="notice small" data-testid="modified-note">
-          Changed in flight ({changes.map((c) => `${c.phase}: ${c.name}`).join("; ")}). The record shows what the server saw and sent; the browser's side of each changed message is under Original request and Delivered response.{" "}
+          Changed in flight ({realChanges.map((c) => `${c.phase}: ${c.name}`).join("; ")}). The record shows what the server saw and sent; the browser's side of each changed message is under Original request and Delivered response.{" "}
           <button className="btn" onClick={() => setTab("changes")}>See changes</button>
         </div>
       )}
@@ -734,7 +744,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
             {changes.map((c, i) => (
               <li key={i}>
                 <Chip value={c.phase} /> <strong>{c.name}</strong>{" "}
-                <span className="muted">{c.by === "rule" ? "match-and-replace rule" : c.by === "intercept" ? "edited in the intercept queue" : "hook"}{c.note ? `: ${c.note}` : ""}</span>
+                <span className="muted">{c.by === "rule" ? "match-and-replace rule" : c.by === "intercept" ? "edited in the intercept queue" : "plugin hook"}{c.note ? `: ${c.note}` : ""}</span>
               </li>
             ))}
           </ul>

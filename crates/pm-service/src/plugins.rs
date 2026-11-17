@@ -9,11 +9,16 @@
 
 use std::path::PathBuf;
 
-use pm_policy::{Actor, ActorKind, Tier};
+use std::sync::Arc;
+
+use pm_plugin::hooks::{Failure, HookEngine};
+use pm_plugin::v2::{self, HookKind, HookMatch, OnError};
+use pm_policy::{Actor, ActorKind, Target, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{Authorization, Result, Service, ServiceError};
+use crate::api_types::HookAction;
+use crate::{Authorization, Event, Result, Service, ServiceError};
 use pm_replay::Endpoint;
 
 const ACTION: &str = "plugin_check";
@@ -35,6 +40,40 @@ pub struct PluginInfo {
     pub panels: Vec<(String, String)>,
     /// Who signed it, as checked at install.
     pub signature: pm_plugin::sign::Signature,
+    /// Plugin API version: 1 (no permissions) or 2.
+    pub api: u32,
+    /// The permissions a v2 plugin declares.
+    pub permissions: Vec<String>,
+    /// The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted.
+    pub accepted_permissions: Vec<String>,
+    /// The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them.
+    pub needs_review: bool,
+    /// Traffic hooks the plugin declares.
+    pub hooks: Vec<HookInfo>,
+}
+
+/// A traffic hook of a plugin, as set up and as running.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct HookInfo {
+    pub kind: HookKind,
+    /// A person turned it on.
+    pub enabled: bool,
+    /// `off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`).
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused_reason: Option<String>,
+    pub on_error: OnError,
+    pub timeout_ms: u64,
+    pub matcher: HookMatch,
+    /// Place among the hooks of its kind, first to run = 1.
+    pub order: usize,
+    /// Messages sent to it and changed by it since the proxy started it (this process).
+    pub calls: u64,
+    pub changed: u64,
+    /// Latest failures, newest last.
+    pub failures: Vec<Failure>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -119,19 +158,70 @@ impl Service {
     }
 
     pub fn plugin_list(&self) -> PluginsView {
+        // `proxymind plugin add` in another process may have changed the registry: bring the hooks in line (this
+        // is also what keeps a plugin whose permissions changed from running until a person accepts them).
+        self.sync_hooks();
+        let reg = self.registry();
+        let engine = self.hook_engine.get();
         let plugins = self
             .installed_plugins()
             .into_iter()
-            .map(|p| PluginInfo {
-                kinds: p.manifest.kinds(),
-                max_requests: p.manifest.active.as_ref().map(|a| a.limit()),
-                name: p.manifest.name,
-                version: p.manifest.version,
-                description: p.manifest.description,
-                enabled: p.enabled,
-                dir: p.dir.display().to_string(),
-                panels: p.manifest.panels.iter().map(|x| (x.id.clone(), x.title.clone())).collect(),
-                signature: p.signature,
+            .map(|p| {
+                let name = p.manifest.name.clone();
+                let (accepted, needs_review) = match &reg {
+                    Some(r) if p.manifest.is_v2() => (r.accepted(&name), r.needs_review(&name)),
+                    _ => (if p.manifest.is_v2() { p.manifest.declared_permissions() } else { vec![] }, false),
+                };
+                let hooks = HookKind::ALL
+                    .into_iter()
+                    .filter_map(|kind| {
+                        let spec = p.manifest.hook(kind)?;
+                        let enabled = reg.as_ref().is_some_and(|r| r.hook_on(&name, kind));
+                        let blocked_reason = reg.as_ref().and_then(|r| r.hook_blocker(&name, kind));
+                        let status = engine.and_then(|e| e.status(&name, kind));
+                        let paused = status.as_ref().is_some_and(|s| s.paused);
+                        let state = match (enabled, &blocked_reason, paused) {
+                            (false, _, _) => "off",
+                            (true, Some(_), _) => "unavailable",
+                            (true, None, true) => "paused",
+                            (true, None, false) => "on",
+                        };
+                        let order = reg
+                            .as_ref()
+                            .and_then(|r| r.hooks_in_order().iter().filter(|h| h.1 == kind).position(|h| h.0 == name))
+                            .map_or(1, |i| i + 1);
+                        Some(HookInfo {
+                            kind,
+                            enabled,
+                            state: state.into(),
+                            blocked_reason,
+                            paused_reason: status.as_ref().and_then(|s| s.paused_reason.clone()),
+                            on_error: spec.on_error,
+                            timeout_ms: spec.timeout_ms(),
+                            matcher: spec.matcher.clone(),
+                            order,
+                            calls: status.as_ref().map_or(0, |s| s.calls),
+                            changed: status.as_ref().map_or(0, |s| s.changed),
+                            failures: status.map(|s| s.failures).unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                PluginInfo {
+                    kinds: p.manifest.kinds(),
+                    max_requests: p.manifest.active.as_ref().map(|a| a.limit()),
+                    api: p.manifest.api_version(),
+                    permissions: p.manifest.declared_permissions(),
+                    accepted_permissions: accepted,
+                    needs_review,
+                    hooks,
+                    name: p.manifest.name,
+                    version: p.manifest.version,
+                    description: p.manifest.description,
+                    enabled: p.enabled,
+                    dir: p.dir.display().to_string(),
+                    panels: p.manifest.panels.iter().map(|x| (x.id.clone(), x.title.clone())).collect(),
+                    signature: p.signature,
+                }
             })
             .collect();
         PluginsView {
@@ -139,6 +229,161 @@ impl Service {
             sandbox: pm_plugin::sandbox::status(),
             registry: self.plugin_home.get().map(|h| h.join(pm_plugin::REGISTRY).display().to_string()),
         }
+    }
+
+    fn registry(&self) -> Option<pm_plugin::Registry> {
+        pm_plugin::Registry::load(self.plugin_home.get()?).ok()
+    }
+
+    /// What a plugin may do now. None for version 1 plugins, which have no permissions to check. A v2 plugin gets
+    /// what its manifest declares and a person accepted (plugins handed over with `set_plugins`, which have no
+    /// registry, get what they declare).
+    fn permissions_of(&self, p: &pm_plugin::Installed) -> Option<Vec<String>> {
+        if !p.manifest.is_v2() {
+            return None;
+        }
+        match self.registry() {
+            Some(r) => r.effective_permissions(&p.manifest.name),
+            None => Some(p.manifest.declared_permissions()),
+        }
+    }
+
+    /// Refuses a feature a v2 plugin did not declare, or declared but nobody accepted.
+    fn require(&self, p: &pm_plugin::Installed, perm: &str) -> Result<()> {
+        let Some(granted) = self.permissions_of(p) else { return Ok(()) };
+        if granted.iter().any(|g| g == perm) {
+            return Ok(());
+        }
+        let name = &p.manifest.name;
+        Err(ServiceError::Invalid(if p.manifest.declared_permissions().iter().any(|d| d == perm) {
+            format!("plugin {name} declares the {perm} permission but nobody accepted it yet")
+        } else {
+            format!(
+                "plugin {name} did not declare the {perm} permission (api 2 plugins may only use what they declare)"
+            )
+        }))
+    }
+
+    /// The enabled plugins that may run passive checks.
+    pub(crate) fn passive_plugins(&self) -> Vec<pm_plugin::Installed> {
+        self.enabled_plugins()
+            .into_iter()
+            .filter(|p| self.permissions_of(p).is_none_or(|g| g.iter().any(|x| x == v2::CHECKS_PASSIVE)))
+            .collect()
+    }
+
+    /// Connects the proxy's hook engine (ADR-0020): hooks only see in-scope traffic by this project's rules of
+    /// engagement, a hook that pauses itself reaches the event bus, and the hooks a person turned on start now.
+    pub fn attach_hooks(&self, engine: Arc<HookEngine>) {
+        let policy = self.policy.clone();
+        engine.set_scope(Arc::new(move |scheme, host, port, path| {
+            Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
+        }));
+        let bus = self.bus.clone();
+        engine.set_observer(Arc::new(move |plugin, what| {
+            bus.publish(Event::PluginsChanged { plugin: plugin.to_string(), what: what.to_string() }, None);
+        }));
+        let _ = self.hook_engine.set(engine);
+        self.sync_hooks();
+    }
+
+    pub fn hook_engine(&self) -> Option<&Arc<HookEngine>> {
+        self.hook_engine.get()
+    }
+
+    /// Gives the engine the hooks the registry says should run.
+    fn sync_hooks(&self) {
+        let (Some(engine), Some(reg)) = (self.hook_engine.get(), self.registry()) else { return };
+        engine.configure(reg.active_hooks());
+    }
+
+    fn plugin_changed(&self, plugin: &str, what: &str) {
+        self.sync_hooks();
+        self.bus.publish(Event::PluginsChanged { plugin: plugin.to_string(), what: what.to_string() }, None);
+    }
+
+    /// Only people turn plugins on, accept their permissions and set up hooks: they run code, or change traffic.
+    fn people_only(&self, actor: &Actor, action: &str, detail: serde_json::Value) -> Result<()> {
+        if actor.kind == ActorKind::Human {
+            return Ok(());
+        }
+        let _ = self.audit(&actor.id(), action, detail, "deny");
+        Err(ServiceError::Invalid(format!(
+            "only people can do this ({action}): plugins run code and hooks change traffic, so an agent can't turn them on, accept their permissions or set them up"
+        )))
+    }
+
+    fn registry_for_change(&self) -> Result<pm_plugin::Registry> {
+        let home =
+            self.plugin_home.get().ok_or_else(|| ServiceError::Invalid("no plugin registry in this process".into()))?;
+        pm_plugin::Registry::load(home).map_err(|e| ServiceError::Invalid(e.to_string()))
+    }
+
+    /// A person accepts the permissions a v2 plugin declares (the first time, or after an update changed them),
+    /// which also turns the plugin on. Audited.
+    pub fn plugin_accept_permissions(&self, actor: &Actor, name: &str) -> Result<PluginsView> {
+        self.people_only(actor, "plugin_accept_permissions", json!({ "plugin": name }))?;
+        let mut reg = self.registry_for_change()?;
+        let perms = reg.accept_permissions(name).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        reg.save().map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        self.audit(&actor.id(), "plugin_accept_permissions", json!({ "plugin": name, "permissions": perms }), "allow")?;
+        self.plugin_changed(name, "permissions_accepted");
+        Ok(self.plugin_list())
+    }
+
+    /// Turns a hook on or off, moves it, or pauses or resumes it. People only; audited.
+    pub fn plugin_hook_set(
+        &self,
+        actor: &Actor,
+        name: &str,
+        kind: HookKind,
+        action: HookAction,
+    ) -> Result<PluginsView> {
+        let detail = json!({ "plugin": name, "hook": kind.as_str(), "action": action });
+        self.people_only(actor, "plugin_hook", detail.clone())?;
+        let mut reg = self.registry_for_change()?;
+        let plugin = reg.find(name).ok_or_else(|| ServiceError::NotFound(format!("plugin {name}")))?;
+        if plugin.manifest.hook(kind).is_none() {
+            return Err(ServiceError::NotFound(format!("{} hook of plugin {name}", kind.as_str())));
+        }
+        let what = match action {
+            HookAction::Enable => {
+                if let Some(why) = reg.hook_blocker(name, kind) {
+                    return Err(ServiceError::Invalid(format!("can't turn on {name}'s {} hook: {why}", kind.as_str())));
+                }
+                reg.set_hook_on(name, kind, true);
+                "hook_enabled"
+            }
+            HookAction::Disable => {
+                reg.set_hook_on(name, kind, false);
+                "hook_disabled"
+            }
+            HookAction::Up | HookAction::Down => {
+                let delta = if action == HookAction::Up { -1 } else { 1 };
+                reg.move_hook(name, kind, delta).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+                "hook_order"
+            }
+            HookAction::Pause | HookAction::Resume => {
+                let engine = self.hook_engine.get().ok_or_else(|| {
+                    ServiceError::Invalid("hooks run in the proxy process (proxymind ui): none here".into())
+                })?;
+                let done =
+                    if action == HookAction::Pause { engine.pause(name, kind) } else { engine.resume(name, kind) };
+                if !done {
+                    return Err(ServiceError::Invalid(format!(
+                        "the {} hook of {name} isn't running: turn it on first",
+                        kind.as_str()
+                    )));
+                }
+                if action == HookAction::Pause { "hook_paused" } else { "hook_resumed" }
+            }
+        };
+        if !matches!(action, HookAction::Pause | HookAction::Resume) {
+            reg.save().map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        }
+        self.audit(&actor.id(), "plugin_hook", detail, "allow")?;
+        self.plugin_changed(name, what);
+        Ok(self.plugin_list())
     }
 
     /// Runs a plugin's panel over the newest recorded exchanges (default
@@ -156,12 +401,18 @@ impl Service {
             .into_iter()
             .find(|p| p.manifest.name == plugin)
             .ok_or_else(|| ServiceError::NotFound(format!("enabled plugin {plugin}")))?;
-        let rows = self.store.read(|db| {
-            db.search_exchanges(&pm_store::HistoryFilter {
-                limit: Some(limit.unwrap_or(500).clamp(1, 5000)),
-                ..Default::default()
-            })
-        })?;
+        self.require(&p, v2::PANELS)?;
+        // A v2 panel only gets recorded exchanges if the plugin declared (and a person accepted) history.read.
+        let rows = if self.require(&p, v2::HISTORY_READ).is_err() {
+            Vec::new()
+        } else {
+            self.store.read(|db| {
+                db.search_exchanges(&pm_store::HistoryFilter {
+                    limit: Some(limit.unwrap_or(500).clamp(1, 5000)),
+                    ..Default::default()
+                })
+            })?
+        };
         let mut lines = Vec::with_capacity(rows.len());
         for s in rows {
             let Some(ex) = self.store.read(|db| db.get_exchange(s.id))? else { continue };
@@ -190,19 +441,20 @@ impl Service {
         Ok(data)
     }
 
-    /// Turns a plugin on or off in the user's registry. Humans only.
+    /// Turns a plugin on or off in the user's registry. Humans only. A v2 plugin whose permissions nobody
+    /// accepted can't be turned on.
     pub fn plugin_set_enabled(&self, actor: &Actor, name: &str, enabled: bool) -> Result<PluginsView> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can turn plugins on or off (they run code)".into()));
-        }
-        let home =
-            self.plugin_home.get().ok_or_else(|| ServiceError::Invalid("no plugin registry in this process".into()))?;
-        let mut reg = pm_plugin::Registry::load(home).map_err(|e| ServiceError::Invalid(e.to_string()))?;
-        if !reg.set_enabled(name, enabled) {
-            return Err(ServiceError::NotFound(format!("plugin {name}")));
-        }
+        self.people_only(actor, "plugin_enable", json!({ "plugin": name, "enabled": enabled }))?;
+        let mut reg = self.registry_for_change()?;
+        reg.set_enabled_checked(name, enabled).map_err(|e| match e {
+            pm_plugin::PluginError::Invalid(m) if m.starts_with("no plugin") => {
+                ServiceError::NotFound(format!("plugin {name}"))
+            }
+            e => ServiceError::Invalid(e.to_string()),
+        })?;
         reg.save().map_err(|e| ServiceError::Invalid(e.to_string()))?;
         self.audit(&actor.id(), "plugin_enable", json!({ "plugin": name, "enabled": enabled }), "allow")?;
+        self.plugin_changed(name, if enabled { "enabled" } else { "disabled" });
         Ok(self.plugin_list())
     }
 
@@ -216,6 +468,7 @@ impl Service {
         if plugin.manifest.active.is_none() {
             return Err(ServiceError::Invalid(format!("{} has no active check", req.plugin)));
         }
+        self.require(&plugin, v2::CHECKS_ACTIVE)?;
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
         }

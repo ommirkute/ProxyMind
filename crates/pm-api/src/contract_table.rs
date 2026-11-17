@@ -161,6 +161,8 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/plugins", "plugins", "Installed plugins and their state.").out::<PluginsView>(),
         op("post", "/plugins/check", "plugin_check", "Run a plugin check on a recorded exchange.").body::<PluginCheckRequest>().out::<PluginCheckResult>(),
         op("put", "/plugins/{name}", "plugin_set", "Turn a plugin on or off.").body::<PluginSet>().out::<PluginsView>(),
+        op("post", "/plugins/{name}/accept", "plugin_accept", "A person accepts the permissions a version 2 plugin declares (and the plugin turns on).").out::<PluginsView>(),
+        op("put", "/plugins/{name}/hooks/{kind}", "plugin_hook_set", "Turn a plugin's request or response hook on or off, reorder it, pause or resume it.").body::<PluginHookSet>().out::<PluginsView>(),
         op("get", "/plugins/{name}/panels/{panel}", "plugin_panel", "The data of a plugin panel.").query::<PanelQuery>().out::<pm_service::pm_plugin::panel::PanelData>(),
         op("get", "/scan/profiles", "scan_profiles", "Scan profiles, built-in and saved.").out::<Vec<ScanProfile>>(),
         op("post", "/scan/profiles", "scan_profile_save", "Save a scan profile.").body::<ScanProfile>().out::<Vec<ScanProfile>>(),

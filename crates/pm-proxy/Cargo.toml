@@ -21,6 +21,7 @@ pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }
 pm-replay = { version = "0.2.0", path = "../pm-replay" }
 pm-core = { version = "0.2.0", path = "../pm-core" }
+pm-plugin = { path = "../pm-plugin" }
 parking_lot = "0.12.5"
 serde = { version = "1.0.229", features = ["derive"] }
 regex = "1.13.1"

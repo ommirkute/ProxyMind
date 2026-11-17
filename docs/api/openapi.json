@@ -1641,7 +1641,7 @@
         "description": "One change made to an exchange's traffic in flight.",
         "properties": {
           "by": {
-            "description": "What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.",
+            "description": "What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin\nhook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note\nonly: the hook did not change the message.",
             "type": "string"
           },
           "name": {
@@ -3425,7 +3425,7 @@
             "type": "string"
           },
           "modified": {
-            "description": "Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.",
+            "description": "Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the\nrecorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in\n`changes` but doesn't make the row modified.",
             "type": "boolean"
           },
           "path": {
@@ -3849,6 +3849,23 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "Failure": {
+        "description": "A recent failure of a hook.",
+        "properties": {
+          "at_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at_ms",
+          "reason"
+        ],
         "type": "object"
       },
       "FindingProve": {
@@ -5365,6 +5382,170 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "HookAction": {
+        "description": "What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).",
+        "oneOf": [
+          {
+            "const": "enable",
+            "description": "Turn the hook on (needs the plugin's permissions accepted and the plugin on).",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Turn the hook off.",
+            "type": "string"
+          },
+          {
+            "const": "pause",
+            "description": "Stop sending messages to it for now.",
+            "type": "string"
+          },
+          {
+            "const": "resume",
+            "description": "Start again after a pause (or after it paused itself) and forget its recent failures.",
+            "type": "string"
+          },
+          {
+            "const": "up",
+            "description": "Run earlier among the hooks of its kind.",
+            "type": "string"
+          },
+          {
+            "const": "down",
+            "description": "Run later among the hooks of its kind.",
+            "type": "string"
+          }
+        ]
+      },
+      "HookInfo": {
+        "description": "A traffic hook of a plugin, as set up and as running.",
+        "properties": {
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "calls": {
+            "description": "Messages sent to it and changed by it since the proxy started it (this process).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changed": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "A person turned it on.",
+            "type": "boolean"
+          },
+          "failures": {
+            "description": "Latest failures, newest last.",
+            "items": {
+              "$ref": "#/components/schemas/Failure"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HookKind"
+          },
+          "matcher": {
+            "$ref": "#/components/schemas/HookMatch"
+          },
+          "on_error": {
+            "$ref": "#/components/schemas/OnError"
+          },
+          "order": {
+            "description": "Place among the hooks of its kind, first to run = 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "paused_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "`off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`).",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "enabled",
+          "state",
+          "on_error",
+          "timeout_ms",
+          "matcher",
+          "order",
+          "calls",
+          "changed",
+          "failures"
+        ],
+        "type": "object"
+      },
+      "HookKind": {
+        "description": "Request hook or response hook.",
+        "enum": [
+          "request",
+          "response"
+        ],
+        "type": "string"
+      },
+      "HookMatch": {
+        "additionalProperties": false,
+        "description": "Which messages a hook sees. Empty lists match everything.",
+        "properties": {
+          "content_types": {
+            "default": [],
+            "description": "Media types of the message's own `Content-Type` (`application/json`, or `text/*`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hosts": {
+            "default": [],
+            "description": "Host patterns; `*` matches any run of characters (`*.example.com`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "methods": {
+            "default": [],
+            "description": "Request methods.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "paths": {
+            "default": [],
+            "description": "Path prefixes (`/api/`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts",
+          "paths",
+          "methods",
+          "content_types"
+        ],
         "type": "object"
       },
       "HostOverride": {
@@ -6926,6 +7107,21 @@
         ],
         "type": "object"
       },
+      "OnError": {
+        "description": "What the proxy does with a message when its hook fails.",
+        "oneOf": [
+          {
+            "const": "pass",
+            "description": "Forward the original message (fail open). The default.",
+            "type": "string"
+          },
+          {
+            "const": "drop",
+            "description": "Drop the message: a request gets ProxyMind's 403, a response a 502 (fail closed).",
+            "type": "string"
+          }
+        ]
+      },
       "OpChange": {
         "properties": {
           "auth": {
@@ -7751,9 +7947,35 @@
           }
         ]
       },
+      "PluginHookSet": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /plugins/{name}/hooks/{kind}`.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/HookAction"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
       "PluginInfo": {
         "description": "An installed plugin, for lists.",
         "properties": {
+          "accepted_permissions": {
+            "description": "The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "api": {
+            "description": "Plugin API version: 1 (no permissions) or 2.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "description": {
             "type": "string"
           },
@@ -7762,6 +7984,13 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "hooks": {
+            "description": "Traffic hooks the plugin declares.",
+            "items": {
+              "$ref": "#/components/schemas/HookInfo"
+            },
+            "type": "array"
           },
           "kinds": {
             "description": "\"passive\" and/or \"active\".",
@@ -7782,6 +8011,10 @@
           "name": {
             "type": "string"
           },
+          "needs_review": {
+            "description": "The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them.",
+            "type": "boolean"
+          },
           "panels": {
             "description": "Panels the plugin adds: (id, title).",
             "items": {
@@ -7796,6 +8029,13 @@
                 }
               ],
               "type": "array"
+            },
+            "type": "array"
+          },
+          "permissions": {
+            "description": "The permissions a v2 plugin declares.",
+            "items": {
+              "type": "string"
             },
             "type": "array"
           },
@@ -7815,7 +8055,12 @@
           "enabled",
           "dir",
           "panels",
-          "signature"
+          "signature",
+          "api",
+          "permissions",
+          "accepted_permissions",
+          "needs_review",
+          "hooks"
         ],
         "type": "object"
       },
@@ -17058,6 +17303,100 @@
           }
         },
         "summary": "Turn a plugin on or off."
+      }
+    },
+    "/api/v1/plugins/{name}/accept": {
+      "post": {
+        "operationId": "plugin_accept",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginsView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "A person accepts the permissions a version 2 plugin declares (and the plugin turns on)."
+      }
+    },
+    "/api/v1/plugins/{name}/hooks/{kind}": {
+      "put": {
+        "operationId": "plugin_hook_set",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginHookSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginsView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn a plugin's request or response hook on or off, reorder it, pause or resume it."
       }
     },
     "/api/v1/plugins/{name}/panels/{panel}": {

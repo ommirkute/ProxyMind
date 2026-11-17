@@ -513,7 +513,9 @@ fn from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<u
 pub struct Change {
     /// Which message changed: `request` or `response`.
     pub phase: String,
-    /// What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`.
+    /// What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+    /// hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+    /// only: the hook did not change the message.
     pub by: String,
     /// The rule (its comment, or its part and match) or a label for the editor.
     pub name: String,
@@ -625,7 +627,9 @@ pub struct ExchangeSummary {
     /// this was tracked and for ones ProxyMind sent itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_addr: Option<String>,
-    /// Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not.
+    /// Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+    /// recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+    /// `changes` but doesn't make the row modified.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub modified: bool,
 }
@@ -1228,7 +1232,7 @@ impl Store {
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
                                         status, req_len, resp_len, error, identity, hypothesis_id, tags, notes, \
-                                        client_addr, (changes IS NOT NULL)";
+                                        client_addr, (req_orig_hash IS NOT NULL OR resp_deliv_hash IS NOT NULL)";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {

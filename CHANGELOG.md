@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Plugins can change traffic in flight (plugin API 2).** A plugin that says `api: 2` in its manifest lists the
+  permissions it needs (`hooks.request`, `hooks.response`, `checks.passive`, `checks.active`, `panels`,
+  `history.read`) and may only use those. A new plugin, or an update that asks for different permissions, stays off
+  until you accept them on the Plugins page (or with `proxymind plugin accept`). A *request hook* or *response hook* is
+  a small program ProxyMind keeps running in the plugin sandbox; it sees each matching in-scope message (by host,
+  path, method and content type) after your match-and-replace rules and before the intercept queue, and may replace it,
+  or drop a request. What it returns is sent exactly as given. A hook that is slow, crashes or answers nonsense is
+  skipped and the original goes through (or is blocked, if the plugin asks for that); five failures in a minute pause
+  it until you resume it. The Plugins page turns hooks on and off, reorders them, pauses and resumes them and shows
+  recent failures, live. History keeps the browser's version beside what was sent, and the Changes tab names the
+  hook. Streamed (server-sent events), WebSocket and over-8 MB messages are not given to hooks. Includes the
+  `sign-request` example (adds an HMAC `X-Signature` header), Python and TypeScript helpers, and
+  [docs/plugins.md](docs/plugins.md). Existing plugins keep working unchanged.
 - **Set up a phone or tablet from a QR code.** The Proxy setup page has a new *Phone or tablet* section with the
   address to open on the phone (built from this computer's network address and the proxy's port), a QR code for it, and
   the proxy address to enter in the phone's Wi-Fi settings. The proxy itself serves that page, so it works before the

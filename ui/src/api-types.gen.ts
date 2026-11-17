@@ -465,7 +465,11 @@ export interface CaptureBody {
 
 /** One change made to an exchange's traffic in flight. */
 export interface Change {
-  /** What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook`. */
+  /**
+   * What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+   * hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+   * only: the hook did not change the message.
+   */
   by: string;
   /** The rule (its comment, or its part and match) or a label for the editor. */
   name: string;
@@ -1000,7 +1004,11 @@ export interface ExchangeSummary {
   id: number;
   identity?: string | null;
   method: string;
-  /** Rules or the intercept editor changed the request or response; see [`Exchange::changes`]. Absent when not. */
+  /**
+   * Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+   * recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+   * `changes` but doesn't make the row modified.
+   */
   modified?: boolean;
   path: string;
   port: number;
@@ -1130,6 +1138,12 @@ export interface Extraction {
   kind?: ExtractKind;
   /** Variable name: letters, digits and `_`. */
   name?: string;
+}
+
+/** A recent failure of a hook. */
+export interface Failure {
+  at_ms: number;
+  reason: string;
 }
 
 /** The result of trying to prove one finding. */
@@ -1560,6 +1574,57 @@ export interface HistoryFilter {
   status_class?: string | null;
   /** Free text: the host, the path (with query) or the comment contains it (case-insensitive). */
   text?: string | null;
+}
+
+/** What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`). */
+export type HookAction =
+  /** Turn the hook on (needs the plugin's permissions accepted and the plugin on). */
+  | "enable"
+  /** Turn the hook off. */
+  | "disable"
+  /** Stop sending messages to it for now. */
+  | "pause"
+  /** Start again after a pause (or after it paused itself) and forget its recent failures. */
+  | "resume"
+  /** Run earlier among the hooks of its kind. */
+  | "up"
+  /** Run later among the hooks of its kind. */
+  | "down";
+
+/** A traffic hook of a plugin, as set up and as running. */
+export interface HookInfo {
+  blocked_reason?: string | null;
+  /** Messages sent to it and changed by it since the proxy started it (this process). */
+  calls: number;
+  changed: number;
+  /** A person turned it on. */
+  enabled: boolean;
+  /** Latest failures, newest last. */
+  failures: Failure[];
+  kind: HookKind;
+  matcher: HookMatch;
+  on_error: OnError;
+  /** Place among the hooks of its kind, first to run = 1. */
+  order: number;
+  paused_reason?: string | null;
+  /** `off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`). */
+  state: string;
+  timeout_ms: number;
+}
+
+/** Request hook or response hook. */
+export type HookKind = "request" | "response";
+
+/** Which messages a hook sees. Empty lists match everything. */
+export interface HookMatch {
+  /** Media types of the message's own `Content-Type` (`application/json`, or `text/*`). */
+  content_types: string[];
+  /** Host patterns; `*` matches any run of characters (`*.example.com`). */
+  hosts: string[];
+  /** Request methods. */
+  methods: string[];
+  /** Path prefixes (`/api/`). */
+  paths: string[];
 }
 
 export interface HostOverride {
@@ -2043,6 +2108,13 @@ export interface NoiseMask {
   words: string[];
 }
 
+/** What the proxy does with a message when its hook fails. */
+export type OnError =
+  /** Forward the original message (fail open). The default. */
+  | "pass"
+  /** Drop the message: a request gets ProxyMind's 403, a response a 502 (fail closed). */
+  | "drop";
+
 export interface OpChange {
   /** "now sent with credentials" / "now sent without credentials" */
   auth?: string | null;
@@ -2281,18 +2353,33 @@ export type PluginCheckResult =
       status: "denied";
     };
 
+/** Body of `PUT /plugins/{name}/hooks/{kind}`. */
+export interface PluginHookSet {
+  action: HookAction;
+}
+
 /** An installed plugin, for lists. */
 export interface PluginInfo {
+  /** The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted. */
+  accepted_permissions: string[];
+  /** Plugin API version: 1 (no permissions) or 2. */
+  api: number;
   description: string;
   dir: string;
   enabled: boolean;
+  /** Traffic hooks the plugin declares. */
+  hooks: HookInfo[];
   /** "passive" and/or "active". */
   kinds: string[];
   /** Most requests one active check may send. */
   max_requests?: number | null;
   name: string;
+  /** The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them. */
+  needs_review: boolean;
   /** Panels the plugin adds: (id, title). */
   panels: [string, string][];
+  /** The permissions a v2 plugin declares. */
+  permissions: string[];
   /** Who signed it, as checked at install. */
   signature: Signature;
   version: string;

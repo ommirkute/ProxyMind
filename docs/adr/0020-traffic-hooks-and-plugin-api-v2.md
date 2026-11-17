@@ -90,6 +90,42 @@ Constraints:
    embed `request` and `response` only.
 
 2. Plugin API v2: manifest `api: 2`, permissions, enforcement in `pm-service`, install and UI review.
+   **Done.** `pm_plugin::v2` parses `api`, `permissions` (the six names above; anything else is an install error) and
+   `hooks`; a v2 manifest that uses `passive:`, `active:`, `panels:` or a hook without declaring `checks.passive`,
+   `checks.active`, `panels`, `hooks.request` or `hooks.response` is refused at install, and v1 manifests may not use
+   v2 sections. The accepted list lives in `plugin-state.json` beside `plugins.json` (a new file, so the registry's
+   rows keep their shape): a fresh v2 install, or an update whose declared permissions differ from the accepted
+   ones, is installed *off* until a person accepts (`POST /plugins/{name}/accept`, `proxymind plugin accept`, the
+   Plugins page), which also turns the plugin on. `pm-service` enforces at run time: `plugin_check` needs
+   `checks.active`, the passive scan only runs plugins with `checks.passive`, a panel gets recorded exchanges only
+   with `history.read` (and needs `panels`), hooks only run when their permission is accepted. Accepting, turning
+   plugins and hooks on or off, reordering, pausing and resuming are people-only and audited (an agent's attempt is
+   audited as `deny`). Deviation: `history.read` gates what a panel is given rather than a separate call, because
+   panels are the only place plugins read history today.
 3. Hook workers in `pm-plugin` (protocol, deadlines, bypass, pause), wired into the proxy after rules and before
    intercept; UI to turn on, order, pause and resume.
+   **Done.** `pm_plugin::hooks::HookEngine` keeps one lazily started worker per (plugin, kind) in the existing sandbox
+   (`sandbox::worker_command`: same clean environment, namespaces and `prlimit`, with an hour of CPU instead of the
+   per-run allowance), speaking the JSON lines of `pm_plugin::frames`. Limits: deadline from `timeout_ms` (the first
+   call to a fresh worker gets 500 ms more for the interpreter to start), 8 MB per message, 4 calls in flight per
+   worker (more bypass), answers matched by `id` (a late answer after a timeout is ignored; four abandoned calls
+   kill a wedged worker, which restarts on the next message). Any failure forwards the original and notes it;
+   5 failures within 60 s pause the hook until a person resumes it (the pause lives in the running process: a restart
+   starts hooks fresh); `on_error: drop` blocks instead (request: 403, response: 502). Wired into HTTP/1.1 and
+   HTTP/2 in `pm-proxy`: requests run rules, hooks, intercept; responses run rules, hooks; the cost with no hook on is
+   one atomic load. A response hook that matches holds the response (up to 8 MB) instead of streaming it; server-sent
+   events, responses declared over 8 MB, until-close bodies on HTTP/1.1, upgrades and WebSocket messages bypass, and the
+   exchange records a `bypassed:` note. Recording: `changes` entries `{by:"hook", name:"<plugin>/<kind>", note}`; a hook
+   that failed or was bypassed leaves an entry whose note starts `failed:` or `bypassed:` and changes nothing, so
+   `modified` now means "the client's side differs" (original or delivered bytes were stored) rather than "has a
+   change entry". Hook state changes publish `plugins_changed` on a new `plugins` event topic, so the Plugins page
+   updates without polling. Deviations: a request dropped or blocked by a hook is not recorded (like a dropped
+   intercept); an HTTP/1.1 until-close response bypasses instead of waiting for the connection to close; hooks and
+   permissions changed by `proxymind plugin add` in another process reach a running proxy when the plugin list is next
+   read (opening the Plugins page) or a person changes something.
 4. SDK helpers, an example hook plugin, a browser test and a proxy test with a hook that times out.
+   **Done.** `proxymind.plugin` (Python: `hook`, `serve`, `Replace`, `DROP`, `add_header`, `set_header_bytes`) and
+   `@proxymind/client/plugin` (TypeScript: `serve`, `replace`, `DROP`, `addHeader`); example `examples/plugins/sign-request`;
+   tests: worker tests with Python fixtures (`crates/pm-plugin/tests`), proxy tests on HTTP/1.1 and HTTP/2
+   (`crates/pm-proxy/tests/hooks.rs`, `h2_hooks.rs`), service tests for permissions and traffic
+   (`crates/pm-service/tests/hooks.rs`) and a "Plugin hooks (API 2)" step in the browser test. Reference: `docs/plugins.md`.

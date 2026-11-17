@@ -147,7 +147,7 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 
 | Work package | What |
 | --- | --- |
-| 2.1 Traffic hooks | Request and response hooks in the proxy with time and memory limits (an ADR first: a new WASM runtime or the existing sandboxed plugin processes, ADR-0015/0016); changes recorded next to the original |
+| 2.1 Traffic hooks | **Done** (ADR-0020). Request and response hooks in the proxy with time and memory limits (an ADR first: a new WASM runtime or the existing sandboxed plugin processes, ADR-0015/0016); changes recorded next to the original. Long-lived sandboxed workers, JSON lines, 200 ms default deadline, bypass and pause on failure, HTTP/1.1 and HTTP/2; Plugins page controls |
 | 2.2 Workflows | Saved chains of steps (match, extract, transform, send, assert), run on demand, per exchange or from the fuzzer, through the policy gate |
 | 2.3 Inline transforms | Encode, decode and hash in the editor with a reversible preview. **Done 2026-11-16:** browser-side transforms (`ui/src/transforms.ts`, menu `ui/src/TransformMenu.tsx`) in the Replay and Intercept editors, with preview, chaining, Undo and native Ctrl+Z; smart decode via `/tools/decode`; unit tests `npm run test:unit` |
 | 2.4 HTTP/3 | QUIC on the client and upstream sides, Alt-Svc handling, HTTP/3 in history and replay |
@@ -155,7 +155,7 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 | 2.6 Raw TCP and TLS | Relay non-HTTP streams with hex and text views; replay a stream |
 | 2.7 Capture modes | Transparent mode (Linux, macOS), SOCKS5, upstream chains with per-host rules |
 | 2.8 Mobile onboarding | CA certificate page with a QR code; Android 14+ and iOS guides; per-device scoping. **Done 2026-11-16:** the proxy answers `http://proxymind.setup/` (and its own address) with a script-free CA page (`pm_proxy::setup_page`: `.crt` DER and `.pem` downloads, fingerprint, steps), never forwarded or recorded; `GET /setup/mobile` returns LAN URLs and a server-drawn QR code (SVG via the `qrcode` crate, shown as an `<img>`); `client_addr` on exchanges (migration 21), `client` filter and HQL `client:`, device names (`/devices`, project setting `devices`), `record_devices` next to in-scope recording; guide `docs/mobile.md`. Not yet: SOCKS5 or a PAC file for apps that ignore the Wi-Fi proxy, IPv6 addresses in the QR URL, automatic device names |
-| 2.9 Plugin API v2 | Versioned SDK for hooks, manifest with declared permissions enforced by the policy gate |
+| 2.9 Plugin API v2 | **Done** (ADR-0020). Versioned SDK for hooks, manifest with declared permissions enforced by the policy gate. `api: 2` manifests, accepted-permission review, enforcement in `pm-service`, Python and TypeScript helpers, `docs/plugins.md`, example `sign-request` |
 
 **Gate:** byte-exact tests for every new protocol, fuzz targets in CI, the Phase 1 benchmark no more than 10% worse.
 

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import http from "node:http";
-import { X509Certificate } from "node:crypto";
+import { X509Certificate, createHmac } from "node:crypto";
 import { chromium } from "playwright-core";
 
 const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
@@ -1271,6 +1271,64 @@ try {
       await page.getByText("Off · turn on").waitFor();
       check(/debug-switch\s+\S+\s+active\s+off/.test(pm("plugin", "list")), "turning a plugin off is saved in the user's registry");
     }
+  });
+
+  await section("Plugin hooks (API 2)", async () => {
+    let python = false;
+    try {
+      execFileSync("python3", ["--version"]);
+      python = true;
+    } catch {
+      console.log("  (python3 not found: skipping the hook plugin)");
+    }
+    if (!python) return;
+    const example = new URL("../../examples/plugins/sign-request", import.meta.url).pathname;
+    pm("plugin", "add", example);
+    await open("plugins");
+    await page.reload(); // the CLI changed the registry behind the page's back
+    await page.waitForSelector('[data-testid="plugin-permissions-sign-request"]');
+    check(await page.getByTestId("plugin-permissions-sign-request").textContent().then((t) => t.includes("hooks.request")), "the Plugins page lists the permissions a v2 plugin asks for");
+    check(await page.getByTestId("plugin-toggle-sign-request").isDisabled(), "a v2 plugin can't be turned on before its permissions are accepted");
+    check(await page.getByTestId("hook-enable-sign-request-request").isDisabled(), "its hook can't be turned on either");
+    await page.screenshot({ path: join(SHOTS, "6g-plugin-review.png"), fullPage: true });
+    await page.getByTestId("plugin-accept-sign-request").click();
+    await page.getByTestId("plugin-toggle-sign-request").getByText("On · turn off").waitFor();
+    await page.getByTestId("hook-enable-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("on", { exact: true }).waitFor();
+    check(true, "accepting the permissions and turning the hook on works from the Plugins page");
+
+    const body = '{"username":"hook","password":"e2e"}';
+    await viaProxy(proxy, shop, `POST /api/login?e2e=hook HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+    const hookId = await recordedId("e2e=hook");
+    const key = readFileSync(join(example, "signing.key"), "utf8").split("\n")[0].trim();
+    const signature = createHmac("sha256", key).update(body).digest("hex");
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("e2e=hook");
+    await sleep(500);
+    await page.getByTestId(`row-${hookId}`).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
+    const sentReq = await page.locator('[data-testid="exchange-detail"] pre.raw', { hasText: "X-Signature" }).first().textContent();
+    check(sentReq.includes(`X-Signature: ${signature}`), "History's request shows the header the hook added");
+    await page.getByTestId("tab-original_request").click();
+    const origHook = await page.getByTestId("original-request-view").locator("pre.raw").first().textContent();
+    check(!origHook.includes("X-Signature"), "the original request is kept without it");
+    await page.getByTestId("tab-changes").click();
+    const hookChanges = await page.getByTestId("changes-list").textContent();
+    check(hookChanges.includes("sign-request/request") && hookChanges.includes("added X-Signature"), "the Changes tab names the hook");
+    await page.screenshot({ path: join(SHOTS, "6h-hook-changes.png") });
+
+    // Pausing stops it (and resuming starts it again); turning it off leaves the other sections alone.
+    await open("plugins");
+    await page.getByTestId("hook-pause-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("paused", { exact: true }).waitFor();
+    await viaProxy(proxy, shop, `POST /api/login?e2e=hook-paused HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+    const pausedId = await recordedId("e2e=hook-paused");
+    const pausedEx = await page.evaluate(async (id) => (await fetch(`/api/v1/exchanges/${id}`)).json(), pausedId);
+    check(!pausedEx.request.includes("X-Signature") && !(pausedEx.changes ?? []).some((c) => c.by === "hook"), "a paused hook leaves traffic alone");
+    await page.getByTestId("hook-pause-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("on", { exact: true }).waitFor();
+    await page.getByTestId("hook-enable-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("off", { exact: true }).waitFor();
   });
 
   await section("Custom checks", async () => {

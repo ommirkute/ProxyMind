@@ -99,7 +99,7 @@ pub use network::{
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use organizer::{ORGANIZER_STATUSES, OrganizerItem, OrganizerUpdate};
-pub use plugins::{PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
+pub use plugins::{HookInfo, PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use prove_auto::{FindingProve, ProveSweep};
@@ -194,6 +194,8 @@ pub struct Service {
     smtp_listening: std::sync::OnceLock<std::net::SocketAddr>,
     /// The user's home directory, whose plugin registry is read when used.
     plugin_home: std::sync::OnceLock<std::path::PathBuf>,
+    /// The proxy's plugin hook engine (ADR-0020), when this process runs the proxy.
+    hook_engine: std::sync::OnceLock<std::sync::Arc<pm_plugin::hooks::HookEngine>>,
     /// Recent Fuzzer attacks (running ones keep going in the background).
     attacks: parking_lot::Mutex<Vec<std::sync::Arc<fuzzer::Attack>>>,
     /// This process's proxy, for the built-in browser.
@@ -367,6 +369,7 @@ impl Service {
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             plugin_home: std::sync::OnceLock::new(),
+            hook_engine: std::sync::OnceLock::new(),
             oast_listening: std::sync::OnceLock::new(),
             smtp_listening: std::sync::OnceLock::new(),
             attacks: parking_lot::Mutex::new(Vec::new()),

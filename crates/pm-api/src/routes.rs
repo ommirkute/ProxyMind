@@ -184,6 +184,8 @@ pub fn api() -> Router<AppState> {
         .route("/plugins", get(plugins))
         .route("/plugins/check", post(plugin_check))
         .route("/plugins/{name}", axum::routing::put(plugin_set))
+        .route("/plugins/{name}/accept", post(plugin_accept))
+        .route("/plugins/{name}/hooks/{kind}", axum::routing::put(plugin_hook_set))
         .route("/plugins/{name}/panels/{panel}", get(plugin_panel))
         .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
         .route("/scan/custom-checks", get(custom_checks).post(custom_check_save))
@@ -792,6 +794,20 @@ async fn plugins(State(st): State<AppState>) -> ApiResult {
 
 async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b): Json<PluginSet>) -> ApiResult {
     ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
+}
+
+async fn plugin_accept(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.plugin_accept_permissions(&st.actor, &name)?)
+}
+
+async fn plugin_hook_set(
+    State(st): State<AppState>,
+    Path((name, kind)): Path<(String, String)>,
+    Json(b): Json<pm_service::api_types::PluginHookSet>,
+) -> ApiResult {
+    let kind = pm_service::pm_plugin::v2::HookKind::parse(&kind)
+        .ok_or_else(|| ServiceError::Invalid("a hook kind is `request` or `response`".into()))?;
+    ok(st.service.plugin_hook_set(&st.actor, &name, kind, b.action)?)
 }
 
 async fn plugin_panel(
