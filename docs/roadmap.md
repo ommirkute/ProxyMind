@@ -186,7 +186,7 @@ Starts with an ADR on identity and a written threat model.
 
 | Work package | What |
 | --- | --- |
-| 3.1 Identity ADR | Local accounts with passkeys, OIDC, or both; sessions; how the API token fits |
+| 3.1 Identity ADR | Local accounts with passkeys, OIDC, or both; sessions; how the API token fits. ADR-0022 proposed 2026-11-17, threat model in `docs/threat-model.md`; awaiting owner confirmation |
 | 3.2 Users and roles | Owner, tester, viewer; authorization in `pm-service` for every action; audit of who did what |
 | 3.3 Project server | One server, many projects, each with its own scope and rules of engagement |
 | 3.4 Shared work | Assignment, comments on exchanges and issues, presence over the event bus |

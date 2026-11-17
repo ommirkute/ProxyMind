@@ -25,3 +25,4 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0019](0019-typed-api-contracts.md) | One source of truth for API contracts | Accepted |
 | [0020](0020-traffic-hooks-and-plugin-api-v2.md) | Traffic hooks run in long-lived sandboxed plugin processes; plugin API v2 declares permissions | Accepted |
 | [0021](0021-http3.md) | HTTP/3 as text, sent over QUIC with quinn and h3; Alt-Svc handling; no client QUIC listener yet | Accepted |
+| [0022](0022-identity-and-access.md) | Identity and access: local accounts first and OIDC second, server-side sessions, scoped tokens, roles enforced in `pm-service`, TLS for the project server | Proposed |
