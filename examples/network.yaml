@@ -1,19 +1,21 @@
 # Network settings:  proxymind network set examples/network.yaml
-# They apply to the proxy, Replay, agents and proofs, and running
-# processes pick up changes within seconds.
+# They apply to the proxy, SOCKS5 and transparent listeners, Replay, the scanner, the fuzzer, agents and proofs, and
+# running processes pick up changes within seconds.
 
-# Send traffic through an upstream proxy (omit for direct connections).
-upstream:
-  kind: http            # http (CONNECT for HTTPS) or socks5
-  host: proxy.corp.example
-  port: 3128
-  username: ""          # optional login
-  password: ""
-  # remote_dns: true    # socks5 only: let the proxy resolve names (socks5h)
-  bypass:               # reached directly: name, *.domain or *
-    - localhost
-    - 127.0.0.1
-    - "*.internal.example"
+# Where outgoing connections go, per target host. The first rule whose `match` fits wins; a host that fits no rule
+# is reached directly. A rule with no `match` covers everything, so it goes last. See docs/capture.md.
+upstream_rules:
+  - match: [localhost, 127.0.0.1, "*.internal.example", 10.0.0.0/8]   # names, * patterns, CIDR ranges
+    via: direct
+  - match: ["*.onion"]
+    via: socks5://127.0.0.1:9050
+    remote_dns: true    # let the proxy resolve names (socks5h)
+  - via: http://proxy.corp.example:3128    # everything else (HTTP proxy: CONNECT for HTTPS)
+    username: ""        # optional login, kept in the project like other secrets
+    password: ""
+
+# The older single-proxy form still loads (it becomes rules like the ones above):
+# upstream: { kind: http, host: proxy.corp.example, port: 3128, bypass: [localhost, "*.internal.example"] }
 
 # Client certificates for servers that require mutual TLS (PEM files;
 # convert a .p12 with: openssl pkcs12 -in cert.p12 -out cert.pem -nodes).

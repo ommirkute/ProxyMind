@@ -7,6 +7,7 @@
 
 pub mod h2text;
 pub mod protobuf;
+pub mod socks5;
 pub mod ws;
 
 use thiserror::Error;

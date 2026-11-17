@@ -10,15 +10,19 @@ use pm_store::Store;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::api_types::{UpstreamResolution, UpstreamResolveRequest};
 use crate::{Result, Service, ServiceError};
 
 /// Project setting that holds the network settings as JSON.
 pub const NETWORK_SETTING: &str = "network";
 
+/// The saved network settings. A project saved with the older single `upstream` loads as a list of upstream rules.
 pub fn load_network(store: &Store) -> Result<NetConfig> {
     match store.get_setting(NETWORK_SETTING)? {
-        Some(text) => serde_json::from_str(&text)
-            .map_err(|e| ServiceError::Invalid(format!("saved network settings are unreadable: {e}"))),
+        Some(text) => serde_json::from_str::<NetConfig>(&text)
+            .map_err(|e| ServiceError::Invalid(format!("saved network settings are unreadable: {e}")))?
+            .normalized()
+            .map_err(|e| ServiceError::Invalid(format!("saved network settings are unreadable: {e:#}"))),
         None => Ok(NetConfig::default()),
     }
 }
@@ -45,9 +49,12 @@ pub fn sync_listeners(store: &Store, listeners: &Listeners) -> Result<()> {
 pub struct ListenersView {
     /// The proxy's main listener (from the command line), if this process runs one.
     pub primary: Option<String>,
+    /// The saved listeners; SOCKS5 passwords show as `********`.
     pub listeners: Vec<ListenerConfig>,
     /// Empty when this process doesn't run the proxy.
     pub status: Vec<ListenerStatus>,
+    /// This build can take traffic the operating system redirected (`transparent` listeners): Linux only.
+    pub transparent_supported: bool,
 }
 
 /// Applies the saved settings to `net` if they changed; true when they did.
@@ -72,23 +79,77 @@ impl Service {
         Ok(self.store.read(load_network)?.masked())
     }
 
-    /// Replaces the settings. Humans only. A password of `********` keeps
-    /// the saved one, so a masked value can be sent back unchanged.
-    pub fn network_set(&self, actor: &Actor, mut cfg: NetConfig) -> Result<NetConfig> {
+    /// Replaces the settings. Humans only. A password of `********` keeps the saved one (of the upstream rule with
+    /// the same `via` and username), so a masked value can be sent back unchanged.
+    pub fn network_set(&self, actor: &Actor, cfg: NetConfig) -> Result<NetConfig> {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change network settings".into()));
         }
         let saved = self.store.read(load_network)?;
-        if let (Some(new), Some(old)) = (cfg.upstream.as_mut(), saved.upstream.as_ref())
-            && new.password == "********"
+        let mut cfg = cfg;
+        // The older single `upstream` keeps its masked password whatever else changed (as it always did).
+        if let Some(u) = cfg.upstream.as_mut()
+            && u.password == "********"
+            && let Some(old) = saved.upstream_rules.iter().rev().find(|r| r.via != "direct" && r.username == u.username)
         {
-            new.password = old.password.clone();
+            u.password.clone_from(&old.password);
+        }
+        let mut cfg = cfg.normalized().map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
+        for r in cfg.upstream_rules.iter_mut().filter(|r| r.password == "********") {
+            let old = saved.upstream_rules.iter().find(|o| o.via == r.via && o.username == r.username);
+            match old {
+                Some(o) => r.password.clone_from(&o.password),
+                None => {
+                    return Err(ServiceError::Invalid(format!(
+                        "no saved password for {} (user {:?}): type it again",
+                        r.via, r.username
+                    )));
+                }
+            }
         }
         self.network().set(cfg.clone()).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         self.store.write(|db| db.set_setting(NETWORK_SETTING, &text))?;
         self.audit(&actor.id(), "network_settings", json!(cfg.masked()), "allow")?;
         Ok(cfg.masked())
+    }
+
+    /// Which upstream rule decides how `host` is reached: the saved rules, or `rules` when given (to try a draft
+    /// before saving it). Sends nothing.
+    pub fn network_resolve(&self, req: &UpstreamResolveRequest) -> Result<UpstreamResolution> {
+        let host = req.host.trim().trim_matches(['[', ']']);
+        if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(ServiceError::Invalid("give a host name or IP address".into()));
+        }
+        let cfg = match &req.rules {
+            Some(rules) => {
+                let cfg = NetConfig { upstream_rules: rules.clone(), ..Default::default() };
+                for (i, r) in cfg.upstream_rules.iter().enumerate() {
+                    r.validate().map_err(|e| ServiceError::Invalid(format!("upstream rule {}: {e:#}", i + 1)))?;
+                }
+                cfg
+            }
+            None => self.store.read(load_network)?,
+        };
+        Ok(match cfg.resolve(host) {
+            Some((i, pattern)) => {
+                let r = &cfg.upstream_rules[i];
+                UpstreamResolution {
+                    rule_index: Some(i),
+                    pattern,
+                    direct: r.via.trim().eq_ignore_ascii_case("direct"),
+                    via: r.via.clone(),
+                    remote_dns: r.remote_dns,
+                }
+            }
+            None => UpstreamResolution {
+                rule_index: None,
+                pattern: None,
+                direct: true,
+                via: "direct".into(),
+                remote_dns: false,
+            },
+        })
     }
 }
 /// Keeps match-and-replace rules and network settings in step with the
@@ -113,8 +174,10 @@ pub fn watch_project(
         eprintln!("Network settings not applied: {e}");
     }
     let net = network.config();
-    if let Some(u) = &net.upstream {
-        eprintln!("Upstream proxy: {:?} {}:{}", u.kind, u.host, u.port);
+    for (i, r) in net.upstream_rules.iter().enumerate() {
+        // Never the login: only where traffic goes.
+        let who = if r.matches.is_empty() { "all other hosts".to_string() } else { r.matches.join(", ") };
+        eprintln!("Upstream rule {}: {who} via {}", i + 1, r.via);
     }
     if !net.client_certs.is_empty() {
         eprintln!("{} client certificate(s) configured", net.client_certs.len());
@@ -124,7 +187,11 @@ pub fn watch_project(
         for st in l.status() {
             match st.error {
                 Some(e) => eprintln!("Extra proxy listener {}: {e}", st.bind),
-                None => eprintln!("Extra proxy listener on http://{}", st.bind),
+                None => match (st.kind, st.transparent) {
+                    (pm_proxy::ListenerKind::Socks5, _) => eprintln!("SOCKS5 listener on socks5://{}", st.bind),
+                    (_, true) => eprintln!("Transparent listener on {} (redirected traffic)", st.bind),
+                    _ => eprintln!("Extra proxy listener on http://{}", st.bind),
+                },
             }
         }
     }
@@ -162,19 +229,33 @@ impl Service {
     }
 
     pub fn listeners_get(&self) -> Result<ListenersView> {
-        let listeners = self.store.read(load_listeners)?;
+        let listeners = self.store.read(load_listeners)?.iter().map(ListenerConfig::masked).collect();
         let (primary, status) = match self.listeners.get() {
             Some(l) => (l.primary().map(str::to_string), l.status()),
             None => (None, vec![]),
         };
-        Ok(ListenersView { primary, listeners, status })
+        Ok(ListenersView { primary, listeners, status, transparent_supported: pm_proxy::transparent::SUPPORTED })
     }
 
     /// Replaces the extra listeners. Humans only: a listener on a public
     /// interface lets other machines use the proxy.
-    pub fn listeners_set(&self, actor: &Actor, list: Vec<ListenerConfig>) -> Result<ListenersView> {
+    pub fn listeners_set(&self, actor: &Actor, mut list: Vec<ListenerConfig>) -> Result<ListenersView> {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid("only humans can change proxy listeners".into()));
+        }
+        // A masked password keeps the one saved for the same address.
+        let saved = self.store.read(load_listeners)?;
+        for l in list.iter_mut().filter(|l| l.password == pm_proxy::listeners::MASKED_PASSWORD) {
+            let old = saved.iter().find(|o| o.bind.trim() == l.bind.trim() && o.username == l.username);
+            match old {
+                Some(o) => l.password.clone_from(&o.password),
+                None => {
+                    return Err(ServiceError::Invalid(format!(
+                        "no saved password for the listener on {}: type it again",
+                        l.bind
+                    )));
+                }
+            }
         }
         pm_proxy::listeners::validate(&list).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&list).map_err(|e| ServiceError::Invalid(e.to_string()))?;
@@ -182,7 +263,8 @@ impl Service {
         if let Some(l) = self.listeners.get() {
             l.sync(&list);
         }
-        self.audit(&actor.id(), "proxy_listeners", json!(list), "allow")?;
+        let shown: Vec<ListenerConfig> = list.iter().map(ListenerConfig::masked).collect();
+        self.audit(&actor.id(), "proxy_listeners", json!(shown), "allow")?;
         self.listeners_get()
     }
 }
@@ -280,5 +362,75 @@ impl Service {
         let me = Arc::downgrade(self);
         recorder.set_filter(Some(Arc::new(move |ex| me.upgrade().is_none_or(|s| s.should_record(ex)))));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(name: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!("pm-net-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Store::open(&dir.join("p.pmproj")).unwrap()
+    }
+
+    /// A project saved before upstream rules existed: one `upstream` with a bypass list.
+    const OLD: &str = r#"{"upstream":{"kind":"http","host":"proxy.corp.test","port":3128,"username":"u","password":"pw","remote_dns":false,"bypass":["localhost","*.lan"]},"client_certs":[],"hosts":[],"tls_passthrough":["pinned.test"]}"#;
+
+    #[test]
+    fn a_project_with_the_old_single_upstream_loads_as_rules() {
+        let mut store = project("old");
+        store.set_setting(NETWORK_SETTING, OLD).unwrap();
+        let cfg = load_network(&store).unwrap();
+        assert!(cfg.upstream.is_none());
+        assert_eq!(cfg.tls_passthrough, ["pinned.test"]);
+        assert_eq!(cfg.upstream_rules.len(), 2);
+        assert_eq!(cfg.upstream_rules[0].via, "direct");
+        assert_eq!(cfg.upstream_rules[0].matches, ["localhost", "*.lan"]);
+        let proxy = &cfg.upstream_rules[1];
+        assert_eq!(
+            (proxy.via.as_str(), proxy.username.as_str(), proxy.password.as_str()),
+            ("http://proxy.corp.test:3128", "u", "pw")
+        );
+        assert!(proxy.matches.is_empty());
+        // The same hosts go the same ways as before: bypassed hosts direct, everything else through the proxy.
+        let net = Network::new();
+        assert!(sync_network(&store, &net).unwrap());
+        assert_eq!(net.resolve("localhost").map(|r| r.0), Some(0));
+        assert_eq!(net.resolve("printer.lan").map(|r| r.0), Some(0));
+        assert_eq!(net.resolve("shop.test").map(|r| r.0), Some(1));
+        assert!(!sync_network(&store, &net).unwrap(), "unchanged settings are not re-applied");
+        // Without bypass hosts it is one rule.
+        let bare = r#"{"upstream":{"kind":"socks5","host":"127.0.0.1","port":1080}}"#;
+        store.set_setting(NETWORK_SETTING, bare).unwrap();
+        let cfg = load_network(&store).unwrap();
+        assert_eq!(cfg.upstream_rules.len(), 1);
+        assert_eq!(cfg.upstream_rules[0].via, "socks5://127.0.0.1:1080");
+        // Saving writes the new form only.
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert!(text.contains("upstream_rules") && !text.contains("\"upstream\":"), "{text}");
+        // Empty and new-form settings load too.
+        store.set_setting(NETWORK_SETTING, "{}").unwrap();
+        assert_eq!(load_network(&store).unwrap(), NetConfig::default());
+        // Unknown fields are still refused (a typo is not silently ignored).
+        store.set_setting(NETWORK_SETTING, r#"{"upstream_rule":[]}"#).unwrap();
+        assert!(load_network(&store).is_err());
+    }
+
+    #[test]
+    fn old_listeners_load_as_http_listeners() {
+        let mut store = project("old-listeners");
+        store
+            .set_setting(
+                LISTENERS_SETTING,
+                r#"[{"bind":"127.0.0.1:8081","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]"#,
+            )
+            .unwrap();
+        let l = load_listeners(&store).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].kind, pm_proxy::ListenerKind::Http);
+        assert!(!l[0].transparent && l[0].username.is_empty());
     }
 }

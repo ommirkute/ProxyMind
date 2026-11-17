@@ -1859,16 +1859,34 @@ class ListenerConfig(TypedDict, total=False):
     enabled: bool
     # With a redirect: connect to it with TLS even for plain-HTTP clients.
     force_tls: bool
+    # `http` (default) or `socks5`.
+    kind: "ListenerKind"
+    # `socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send
+    # that value back to keep the saved password. Max 255 bytes.
+    password: str
     # Send every request to this host instead of where the client asked
     # (empty: no redirect). The Host header is left as the client sent it.
     redirect_host: str
     # Port to send requests to with `redirect_host`.
     redirect_port: int
+    # `http` listeners only, Linux only: take connections that the operating system redirected here
+    # (iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a
+    # device without proxy settings works. See docs/capture.md.
+    transparent: bool
+    # `socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes.
+    username: str
 
+
+# What a listener speaks.
+ListenerKind = _t.Literal["http", "socks5"]
 
 class _ListenerStatusRequired(TypedDict):
     bind: str
+    # `http` or `socks5`.
+    kind: "ListenerKind"
     running: bool
+    # Redirected traffic is accepted (see `ListenerConfig::transparent`).
+    transparent: bool
 
 
 class ListenerStatus(_ListenerStatusRequired, total=False):
@@ -1883,11 +1901,14 @@ class ListenersBody(TypedDict):
 
 class ListenersView(TypedDict):
     """Extra proxy listeners and whether each is running in this process."""
+    # The saved listeners; SOCKS5 passwords show as `********`.
     listeners: _t.List["ListenerConfig"]
     # The proxy's main listener (from the command line), if this process runs one.
     primary: _t.Optional[str]
     # Empty when this process doesn't run the proxy.
     status: _t.List["ListenerStatus"]
+    # This build can take traffic the operating system redirected (`transparent` listeners): Linux only.
+    transparent_supported: bool
 
 
 class LoggedOut(TypedDict):
@@ -2115,8 +2136,12 @@ class NetConfig(TypedDict, total=False):
     # (`example.com`, `*.example.com`): for certificate pinning or noise.
     # Nothing inside such a tunnel is recorded.
     tls_passthrough: _t.List[str]
-    # Send traffic through this proxy (None: connect directly).
+    # The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that
+    # goes through the proxy, after one that sends the `bypass` hosts directly) and is never returned.
     upstream: _t.Optional["UpstreamProxy"]
+    # Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
+    # that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
+    upstream_rules: _t.List["UpstreamRule"]
 
 
 class NewAttackPath(TypedDict):
@@ -3677,6 +3702,47 @@ class UpstreamProxy(TypedDict, total=False):
     remote_dns: bool
     # Optional login (Basic for HTTP proxies, username/password for SOCKS5).
     username: str
+
+
+class UpstreamResolution(TypedDict):
+    """Answer of `POST /network/upstream/resolve`: how a host would be reached."""
+    # Connected directly (the rule says `direct`, or no rule matched).
+    direct: bool
+    # The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).
+    pattern: _t.Optional[str]
+    # The rule lets the proxy resolve names.
+    remote_dns: bool
+    # The first rule that covers the host (0 is the first), or null when none does.
+    rule_index: _t.Optional[int]
+    # What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).
+    via: str
+
+
+class UpstreamResolveRequest(TypedDict, total=False):
+    """Body of `POST /network/upstream/resolve`."""
+    # The target host: a name or an IP address.
+    host: str
+    # Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.
+    rules: _t.Optional[_t.List["UpstreamRule"]]
+
+
+class UpstreamRule(TypedDict, total=False):
+    """One entry of the ordered upstream list: which targets it covers and how to reach them."""
+    # Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers
+    # `example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`
+    # or `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:
+    # covers everything, which only makes sense for the last rule.
+    match: _t.List[str]
+    password: str
+    # Let the proxy resolve target names ("socks5h" for SOCKS5; for HTTP proxies, CONNECT names the host).
+    # Off by default so the proxy is asked for the address ProxyMind resolved and checked against the denied
+    # networks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.
+    remote_dns: bool
+    # Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like
+    # other secrets, hidden when settings are shown (`********`) and never logged.
+    username: str
+    # `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.
+    via: str
 
 
 class Validity(TypedDict, total=False):

@@ -98,7 +98,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - Match & replace rules, with presets (unhide fields, strip security headers…)
 - History with a query language: `status:>=400 -ext:png resp:"error"`
 - Site map, global search, highlights and comments
-- Transparent mode for apps that ignore proxy settings, extra listeners, upstream proxies (HTTP/SOCKS5) and client certificates
+- SOCKS5 listeners, transparent mode on Linux for apps that ignore proxy settings, extra listeners, per-host upstream proxies (HTTP/SOCKS5) and client certificates
 - HAR import/export, *Copy as cURL / Python / JS / PowerShell*
 
 </td>
@@ -309,6 +309,7 @@ fuzz/          fuzz targets for the parsers
 | | |
 |---|---|
 | [docs/agents.md](docs/agents.md) | Connecting AI agents (MCP) |
+| [docs/capture.md](docs/capture.md) | SOCKS5 listeners, transparent mode with iptables/nftables, upstream chains with per-host rules |
 | [docs/mobile.md](docs/mobile.md) | Testing from an Android or iOS device: CA setup page and QR code, per-device history |
 | [docs/plan.md](docs/plan.md) | Roadmap and status |
 | [docs/adr/](docs/adr/) | Architecture decision records |

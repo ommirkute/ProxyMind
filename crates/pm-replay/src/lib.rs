@@ -20,7 +20,7 @@ mod pool;
 pub mod race;
 
 pub use h2send::StreamedResponse;
-pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy};
+pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy, UpstreamRule, Via};
 
 const READ_CHUNK: usize = 16 * 1024;
 /// The most a connection buffers for one message (a hostile peer could
@@ -36,11 +36,21 @@ pub struct Endpoint {
     pub scheme: String,
     pub host: String,
     pub port: u16,
+    /// Connect to this address instead of resolving `host` (transparent mode: where the client was really going;
+    /// `host` still names the target for TLS, the Host header and records). A hostname override from the
+    /// network settings wins over it.
+    pub pin: Option<IpAddr>,
 }
 
 impl Endpoint {
     pub fn new(scheme: &str, host: &str, port: u16) -> Self {
-        Self { scheme: scheme.to_ascii_lowercase(), host: host.to_string(), port }
+        Self { scheme: scheme.to_ascii_lowercase(), host: host.to_string(), port, pin: None }
+    }
+
+    /// The same endpoint, connecting to `ip` (see [`Endpoint::pin`]).
+    pub fn with_pin(mut self, ip: Option<IpAddr>) -> Self {
+        self.pin = ip;
+        self
     }
 }
 
@@ -365,6 +375,18 @@ impl Sender {
         Ok(self.connect_with(&Endpoint::new("tcp", host, port), check, false).await?.0)
     }
 
+    /// Like [`Sender::connect_tunnel`] for an endpoint with a pinned address (`ep.scheme` is not used for TLS).
+    pub async fn connect_tunnel_to(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        let tcp = Endpoint { scheme: "tcp".into(), ..ep.clone() };
+        Ok(self.connect_with(&tcp, check, false).await?.0)
+    }
+
+    /// A raw connection to an endpoint, with its pinned address and the upstream rules applied (TLS is done for
+    /// `https` endpoints, not for `tcp` ones). For tunnels in transparent mode and for tests.
+    pub async fn connect_with_endpoint(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        self.connect(ep, check).await
+    }
+
     /// Like [`Sender::connect`]; with `h2`, offers HTTP/2 over TLS (or assumes
     /// it for plain HTTP). Returns whether HTTP/2 is in use.
     pub(crate) async fn connect_with(
@@ -375,7 +397,7 @@ impl Sender {
     ) -> Result<(Box<dyn Io>, bool)> {
         let upstream = self.net.upstream_for(&ep.host);
         // A hostname override replaces DNS (for SOCKS5 too: the proxy gets the address).
-        let pinned = self.net.address_for(&ep.host);
+        let pinned = self.net.address_for(&ep.host).or(ep.pin);
         let remote_dns = pinned.is_none()
             && (upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
                 || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http));
@@ -557,7 +579,7 @@ impl Sender {
             ep.host.to_ascii_lowercase(),
             ep.port,
             self.net.upstream_for(&ep.host),
-            self.net.address_for(&ep.host)
+            self.net.address_for(&ep.host).or(ep.pin)
         )
     }
 

@@ -4,6 +4,7 @@
 //! tests in `tests/wire_contract.rs` pin them.
 
 use pm_proxy::{ListenerConfig, RewriteRule as Rule};
+use pm_replay::UpstreamRule;
 use pm_tools::codegen::Lang;
 use pm_tools::engage::CsrfTechnique;
 use schemars::JsonSchema;
@@ -438,6 +439,31 @@ pub struct ScanQuery {
 pub struct ListenersBody {
     /// The complete list of proxy listeners.
     pub listeners: Vec<ListenerConfig>,
+}
+
+/// Body of `POST /network/upstream/resolve`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamResolveRequest {
+    /// The target host: a name or an IP address.
+    pub host: String,
+    /// Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.
+    pub rules: Option<Vec<UpstreamRule>>,
+}
+
+/// Answer of `POST /network/upstream/resolve`: how a host would be reached.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct UpstreamResolution {
+    /// The first rule that covers the host (0 is the first), or null when none does.
+    pub rule_index: Option<usize>,
+    /// The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).
+    pub pattern: Option<String>,
+    /// Connected directly (the rule says `direct`, or no rule matched).
+    pub direct: bool,
+    /// What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).
+    pub via: String,
+    /// The rule lets the proxy resolve names.
+    pub remote_dns: bool,
 }
 
 /// Body of `PUT /match-replace`.

@@ -71,6 +71,11 @@ export default function Setup() {
               <p>Set your browser or system HTTP and HTTPS proxy to:</p>
               <pre className="raw" data-testid="setup-proxy">{proxy}</pre>
               <p className="small muted">
+                For clients that speak SOCKS5 (curl <code>--socks5-hostname</code>, Android SOCKS apps) or that can't be
+                given proxy settings at all (Linux traffic redirected by iptables), add a SOCKS5 or transparent listener
+                under "3. Proxy listeners" below.
+              </p>
+              <p className="small muted">
                 Tip: use a separate browser profile for testing, so only that profile's traffic goes through ProxyMind. For
                 Chromium: <code>chromium --proxy-server=http://{proxy} --user-data-dir=/tmp/pm-profile</code>
               </p>

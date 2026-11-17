@@ -400,6 +400,10 @@ async fn network_settings_hide_the_password() {
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(again)).await.0, 200);
     let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
     assert!(audit.contains("network_settings") && !audit.contains("hunter2"), "audited without the password");
+    let (_, _, shown) = http(port, "GET", "/api/v1/network", &[AUTH], None).await;
+    let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert!(shown.get("upstream").is_none(), "the single upstream is shown as rules: {shown}");
+    assert_eq!(shown["upstream_rules"][0]["via"], "socks5://127.0.0.1:1081");
     let bad = json!({"client_certs": [{"host": "*", "cert_file": "/nope.pem", "key_file": "/nope.key"}]});
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad)).await.0, 400);
     let unknown = json!({"upstream": {"host": "x", "port": 1, "typo": true}});
@@ -411,6 +415,64 @@ async fn network_settings_hide_the_password() {
     assert!(body.contains("10.1.2.3") && body.contains("pinned.test"));
     let bad_ip = json!({"hosts": [{"host": "a.test", "address": "not-an-ip"}]});
     assert_eq!(http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(bad_ip)).await.0, 422);
+}
+
+#[tokio::test]
+async fn upstream_rules_are_ordered_masked_validated_and_resolvable() {
+    let (port, _) = start().await;
+    let put =
+        |cfg: serde_json::Value| async move { http(port, "PUT", "/api/v1/network", &[AUTH, CHANGE], Some(cfg)).await };
+    let rules = json!({"upstream_rules": [
+        {"match": ["*.corp.test", "10.0.0.0/8"], "via": "http://127.0.0.1:3128", "username": "u", "password": "hunter2"},
+        {"match": ["lab.test"], "via": "socks5://127.0.0.1:1080", "remote_dns": true},
+        {"via": "direct"},
+    ]});
+    let (st, _, body) = put(rules).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("********") && !body.contains("hunter2"), "{body}");
+    // Reordering with the masked password keeps the saved one; an unknown login cannot use the placeholder.
+    let reordered = json!({"upstream_rules": [
+        {"match": ["lab.test"], "via": "socks5://127.0.0.1:1080", "remote_dns": true},
+        {"match": ["*.corp.test", "10.0.0.0/8"], "via": "http://127.0.0.1:3128", "username": "u", "password": "********"},
+        {"via": "direct"},
+    ]});
+    assert_eq!(put(reordered).await.0, 200);
+    let stolen = json!({"upstream_rules": [{"via": "http://evil.test:3128", "username": "u", "password": "********"}]});
+    assert_eq!(put(stolen).await.0, 400, "the saved password is not handed to another proxy");
+    // Mistakes are 400s: a catch-all that is not last, bad via, bad CIDR, both forms at once.
+    for bad in [
+        json!({"upstream_rules": [{"via": "direct"}, {"match": ["a.test"], "via": "direct"}]}),
+        json!({"upstream_rules": [{"match": ["a.test"], "via": "ftp://x:1"}]}),
+        json!({"upstream_rules": [{"match": ["10.0.0.0/40"], "via": "direct"}]}),
+        json!({"upstream": {"host": "x", "port": 1}, "upstream_rules": [{"via": "direct"}]}),
+    ] {
+        assert_eq!(put(bad.clone()).await.0, 400, "{bad}");
+    }
+    // Which rule decides: saved rules, or a draft.
+    let resolve = |body: serde_json::Value| async move {
+        let (st, _, text) = http(port, "POST", "/api/v1/network/upstream/resolve", &[AUTH, CHANGE], Some(body)).await;
+        (st, serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default())
+    };
+    let (st, r) = resolve(json!({"host": "lab.test"})).await;
+    assert_eq!(
+        (st, r["rule_index"].as_u64(), r["via"].as_str(), r["remote_dns"].as_bool()),
+        (200, Some(0), Some("socks5://127.0.0.1:1080"), Some(true))
+    );
+    let (_, r) = resolve(json!({"host": "10.2.3.4"})).await;
+    assert_eq!(
+        (r["rule_index"].as_u64(), r["pattern"].as_str(), r["direct"].as_bool()),
+        (Some(1), Some("10.0.0.0/8"), Some(false))
+    );
+    let (_, r) = resolve(json!({"host": "elsewhere.test"})).await;
+    assert_eq!((r["rule_index"].as_u64(), r["direct"].as_bool()), (Some(2), Some(true)));
+    assert!(!r.to_string().contains("hunter2"));
+    let (_, r) = resolve(json!({"host": "x.test", "rules": [{"match": ["x.test"], "via": "http://p:1"}]})).await;
+    assert_eq!((r["rule_index"].as_u64(), r["via"].as_str()), (Some(0), Some("http://p:1")));
+    let (st, _) = resolve(json!({"host": "x.test", "rules": [{"via": "bogus"}]})).await;
+    assert_eq!(st, 400);
+    assert_eq!(resolve(json!({"host": " "})).await.0, 400);
+    let (_, r) = resolve(json!({"host": "a.test", "rules": []})).await;
+    assert_eq!((r["rule_index"].is_null(), r["direct"].as_bool()), (true, Some(true)), "no rule matches: direct");
 }
 
 #[tokio::test]
@@ -427,6 +489,39 @@ async fn proxy_listeners_are_saved_and_validated() {
     assert_eq!(http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(bad)).await.0, 400);
     let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
     assert!(audit.contains("proxy_listeners"));
+
+    // SOCKS5 listeners: a login that is hidden when shown and kept when sent back masked.
+    let socks = json!({"listeners": [{"bind": "127.0.0.1:18090", "kind": "socks5", "username": "scout", "password": "s3cret"}]});
+    let (st, _, body) = http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(socks)).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"kind\":\"socks5\"") && body.contains("********") && !body.contains("s3cret"), "{body}");
+    let masked = json!({"listeners": [{"bind": "127.0.0.1:18090", "kind": "socks5", "username": "scout", "password": "********"}]});
+    assert_eq!(http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(masked)).await.0, 200);
+    let other = json!({"listeners": [{"bind": "127.0.0.1:18091", "kind": "socks5", "username": "scout", "password": "********"}]});
+    assert_eq!(
+        http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(other)).await.0,
+        400,
+        "no saved password there"
+    );
+    let (_, _, audit) = http(port, "GET", "/api/v1/audit", &[AUTH], None).await;
+    assert!(!audit.contains("s3cret"), "audited without the password");
+    for bad in [json!({"listeners": [{"bind": "127.0.0.1:18092", "kind": "socks4"}]})] {
+        assert_eq!(http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(bad)).await.0, 422);
+    }
+    for bad in [
+        json!({"listeners": [{"bind": "127.0.0.1:18092", "kind": "socks5", "transparent": true}]}),
+        json!({"listeners": [{"bind": "127.0.0.1:18092", "username": "u"}]}),
+        json!({"listeners": [{"bind": "127.0.0.1:18092", "kind": "socks5", "password": "p"}]}),
+    ] {
+        assert_eq!(
+            http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(bad.clone())).await.0,
+            400,
+            "{bad}"
+        );
+    }
+    let t = json!({"listeners": [{"bind": "127.0.0.1:18092", "transparent": true}]});
+    let want = if cfg!(target_os = "linux") { 200 } else { 400 };
+    assert_eq!(http(port, "PUT", "/api/v1/proxy/listeners", &[AUTH, CHANGE], Some(t)).await.0, want);
 }
 
 #[tokio::test]

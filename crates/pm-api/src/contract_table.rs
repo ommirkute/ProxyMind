@@ -213,8 +213,10 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/intercept/{id}/drop", "intercept_drop", "Drop one held message.").json("Object with `dropped` (the id)."),
         op("get", "/match-replace", "rules_get", "Match-and-replace rules.").json("Object with `rules` (list of rules)."),
         op("put", "/match-replace", "rules_put", "Replace all match-and-replace rules.").body::<RulesBody>().json("Object with `rules` (the stored list)."),
-        op("get", "/network", "network_get", "Outgoing network settings (upstream proxy, client certificates, host overrides).").out::<pm_service::pm_replay::NetConfig>(),
+        op("get", "/network", "network_get", "Outgoing network settings (ordered upstream rules, client certificates, host overrides). Proxy passwords show as `********`.").out::<pm_service::pm_replay::NetConfig>(),
         op("put", "/network", "network_put", "Change the outgoing network settings.").body::<pm_service::pm_replay::NetConfig>().out::<pm_service::pm_replay::NetConfig>(),
+        op("post", "/network/upstream/resolve", "network_resolve", "Which upstream rule decides how a host is reached (saved rules, or a draft passed in `rules`). Sends nothing.")
+            .body::<UpstreamResolveRequest>().out::<UpstreamResolution>(),
         op("get", "/proxy/listeners", "listeners_get", "Proxy listeners and their state.").out::<ListenersView>(),
         op("put", "/proxy/listeners", "listeners_put", "Replace the proxy listeners.").body::<ListenersBody>().out::<ListenersView>(),
         op("get", "/history/recording", "recording_get", "What the proxy records.").out::<RecordingSettings>(),

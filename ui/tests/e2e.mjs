@@ -124,6 +124,68 @@ function rawTo(port, raw) {
     setTimeout(() => s.destroy(), 5000);
   });
 }
+/**
+ * A minimal SOCKS5 client (RFC 1928, login per RFC 1929) over node:net, no dependencies. Resolves with the connected
+ * socket, or rejects with `socks5 refused: ...` saying which step the server turned the client away at.
+ */
+function socks5Connect(proxyPort, host, port, login) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect(proxyPort, "127.0.0.1");
+    let buf = Buffer.alloc(0);
+    let stage = "greeting";
+    const fail = (why) => {
+      s.destroy();
+      reject(new Error(`socks5 refused: ${why}`));
+    };
+    const request = () => {
+      const name = Buffer.from(host);
+      stage = "reply";
+      s.write(Buffer.concat([Buffer.from([5, 1, 0, 3, name.length]), name, Buffer.from([port >> 8, port & 255])]));
+    };
+    s.on("connect", () => s.write(login ? Buffer.from([5, 2, 0, 2]) : Buffer.from([5, 1, 0])));
+    s.on("error", reject);
+    s.on("close", () => stage !== "done" && reject(new Error("socks5 refused: connection closed")));
+    s.on("data", function onData(d) {
+      buf = Buffer.concat([buf, d]);
+      if (stage === "greeting" && buf.length >= 2) {
+        const method = buf[1];
+        buf = buf.subarray(2);
+        if (method === 0xff) return fail("no acceptable method");
+        if (method === 2) {
+          const u = Buffer.from(login.username);
+          const p = Buffer.from(login.password);
+          stage = "login";
+          s.write(Buffer.concat([Buffer.from([1, u.length]), u, Buffer.from([p.length]), p]));
+        } else request();
+      }
+      if (stage === "login" && buf.length >= 2) {
+        const ok = buf[1] === 0;
+        buf = buf.subarray(2);
+        if (!ok) return fail("login rejected");
+        request();
+      }
+      if (stage === "reply" && buf.length >= 10) {
+        if (buf[1] !== 0) return fail(`reply code ${buf[1]}`);
+        stage = "done";
+        s.off("data", onData);
+        resolve(s);
+      }
+    });
+    setTimeout(() => stage !== "done" && fail("timeout"), 5000);
+  });
+}
+/** One raw request through a SOCKS5 server, returns the raw response. */
+async function viaSocks5(proxyPort, host, port, raw, login) {
+  const s = await socks5Connect(proxyPort, host, port, login);
+  return new Promise((resolve, reject) => {
+    let out = "";
+    s.on("data", (d) => (out += d));
+    s.on("end", () => resolve(out));
+    s.on("error", reject);
+    s.write(raw);
+    setTimeout(() => s.destroy(), 5000);
+  });
+}
 async function browseAs(proxy, shop, user, paths) {
   const body = JSON.stringify({ username: user, password: `${user}123` });
   const login = await viaProxy(proxy, shop, `POST /api/login HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
@@ -1041,21 +1103,55 @@ try {
     });
     await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
     await open("network");
-    await page.getByTestId("upstream-toggle").check();
-    await page.getByLabel("Proxy host").fill("127.0.0.1");
-    await page.getByLabel("Proxy port").fill(String(upstream.address().port));
-    await page.getByLabel("Bypass list").fill("");
+    // One rule without a match covers every host.
+    await page.getByTestId("add-upstream-rule").click();
+    await page.getByLabel("Rule 1 via", { exact: true }).selectOption("http");
+    await page.getByLabel("Rule 1 proxy host").fill("127.0.0.1");
+    await page.getByLabel("Rule 1 proxy port").fill(String(upstream.address().port));
     await page.getByTestId("network-save").click();
     await page.waitForSelector("text=Saved. The proxy");
     await page.screenshot({ path: join(SHOTS, "6e-network.png") });
     const viaUpstream = await search("via-upstream");
     check(viaUpstream.startsWith("HTTP/1.1 200") && upstreamSeen.some((l) => l.includes("q=via-upstream")), "traffic goes through the upstream proxy");
-    await page.getByTestId("upstream-toggle").uncheck();
+    // Per-host rules: 127.0.0.1 goes direct, everything else through the proxy; the first match wins.
+    const resolve = async (host) => {
+      await page.getByLabel("Host to test").fill(host);
+      await page.getByTestId("resolve-go").click();
+      return (await page.getByTestId("resolve-result").textContent()).trim();
+    };
+    await page.getByTestId("add-upstream-rule").click();
+    await page.getByLabel("Rule 1 match").fill("127.0.0.1, *.lab.test");
+    await page.getByLabel("Rule 1 via", { exact: true }).selectOption("direct");
+    check((await page.getByTestId("upstream-rule").count()) === 2, "a rule is added before the catch-all rule");
+    let r = await resolve("a.lab.test");
+    check(r.startsWith("Rule 1 (matched *.lab.test): direct"), `the resolve tool names the matching rule (${r})`);
+    r = await resolve("elsewhere.example");
+    check(r.startsWith("Rule 2 (matches every host): via http://127.0.0.1:"), `other hosts fall to the last rule (${r})`);
+    await page.getByTestId("network-save").click();
+    await page.waitForSelector("text=Saved. The proxy");
+    r = await resolve("127.0.0.1");
+    check(r.startsWith("Rule 1 (matched 127.0.0.1): direct"), "the saved rules resolve the same way");
+    n = upstreamSeen.length;
+    const direct127 = await search("direct-by-rule");
+    check(direct127.startsWith("HTTP/1.1 200") && upstreamSeen.length === n, "a host with its own direct rule bypasses the upstream proxy");
+    // Order matters: moving the catch-all up makes it win (tried on the unsaved draft).
+    await page.getByLabel("Move rule 1 down").click();
+    r = await resolve("127.0.0.1");
+    check(r.startsWith("Rule 1 (matches every host): via http://127.0.0.1:"), "reordering changes which rule wins");
+    await page.getByLabel("Move rule 1 down").click();
+    // A catch-all that is not last is refused on save.
+    await page.getByLabel("Move rule 1 down").click();
+    await page.getByTestId("network-save").click();
+    await page.locator("text=must be the last").first().waitFor({ timeout: 5000 });
+    check(true, "a catch-all rule that is not last is refused with a reason");
+    await page.getByRole("button", { name: "Discard changes" }).click();
+    await page.getByLabel("Delete rule 1").click();
+    await page.getByLabel("Delete rule 1").click();
     await page.getByTestId("network-save").click();
     await page.waitForSelector("text=Saved. The proxy");
     n = upstreamSeen.length;
     await search("direct-again");
-    check(upstreamSeen.length === n, "turning it off connects directly again");
+    check(upstreamSeen.length === n, "deleting the rules connects directly again");
     upstream.close();
   });
 
@@ -1453,6 +1549,60 @@ match:
     check(await rawTo(extra, "GET / HTTP/1.1\r\n\r\n").then(() => false, () => true), "a removed listener stops");
   });
 
+  await section("Capture modes: SOCKS5 and transparent listeners", async () => {
+    await open("setup");
+    // A SOCKS5 listener with a login.
+    const socks = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`127.0.0.1:${socks}`);
+    await page.getByLabel("Listener 1 type").selectOption("socks5");
+    await page.getByLabel("Listener 1 username").fill("scout");
+    await page.getByLabel("Listener 1 password").fill("s3cret");
+    await page.getByTestId("listeners-save").click();
+    await page.locator('[data-testid="listener-status"]', { hasText: "SOCKS5" }).waitFor({ timeout: 5000 });
+    check(true, "a SOCKS5 listener starts without a restart");
+    check((await page.getByLabel("Listener 1 password").inputValue()) === "********", "its password is shown masked");
+    const req = (q) => `GET /api/products/search?q=${q} HTTP/1.1\r\nHost: 127.0.0.1:${shop}\r\nConnection: close\r\n\r\n`;
+    const refused = await viaSocks5(socks, "127.0.0.1", shop, req("no-login")).then(() => "", (e) => e.message);
+    check(refused.includes("no acceptable method"), "a SOCKS5 client without a login is refused");
+    const wrong = await viaSocks5(socks, "127.0.0.1", shop, req("bad-login"), { username: "scout", password: "nope" }).then(() => "", (e) => e.message);
+    check(wrong.includes("login rejected"), "a wrong password is refused");
+    const ok = await viaSocks5(socks, "127.0.0.1", shop, req("via-socks5"), { username: "scout", password: "s3cret" });
+    check(ok.startsWith("HTTP/1.1 200"), "a SOCKS5 client with the login gets the response");
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("via-socks5");
+    await page.locator('[data-testid^="row-"]').first().waitFor({ timeout: 10000 });
+    check(true, "the request tunnelled through SOCKS5 shows in History");
+    await page.screenshot({ path: join(SHOTS, "7d2-socks5.png"), fullPage: true });
+    await open("setup");
+    await page.getByLabel("Delete listener 1").click();
+    await page.getByTestId("listeners-save").click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
+    check(await socks5Connect(socks, "127.0.0.1", shop).then((s) => (s.destroy(), false), () => true), "a removed SOCKS5 listener stops");
+
+    // Transparent mode: Linux only, greyed out elsewhere. Without iptables a client simply connects to the
+    // listener, which then behaves like an ordinary invisible client.
+    const linux = process.platform === "linux";
+    const tp = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`127.0.0.1:${tp}`);
+    const box = page.getByLabel("Listener 1 transparent");
+    check((await box.isEnabled()) === linux, linux ? "the transparent option is available on Linux" : "the transparent option is greyed out here");
+    if (!linux) {
+      check(await page.getByTestId("transparent-unsupported").isVisible(), "and the page says why");
+    } else {
+      await box.check();
+      await page.getByTestId("listeners-save").click();
+      await page.locator('[data-testid="listener-status"]', { hasText: "transparent" }).waitFor({ timeout: 5000 });
+      const plain = await rawTo(tp, `GET /api/products HTTP/1.1\r\nHost: 127.0.0.1:${shop}\r\nConnection: close\r\n\r\n`);
+      check(plain.startsWith("HTTP/1.1 200"), "a transparent listener serves a client that was not redirected");
+      await page.getByLabel("Delete listener 1").click();
+      await page.getByTestId("listeners-save").click();
+      await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
+    }
+    if (!linux) await page.getByLabel("Delete listener 1").click();
+  });
+
   await section("Mobile onboarding (setup page, QR code, devices)", async () => {
     await open("setup");
     // The main proxy listens on loopback only: a phone cannot reach it, and the page says so.
@@ -1720,7 +1870,7 @@ match:
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns"));
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns") && !(e.includes("400 (Bad Request)") && e.endsWith("/api/v1/network)")));
   check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
   if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();

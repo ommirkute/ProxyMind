@@ -1786,6 +1786,13 @@ export interface ListenerConfig {
   enabled?: boolean;
   /** With a redirect: connect to it with TLS even for plain-HTTP clients. */
   force_tls?: boolean;
+  /** `http` (default) or `socks5`. */
+  kind?: ListenerKind;
+  /**
+   * `socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send
+   * that value back to keep the saved password. Max 255 bytes.
+   */
+  password?: string;
   /**
    * Send every request to this host instead of where the client asked
    * (empty: no redirect). The Host header is left as the client sent it.
@@ -1793,12 +1800,31 @@ export interface ListenerConfig {
   redirect_host?: string;
   /** Port to send requests to with `redirect_host`. */
   redirect_port?: number;
+  /**
+   * `http` listeners only, Linux only: take connections that the operating system redirected here
+   * (iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a
+   * device without proxy settings works. See docs/capture.md.
+   */
+  transparent?: boolean;
+  /** `socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes. */
+  username?: string;
 }
+
+/** What a listener speaks. */
+export type ListenerKind =
+  /** An HTTP proxy (also takes clients that don't know about the proxy: see `transparent`). */
+  | "http"
+  /** A SOCKS5 server (CONNECT only, no UDP), with an optional username and password. */
+  | "socks5";
 
 export interface ListenerStatus {
   bind: string;
   error?: string | null;
+  /** `http` or `socks5`. */
+  kind: ListenerKind;
   running: boolean;
+  /** Redirected traffic is accepted (see `ListenerConfig::transparent`). */
+  transparent: boolean;
 }
 
 /** Body of `PUT /proxy/listeners`. */
@@ -1809,11 +1835,14 @@ export interface ListenersBody {
 
 /** Extra proxy listeners and whether each is running in this process. */
 export interface ListenersView {
+  /** The saved listeners; SOCKS5 passwords show as `********`. */
   listeners: ListenerConfig[];
   /** The proxy's main listener (from the command line), if this process runs one. */
   primary: string | null;
   /** Empty when this process doesn't run the proxy. */
   status: ListenerStatus[];
+  /** This build can take traffic the operating system redirected (`transparent` listeners): Linux only. */
+  transparent_supported: boolean;
 }
 
 /**
@@ -2048,8 +2077,16 @@ export interface NetConfig {
    * Nothing inside such a tunnel is recorded.
    */
   tls_passthrough?: string[];
-  /** Send traffic through this proxy (None: connect directly). */
+  /**
+   * The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that
+   * goes through the proxy, after one that sends the `bypass` hosts directly) and is never returned.
+   */
   upstream?: UpstreamProxy | null;
+  /**
+   * Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
+   * that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
+   */
+  upstream_rules?: UpstreamRule[];
 }
 
 export interface NewAttackPath {
@@ -3627,6 +3664,53 @@ export interface UpstreamProxy {
   remote_dns?: boolean;
   /** Optional login (Basic for HTTP proxies, username/password for SOCKS5). */
   username?: string;
+}
+
+/** Answer of `POST /network/upstream/resolve`: how a host would be reached. */
+export interface UpstreamResolution {
+  /** Connected directly (the rule says `direct`, or no rule matched). */
+  direct: boolean;
+  /** The match pattern that covered it (null for a rule with an empty `match` or when no rule matched). */
+  pattern: string | null;
+  /** The rule lets the proxy resolve names. */
+  remote_dns: boolean;
+  /** The first rule that covers the host (0 is the first), or null when none does. */
+  rule_index: number | null;
+  /** What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login). */
+  via: string;
+}
+
+/** Body of `POST /network/upstream/resolve`. */
+export interface UpstreamResolveRequest {
+  /** The target host: a name or an IP address. */
+  host?: string;
+  /** Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules. */
+  rules?: UpstreamRule[] | null;
+}
+
+/** One entry of the ordered upstream list: which targets it covers and how to reach them. */
+export interface UpstreamRule {
+  /**
+   * Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers
+   * `example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`
+   * or `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:
+   * covers everything, which only makes sense for the last rule.
+   */
+  match?: string[];
+  password?: string;
+  /**
+   * Let the proxy resolve target names ("socks5h" for SOCKS5; for HTTP proxies, CONNECT names the host).
+   * Off by default so the proxy is asked for the address ProxyMind resolved and checked against the denied
+   * networks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.
+   */
+  remote_dns?: boolean;
+  /**
+   * Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like
+   * other secrets, hidden when settings are shown (`********`) and never logged.
+   */
+  username?: string;
+  /** `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`. */
+  via?: string;
 }
 
 /**

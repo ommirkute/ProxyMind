@@ -1,6 +1,6 @@
-//! Network settings for outgoing connections: an upstream proxy (HTTP or
-//! SOCKS5), client certificates for mutual TLS, hostname overrides, and
-//! hosts whose TLS the proxy passes through without interception.
+//! Network settings for outgoing connections: an ordered list of upstream rules (direct, an HTTP proxy or a SOCKS5
+//! proxy, chosen per host), client certificates for mutual TLS, hostname overrides, and hosts whose TLS the proxy
+//! passes through without interception.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -15,7 +15,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetConfig {
-    /// Send traffic through this proxy (None: connect directly).
+    /// Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
+    /// that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
+    pub upstream_rules: Vec<UpstreamRule>,
+    /// The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that
+    /// goes through the proxy, after one that sends the `bypass` hosts directly) and is never returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream: Option<UpstreamProxy>,
     /// Client certificates, by host. The first matching entry is used.
     pub client_certs: Vec<ClientCert>,
@@ -64,6 +69,181 @@ pub struct UpstreamProxy {
     pub bypass: Vec<String>,
 }
 
+/// How many upstream rules a project can have.
+pub const MAX_UPSTREAM_RULES: usize = 64;
+/// How many match patterns one upstream rule can have.
+pub const MAX_RULE_PATTERNS: usize = 100;
+
+/// One entry of the ordered upstream list: which targets it covers and how to reach them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamRule {
+    /// Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers
+    /// `example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`
+    /// or `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:
+    /// covers everything, which only makes sense for the last rule.
+    #[serde(rename = "match")]
+    pub matches: Vec<String>,
+    /// `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.
+    pub via: String,
+    /// Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like
+    /// other secrets, hidden when settings are shown (`********`) and never logged.
+    pub username: String,
+    pub password: String,
+    /// Let the proxy resolve target names ("socks5h" for SOCKS5; for HTTP proxies, CONNECT names the host).
+    /// Off by default so the proxy is asked for the address ProxyMind resolved and checked against the denied
+    /// networks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.
+    pub remote_dns: bool,
+}
+
+/// What `via` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Via {
+    Direct,
+    Proxy { kind: ProxyKind, host: String, port: u16 },
+}
+
+/// Reads a `via` value: `direct`, `http://host:port` or `socks5://host:port`.
+pub fn parse_via(via: &str) -> Result<Via> {
+    let v = via.trim();
+    if v.eq_ignore_ascii_case("direct") {
+        return Ok(Via::Direct);
+    }
+    let (kind, rest) = if let Some(r) = v.strip_prefix("http://") {
+        (ProxyKind::Http, r)
+    } else if let Some(r) = v.strip_prefix("socks5://") {
+        (ProxyKind::Socks5, r)
+    } else {
+        bail!("`via` must be direct, http://host:port or socks5://host:port (got {v:?})");
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    ensure!(
+        !rest.contains(['@', '/', '?', '#']),
+        "`via` takes no login or path: put the login in the username and password fields"
+    );
+    let (host, port) = pm_http::split_host_port(rest, 0).ok_or_else(|| anyhow!("bad host in `via` {v:?}"))?;
+    ensure!(!host.is_empty() && port != 0, "`via` {v:?} needs a host and a port");
+    Ok(Via::Proxy { kind, host, port })
+}
+
+fn via_text(kind: ProxyKind, host: &str, port: u16) -> String {
+    let scheme = if kind == ProxyKind::Socks5 { "socks5" } else { "http" };
+    if host.contains(':') { format!("{scheme}://[{host}]:{port}") } else { format!("{scheme}://{host}:{port}") }
+}
+
+/// Whether one match pattern covers a host (a name or an IP address, with or without brackets).
+pub fn pattern_matches(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.trim();
+    let host = host.trim().trim_matches(['[', ']']);
+    if let Some((net, bits)) = parse_cidr(pattern) {
+        return host.parse::<IpAddr>().is_ok_and(|ip| cidr_contains(net, bits, ip.to_canonical()));
+    }
+    if pattern.starts_with("*.") || !pattern.contains(['*', '?']) {
+        return host_matches(pattern, host);
+    }
+    glob(pattern.to_ascii_lowercase().as_bytes(), host.trim_end_matches('.').to_ascii_lowercase().as_bytes())
+}
+
+/// `*` (any run) and `?` (one byte) wildcards.
+fn glob(p: &[u8], t: &[u8]) -> bool {
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) && p[pi] != b'*' {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn parse_cidr(p: &str) -> Option<(IpAddr, u8)> {
+    let (ip, bits) = p.split_once('/')?;
+    let ip: IpAddr = ip.trim().trim_matches(['[', ']']).parse().ok()?;
+    let bits: u8 = bits.trim().parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    (bits <= max).then_some((ip.to_canonical(), bits))
+}
+
+fn cidr_contains(net: IpAddr, bits: u8, ip: IpAddr) -> bool {
+    let (a, b): (u128, u128) = match (net, ip) {
+        (IpAddr::V4(n), IpAddr::V4(i)) => (u128::from(u32::from(n)) << 96, u128::from(u32::from(i)) << 96),
+        (IpAddr::V6(n), IpAddr::V6(i)) => (u128::from(n), u128::from(i)),
+        _ => return false,
+    };
+    if bits == 0 {
+        return true;
+    }
+    let mask = u128::MAX << (128 - u32::from(bits));
+    a & mask == b & mask
+}
+
+/// A rule pattern: a name pattern (letters, digits, `-`, `.`, `_`, `:`, `*`, `?`) or a CIDR range.
+fn valid_rule_pattern(p: &str) -> bool {
+    let p = p.trim();
+    if p.contains('/') {
+        return parse_cidr(p).is_some();
+    }
+    !p.is_empty()
+        && p.len() <= 253
+        && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | '*' | '?'))
+}
+
+impl UpstreamRule {
+    /// The proxy this rule uses, in the form the sender works with; `None` for `direct`.
+    fn proxy(&self) -> Option<UpstreamProxy> {
+        match parse_via(&self.via).ok()? {
+            Via::Direct => None,
+            Via::Proxy { kind, host, port } => Some(UpstreamProxy {
+                kind,
+                host,
+                port,
+                username: self.username.clone(),
+                password: self.password.clone(),
+                remote_dns: self.remote_dns,
+                bypass: vec![],
+            }),
+        }
+    }
+
+    /// The first pattern that covers the host (`None` when none does; an empty `match` covers everything).
+    pub fn covering_pattern(&self, host: &str) -> Option<Option<&str>> {
+        if self.matches.is_empty() {
+            return Some(None);
+        }
+        self.matches.iter().find(|p| pattern_matches(p, host)).map(|p| Some(p.as_str()))
+    }
+
+    /// Checks one rule (not its place in the list).
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.matches.len() <= MAX_RULE_PATTERNS, "at most {MAX_RULE_PATTERNS} match patterns per rule");
+        for p in &self.matches {
+            ensure!(valid_rule_pattern(p), "bad match pattern {p:?}: use a host name, a * pattern or a CIDR range");
+        }
+        let via = parse_via(&self.via)?;
+        ensure!(self.username.len() <= 255 && self.password.len() <= 255, "proxy username and password: 255 bytes max");
+        if via == Via::Direct {
+            ensure!(
+                self.username.is_empty() && self.password.is_empty() && !self.remote_dns,
+                "a direct rule has no login and no remote DNS"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientCert {
@@ -96,10 +276,6 @@ fn valid_pattern(p: &str) -> bool {
 }
 
 impl UpstreamProxy {
-    pub fn applies_to(&self, host: &str) -> bool {
-        !self.bypass.iter().any(|b| host_matches(b, host))
-    }
-
     fn basic_auth(&self) -> Option<String> {
         (!self.username.is_empty())
             .then(|| format!("Basic {}", pm_core::base64(format!("{}:{}", self.username, self.password).as_bytes())))
@@ -107,11 +283,39 @@ impl UpstreamProxy {
 }
 
 impl NetConfig {
+    /// Folds the older single `upstream` into `upstream_rules`. Fails when both are given.
+    pub fn normalized(mut self) -> Result<Self> {
+        let Some(u) = self.upstream.take() else { return Ok(self) };
+        ensure!(self.upstream_rules.is_empty(), "give either `upstream` (older form) or `upstream_rules`, not both");
+        ensure!(!u.host.trim().is_empty() && u.port != 0, "the upstream proxy needs a host and port");
+        let bypass: Vec<String> = u.bypass.iter().filter(|b| !b.trim().is_empty()).cloned().collect();
+        if !bypass.is_empty() {
+            self.upstream_rules.push(UpstreamRule { matches: bypass, via: "direct".into(), ..Default::default() });
+        }
+        self.upstream_rules.push(UpstreamRule {
+            matches: vec![],
+            via: via_text(u.kind, u.host.trim(), u.port),
+            username: u.username,
+            password: u.password,
+            remote_dns: u.remote_dns,
+        });
+        Ok(self)
+    }
+
     /// Checks the settings and loads the certificates.
     pub fn validate(&self) -> Result<()> {
         if let Some(u) = &self.upstream {
             ensure!(!u.host.trim().is_empty() && u.port != 0, "the upstream proxy needs a host and port");
             ensure!(u.username.len() <= 255 && u.password.len() <= 255, "proxy username and password: 255 bytes max");
+        }
+        ensure!(self.upstream_rules.len() <= MAX_UPSTREAM_RULES, "at most {MAX_UPSTREAM_RULES} upstream rules");
+        for (i, r) in self.upstream_rules.iter().enumerate() {
+            r.validate().with_context(|| format!("upstream rule {}", i + 1))?;
+            ensure!(
+                !r.matches.is_empty() || i + 1 == self.upstream_rules.len(),
+                "upstream rule {}: a rule with no match covers every host, so it must be the last",
+                i + 1
+            );
         }
         for c in &self.client_certs {
             ensure!(!c.host.trim().is_empty(), "each client certificate needs a host pattern");
@@ -128,7 +332,7 @@ impl NetConfig {
         Ok(())
     }
 
-    /// The settings with the proxy password hidden, for logs and display.
+    /// The settings with proxy passwords hidden, for logs and display.
     pub fn masked(&self) -> Self {
         let mut c = self.clone();
         if let Some(u) = c.upstream.as_mut()
@@ -136,7 +340,21 @@ impl NetConfig {
         {
             u.password = "********".into();
         }
+        for r in &mut c.upstream_rules {
+            if !r.password.is_empty() {
+                r.password = "********".into();
+            }
+        }
         c
+    }
+
+    /// The rule that decides how to reach `host`: its index and the pattern that matched (`None` pattern: an
+    /// empty `match`). `None` when no rule covers the host, which means direct.
+    pub fn resolve(&self, host: &str) -> Option<(usize, Option<String>)> {
+        self.upstream_rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| r.covering_pattern(host).map(|p| (i, p.map(str::to_string))))
     }
 }
 
@@ -150,6 +368,8 @@ fn load_cert(c: &ClientCert, verify: bool) -> Result<TlsConnector> {
 
 struct Loaded {
     config: NetConfig,
+    /// The proxy of each upstream rule (`None`: direct), in order.
+    proxies: Vec<Option<UpstreamProxy>>,
     /// (host pattern, connector without and with upstream verification).
     certs: Vec<(String, TlsConnector, TlsConnector)>,
 }
@@ -160,7 +380,7 @@ pub struct Network(Arc<RwLock<Arc<Loaded>>>);
 
 impl Default for Network {
     fn default() -> Self {
-        Self(Arc::new(RwLock::new(Arc::new(Loaded { config: NetConfig::default(), certs: vec![] }))))
+        Self(Arc::new(RwLock::new(Arc::new(Loaded { config: NetConfig::default(), proxies: vec![], certs: vec![] }))))
     }
 }
 
@@ -171,13 +391,15 @@ impl Network {
 
     /// Applies new settings; on error the old ones stay in place.
     pub fn set(&self, config: NetConfig) -> Result<()> {
+        let config = config.normalized()?;
         config.validate()?;
         let certs = config
             .client_certs
             .iter()
             .map(|c| Ok((c.host.clone(), load_cert(c, false)?, load_cert(c, true)?)))
             .collect::<Result<Vec<_>>>()?;
-        *self.0.write() = Arc::new(Loaded { config, certs });
+        let proxies = config.upstream_rules.iter().map(UpstreamRule::proxy).collect();
+        *self.0.write() = Arc::new(Loaded { config, proxies, certs });
         Ok(())
     }
 
@@ -185,8 +407,16 @@ impl Network {
         self.0.read().config.clone()
     }
 
+    /// The proxy `host` is reached through (`None`: directly), from the first upstream rule that covers it.
     pub(crate) fn upstream_for(&self, host: &str) -> Option<UpstreamProxy> {
-        self.0.read().config.upstream.as_ref().filter(|u| u.applies_to(host)).cloned()
+        let l = self.0.read();
+        let (i, _) = l.config.resolve(host)?;
+        l.proxies.get(i).cloned().flatten()
+    }
+
+    /// Which upstream rule covers `host` (see [`NetConfig::resolve`]).
+    pub fn resolve(&self, host: &str) -> Option<(usize, Option<String>)> {
+        self.0.read().config.resolve(host)
     }
 
     /// The fixed address for a host name, if an override matches.

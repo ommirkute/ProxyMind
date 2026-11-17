@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **SOCKS5, transparent mode and per-host upstream proxies.** A listener can now be a **SOCKS5 server** (Setup,
+  "3. Proxy listeners": type SOCKS5, optionally with a username and password). curl `--socks5-hostname`, browsers and
+  Android SOCKS apps can use it; their web traffic, including HTTPS and HTTP/2, is recorded and changed by your rules,
+  hooks and the intercept queue just like proxy traffic, and other protocols (SSH, databases) pass through untouched and
+  unrecorded. Only CONNECT is served: BIND and UDP are refused. On Linux an HTTP listener can be **transparent**: with
+  an iptables or nftables redirect, a device or program with no proxy settings is sent through ProxyMind to wherever it
+  was going (HTTPS by its server name, HTTP by its Host header); the option is greyed out on macOS and Windows, which
+  are not supported yet. The single upstream proxy became an ordered list of **upstream rules** (Settings, Network):
+  per host name, wildcard or CIDR range, go direct or through an HTTP or SOCKS5 proxy, each with its own login; the
+  first match wins and the page can tell you which rule a host would use. Older projects load unchanged. As before,
+  ProxyMind connects to the address it checked against the denied networks unless a rule lets the proxy resolve names.
+  New guide: [docs/capture.md](docs/capture.md) with the iptables and nftables commands, SOCKS5 client examples and
+  upstream chains.
 - **Plugins can change traffic in flight (plugin API 2).** A plugin that says `api: 2` in its manifest lists the
   permissions it needs (`hooks.request`, `hooks.response`, `checks.passive`, `checks.active`, `panels`,
   `history.read`) and may only use those. A new plugin, or an update that asks for different permissions, stays off

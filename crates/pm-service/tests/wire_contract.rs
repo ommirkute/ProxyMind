@@ -275,7 +275,7 @@ fn api_types_wire_format() {
     check::<ListenersBody>(
         &[(
             r#"{"listeners":[{"bind":"127.0.0.1:1"}]}"#,
-            r#"{"listeners":[{"bind":"127.0.0.1:1","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]}"#,
+            r#"{"listeners":[{"bind":"127.0.0.1:1","kind":"http","transparent":false,"username":"","password":"","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]}"#,
         )],
         &["{}", r#"{"listeners":[{"nope":1}]}"#],
     );

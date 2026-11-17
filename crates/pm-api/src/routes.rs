@@ -15,8 +15,8 @@ use pm_service::api_types::{
     CoverageQuery, CurlBody, EngageExchange, ExchangeQuery, ExplainBody, ForwardBody, FromQuery, HostQuery, KeyBody,
     LimitQuery, ListenBody, ListenersBody, OrganizerAdd, OrganizerQuery, PackQuery, PanelQuery, PayloadBody, PluginSet,
     ProbesQuery, ReconDns, ReconWayback, RecordLoginBody, ReportQuery, RoeBody, RulesBody, ScanQuery, SendBody,
-    SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet, WsHistoryQuery,
-    WsQuery,
+    SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet,
+    UpstreamResolveRequest, WsHistoryQuery, WsQuery,
 };
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
@@ -224,6 +224,7 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
+        .route("/network/upstream/resolve", post(network_resolve))
         .route("/proxy/listeners", get(listeners_get).put(listeners_put))
         .route("/history/recording", get(recording_get).put(recording_put))
         .route("/devices", get(devices_get))
@@ -1351,6 +1352,10 @@ async fn ai_scan_prompt(State(st): State<AppState>) -> ApiResult {
 
 async fn network_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.network_get()?)
+}
+
+async fn network_resolve(State(st): State<AppState>, Json(b): Json<UpstreamResolveRequest>) -> ApiResult {
+    ok(st.service.network_resolve(&b)?)
 }
 
 async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {

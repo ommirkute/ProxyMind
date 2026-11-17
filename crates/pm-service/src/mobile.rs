@@ -23,6 +23,7 @@ impl Service {
         let mut binds: Vec<SocketAddr> = info.addr.parse().ok().into_iter().collect();
         for st in self.listeners_get()?.status {
             if st.running
+                && st.kind == pm_proxy::ListenerKind::Http
                 && let Ok(a) = st.bind.parse()
                 && !binds.contains(&a)
             {

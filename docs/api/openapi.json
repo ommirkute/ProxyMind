@@ -6054,6 +6054,16 @@
             "description": "With a redirect: connect to it with TLS even for plain-HTTP clients.",
             "type": "boolean"
           },
+          "kind": {
+            "$ref": "#/components/schemas/ListenerKind",
+            "default": "http",
+            "description": "`http` (default) or `socks5`."
+          },
+          "password": {
+            "default": "",
+            "description": "`socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send\nthat value back to keep the saved password. Max 255 bytes.",
+            "type": "string"
+          },
           "redirect_host": {
             "default": "",
             "description": "Send every request to this host instead of where the client asked\n(empty: no redirect). The Host header is left as the client sent it.",
@@ -6066,9 +6076,34 @@
             "maximum": 65535,
             "minimum": 0,
             "type": "integer"
+          },
+          "transparent": {
+            "default": false,
+            "description": "`http` listeners only, Linux only: take connections that the operating system redirected here\n(iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a\ndevice without proxy settings works. See docs/capture.md.",
+            "type": "boolean"
+          },
+          "username": {
+            "default": "",
+            "description": "`socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes.",
+            "type": "string"
           }
         },
         "type": "object"
+      },
+      "ListenerKind": {
+        "description": "What a listener speaks.",
+        "oneOf": [
+          {
+            "const": "http",
+            "description": "An HTTP proxy (also takes clients that don't know about the proxy: see `transparent`).",
+            "type": "string"
+          },
+          {
+            "const": "socks5",
+            "description": "A SOCKS5 server (CONNECT only, no UDP), with an optional username and password.",
+            "type": "string"
+          }
+        ]
       },
       "ListenerStatus": {
         "properties": {
@@ -6081,12 +6116,22 @@
               "null"
             ]
           },
+          "kind": {
+            "$ref": "#/components/schemas/ListenerKind",
+            "description": "`http` or `socks5`."
+          },
           "running": {
+            "type": "boolean"
+          },
+          "transparent": {
+            "description": "Redirected traffic is accepted (see `ListenerConfig::transparent`).",
             "type": "boolean"
           }
         },
         "required": [
           "bind",
+          "kind",
+          "transparent",
           "running"
         ],
         "type": "object"
@@ -6111,6 +6156,7 @@
         "description": "Extra proxy listeners and whether each is running in this process.",
         "properties": {
           "listeners": {
+            "description": "The saved listeners; SOCKS5 passwords show as `********`.",
             "items": {
               "$ref": "#/components/schemas/ListenerConfig"
             },
@@ -6129,12 +6175,17 @@
               "$ref": "#/components/schemas/ListenerStatus"
             },
             "type": "array"
+          },
+          "transparent_supported": {
+            "description": "This build can take traffic the operating system redirected (`transparent` listeners): Linux only.",
+            "type": "boolean"
           }
         },
         "required": [
           "primary",
           "listeners",
-          "status"
+          "status",
+          "transparent_supported"
         ],
         "type": "object"
       },
@@ -6897,8 +6948,15 @@
                 "type": "null"
               }
             ],
-            "default": null,
-            "description": "Send traffic through this proxy (None: connect directly)."
+            "description": "The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that\ngoes through the proxy, after one that sends the `bypass` hosts directly) and is never returned."
+          },
+          "upstream_rules": {
+            "default": [],
+            "description": "Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host\nthat fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamRule"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -11865,6 +11923,104 @@
           "username": {
             "default": "",
             "description": "Optional login (Basic for HTTP proxies, username/password for SOCKS5).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UpstreamResolution": {
+        "description": "Answer of `POST /network/upstream/resolve`: how a host would be reached.",
+        "properties": {
+          "direct": {
+            "description": "Connected directly (the rule says `direct`, or no rule matched).",
+            "type": "boolean"
+          },
+          "pattern": {
+            "description": "The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_dns": {
+            "description": "The rule lets the proxy resolve names.",
+            "type": "boolean"
+          },
+          "rule_index": {
+            "description": "The first rule that covers the host (0 is the first), or null when none does.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "via": {
+            "description": "What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_index",
+          "pattern",
+          "direct",
+          "via",
+          "remote_dns"
+        ],
+        "type": "object"
+      },
+      "UpstreamResolveRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /network/upstream/resolve`.",
+        "properties": {
+          "host": {
+            "default": "",
+            "description": "The target host: a name or an IP address.",
+            "type": "string"
+          },
+          "rules": {
+            "default": null,
+            "description": "Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamRule"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpstreamRule": {
+        "additionalProperties": false,
+        "description": "One entry of the ordered upstream list: which targets it covers and how to reach them.",
+        "properties": {
+          "match": {
+            "default": [],
+            "description": "Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers\n`example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`\nor `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:\ncovers everything, which only makes sense for the last rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "password": {
+            "default": "",
+            "type": "string"
+          },
+          "remote_dns": {
+            "default": false,
+            "description": "Let the proxy resolve target names (\"socks5h\" for SOCKS5; for HTTP proxies, CONNECT names the host).\nOff by default so the proxy is asked for the address ProxyMind resolved and checked against the denied\nnetworks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.",
+            "type": "boolean"
+          },
+          "username": {
+            "default": "",
+            "description": "Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like\nother secrets, hidden when settings are shown (`********`) and never logged.",
+            "type": "string"
+          },
+          "via": {
+            "default": "",
+            "description": "`direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.",
             "type": "string"
           }
         },
@@ -16919,7 +17075,7 @@
             "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
           }
         },
-        "summary": "Outgoing network settings (upstream proxy, client certificates, host overrides)."
+        "summary": "Outgoing network settings (ordered upstream rules, client certificates, host overrides). Proxy passwords show as `********`."
       },
       "put": {
         "operationId": "network_put",
@@ -16956,6 +17112,44 @@
           }
         },
         "summary": "Change the outgoing network settings."
+      }
+    },
+    "/api/v1/network/upstream/resolve": {
+      "post": {
+        "operationId": "network_resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpstreamResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamResolution"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Which upstream rule decides how a host is reached (saved rules, or a draft passed in `rules`). Sends nothing."
       }
     },
     "/api/v1/openapi": {

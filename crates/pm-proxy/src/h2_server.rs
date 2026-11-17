@@ -15,7 +15,7 @@ use pm_http::h2text::{H2Request, h2_response, render_h2_request};
 use pm_replay::{Endpoint, Io};
 use pm_store::NewExchange;
 
-use crate::{Ctx, HOOK_MAX, HookKind, HookTarget, Proxy, ResponseEdit, SelfAddr, hook_changes, message_content_type};
+use crate::{Ctx, HOOK_MAX, HookKind, HookTarget, Proxy, ResponseEdit, hook_changes, message_content_type};
 
 /// Largest request body accepted from the browser over HTTP/2.
 const MAX_BODY: usize = 64 << 20;
@@ -28,7 +28,6 @@ impl Proxy {
         port: u16,
         ctx: Ctx,
     ) -> Result<()> {
-        let (me, peer) = (ctx.me, ctx.peer);
         // Each stream may buffer a body: bound how many run at once.
         let mut conn = h2::server::Builder::new()
             .max_concurrent_streams(128)
@@ -39,8 +38,9 @@ impl Proxy {
             let (req, respond) = next.context("HTTP/2 stream from client")?;
             let this = self.clone();
             let host = host.clone();
+            let ctx = ctx.clone();
             tokio::spawn(async move {
-                if let Err(e) = this.h2_stream(req, respond, &host, port, me, peer).await {
+                if let Err(e) = this.h2_stream(req, respond, &host, port, ctx).await {
                     tracing::debug!(error = %e, "HTTP/2 stream ended with error");
                 }
             });
@@ -54,9 +54,9 @@ impl Proxy {
         mut respond: SendResponse<Bytes>,
         host: &str,
         port: u16,
-        me: Option<SelfAddr>,
-        peer: Option<std::net::IpAddr>,
+        ctx: Ctx,
     ) -> Result<()> {
+        let (me, peer, pin) = (ctx.me, ctx.peer, ctx.pin());
         let (parts, mut body) = req.into_parts();
         // Answer 100 Continue ourselves: the body goes upstream only once
         // it has arrived whole.
@@ -97,9 +97,12 @@ impl Proxy {
         let guard = self.loop_guard(&me, host, port);
         let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
         if pm_http::h2text::is_http2_request(&request) && !self.buffers_response("https", host, port, &path) {
-            return self.h2_streamed(respond, host, port, (request, edits), method, path, check, started, peer).await;
+            return self
+                .h2_streamed(respond, host, port, (request, edits), method, path, check, started, (peer, pin))
+                .await;
         }
-        let result = self.sender.send(&Endpoint::new("https", host, port), &request, &method, check).await;
+        let ep = Endpoint::new("https", host, port).with_pin(pin);
+        let result = self.sender.send(&ep, &request, &method, check).await;
         let mut record = NewExchange {
             client_addr: peer.map(|ip| ip.to_string()),
             ts_ms: now_ms(),
@@ -188,7 +191,7 @@ impl Proxy {
         path: String,
         check: Option<pm_replay::AddrCheck<'_>>,
         started: Instant,
-        peer: Option<std::net::IpAddr>,
+        (peer, pin): (Option<std::net::IpAddr>, Option<std::net::IpAddr>),
     ) -> Result<()> {
         let mut record = NewExchange {
             client_addr: peer.map(|ip| ip.to_string()),
@@ -210,7 +213,7 @@ impl Proxy {
             ..Default::default()
         };
         edits.note_on(&mut record);
-        let ep = Endpoint::new("https", host, port);
+        let ep = Endpoint::new("https", host, port).with_pin(pin);
         let mut r = match self.sender.send_h2_start(&ep, &record.request, &method, check, crate::HEAD_TIMEOUT).await {
             Ok(r) => r,
             Err(e) => {

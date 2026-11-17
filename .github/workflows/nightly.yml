@@ -37,6 +37,7 @@ jobs:
           - har_curl
           - graphql_schema
           - protobuf_decode
+          - socks5_handshake
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master

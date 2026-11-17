@@ -106,3 +106,10 @@ path = "fuzz_targets/protobuf_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "socks5_handshake"
+path = "fuzz_targets/socks5_handshake.rs"
+test = false
+doc = false
+bench = false

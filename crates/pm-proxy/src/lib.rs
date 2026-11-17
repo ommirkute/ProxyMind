@@ -9,12 +9,14 @@
 //! first: a response rule or the intercept queue. History keeps the first
 //! [`RECORD_CAP`] bytes of a response.
 
+mod capture;
 mod h2_server;
 pub mod intercept;
 pub mod listeners;
 pub mod presets;
 pub mod rewrite;
 pub mod setup_page;
+pub mod transparent;
 mod ws_relay;
 
 use std::net::SocketAddr;
@@ -30,15 +32,17 @@ use pm_plugin::hooks::{
 use pm_plugin::v2::HookKind;
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
+pub use capture::{HANDSHAKE_TIMEOUT as SOCKS5_HANDSHAKE_TIMEOUT, RawStats, SocksLogin};
 use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings, QueueChange, QueueObserver};
-pub use listeners::{ListenerConfig, ListenerStatus, Listeners, Redirect};
+pub use listeners::{ListenerConfig, ListenerKind, ListenerStatus, Listeners, Redirect};
 pub use pm_store::NewExchange as RecordedExchange;
 use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, WsTarget};
 use pm_tls::{CertAuthority, TlsAcceptor};
 pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+pub use transparent::{OriginalDst, SystemOriginalDst};
 
 /// How long the proxy waits for a response head (long polling can be slow).
 pub(crate) const HEAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -325,6 +329,18 @@ pub(crate) struct Ctx {
     /// The IP address of the client on this connection (no port).
     peer: Option<std::net::IpAddr>,
     redirect: Option<Redirect>,
+    /// Where the client was really going, when the connection was redirected by the OS (transparent mode) or a
+    /// SOCKS5 request gave an IP address: requests are named by their Host header or TLS server name, but still
+    /// connect to this address and port.
+    orig: Option<SocketAddr>,
+    pin: Option<std::net::IpAddr>,
+}
+
+impl Ctx {
+    /// The address to connect to instead of resolving the target's name (not when a redirect picks the target).
+    pub(crate) fn pin(&self) -> Option<std::net::IpAddr> {
+        if self.redirect.is_some() { None } else { self.pin }
+    }
 }
 
 const DROPPED_MSG: &str = "Request dropped in ProxyMind's intercept queue.";
@@ -340,6 +356,8 @@ pub struct Proxy {
     sender: Sender,
     recorder: Recorder,
     hooks: Hooks,
+    /// Non-HTTP streams relayed without recording (SOCKS5 and transparent capture).
+    raw: capture::RawCounters,
 }
 
 /// Optional user controls over live traffic.
@@ -372,7 +390,7 @@ impl Proxy {
         if let Some(n) = &hooks.network {
             sender = sender.with_network(n.clone());
         }
-        Ok(Arc::new(Self { ca, sender, recorder, hooks }))
+        Ok(Arc::new(Self { ca, sender, recorder, hooks, raw: capture::RawCounters::default() }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -387,20 +405,10 @@ impl Proxy {
         listener: TcpListener,
         redirect: Arc<parking_lot::RwLock<Option<Redirect>>>,
     ) -> Result<()> {
-        loop {
-            let (tcp, peer) = listener.accept().await?;
-            let this = self.clone();
-            let ctx =
-                Ctx { me: SelfAddr::of(&tcp), peer: Some(peer.ip().to_canonical()), redirect: redirect.read().clone() };
-            tokio::spawn(async move {
-                if let Err(e) = this.handle_client(tcp, ctx).await {
-                    tracing::debug!(%peer, error = %e, "client connection ended with error");
-                }
-            });
-        }
+        self.run_mode(listener, capture::Accept::Http, redirect).await
     }
 
-    async fn handle_client(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
+    pub(crate) async fn handle_client(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
         tcp.set_nodelay(true)?;
         // Transparent mode: a TLS handshake straight away (no CONNECT) from a
         // client sent here by DNS or a port redirect.
@@ -435,38 +443,29 @@ impl Proxy {
         if tcp.peek(&mut first).await? == 0 {
             return Ok(());
         }
-        if first[0] == 0x16 {
-            let tls =
-                TlsAcceptor::from(self.tls_config(&host)?).accept(tcp).await.context("TLS handshake with client")?;
-            if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-                let (host, port) = ctx.redirect.as_ref().map_or((host, port), |r| (r.host.clone(), r.port));
-                return self.serve_h2(tls, host, port, ctx).await;
-            }
-            self.serve_http(Conn::new(tls), "https", Some((host, port)), None, ctx).await
-        } else {
-            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None, ctx).await
-        }
+        self.intercept_tunnel(tcp, host, port, ctx, first[0] == 0x16).await
     }
 
     /// Whether TLS to this host is passed through without interception.
-    fn passthrough(&self, host: &str) -> bool {
+    pub(crate) fn passthrough(&self, host: &str) -> bool {
         // ProxyMind's own setup page is never tunnelled anywhere.
         !setup_page::is_setup_host(host) && self.sender.network().passthrough(host)
     }
 
     /// Passes bytes both ways between the client and `host:port`, untouched
     /// and unrecorded (TLS pass-through).
-    async fn tunnel(&self, mut client: TcpStream, host: &str, port: u16, ctx: &Ctx) -> Result<()> {
+    pub(crate) async fn tunnel(&self, mut client: TcpStream, host: &str, port: u16, ctx: &Ctx) -> Result<()> {
         let guard = self.loop_guard(&ctx.me, host, port);
         let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
-        let mut upstream = self.sender.connect_tunnel(host, port, check).await?;
+        let ep = Endpoint::new("tcp", host, port).with_pin(ctx.pin());
+        let mut upstream = self.sender.connect_tunnel_to(&ep, check).await?;
         tracing::debug!(host, port, "TLS pass-through");
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         Ok(())
     }
 
     /// The certificate (and ALPN) ProxyMind presents for a host.
-    fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
+    pub(crate) fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
         let mut cfg = self.ca.server_config(host)?;
         // The setup page is answered by the HTTP/1.1 path, which is where it is looked for.
         if self.hooks.http2 && !setup_page::is_setup_host(host) {
@@ -480,30 +479,35 @@ impl Proxy {
     /// TLS without CONNECT: the server name (SNI) picks the certificate;
     /// requests go to their Host header (default port 443).
     async fn serve_transparent_tls(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
+        // A redirected connection knows its port; otherwise requests go to the default HTTPS port.
+        let default_port = ctx.orig.map_or(443, |o| o.port());
         // Peek at the ClientHello for pass-through hosts (the bytes stay
         // unread for the tunnel or the TLS acceptor).
         if !self.sender.network().config().tls_passthrough.is_empty()
             && let Some(sni) = peek_sni(&tcp).await
             && self.passthrough(&sni)
         {
-            let (host, port) = ctx.redirect.as_ref().map_or((sni, 443), |r| (r.host.clone(), r.port));
+            let (host, port) = ctx.redirect.as_ref().map_or((sni, default_port), |r| (r.host.clone(), r.port));
             return self.tunnel(tcp, &host, port, &ctx).await;
         }
         let start =
             pm_tls::LazyConfigAcceptor::new(pm_tls::Acceptor::default(), tcp).await.context("reading the TLS hello")?;
-        let Some(sni) = start.client_hello().server_name().map(|n| n.to_string()) else {
-            bail!("transparent HTTPS needs the client to send a server name (SNI)");
+        let sni = match (start.client_hello().server_name(), ctx.orig) {
+            (Some(n), _) => n.to_string(),
+            // No server name: a redirected connection still says where it was going.
+            (None, Some(o)) => o.ip().to_string(),
+            (None, None) => bail!("transparent HTTPS needs the client to send a server name (SNI)"),
         };
         let tls = start.into_stream(self.tls_config(&sni)?).await.context("TLS handshake with client")?;
         if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-            let (host, port) = ctx.redirect.as_ref().map_or((sni, 443), |r| (r.host.clone(), r.port));
+            let (host, port) = ctx.redirect.as_ref().map_or((sni, default_port), |r| (r.host.clone(), r.port));
             return self.serve_h2(tls, host, port, ctx).await;
         }
         self.serve_http(Conn::new(tls), "https", None, None, ctx).await
     }
 
     /// Checks resolved addresses against ProxyMind's own (direct connections only).
-    fn loop_guard<'a>(
+    pub(crate) fn loop_guard<'a>(
         &self,
         me: &'a Option<SelfAddr>,
         host: &str,
@@ -664,7 +668,9 @@ impl Proxy {
                 },
             };
             let head = pm_http::parse_request_head(&head_raw)?;
-            let mut target = resolve_target(&head, &head_raw, scheme, tunnel_target.as_ref())?;
+            let mut target = resolve_target(&head, &head_raw, scheme, tunnel_target.as_ref(), ctx.orig)?;
+            // A request that names its own target (absolute-form) is not tied to where the client was going.
+            let pin = if pm_http::split_absolute_target(&head.target).is_some() { None } else { ctx.pin() };
             // ProxyMind's own setup page (the reserved host, or this listener's own address): answered here,
             // never forwarded, never recorded, and not touched by rules or the intercept queue.
             if setup_page::is_local(&target.host, target.port, ctx.me) {
@@ -736,7 +742,7 @@ impl Proxy {
             }
 
             let started = Instant::now();
-            let ep = Endpoint::new(&target.scheme, &target.host, target.port);
+            let ep = Endpoint::new(&target.scheme, &target.host, target.port).with_pin(pin);
             let guard = self.loop_guard(&ctx.me, &target.host, target.port);
             let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
             let mut record = NewExchange {
@@ -1157,6 +1163,7 @@ fn resolve_target(
     head_raw: &[u8],
     tunnel_scheme: &str,
     tunnel_target: Option<&(String, u16)>,
+    orig: Option<SocketAddr>,
 ) -> Result<Target> {
     // Absolute-form (`GET http://host/path`): sent by browsers to a plain
     // HTTP proxy. Servers expect origin-form, so rewrite only the target.
@@ -1177,11 +1184,20 @@ fn resolve_target(
             head_raw: head_raw.to_vec(),
         });
     }
-    // Origin-form without a tunnel (transparent proxying): use the Host header.
-    let host_hdr = pm_http::header(&head.headers, "host").ok_or_else(|| anyhow!("request has no Host header"))?;
-    let default_port = if tunnel_scheme == "https" { 443 } else { 80 };
-    let (host, port) = pm_http::split_host_port(std::str::from_utf8(host_hdr)?.trim(), default_port)
-        .ok_or_else(|| anyhow!("bad Host header"))?;
+    // Origin-form without a tunnel (transparent proxying): use the Host header. A redirected connection also
+    // knows where it was going: that port wins, and the address stands in for a missing Host header.
+    let default_port = orig.map_or(if tunnel_scheme == "https" { 443 } else { 80 }, |o| o.port());
+    let (host, port) = match pm_http::header(&head.headers, "host") {
+        Some(h) => {
+            let (host, port) = pm_http::split_host_port(std::str::from_utf8(h)?.trim(), default_port)
+                .ok_or_else(|| anyhow!("bad Host header"))?;
+            (host, orig.map_or(port, |o| o.port()))
+        }
+        None => match orig {
+            Some(o) => (o.ip().to_string(), o.port()),
+            None => bail!("request has no Host header"),
+        },
+    };
     Ok(Target { scheme: tunnel_scheme.into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
 }
 
