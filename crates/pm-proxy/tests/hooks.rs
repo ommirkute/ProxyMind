@@ -65,7 +65,11 @@ async fn setup(script: &str, kind: HookKind, extra: &str) -> Setup {
     let k = kind.as_str();
     std::fs::write(
         dir.join("proxymind-plugin.yaml"),
-        format!("name: fx\nversion: 1\napi: 2\npermissions: [hooks.{k}]\nhooks:\n  {k}:\n    command: [\"python3\", \"hook.py\"]\n{extra}"),
+        // The first call includes starting Python: allow for a busy machine unless the test is about the deadline.
+        format!(
+            "name: fx\nversion: 1\napi: 2\npermissions: [hooks.{k}]\nhooks:\n  {k}:\n    command: [\"python3\", \"hook.py\"]\n{extra}{}",
+            if extra.contains("timeout_ms") { "" } else { "    timeout_ms: 2000\n" }
+        ),
     )
     .unwrap();
     let mut reg = Registry::load(&home).unwrap();

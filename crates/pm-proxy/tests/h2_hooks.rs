@@ -77,7 +77,7 @@ async fn start_proxy(script: &str, kind: HookKind) -> (u16, std::path::PathBuf) 
     let k = kind.as_str();
     std::fs::write(
         dir.join("proxymind-plugin.yaml"),
-        format!("name: fx\nversion: 1\napi: 2\npermissions: [hooks.{k}]\nhooks:\n  {k}:\n    command: [\"python3\", \"hook.py\"]\n"),
+        format!("name: fx\nversion: 1\napi: 2\npermissions: [hooks.{k}]\nhooks:\n  {k}:\n    command: [\"python3\", \"hook.py\"]\n    timeout_ms: 2000\n"),
     )
     .unwrap();
     let mut reg = Registry::load(&home).unwrap();

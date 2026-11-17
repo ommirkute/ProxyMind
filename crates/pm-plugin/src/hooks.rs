@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -238,7 +238,7 @@ impl Worker {
                         },
                     }
                 }
-                sh.alive.store(false, Relaxed);
+                sh.alive.store(false, SeqCst);
                 sh.fail_all(&CallError::Exited);
                 let mut c = ch.lock();
                 let _ = c.kill();
@@ -268,6 +268,15 @@ impl Worker {
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.shared.pending.lock() {
             p.waiting.insert(id, tx);
+        }
+        // The reader marks the worker dead and then fails every waiting call. A call registered after that last
+        // sweep would wait out its whole deadline, so check again now that it is registered: either the sweep
+        // reaches it, or it sees the worker is gone (SeqCst pairs with the reader's store).
+        if !self.shared.alive.load(SeqCst) {
+            if let Ok(mut p) = self.shared.pending.lock() {
+                p.waiting.remove(&id);
+            }
+            return Err(CallError::Exited);
         }
         if let Err(e) = self.tx.try_send(frame) {
             if let Ok(mut p) = self.shared.pending.lock() {

@@ -36,6 +36,9 @@ fn fixture(script: &str, kind: HookKind, extra: &str) -> Fixture {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(script);
     std::fs::copy(src, dir.join("hook.py")).unwrap();
     let k = kind.as_str();
+    // The first call includes starting Python, which can exceed the 200 ms default on a busy machine; tests that
+    // are about the deadline set their own.
+    let extra = if extra.contains("timeout_ms") { extra.to_string() } else { format!("{extra}    timeout_ms: 2000\n") };
     std::fs::write(
         dir.join("proxymind-plugin.yaml"),
         format!(
@@ -184,11 +187,17 @@ async fn garbage_and_unparseable_replacements_are_failures() {
         return;
     }
     let g = fixture("garbage.py", HookKind::Request, "");
+    let mut malformed = 0;
     for _ in 0..5 {
         let r = g.run().await;
         assert_eq!(r.bytes, None);
-        assert!(r.notes[0].note.as_deref().unwrap().contains("not a JSON object"), "{:?}", r.notes);
+        // An unattributable answer kills the worker; a call that lands just as it dies fails as "exited" and the
+        // next one starts a fresh worker. Either way it is a failure and the original is forwarded.
+        let note = r.notes[0].note.as_deref().unwrap();
+        assert!(note.contains("not a JSON object") || note.contains("exited"), "{:?}", r.notes);
+        malformed += usize::from(note.contains("not a JSON object"));
     }
+    assert!(malformed >= 1, "the garbage answer itself is reported");
     assert!(g.status().paused);
 
     let b = fixture("badreplace.py", HookKind::Request, "");
