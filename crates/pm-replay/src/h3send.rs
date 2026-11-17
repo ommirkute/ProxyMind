@@ -155,24 +155,32 @@ impl Sender {
             let (client, host, timeout) = (client.clone(), ep.host.clone(), self.connect_timeout);
             attempts.spawn(async move {
                 let bind: SocketAddr = if addr.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
-                let endpoint = quinn::Endpoint::client(bind).context("opening a UDP socket")?;
-                let connecting = endpoint.connect_with(client, addr, &host).context("starting the QUIC connection")?;
+                let endpoint = quinn::Endpoint::client(bind).context("opening a UDP socket").map_err(|e| (false, e))?;
+                let connecting = endpoint
+                    .connect_with(client, addr, &host)
+                    .context("starting the QUIC connection")
+                    .map_err(|e| (false, e))?;
                 match tokio::time::timeout(timeout, connecting).await {
                     Ok(Ok(conn)) => Ok((endpoint, conn)),
-                    Ok(Err(e)) => Err(anyhow!(e).context(format!("QUIC handshake with {addr}"))),
-                    Err(_) => Err(anyhow!("QUIC handshake with {addr} timed out")),
+                    Ok(Err(e)) => Err((false, anyhow!(e).context(format!("QUIC handshake with {addr}")))),
+                    Err(_) => Err((true, anyhow!("QUIC handshake with {addr} timed out"))),
                 }
             });
         }
-        let mut last_err = None;
+        // When every address fails, report a real refusal (a certificate error, say) over a timeout: an address that
+        // never answers, such as `::1` when the server listens on IPv4 only, tells the user nothing.
+        let mut best: Option<(bool, anyhow::Error)> = None;
         while let Some(done) = attempts.join_next().await {
-            match done {
+            let (timed_out, e) = match done {
                 Ok(Ok(connected)) => return Ok(connected), // the others are dropped (aborted) with the set
-                Ok(Err(e)) => last_err = Some(e),
-                Err(e) => last_err = Some(anyhow!(e)),
+                Ok(Err(failed)) => failed,
+                Err(e) => (false, anyhow!(e)),
+            };
+            if best.as_ref().is_none_or(|(best_timed_out, _)| *best_timed_out && !timed_out) {
+                best = Some((timed_out, e));
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("could not connect over QUIC")))
+        Err(best.map(|(_, e)| e).unwrap_or_else(|| anyhow!("could not connect over QUIC")))
     }
 }
 
