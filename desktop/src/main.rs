@@ -122,11 +122,15 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
             service.attach_intercept(queue.clone());
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
             service.attach_rewriter(rewriter.clone())?;
+            // Plugin traffic hooks (ADR-0020), as in `proxymind proxy`: the service turns them on and off.
+            let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
+            service.attach_hooks(plugin_hooks.clone());
             let hooks = pm_proxy::Hooks {
                 rewrite: Some(rewriter.clone()),
                 intercept: Some(queue),
                 network: Some(service.network().clone()),
                 http2: true,
+                plugin_hooks: Some(plugin_hooks),
             };
             let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
             let extra = pm_proxy::Listeners::new(p.clone(), Some(proxy_addr));
