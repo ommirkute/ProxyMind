@@ -2044,6 +2044,8 @@ match:
 
     // ADR-0018: a run started elsewhere shows up in the run history with every page timer frozen.
     await open("workflows");
+    // Count only once the run list has loaded (the run above is in it), or a late first load looks like a new run.
+    await page.getByTestId("wf-run-row").first().waitFor();
     const before = await page.getByTestId("wf-run-row").count();
     await withFrozenTimers(async () => {
       await api("POST", "/workflows/e2e-order-id/run", { exchange_id: orderEx });
