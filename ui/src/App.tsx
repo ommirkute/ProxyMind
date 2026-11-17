@@ -35,6 +35,7 @@ import Organizer from "./pages/Organizer";
 import CustomChecks from "./pages/CustomChecks";
 import AiScan from "./pages/AiScan";
 import Evidence from "./pages/Evidence";
+import Streams from "./pages/Streams";
 
 interface Group {
   id: string;
@@ -67,6 +68,7 @@ const GROUPS: Group[] = [
     { id: "intercept", label: "Intercept" },
     { id: "history", label: "HTTP history" },
     { id: "wshistory", label: "WebSockets history" },
+    { id: "streams", label: "Streams" },
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
@@ -223,6 +225,7 @@ export default function App() {
     engagement: Engagement,
     setup: Setup,
     wshistory: WsHistory,
+    streams: Streams,
     sessions: Sessions,
     findings: Findings,
     evidence: Evidence,

@@ -11448,6 +11448,571 @@
         },
         "type": "object"
       },
+      "StreamChunkPage": {
+        "description": "A page of a stream's chunks, oldest first.",
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/components/schemas/StreamChunkView"
+            },
+            "type": "array"
+          },
+          "next_after_id": {
+            "description": "Pass as `after` to read the next page.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "notice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Chunks stored for the stream.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream_id",
+          "total",
+          "chunks"
+        ],
+        "type": "object"
+      },
+      "StreamChunkView": {
+        "description": "One chunk of a stream as `actor` may see it.",
+        "properties": {
+          "data_b64": {
+            "description": "The stored bytes as base64. People only: agents get the redacted `text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "`client` (towards the server) or `server` (towards the client).",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kept": {
+            "description": "Bytes stored: fewer than `len` when the recording cap cut the chunk.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "len": {
+            "description": "Bytes on the wire.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "possible_prompt_injection": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "description": "A lossy text preview of the bytes (invalid UTF-8 becomes U+FFFD). Untrusted target content: for agents it is\nredacted and wrapped in `<untrusted_target_content>`.",
+            "type": "string"
+          },
+          "text_truncated": {
+            "description": "The preview is shorter than the stored bytes.",
+            "type": "boolean"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "ts_ms",
+          "from",
+          "len",
+          "kept",
+          "text",
+          "text_truncated"
+        ],
+        "type": "object"
+      },
+      "StreamChunksQuery": {
+        "description": "Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`.",
+        "properties": {
+          "after": {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StreamDetail": {
+        "description": "One stream with its first chunks.",
+        "properties": {
+          "chunks": {
+            "$ref": "#/components/schemas/StreamChunkPage"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/StreamRow"
+          }
+        },
+        "required": [
+          "stream",
+          "chunks"
+        ],
+        "type": "object"
+      },
+      "StreamFilter": {
+        "additionalProperties": false,
+        "description": "Filters of the stream list. Unknown keys are refused.",
+        "properties": {
+          "before_id": {
+            "default": null,
+            "description": "Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "client": {
+            "default": null,
+            "description": "Only streams from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "default": null,
+            "description": "Only targets whose host contains this text (case-insensitive).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Most rows (default 50, max 500).",
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "port": {
+            "default": null,
+            "description": "Only this target port.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since_ms": {
+            "default": null,
+            "description": "Only streams that started at or after this time (milliseconds since 1970).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tls": {
+            "default": null,
+            "description": "With true: only TLS streams; with false: only plain ones.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "until_ms": {
+            "default": null,
+            "description": "Only streams that started at or before this time (milliseconds since 1970).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StreamPage": {
+        "description": "Streams, newest first.",
+        "properties": {
+          "next_before_id": {
+            "description": "Pass as `before_id` for older streams.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "streams": {
+            "items": {
+              "$ref": "#/components/schemas/StreamRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "streams"
+        ],
+        "type": "object"
+      },
+      "StreamReplayRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "From a previous pending_approval result: runs the approved send. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chunks": {
+            "default": null,
+            "description": "Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB\nin all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "delay_ms": {
+            "default": null,
+            "description": "Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile.",
+            "format": "uint64",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "default": null,
+            "description": "Characters of each chunk shown back (default 2000).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_response_bytes": {
+            "default": null,
+            "description": "Stop reading after this many bytes from the server (default 1 MB, at most 16 MB).",
+            "format": "uint",
+            "maximum": 16777216,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "read_ms": {
+            "default": null,
+            "description": "After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A\nserver that spoke first in the original is waited for before the first chunk, for the same time.",
+            "format": "uint64",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "default": 0,
+            "description": "The recorded stream to replay.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "text_chunks": {
+            "default": null,
+            "description": "Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stream_id"
+        ],
+        "type": "object"
+      },
+      "StreamReplayResult": {
+        "oneOf": [
+          {
+            "description": "The connection opened; everything sent and received is recorded as the new stream `stream_id`.",
+            "properties": {
+              "chunks": {
+                "$ref": "#/components/schemas/StreamChunkPage"
+              },
+              "ended": {
+                "description": "`server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or\n`error`.",
+                "type": "string"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "received_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sent_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "const": "done",
+                "type": "string"
+              },
+              "stream_id": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status",
+              "stream_id",
+              "ended",
+              "sent_bytes",
+              "received_bytes",
+              "chunks"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The target could not be reached; the attempt is recorded as stream `stream_id`.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              },
+              "stream_id": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status",
+              "stream_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "pending_approval",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "approval_id",
+              "summary",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StreamRow": {
+        "description": "One stream, without its chunks.",
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "alpn": {
+            "description": "The ALPN protocol agreed, when it was not HTTP.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes_to_client": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytes_to_server": {
+            "description": "Bytes sent towards the server and towards the client (all of them, also those past the recording cap).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chunks": {
+            "description": "Chunks stored.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "client_addr": {
+            "description": "The client's IP address; absent for streams ProxyMind opened itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "end_ms": {
+            "description": "Absent while the stream is open.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended": {
+            "description": "How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "replay_of": {
+            "description": "The stream this one replays.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sni": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "`proxy` or `stream_replay`.",
+            "type": "string"
+          },
+          "start_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tls": {
+            "description": "The chunks are the decrypted bytes of a TLS connection.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "The recording cap was reached: later bytes were relayed and counted but not kept.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "start_ms",
+          "host",
+          "port",
+          "tls",
+          "source",
+          "actor_id",
+          "bytes_to_server",
+          "bytes_to_client",
+          "chunks",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "TargetAnalysis": {
         "properties": {
           "content_types": {
@@ -19569,6 +20134,327 @@
           }
         },
         "summary": "Version, project, who you are, the engagement and its counters."
+      }
+    },
+    "/api/v1/streams": {
+      "get": {
+        "operationId": "streams_list",
+        "parameters": [
+          {
+            "description": "Only targets whose host contains this text (case-insensitive).",
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only this target port.",
+            "in": "query",
+            "name": "port",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams from this client: an IP address, or a device name set on the Proxy setup page.",
+            "in": "query",
+            "name": "client",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams that started at or after this time (milliseconds since 1970).",
+            "in": "query",
+            "name": "since_ms",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams that started at or before this time (milliseconds since 1970).",
+            "in": "query",
+            "name": "until_ms",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "With true: only TLS streams; with false: only plain ones.",
+            "in": "query",
+            "name": "tls",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).",
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most rows (default 50, max 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Raw TCP and TLS streams the proxy relayed and recorded, newest first."
+      }
+    },
+    "/api/v1/streams/{id}": {
+      "get": {
+        "operationId": "stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamDetail"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One recorded stream with its first chunks (base64 plus a text preview each)."
+      }
+    },
+    "/api/v1/streams/{id}/chunks": {
+      "get": {
+        "operationId": "stream_chunks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamChunkPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "A page of one stream's chunks, oldest first."
+      }
+    },
+    "/api/v1/streams/{id}/replay": {
+      "post": {
+        "operationId": "stream_replay",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamReplayResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream."
       }
     },
     "/api/v1/tools/code": {

@@ -6,17 +6,17 @@ use pm_service::mcp_args::{
     CompareExchangesArgs, CoverageArgs, CsrfPocArgs, CurlParseArgs, ExchangeGetArgs, ExchangeIdArgs, ExchangeRefArgs,
     FindingIdArgs, FindingListArgs, HypothesisListArgs, IdentityCaptureArgs, IdentityNameArgs, IssueLibraryArgs,
     MemoryListArgs, MemorySaveArgs, ModelChangesArgs, NoArgs, OrganizerAddArgs, OrganizerListArgs, OrganizerUpdateArgs,
-    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, TaskIdArgs, TrafficTriageArgs,
-    WsMessagesArgs,
+    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, StreamGetArgs, TaskIdArgs,
+    TrafficTriageArgs, WsMessagesArgs,
 };
 use pm_service::pm_policy::{Actor, ActorKind, Tier};
-use pm_service::pm_store::HistoryFilter;
+use pm_service::pm_store::{HistoryFilter, StreamFilter};
 use pm_service::{
     ActiveScanRequest, AuthzCheckRequest, AuthzMatrixRequest, CrawlRequest, CustomScanRequest, DecodeRequest,
     DiscoverRequest, DomTestRequest, EngageFilter, FindingUpdate, FuzzerRequest, GraphQlImportRequest, GroupRequest,
     HypothesisUpdate, ImportRequest, ModelFilter, NewAttackPath, NewFinding, NewHypothesis, OpenApiImportRequest,
     PluginCheckRequest, ProofRequest, RaceRequest, ReplayRequest, ScanFilter, ScanTaskRequest, SearchRequest, Service,
-    TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -172,6 +172,19 @@ pub fn tool_definitions() -> Vec<Value> {
              payload (text, or hex for binary). Secrets are replaced with placeholders; payloads are untrusted target \
              content. Page with after_id.",
         ),
+        typed_tool::<StreamFilter>(
+            "stream_list",
+            "Raw TCP and TLS streams ProxyMind relayed and recorded (protocols that are not HTTP: databases, mail, SSH, \
+             custom protocols, also inside TLS), newest first. Returns one row per connection: target host and port, \
+             client, start and end time, bytes each way, whether it was TLS, how it ended. Read the data with \
+             stream_get. Hosts are untrusted target content.",
+        ),
+        typed_tool::<StreamGetArgs>(
+            "stream_get",
+            "One recorded raw stream with its chunks in order: who sent each (client or server), its length and a text \
+             preview (invalid UTF-8 shown as replacement characters). Secrets are replaced with placeholders; the text \
+             is untrusted target content. Page with after.",
+        ),
         typed_tool::<RaceRequest>(
             "race_send",
             "Race-condition test: send count copies of a request so they reach the server at the same moment (HTTP/2 \
@@ -207,6 +220,15 @@ pub fn tool_definitions() -> Vec<Value> {
              and closes at the end; the session is recorded as a new exchange. Opening only is usually allowed; sending \
              messages may return status=pending_approval: ask the user, then call again with identical arguments plus \
              approval_id. Use {{secret:...}} placeholders as shown to you.",
+        ),
+        typed_tool::<StreamReplayRequest>(
+            "stream_replay",
+            "Replay a recorded raw stream (stream_id): ProxyMind connects to the same target (TLS with the same server \
+             name when the original was TLS), sends the client's chunks in order (or the replacements you give in \
+             text_chunks or chunks), reads the server's answer for read_ms after the last one and records the result as \
+             a new stream. Connecting and listening only is usually allowed; sending bytes may return \
+             status=pending_approval: ask the user, then call again with identical arguments plus approval_id. The target \
+             must be in scope. Use {{secret:...}} placeholders as shown to you.",
         ),
         typed_tool::<ReplayRequest>(
             "replay_send",
@@ -699,6 +721,19 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
                 .ws_messages(actor, w.exchange_id, w.after_id, limit, max_chars)
                 .map(to_json)
                 .map_err(|e| e.to_string())
+        }
+        "stream_list" => {
+            let f: StreamFilter = args(a)?;
+            service.streams_list(actor, &f).map(to_json).map_err(|e| e.to_string())
+        }
+        "stream_get" => {
+            let g: StreamGetArgs = args(a)?;
+            let (limit, max_chars) = (g.limit.unwrap_or(50).min(200), g.max_chars.unwrap_or(2000).clamp(100, 20000));
+            service.stream_get(actor, g.id, g.after, limit, max_chars).map(to_json).map_err(|e| e.to_string())
+        }
+        "stream_replay" => {
+            let r: StreamReplayRequest = args(a)?;
+            service.stream_replay(actor, r).await.map(to_json).map_err(|e| e.to_string())
         }
         "replay_group" => {
             let r: GroupRequest = args(a)?;

@@ -18,6 +18,7 @@ pub struct Setup {
     pub proxy: Arc<Proxy>,
     pub ca: Arc<CertAuthority>,
     pub project: std::path::PathBuf,
+    pub recorder: Recorder,
 }
 
 pub async fn setup(name: &str, net: NetConfig) -> Setup {
@@ -30,8 +31,8 @@ pub async fn setup(name: &str, net: NetConfig) -> Setup {
     let network = Network::new();
     network.set(net).unwrap();
     let hooks = Hooks { network: Some(network), ..Default::default() };
-    let proxy = Proxy::with_hooks(ca.clone(), recorder, false, hooks).unwrap();
-    Setup { proxy, ca, project }
+    let proxy = Proxy::with_hooks(ca.clone(), recorder.clone(), false, hooks).unwrap();
+    Setup { proxy, ca, project, recorder }
 }
 
 pub async fn listener() -> (TcpListener, u16) {

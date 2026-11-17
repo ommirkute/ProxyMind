@@ -60,6 +60,14 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/tools/curl", "tools_curl", "Turn a cURL command into a raw request.").body::<CurlBody>().out::<CurlParsed>(),
         op("post", "/ws/replay", "ws_replay", "Replay a recorded WebSocket session with edited messages.")
             .body::<WsReplayRequest>().out::<WsReplayResult>(),
+        op("get", "/streams", "streams_list", "Raw TCP and TLS streams the proxy relayed and recorded, newest first.")
+            .query::<pm_service::pm_store::StreamFilter>().out::<StreamPage>(),
+        op("get", "/streams/{id}", "stream_get", "One recorded stream with its first chunks (base64 plus a text preview each).")
+            .query::<StreamChunksQuery>().out::<StreamDetail>(),
+        op("get", "/streams/{id}/chunks", "stream_chunks", "A page of one stream's chunks, oldest first.")
+            .query::<StreamChunksQuery>().out::<StreamChunkPage>(),
+        op("post", "/streams/{id}/replay", "stream_replay", "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream.")
+            .body::<StreamReplayRequest>().out::<StreamReplayResult>(),
         op("post", "/race", "race", "Send the same request several times at once.").body::<RaceRequest>().out::<RaceResult>(),
         op("post", "/replay/group", "replay_group", "Send a group of requests in order or in parallel.").body::<GroupRequest>().out::<GroupResult>(),
         op("post", "/fuzzer", "fuzzer", "Run a fuzzer attack and wait for the result.").body::<FuzzerRequest>().out::<FuzzerResult>(),

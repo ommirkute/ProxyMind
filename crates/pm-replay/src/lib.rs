@@ -395,6 +395,33 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         h2: bool,
     ) -> Result<(Box<dyn Io>, bool)> {
+        let alpn = h2.then(|| vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        let (io, negotiated) = self.connect_alpn(ep, check, alpn.as_deref()).await?;
+        // Plain HTTP assumes HTTP/2 when asked to; TLS goes by what the server agreed.
+        let is_h2 = if ep.scheme == "https" { negotiated.as_deref() == Some(b"h2") } else { h2 };
+        Ok((io, is_h2))
+    }
+
+    /// Like [`Sender::connect`] for a stream that is not HTTP: TLS (an `https` endpoint) offers exactly `alpn` (an
+    /// empty list offers none; `None` keeps the connector's default, `http/1.1`) and the protocol the server chose
+    /// is returned. The server name is the endpoint's host. A plain endpoint ignores `alpn`.
+    pub async fn connect_stream(
+        &self,
+        ep: &Endpoint,
+        alpn: &[Vec<u8>],
+        check: Option<AddrCheck<'_>>,
+    ) -> Result<(Box<dyn Io>, Option<Vec<u8>>)> {
+        self.connect_alpn(ep, check, Some(alpn)).await
+    }
+
+    /// Connects (and does TLS for `https` endpoints) offering `alpn` when it is given; returns the protocol the
+    /// server agreed.
+    async fn connect_alpn(
+        &self,
+        ep: &Endpoint,
+        check: Option<AddrCheck<'_>>,
+        alpn: Option<&[Vec<u8>]>,
+    ) -> Result<(Box<dyn Io>, Option<Vec<u8>>)> {
         let upstream = self.net.upstream_for(&ep.host);
         // A hostname override replaces DNS (for SOCKS5 too: the proxy gets the address).
         let pinned = self.net.address_for(&ep.host).or(ep.pin);
@@ -491,19 +518,19 @@ impl Sender {
         if ep.scheme == "https" {
             let name = pm_tls::server_name(&ep.host)?;
             let mut tls = self.net.tls_for(&ep.host, self.verify).unwrap_or_else(|| self.tls.clone());
-            if h2 {
+            if let Some(alpn) = alpn {
                 let mut cfg = (**tls.config()).clone();
-                cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                cfg.alpn_protocols = alpn.to_vec();
                 tls = TlsConnector::from(std::sync::Arc::new(cfg));
             }
             let tls = tokio::time::timeout(self.connect_timeout, tls.connect(name, tcp))
                 .await
                 .context("TLS handshake timed out")?
                 .context("TLS handshake with server")?;
-            let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
-            Ok((Box::new(tls), is_h2))
+            let negotiated = tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+            Ok((Box::new(tls), negotiated))
         } else {
-            Ok((Box::new(tcp), h2))
+            Ok((Box::new(tcp), None))
         }
     }
 

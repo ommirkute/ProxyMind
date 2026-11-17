@@ -1603,6 +1603,83 @@ match:
     if (!linux) await page.getByLabel("Delete listener 1").click();
   });
 
+  await section("Raw TCP streams (a non-HTTP protocol through CONNECT, Streams page, replay)", async () => {
+    // A line protocol where the server speaks first: greets, then answers each line in capitals.
+    const lineServer = net.createServer((c) => {
+      c.write("220 hello\r\n");
+      c.on("data", (d) => c.write(String(d).toUpperCase()));
+      c.on("error", () => {});
+    });
+    await new Promise((r) => lineServer.listen(0, "127.0.0.1", r));
+    const rawPort = lineServer.address().port;
+    const roeText = `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/", "http://127.0.0.1:${rawPort}/"]\n`;
+    const putRoe = (text) =>
+      page.evaluate(async (text) => (await fetch("/api/v1/roe", { method: "PUT", headers: { "content-type": "application/json", "x-proxymind": "1" }, body: JSON.stringify({ text }) })).status, text);
+    const originalRoe = await page.evaluate(async () => (await (await fetch("/api/v1/roe")).json()).text);
+    check((await putRoe(roeText)) === 200, "the line server is added to the scope (replay checks scope)");
+    // CONNECT through the proxy, wait for the greeting, send a line, read the answer.
+    const talk = (line) =>
+      new Promise((resolve, reject) => {
+        const s = net.connect(proxy, "127.0.0.1", () => s.write(`CONNECT 127.0.0.1:${rawPort} HTTP/1.1\r\nHost: 127.0.0.1:${rawPort}\r\n\r\n`));
+        let out = "";
+        let sent = false;
+        s.on("data", (d) => {
+          out += d;
+          if (!sent && out.includes("220 hello\r\n")) {
+            sent = true;
+            s.write(line);
+          }
+          if (out.includes(line.toUpperCase())) {
+            s.end();
+            resolve(out);
+          }
+        });
+        s.on("error", reject);
+        setTimeout(() => (s.destroy(), reject(new Error(`no answer: ${out}`))), 8000);
+      });
+    await open("streams");
+    // With the page's timers frozen, only a server event can bring the new stream into the list.
+    await withFrozenTimers(async () => {
+      const out = await talk("ping the proxy\r\n");
+      check(out.includes("PING THE PROXY\r\n"), "the non-HTTP stream is relayed unchanged through CONNECT");
+      await page.locator('[data-testid="streams-list"] tr', { hasText: `127.0.0.1:${rawPort}` }).first().waitFor({ timeout: 8000 });
+    });
+    check(true, "the Streams page lists the stream without polling");
+    await page.locator('[data-testid="streams-list"] tr', { hasText: `127.0.0.1:${rawPort}` }).first().click();
+    const detail = page.getByTestId("stream-detail");
+    await detail.waitFor();
+    await page.waitForFunction(() => document.querySelector('[data-testid="stream-ended"]')?.textContent !== "open", null, { timeout: 8000 });
+    const chunks = detail.getByTestId("stream-chunk");
+    await chunks.nth(2).waitFor({ timeout: 8000 });
+    const dirs = await chunks.evaluateAll((els) => els.map((e) => e.getAttribute("data-from")));
+    check(dirs[0] === "server" && dirs.includes("client"), `chunks are in order with their directions (${dirs.join(", ")})`);
+    check((await chunks.first().textContent()).includes("220 hello"), "the text view shows the server's greeting");
+    await detail.getByRole("button", { name: "Hex", exact: true }).click();
+    check((await detail.getByTestId("stream-chunks").textContent()).includes("32 32 30 20 68 65 6c 6c 6f"), "the hex view shows the bytes");
+    await detail.getByRole("button", { name: "Text", exact: true }).click();
+    await page.getByLabel("Search in stream").fill("ping the");
+    check(await page.getByTestId("stream-matches").textContent().then((t) => t.startsWith("2 of ")), "search narrows the chunks of the stream");
+    await page.getByLabel("Search in stream").fill("");
+    await page.screenshot({ path: join(SHOTS, "7d3-streams.png"), fullPage: true });
+    // Replay with an edited chunk: a new connection, recorded as a new stream.
+    await detail.getByRole("button", { name: "Replay stream…" }).click();
+    await page.getByLabel("Chunk 1 to send").fill("edited and replayed\r\n");
+    await page.getByLabel("Listen for (ms)").fill("500");
+    await page.getByTestId("stream-replay-send").click();
+    const result = await page.getByTestId("stream-replay-result").textContent({ timeout: 10000 });
+    check(/Sent \d+ bytes, received \d+; recorded as stream #\d+/.test(result), `replay sends the edited chunk and records a new stream (${result.trim()})`);
+    await page.getByTestId("stream-replay-result").getByRole("link", { name: "Open it" }).click();
+    await page.locator('[data-testid="stream-chunks"]', { hasText: "EDITED AND REPLAYED" }).waitFor({ timeout: 8000 });
+    check(true, "the new stream shows the server's answer to the edited bytes");
+    // Out of scope: the gate refuses.
+    check((await putRoe(`version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`)) === 200, "the line server leaves the scope");
+    await page.getByRole("button", { name: "Replay stream…" }).click();
+    await page.getByTestId("stream-replay-send").click();
+    check(await page.getByTestId("stream-replay-denied").textContent({ timeout: 8000 }).then((t) => /scope/i.test(t)), "replay of an out-of-scope target is denied by the policy gate");
+    await putRoe(originalRoe);
+    lineServer.close();
+  });
+
   await section("Mobile onboarding (setup page, QR code, devices)", async () => {
     await open("setup");
     // The main proxy listens on loopback only: a phone cannot reach it, and the page says so.

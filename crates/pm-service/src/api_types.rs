@@ -306,6 +306,15 @@ pub struct WsQuery {
     pub limit: Option<usize>,
 }
 
+/// Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct StreamChunksQuery {
+    /// Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.
+    pub after: Option<i64>,
+    /// Most chunks to return (default 100, at most 500).
+    pub limit: Option<usize>,
+}
+
 /// Query of `GET /sitemap`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct SiteQuery {

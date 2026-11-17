@@ -12,16 +12,16 @@ use pm_service::mcp_args::{
     CompareExchangesArgs, CoverageArgs, CsrfPocArgs, CurlParseArgs, ExchangeGetArgs, ExchangeIdArgs, ExchangeRefArgs,
     FindingIdArgs, FindingListArgs, HypothesisListArgs, IdentityCaptureArgs, IdentityNameArgs, IssueLibraryArgs,
     MemoryListArgs, MemorySaveArgs, ModelChangesArgs, NoArgs, OrganizerAddArgs, OrganizerListArgs, OrganizerUpdateArgs,
-    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, TaskIdArgs, TrafficTriageArgs,
-    WsMessagesArgs,
+    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, StreamGetArgs, TaskIdArgs,
+    TrafficTriageArgs, WsMessagesArgs,
 };
-use pm_service::pm_store::HistoryFilter;
+use pm_service::pm_store::{HistoryFilter, StreamFilter};
 use pm_service::{
     ActiveScanRequest, AuthzCheckRequest, AuthzMatrixRequest, CrawlRequest, CustomScanRequest, DecodeRequest,
     DiscoverRequest, DomTestRequest, EngageFilter, FindingUpdate, FuzzerRequest, GraphQlImportRequest, GroupRequest,
     HypothesisUpdate, ImportRequest, ModelFilter, NewAttackPath, NewFinding, NewHypothesis, OpenApiImportRequest,
     PluginCheckRequest, ProofRequest, RaceRequest, ReplayRequest, ScanFilter, ScanTaskRequest, SearchRequest,
-    TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
 };
 use schemars::JsonSchema;
 use serde_json::Value;
@@ -66,6 +66,9 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("exchange_get", generated::<ExchangeGetArgs>()),
         ("exchange_raw_request", generated::<ExchangeIdArgs>()),
         ("ws_messages", generated::<WsMessagesArgs>()),
+        ("stream_list", generated::<StreamFilter>()),
+        ("stream_get", generated::<StreamGetArgs>()),
+        ("stream_replay", generated::<StreamReplayRequest>()),
         ("race_send", generated::<RaceRequest>()),
         ("replay_group", generated::<GroupRequest>()),
         ("fuzzer_run", generated::<FuzzerRequest>()),
@@ -175,7 +178,7 @@ fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
 #[test]
 fn no_tool_input_schema_needs_ref_resolution() {
     let tools = pm_mcp::tool_definitions();
-    assert_eq!(tools.len(), 80);
+    assert_eq!(tools.len(), 83);
     for t in &tools {
         if let Some(key) = contains_ref(&t["inputSchema"]) {
             panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);
@@ -228,6 +231,8 @@ fn arguments_the_hand_written_schemas_required_are_still_required() {
         ("exchange_get", &["id"]),
         ("exchange_raw_request", &["id"]),
         ("ws_messages", &["exchange_id"]),
+        ("stream_get", &["id"]),
+        ("stream_replay", &["stream_id"]),
         ("replay_group", &["requests"]),
         ("fuzzer_run", &["raw", "payload_sets"]),
         ("identity_capture", &["name", "exchange_id"]),

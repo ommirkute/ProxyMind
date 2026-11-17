@@ -2,11 +2,14 @@
 //!
 //! After the SOCKS5 handshake a connection is treated like a CONNECT tunnel to `host:port`: TLS is intercepted with
 //! ProxyMind's CA (HTTP/1.1 and HTTP/2), plain HTTP is read and recorded (WebSockets included), pass-through hosts
-//! are tunnelled untouched, and the setup page answers for its reserved name. Streams that are not HTTP or TLS
-//! (SSH, databases, anything the server speaks first in) are relayed byte for byte without recording and counted.
+//! are tunnelled untouched, and the setup page answers for its reserved name. Streams that are not HTTP (SSH,
+//! databases, anything the server speaks first in, a custom protocol inside TLS) are relayed byte for byte and, when
+//! the recording settings allow, recorded as raw streams (roadmap 2.6, `docs/capture.md`). The relay never changes
+//! a byte: the recorder gets a copy of each chunk after it has been passed on.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
@@ -14,11 +17,13 @@ use anyhow::{Context, Result, bail};
 use parking_lot::RwLock;
 use pm_http::socks5;
 use pm_replay::{Conn, Endpoint, Io};
+use pm_store::NewStream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::stream_rec::StreamTap;
 use crate::transparent::{Flow, OriginalDst, Sniff, classify, effective_orig, flow_for};
-use crate::{Ctx, Proxy, Redirect, SelfAddr, TlsAcceptor, setup_page};
+use crate::{Ctx, Proxy, Redirect, SelfAddr, setup_page};
 
 /// How long a SOCKS5 client has to finish the handshake (greeting, login and request).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,7 +44,7 @@ pub(crate) enum Accept {
     Transparent(Arc<dyn OriginalDst>),
 }
 
-/// Streams relayed without recording since start (not HTTP or TLS).
+/// Non-HTTP streams relayed since start, recorded or not (pass-through tunnels count too).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RawStats {
     pub streams: u64,
@@ -87,7 +92,7 @@ impl Proxy {
         self.run_mode(listener, Accept::Transparent(provider), redirect).await
     }
 
-    /// Streams relayed without recording (see [`RawStats`]).
+    /// Non-HTTP streams relayed (see [`RawStats`]).
     pub fn raw_stats(&self) -> RawStats {
         self.raw.snapshot()
     }
@@ -155,7 +160,8 @@ impl Proxy {
             return match self.connect_raw(&host, port, &ctx).await {
                 Ok(up) => {
                     tcp.write_all(&socks5::reply(socks5::REP_SUCCEEDED, None)).await?;
-                    self.relay_raw(tcp, up, Vec::new(), &host, port).await
+                    // Pass-through hosts are tunnelled untouched and not recorded.
+                    self.relay_raw(tcp, up, Vec::new(), Vec::new(), Raw::plain(&host, port), &ctx, false).await
                 }
                 Err(e) => {
                     let _ = tcp.write_all(&socks5::reply(reply_code(&e), None)).await;
@@ -182,14 +188,30 @@ impl Proxy {
             ctx.orig = Some(SocketAddr::new(ip, port));
             ctx.pin = Some(ip);
         }
+        self.serve_flow(tcp, host, port, ctx, addressed.is_some()).await
+    }
+
+    /// Decides what a stream to `host:port` is from its first bytes and serves it. `addressed`: the target is an IP
+    /// address the client dialled (see [`flow_for`]); a CONNECT tunnel names its target, so it is `false` there.
+    pub(crate) async fn serve_flow(
+        self: Arc<Self>,
+        tcp: TcpStream,
+        host: String,
+        port: u16,
+        ctx: Ctx,
+        addressed: bool,
+    ) -> Result<()> {
         let idle = match self.first_bytes(&tcp, &host, port, &ctx).await? {
             First::Closed => return Ok(()),
-            First::ServerFirst { up, bytes } => return self.relay_raw(tcp, up, bytes, &host, port).await,
+            First::ServerFirst { up, bytes } => {
+                return self.relay_raw(tcp, up, Vec::new(), bytes, Raw::plain(&host, port), &ctx, true).await;
+            }
             First::Client(idle) => idle,
         };
         let sniff = sniff_client(&tcp).await;
-        match flow_for(addressed.is_some(), sniff) {
-            Flow::Proxy => self.handle_client(tcp, ctx).await,
+        match flow_for(addressed, sniff) {
+            // Boxed: `handle_client` reaches this function again for a CONNECT.
+            Flow::Proxy => Box::pin(self.handle_client(tcp, ctx)).await,
             Flow::InterceptTls => self.intercept_tunnel(tcp, host, port, ctx, true).await,
             Flow::InterceptHttp => self.intercept_tunnel(tcp, host, port, ctx, false).await,
             Flow::Raw => {
@@ -197,13 +219,14 @@ impl Proxy {
                     Some(up) => up,
                     None => self.connect_raw(&host, port, &ctx).await?,
                 };
-                self.relay_raw(tcp, up, Vec::new(), &host, port).await
+                self.relay_raw(tcp, up, Vec::new(), Vec::new(), Raw::plain(&host, port), &ctx, true).await
             }
         }
     }
 
     /// Inside a tunnel to `host:port`: TLS is accepted with a certificate for the host (HTTP/2 when the client asks
-    /// for it), anything else is read as HTTP/1.x.
+    /// for it; a protocol that is not HTTP is relayed as a raw stream, see [`Proxy::serve_tls_client`]), anything
+    /// else is read as HTTP/1.x.
     pub(crate) async fn intercept_tunnel(
         self: Arc<Self>,
         tcp: TcpStream,
@@ -215,12 +238,136 @@ impl Proxy {
         if !tls {
             return self.serve_http(Conn::new(tcp), "http", Some((host, port)), None, ctx).await;
         }
-        let tls = TlsAcceptor::from(self.tls_config(&host)?).accept(tcp).await.context("TLS handshake with client")?;
-        if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-            let (host, port) = ctx.redirect.as_ref().map_or((host, port), |r| (r.host.clone(), r.port));
+        let start =
+            pm_tls::LazyConfigAcceptor::new(pm_tls::Acceptor::default(), tcp).await.context("reading the TLS hello")?;
+        let tunnel = Some((host.clone(), port));
+        self.serve_tls_client(start, host.clone(), (host, port), tunnel, ctx).await
+    }
+
+    /// A TLS client whose hello has been read: `cert_host` names the certificate, `target` is where the stream is
+    /// going (a redirect replaces it) and `tunnel` is passed to the HTTP/1.x reader.
+    ///
+    /// - Offered ALPN values other than `h2` and `http/1.1` mean a protocol that is not HTTP: the client's values
+    ///   are offered to the target, the one it chooses is offered back, and the decrypted stream is relayed raw.
+    /// - `h2` negotiated: HTTP/2 as before.
+    /// - Otherwise the first decrypted bytes decide: an HTTP/1.x request line is served as HTTP, anything else is a
+    ///   raw stream inside TLS (a server that speaks first is found by waiting 500 ms for the client, as for plain
+    ///   streams).
+    pub(crate) async fn serve_tls_client(
+        self: Arc<Self>,
+        start: pm_tls::StartHandshake<TcpStream>,
+        cert_host: String,
+        target: (String, u16),
+        tunnel: Option<(String, u16)>,
+        ctx: Ctx,
+    ) -> Result<()> {
+        let (host, port) = ctx.redirect.as_ref().map_or(target, |r| (r.host.clone(), r.port));
+        let custom: Vec<Vec<u8>> = start
+            .client_hello()
+            .alpn()
+            .map(|offered| {
+                offered.filter(|a| *a != b"h2".as_slice() && *a != b"http/1.1".as_slice()).map(<[u8]>::to_vec).collect()
+            })
+            .unwrap_or_default();
+        if !custom.is_empty() {
+            let (up, chosen) = self.connect_raw_tls(&host, port, &ctx, &custom).await?;
+            let mut cfg = (*self.ca.server_config(&cert_host)?).clone();
+            cfg.alpn_protocols = chosen.iter().cloned().collect();
+            let tls = start.into_stream(Arc::new(cfg)).await.context("TLS handshake with client")?;
+            let raw = Raw::tls(&host, port, chosen.as_deref());
+            return self.relay_raw(tls, up, Vec::new(), Vec::new(), raw, &ctx, true).await;
+        }
+        let mut tls = start.into_stream(self.tls_config(&cert_host)?).await.context("TLS handshake with client")?;
+        let alpn = tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+        if alpn.as_deref() == Some(b"h2") {
             return self.serve_h2(tls, host, port, ctx).await;
         }
-        self.serve_http(Conn::new(tls), "https", Some((host, port)), None, ctx).await
+        let offered: Vec<Vec<u8>> = alpn.iter().cloned().collect();
+        let (first, idle) = match self.first_tls_bytes(&mut tls, &host, port, &ctx, &offered).await? {
+            TlsFirst::Closed => return Ok(()),
+            TlsFirst::ServerFirst { up, bytes } => {
+                let raw = Raw::tls(&host, port, alpn.as_deref());
+                return self.relay_raw(tls, up, Vec::new(), bytes, raw, &ctx, true).await;
+            }
+            TlsFirst::Client { bytes, idle } => (bytes, idle),
+        };
+        let first = match sniff_bytes(&mut tls, first).await {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        if first.sniff == Sniff::Http {
+            let client = Conn { io: tls, buf: first.bytes };
+            return self.serve_http(client, "https", tunnel, None, ctx).await;
+        }
+        // Not HTTP inside TLS: the decrypted bytes are relayed to a TLS connection to the target.
+        let up = match idle {
+            Some(up) => up,
+            None => self.connect_raw_tls(&host, port, &ctx, &offered).await?.0,
+        };
+        let raw = Raw::tls(&host, port, alpn.as_deref());
+        self.relay_raw(tls, up, first.bytes, Vec::new(), raw, &ctx, true).await
+    }
+
+    /// Waits for the first decrypted bytes of a TLS client. Like [`Proxy::first_bytes`]: a client that stays silent
+    /// for 500 ms may be waiting for the server to speak (IMAPS, SMTPS), so the target is connected and, if it
+    /// speaks first, the stream is relayed as it is.
+    async fn first_tls_bytes<S>(
+        &self,
+        tls: &mut S,
+        host: &str,
+        port: u16,
+        ctx: &Ctx,
+        alpn: &[Vec<u8>],
+    ) -> Result<TlsFirst>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut buf = vec![0u8; 16 * 1024];
+        match tokio::time::timeout(SERVER_FIRST_WAIT, tls.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => return Ok(TlsFirst::Closed),
+            Ok(Ok(n)) => {
+                buf.truncate(n);
+                return Ok(TlsFirst::Client { bytes: buf, idle: None });
+            }
+            Err(_) => {}
+        }
+        let client_bytes = |r: std::io::Result<usize>, mut b: Vec<u8>, up: Option<Box<dyn Io>>| match r {
+            Ok(n) if n > 0 => {
+                b.truncate(n);
+                TlsFirst::Client { bytes: b, idle: up }
+            }
+            _ => TlsFirst::Closed,
+        };
+        if setup_page::is_setup_host(host) {
+            let r = tls.read(&mut buf).await;
+            return Ok(client_bytes(r, buf, None));
+        }
+        let mut quiet = vec![0u8; 16 * 1024];
+        let connect = self.connect_raw_tls(host, port, ctx, alpn);
+        tokio::pin!(connect);
+        let mut up = tokio::select! {
+            r = tls.read(&mut quiet) => return Ok(client_bytes(r, quiet, None)),
+            r = &mut connect => match r {
+                Ok((up, _)) => up,
+                Err(e) => {
+                    // Not reachable: let the client speak, so HTTP gets its 502 page and the exchange is recorded.
+                    tracing::debug!(host, port, "could not connect while waiting for the client: {e:#}");
+                    let r = tls.read(&mut buf).await;
+                    return Ok(client_bytes(r, buf, None));
+                }
+            },
+        };
+        let mut from_server = vec![0u8; 16 * 1024];
+        tokio::select! {
+            r = tls.read(&mut quiet) => Ok(client_bytes(r, quiet, Some(up))),
+            n = up.read(&mut from_server) => match n {
+                Ok(n) if n > 0 => { from_server.truncate(n); Ok(TlsFirst::ServerFirst { up, bytes: from_server }) }
+                _ => {
+                    let r = tls.read(&mut buf).await;
+                    Ok(client_bytes(r, buf, None))
+                }
+            },
+        }
     }
 
     /// Waits for the first bytes of a tunnel. Clients of HTTP and TLS speak first, so a tunnel that stays quiet may
@@ -269,35 +416,212 @@ impl Proxy {
         self.sender.connect_tunnel_to(&ep, check).await
     }
 
-    /// Passes bytes both ways, unchanged and unrecorded, and counts the stream.
-    pub(crate) async fn relay_raw(
+    /// A TLS connection to the stream's target offering exactly `alpn`, through the upstream rules; returns the
+    /// protocol the target chose.
+    async fn connect_raw_tls(
         &self,
-        mut client: TcpStream,
-        mut up: Box<dyn Io>,
-        from_server: Vec<u8>,
         host: &str,
         port: u16,
-    ) -> Result<()> {
+        ctx: &Ctx,
+        alpn: &[Vec<u8>],
+    ) -> Result<(Box<dyn Io>, Option<Vec<u8>>)> {
+        let (host, port) = ctx.redirect.as_ref().map_or((host, port), |r| (r.host.as_str(), r.port));
+        let ep = Endpoint::new("https", host, port).with_pin(ctx.pin());
+        let guard = self.loop_guard(&ctx.me, host, port);
+        let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
+        self.sender.connect_stream(&ep, alpn, check).await
+    }
+
+    /// Passes bytes both ways, unchanged, and counts the stream. With `record`, the recording settings decide
+    /// whether a copy goes into the project as a raw stream (see [`StreamTap`]); a pass-through tunnel is not
+    /// recorded. `to_server` and `from_server` are bytes already read from one side that go first.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn relay_raw<C>(
+        &self,
+        mut client: C,
+        mut up: Box<dyn Io>,
+        to_server: Vec<u8>,
+        from_server: Vec<u8>,
+        raw: Raw<'_>,
+        ctx: &Ctx,
+        record: bool,
+    ) -> Result<()>
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+    {
         self.raw.streams.fetch_add(1, Relaxed);
-        tracing::info!(host, port, "relaying a non-HTTP stream without recording it");
+        tracing::info!(host = raw.host, port = raw.port, tls = raw.tls, record, "relaying a non-HTTP stream");
         let started = Instant::now();
-        if !from_server.is_empty() {
-            client.write_all(&from_server).await?;
-            self.raw.to_client.fetch_add(from_server.len() as u64, Relaxed);
+        let tap = StreamTap::open(
+            &self.recorder,
+            record,
+            NewStream {
+                start_ms: pm_core::now_ms(),
+                host: raw.host.to_string(),
+                port: raw.port,
+                client_addr: ctx.peer.map(|ip| ip.to_string()),
+                tls: raw.tls,
+                sni: raw.tls.then(|| raw.host.to_string()),
+                alpn: raw.alpn.clone(),
+                source: "proxy".into(),
+                actor_id: String::new(),
+                replay_of: None,
+            },
+        );
+        let (ended, error) = if record {
+            match pump(&mut client, &mut up, &to_server, &from_server, &tap).await {
+                Ok(by) => (by, None),
+                Err(e) => ("error", Some(e.to_string())),
+            }
+        } else {
+            // Untouched tunnel: nothing is recorded, so the plain copy loop is enough.
+            let result = async {
+                if !from_server.is_empty() {
+                    client.write_all(&from_server).await?;
+                    self.raw.to_client.fetch_add(from_server.len() as u64, Relaxed);
+                }
+                tokio::io::copy_bidirectional(&mut client, &mut up).await
+            }
+            .await;
+            match result {
+                Ok((a, b)) => {
+                    self.raw.to_target.fetch_add(a, Relaxed);
+                    self.raw.to_client.fetch_add(b, Relaxed);
+                    ("closed", None)
+                }
+                Err(e) => ("error", Some(e.to_string())),
+            }
+        };
+        let (up_bytes, down_bytes) = tap.totals();
+        if record {
+            self.raw.to_target.fetch_add(up_bytes, Relaxed);
+            self.raw.to_client.fetch_add(down_bytes, Relaxed);
         }
-        if let Ok((to_target, to_client)) = tokio::io::copy_bidirectional(&mut client, &mut up).await {
-            self.raw.to_target.fetch_add(to_target, Relaxed);
-            self.raw.to_client.fetch_add(to_client, Relaxed);
-            tracing::debug!(
-                host,
-                port,
-                to_target,
-                to_client,
-                ms = started.elapsed().as_millis() as u64,
-                "raw stream finished"
-            );
-        }
+        tap.finish(ended, error.clone());
+        tracing::debug!(
+            host = raw.host,
+            port = raw.port,
+            to_server = up_bytes,
+            to_client = down_bytes,
+            ended,
+            ms = started.elapsed().as_millis() as u64,
+            "raw stream finished"
+        );
         Ok(())
+    }
+}
+
+/// Where a raw stream goes and how: for the stream's row.
+pub(crate) struct Raw<'a> {
+    host: &'a str,
+    port: u16,
+    tls: bool,
+    alpn: Option<String>,
+}
+
+impl<'a> Raw<'a> {
+    pub(crate) fn plain(host: &'a str, port: u16) -> Self {
+        Self { host, port, tls: false, alpn: None }
+    }
+
+    pub(crate) fn tls(host: &'a str, port: u16, alpn: Option<&[u8]>) -> Self {
+        Self { host, port, tls: true, alpn: alpn.map(|a| String::from_utf8_lossy(a).into_owned()) }
+    }
+}
+
+/// Moves bytes both ways until both sides are done or one fails, recording each chunk after it was written to the
+/// other side. `to_server` and `from_server` are written first (bytes that were read while sniffing). Returns how
+/// the stream ended: `client_closed` or `server_closed` (whichever side finished first).
+async fn pump<C>(
+    client: &mut C,
+    up: &mut Box<dyn Io>,
+    to_server: &[u8],
+    from_server: &[u8],
+    tap: &StreamTap,
+) -> std::io::Result<&'static str>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    if !from_server.is_empty() {
+        client.write_all(from_server).await?;
+        client.flush().await?;
+        tap.chunk(false, from_server);
+    }
+    if !to_server.is_empty() {
+        up.write_all(to_server).await?;
+        up.flush().await?;
+        tap.chunk(true, to_server);
+    }
+    let first = AtomicU8::new(0);
+    let (mut cr, mut cw) = tokio::io::split(client);
+    let (mut ur, mut uw) = tokio::io::split(up);
+    tokio::try_join!(half(&mut cr, &mut uw, true, tap, &first), half(&mut ur, &mut cw, false, tap, &first))?;
+    Ok(if first.load(Relaxed) == 2 { "server_closed" } else { "client_closed" })
+}
+
+/// One direction of [`pump`]: reads, writes the same bytes to the other side, then hands them to the tap. At end of
+/// stream the other side's write half is shut down (a half-close is passed on).
+async fn half<R, W>(r: &mut R, w: &mut W, to_server: bool, tap: &StreamTap, first: &AtomicU8) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = match r.read(&mut buf).await {
+            Ok(n) => n,
+            // TLS peers that close without a close_notify alert.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            let _ = first.compare_exchange(0, if to_server { 1 } else { 2 }, Relaxed, Relaxed);
+            let _ = w.shutdown().await;
+            return Ok(());
+        }
+        w.write_all(&buf[..n]).await?;
+        w.flush().await?;
+        // No await between the write and this call: chunks reach the recorder in the order they were relayed.
+        tap.chunk(to_server, &buf[..n]);
+    }
+}
+
+/// The result of [`Proxy::first_tls_bytes`].
+enum TlsFirst {
+    Closed,
+    /// The client sent these decrypted bytes (a connection to the target made while waiting, if any, is kept).
+    Client {
+        bytes: Vec<u8>,
+        idle: Option<Box<dyn Io>>,
+    },
+    /// The server spoke first.
+    ServerFirst {
+        up: Box<dyn Io>,
+        bytes: Vec<u8>,
+    },
+}
+
+/// What the first decrypted bytes of a TLS client look like, with those bytes (and any read to decide).
+struct Sniffed {
+    sniff: Sniff,
+    bytes: Vec<u8>,
+}
+
+/// Classifies `bytes` (reading more while a first line is still ambiguous); `None` when the client went away.
+async fn sniff_bytes<S: AsyncRead + Unpin>(tls: &mut S, mut bytes: Vec<u8>) -> Option<Sniffed> {
+    let deadline = Instant::now() + SNIFF_TIMEOUT;
+    loop {
+        if let Some(sniff) = classify(&bytes[..bytes.len().min(32)]) {
+            return Some(Sniffed { sniff, bytes });
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let mut more = vec![0u8; 4096];
+        match tokio::time::timeout(left, tls.read(&mut more)).await {
+            Ok(Ok(n)) if n > 0 => bytes.extend_from_slice(&more[..n]),
+            Ok(Ok(_)) | Ok(Err(_)) => return None,
+            // Still ambiguous after the wait: not something to read as HTTP.
+            Err(_) => return Some(Sniffed { sniff: Sniff::Other, bytes }),
+        }
     }
 }
 

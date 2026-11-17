@@ -679,3 +679,10 @@ iframe.render { width: 100%; min-height: 420px; border: 1px solid var(--border);
   margin: 0; white-space: pre-wrap; word-break: break-all; max-height: 7.5em; overflow: auto; padding: 6px 8px;
   background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px;
 }
+
+/* Raw streams: one block per chunk, tinted by direction. */
+.stream-chunk { margin: 6px 0; padding: 6px 10px; border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; background: var(--panel); }
+.stream-chunk.client { border-left-color: var(--accent); }
+.stream-chunk.server { border-left-color: var(--ok); }
+.stream-arrow { font-weight: 700; font-size: 14px; }
+.stream-bytes { margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; max-height: 360px; overflow: auto; }

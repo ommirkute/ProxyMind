@@ -87,6 +87,9 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `history_search` | Search recorded traffic: host, path, method, status, `status_class` (e.g. `2,3`), source, actor, `identity`, `hypothesis_id`, `text` (host, path or comment), `hide_ext` (e.g. `png,css`), `annotated`, `in_scope`, an HQL `q`, and paging (`after_id`, `before_id`, `limit`) |
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
+| `stream_list` | Raw TCP and TLS streams the proxy recorded (databases, mail, custom protocols): target, client, times, bytes, TLS, how they ended. Filters: `host`, `port`, `client`, `since_ms`, `until_ms`, `tls`, paging |
+| `stream_get` | One raw stream with its chunks in order (client or server, length, text preview), redacted and tagged as untrusted; no raw bytes for agents. Page with `after` |
+| `stream_replay` | Replay a stream on a new connection to the same target (TLS with the same server name), with the recorded or replacement chunks (`text_chunks` or base64 `chunks`); the target must be in scope and sending bytes needs approval by default |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
 | `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
 | `plugin_list` | The user's plugins (passive and/or active, on or off) and what the plugin sandbox does on this machine |

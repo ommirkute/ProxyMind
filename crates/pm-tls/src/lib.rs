@@ -26,7 +26,7 @@ use time::{Duration, OffsetDateTime};
 const MAX_CACHED_CERTS: usize = 10_000;
 
 pub use tokio_rustls::rustls::server::Acceptor;
-pub use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
+pub use tokio_rustls::{LazyConfigAcceptor, StartHandshake, TlsAcceptor, TlsConnector};
 
 const CA_CERT_FILE: &str = "proxymind-ca.pem";
 const CA_KEY_FILE: &str = "proxymind-ca.key";

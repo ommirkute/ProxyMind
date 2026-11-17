@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Raw TCP and TLS streams are recorded and can be replayed.** Protocols that are not HTTP (databases, mail, SSH,
+  a custom protocol), arriving through a CONNECT tunnel, SOCKS5 or a transparent listener, are still relayed byte for
+  byte, and now each connection is also stored as a **stream**: target, client, start and end, bytes each way, TLS or
+  plain, how it ended, and its chunks in order with direction and time (up to 16 MB per stream; after that the bytes are
+  relayed and counted only, and the stream is marked cut). A protocol inside TLS that is not HTTP is no longer an error:
+  after interception the decrypted bytes are recorded as a TLS stream, and ALPN values other than `h2` and `http/1.1`
+  are passed to the target. The same recording settings as for HTTP apply (only in-scope, only chosen devices); TLS
+  pass-through tunnels stay unrecorded. New **Streams** page (Proxy, next to WebSockets history) with a text and a hex
+  view, search inside a stream and live updates; **Replay stream** sends the client's chunks (edited if you like) to
+  the same target on a new connection and records what comes back. Replay is a send like any other: the target must be
+  in scope, agents need approval for sending bytes, and it is audited. API: `GET /streams`, `/streams/{id}`,
+  `/streams/{id}/chunks`, `POST /streams/{id}/replay`; MCP tools `stream_list`, `stream_get` and `stream_replay`; a
+  `streams` event topic. Needs a project migration (new tables; older ProxyMind versions cannot open the project after).
 - **SOCKS5, transparent mode and per-host upstream proxies.** A listener can now be a **SOCKS5 server** (Setup,
   "3. Proxy listeners": type SOCKS5, optionally with a username and password). curl `--socks5-hostname`, browsers and
   Android SOCKS apps can use it; their web traffic, including HTTPS and HTTP/2, is recorded and changed by your rules,

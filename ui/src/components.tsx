@@ -1,7 +1,7 @@
 import { Component, createContext, useCallback, useContext, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
 import type { Counters, LineDiff } from "./api";
 
-export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
+export type Page = "overview" | "scans" | "library" | "history" | "intercept" | "rules" | "replay" | "fuzzer" | "approvals" | "authz" | "model" | "issues" | "tools" | "plugins" | "findings" | "audit" | "network" | "assistant" | "sitemap" | "engagement" | "setup" | "wshistory" | "streams" | "sessions" | "collaborator" | "engage" | "search" | "organizer" | "checks" | "about" | "aiscan" | "evidence";
 
 export interface Nav {
   page: Page;

@@ -59,6 +59,7 @@ mod scan_task;
 mod search;
 mod session;
 mod skills;
+mod streams;
 mod tools;
 mod traffic;
 mod update;
@@ -127,6 +128,9 @@ pub use session::{
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
 pub use skills::Skill;
+pub use streams::{
+    StreamChunkPage, StreamChunkView, StreamDetail, StreamPage, StreamReplayRequest, StreamReplayResult,
+};
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use update::{UpdateState, UpdateStatus};
@@ -358,6 +362,8 @@ impl Service {
         store.set_on_exchanges(Box::new(move |rows| observer_bus.publish_exchanges(rows)));
         let ws_bus = bus.clone();
         store.set_on_ws_messages(Box::new(move |rows| ws_bus.publish_ws(rows)));
+        let stream_bus = bus.clone();
+        store.set_on_streams(Box::new(move |rows| stream_bus.publish_streams(rows)));
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),

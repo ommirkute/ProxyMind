@@ -112,6 +112,10 @@ pub fn api() -> Router<AppState> {
         .route("/export/har", post(export_har))
         .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
+        .route("/streams", get(streams_list))
+        .route("/streams/{id}", get(stream_get))
+        .route("/streams/{id}/chunks", get(stream_chunks))
+        .route("/streams/{id}/replay", post(stream_replay).layer(axum::extract::DefaultBodyLimit::max(24 << 20)))
         .route("/race", post(race))
         .route("/replay/group", post(replay_group))
         .route("/fuzzer", post(fuzzer))
@@ -1254,6 +1258,43 @@ async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>
 
 async fn ws_replay(State(st): State<AppState>, Json(r): Json<pm_service::WsReplayRequest>) -> ApiResult {
     ok(st.service.ws_replay(&st.actor, r).await?)
+}
+
+async fn streams_list(State(st): State<AppState>, Query(q): Query<pm_service::pm_store::StreamFilter>) -> ApiResult {
+    ok(st.service.streams_list(&st.actor, &q)?)
+}
+
+async fn stream_get(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<pm_service::api_types::StreamChunksQuery>,
+) -> ApiResult {
+    ok(st.service.stream_get(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+}
+
+async fn stream_chunks(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<pm_service::api_types::StreamChunksQuery>,
+) -> ApiResult {
+    ok(st.service.stream_chunks(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+}
+
+/// The stream id comes from the path; a `stream_id` in the body must agree with it (or be left out).
+async fn stream_replay(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(mut r): Json<pm_service::StreamReplayRequest>,
+) -> ApiResult {
+    if r.stream_id != 0 && r.stream_id != id {
+        return Err(pm_service::ServiceError::Invalid(format!(
+            "stream_id {} does not match the path ({id})",
+            r.stream_id
+        ))
+        .into());
+    }
+    r.stream_id = id;
+    ok(st.service.stream_replay(&st.actor, r).await?)
 }
 
 async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {

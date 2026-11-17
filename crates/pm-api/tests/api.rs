@@ -869,3 +869,108 @@ async fn changed_traffic_shows_its_originals_and_changes_and_matches_is_modified
     assert_eq!(v["exchanges"][0]["path"], "/plain");
     assert_eq!(v["exchanges"].as_array().unwrap().len(), 1);
 }
+
+/// Raw streams over the API: list with filters, one stream with its chunks, a chunk page, replay (through the
+/// gate), and the `streams` event topic.
+#[tokio::test]
+async fn raw_streams_routes_and_the_streams_topic() {
+    use pm_service::pm_store::{NewChunk, NewStream, StreamEnd};
+    // A line server to replay against.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let _ = c.write_all(b"hi\n").await;
+                let mut buf = [0u8; 64];
+                while let Ok(n) = c.read(&mut buf).await {
+                    if n == 0 || c.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let roe = format!("version: 1\nscope:\n  include: [\"http://127.0.0.1:{target}/\"]\n");
+    let svc = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&roe).unwrap())).unwrap());
+    let state =
+        pm_api::AppState::new(svc.clone(), Actor::parse("human:tester").unwrap(), TOKEN.into(), "test.pmproj".into())
+            .unwrap();
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = ln.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(ln, pm_api::router(state)).await.unwrap() });
+
+    let mut sub = open_events(port, "?topics=streams", "").await;
+    let mut got = String::new();
+    read_until(&mut sub, &mut got, "\r\n\r\n").await;
+    let chunk =
+        |ts: i64, to_server: bool, d: &[u8]| NewChunk { ts_ms: ts, to_server, len: d.len() as u64, data: d.to_vec() };
+    let new = NewStream {
+        start_ms: 5,
+        host: "127.0.0.1".into(),
+        port: target,
+        client_addr: Some("10.1.2.3".into()),
+        source: "proxy".into(),
+        ..Default::default()
+    };
+    let id = svc
+        .store_handle()
+        .write(|s| {
+            s.record_stream(
+                &new,
+                vec![chunk(1, false, b"hi\n"), chunk(2, true, b"HELLO\n"), chunk(3, false, &[0xff, 0xfe])],
+                StreamEnd {
+                    end_ms: 9,
+                    bytes_to_server: 6,
+                    bytes_to_client: 5,
+                    ended: "client_closed".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    read_until(&mut sub, &mut got, "\"what\":\"ended\"").await;
+    assert!(got.contains("event: streams") && got.contains("\"type\":\"stream_changed\""), "{got}");
+    assert!(got.contains(&format!("\"id\":{id}")), "{got}");
+
+    // The list, with filters; an unknown filter key is a 400.
+    let get = |path: String| async move {
+        let (st, _, b) = http(port, "GET", &path, &[AUTH], None).await;
+        (st, serde_json::from_str::<Value>(&b).unwrap_or(Value::Null))
+    };
+    let (st, list) = get(format!("/api/v1/streams?host=127.0.0&port={target}&client=10.1.2.3&limit=5")).await;
+    assert_eq!(
+        (st, list["streams"][0]["id"].as_i64(), list["streams"][0]["bytes_to_server"].as_i64()),
+        (200, Some(id), Some(6))
+    );
+    assert_eq!(get("/api/v1/streams?port=1".into()).await.1["streams"].as_array().unwrap().len(), 0);
+    assert_eq!(get("/api/v1/streams?bogus=1".into()).await.0, 400);
+
+    // One stream with chunks: base64 and a text preview each; then a page after the first chunk.
+    let (st, one) = get(format!("/api/v1/streams/{id}")).await;
+    assert_eq!(st, 200);
+    let chunks = one["chunks"]["chunks"].as_array().unwrap();
+    assert_eq!(
+        (chunks.len(), chunks[1]["from"].as_str(), chunks[1]["text"].as_str()),
+        (3, Some("client"), Some("HELLO\n"))
+    );
+    assert_eq!(chunks[1]["data_b64"].as_str(), Some("SEVMTE8K"));
+    let (_, page) = get(format!("/api/v1/streams/{id}/chunks?after={}&limit=1", chunks[0]["id"])).await;
+    assert_eq!((page["chunks"][0]["from"].as_str(), page["next_after_id"].as_i64().is_some()), (Some("client"), true));
+    assert_eq!(get("/api/v1/streams/999".into()).await.0, 404);
+
+    // Replay: needs the change header; the path's id wins and a different body id is refused.
+    let url = format!("/api/v1/streams/{id}/replay");
+    assert_eq!(http(port, "POST", &url, &[AUTH], Some(json!({}))).await.0, 403, "state change without X-ProxyMind");
+    let (st, _, _) = http(port, "POST", &url, &[AUTH, CHANGE], Some(json!({"stream_id": id + 1}))).await;
+    assert_eq!(st, 400);
+    let body = json!({"text_chunks": ["EDITED\n"], "read_ms": 300});
+    let (st, _, b) = http(port, "POST", &url, &[AUTH, CHANGE], Some(body)).await;
+    let r: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!((st, r["status"].as_str(), r["sent_bytes"].as_i64()), (200, Some("done"), Some(7)), "{b}");
+    let said: String = r["chunks"]["chunks"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap()).collect();
+    assert!(said.contains("EDITED"), "{said}");
+    let new_id = r["stream_id"].as_i64().unwrap();
+    assert_ne!(new_id, id);
+    read_until(&mut sub, &mut got, &format!("\"id\":{new_id}")).await;
+}

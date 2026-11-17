@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use pm_policy::{Actor, ActorKind, Target};
-use pm_store::{CommittedExchange, CommittedWs};
+use pm_store::{CommittedExchange, CommittedStream, CommittedWs};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -43,10 +43,11 @@ pub enum Topic {
     Fuzzer,
     AiScan,
     Plugins,
+    Streams,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 12] = [
+    pub const ALL: [Topic; 13] = [
         Topic::Exchanges,
         Topic::Findings,
         Topic::Scans,
@@ -59,6 +60,7 @@ impl Topic {
         Topic::Fuzzer,
         Topic::AiScan,
         Topic::Plugins,
+        Topic::Streams,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -75,6 +77,7 @@ impl Topic {
             Topic::Fuzzer => "fuzzer",
             Topic::AiScan => "ai_scan",
             Topic::Plugins => "plugins",
+            Topic::Streams => "streams",
         }
     }
 
@@ -167,6 +170,15 @@ pub enum Event {
         plugin: String,
         what: String,
     },
+    /// A raw TCP or TLS stream was recorded (roadmap 2.6): `what` is `started`, `chunks` (more chunks stored; at most
+    /// one event per stream per write) or `ended`. `host` is target-derived (redacted for agents); an agent only
+    /// gets streams to in-scope targets. Fetch the stream with `stream_get`.
+    StreamChanged {
+        id: i64,
+        what: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl Event {
@@ -185,6 +197,7 @@ impl Event {
             Event::FuzzerProgress { .. } => Topic::Fuzzer,
             Event::AiScanChanged { .. } => Topic::AiScan,
             Event::PluginsChanged { .. } => Topic::Plugins,
+            Event::StreamChanged { .. } => Topic::Streams,
         }
     }
 }
@@ -262,6 +275,15 @@ impl Bus {
         for r in rows {
             let scope = Target::from_parts(&r.scheme, &r.host, r.port, &r.path).ok();
             self.publish(Event::WsMessageRecorded { exchange_id: r.exchange_id }, scope);
+        }
+    }
+
+    pub(crate) fn publish_streams(&self, rows: &[CommittedStream]) {
+        for r in rows {
+            // Scope is matched like the stream's recording: https for TLS, else http, path "/".
+            let scope = Target::from_parts(&r.scheme, &r.host, r.port, "/").ok();
+            let event = Event::StreamChanged { id: r.id, what: r.what.into(), host: r.host.clone(), port: r.port };
+            self.publish(event, scope);
         }
     }
 
@@ -400,7 +422,7 @@ impl Service {
     /// What `actor` may see of a published event, as JSON (`seq`, `topic`, `type` and the event's fields), or
     /// `None` when the event must not reach them. The single place for these rules (ADR-0018):
     /// - a topic the actor may not read is dropped;
-    /// - for an agent, an event about a request target (`ExchangeRecorded`, `FindingChanged`, `WsMessageRecorded`) is dropped when the
+    /// - for an agent, an event about a request target (`ExchangeRecorded`, `FindingChanged`, `WsMessageRecorded`, `StreamChanged`) is dropped when the
     ///   target is out of scope, or when its scope could not be determined;
     /// - for an agent, strings pass through the redactor when the ROE asks for it (`json_for`), so a host
     ///   containing a secret is replaced by a placeholder. Humans see events as published;
@@ -415,7 +437,10 @@ impl Service {
             }
             let targeted = matches!(
                 p.event,
-                Event::ExchangeRecorded { .. } | Event::FindingChanged { .. } | Event::WsMessageRecorded { .. }
+                Event::ExchangeRecorded { .. }
+                    | Event::FindingChanged { .. }
+                    | Event::WsMessageRecorded { .. }
+                    | Event::StreamChanged { .. }
             );
             match &p.scope {
                 Some(t) if self.policy.scope_check(t).is_err() => return None,

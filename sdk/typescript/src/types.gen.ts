@@ -3528,6 +3528,169 @@ export interface StatusQuery {
   status?: string | null;
 }
 
+/** A page of a stream's chunks, oldest first. */
+export interface StreamChunkPage {
+  chunks: StreamChunkView[];
+  /** Pass as `after` to read the next page. */
+  next_after_id?: number | null;
+  notice?: string | null;
+  stream_id: number;
+  /** Chunks stored for the stream. */
+  total: number;
+}
+
+/** One chunk of a stream as `actor` may see it. */
+export interface StreamChunkView {
+  /** The stored bytes as base64. People only: agents get the redacted `text`. */
+  data_b64?: string | null;
+  /** `client` (towards the server) or `server` (towards the client). */
+  from: string;
+  id: number;
+  /** Bytes stored: fewer than `len` when the recording cap cut the chunk. */
+  kept: number;
+  /** Bytes on the wire. */
+  len: number;
+  possible_prompt_injection?: string[];
+  /**
+   * A lossy text preview of the bytes (invalid UTF-8 becomes U+FFFD). Untrusted target content: for agents it is
+   * redacted and wrapped in `<untrusted_target_content>`.
+   */
+  text: string;
+  /** The preview is shorter than the stored bytes. */
+  text_truncated: boolean;
+  ts_ms: number;
+}
+
+/** Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`. */
+export interface StreamChunksQuery {
+  /** Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk. */
+  after?: number | null;
+  /** Most chunks to return (default 100, at most 500). */
+  limit?: number | null;
+}
+
+/** One stream with its first chunks. */
+export interface StreamDetail {
+  chunks: StreamChunkPage;
+  stream: StreamRow;
+}
+
+/** Filters of the stream list. Unknown keys are refused. */
+export interface StreamFilter {
+  /** Only streams with an id less than this (older ones; for paging back, pass `next_before_id`). */
+  before_id?: number | null;
+  /** Only streams from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
+  /** Only targets whose host contains this text (case-insensitive). */
+  host?: string | null;
+  /** Most rows (default 50, max 500). */
+  limit?: number | null;
+  /** Only this target port. */
+  port?: number | null;
+  /** Only streams that started at or after this time (milliseconds since 1970). */
+  since_ms?: number | null;
+  /** With true: only TLS streams; with false: only plain ones. */
+  tls?: boolean | null;
+  /** Only streams that started at or before this time (milliseconds since 1970). */
+  until_ms?: number | null;
+}
+
+/** Streams, newest first. */
+export interface StreamPage {
+  /** Pass as `before_id` for older streams. */
+  next_before_id?: number | null;
+  streams: StreamRow[];
+}
+
+export interface StreamReplayRequest {
+  /** From a previous pending_approval result: runs the approved send. All other fields must be identical. */
+  approval_id?: string | null;
+  /**
+   * Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB
+   * in all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.
+   */
+  chunks?: string[] | null;
+  /** Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile. */
+  delay_ms?: number | null;
+  /** Characters of each chunk shown back (default 2000). */
+  max_chars?: number | null;
+  /** Stop reading after this many bytes from the server (default 1 MB, at most 16 MB). */
+  max_response_bytes?: number | null;
+  /**
+   * After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A
+   * server that spoke first in the original is waited for before the first chunk, for the same time.
+   */
+  read_ms?: number | null;
+  /** The recorded stream to replay. */
+  stream_id: number;
+  /** Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`. */
+  text_chunks?: string[] | null;
+}
+
+export type StreamReplayResult =
+  /** The connection opened; everything sent and received is recorded as the new stream `stream_id`. */
+  | {
+      chunks: StreamChunkPage;
+      /**
+       * `server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or
+       * `error`.
+       */
+      ended: string;
+      note?: string | null;
+      received_bytes: number;
+      sent_bytes: number;
+      status: "done";
+      stream_id: number;
+    }
+  /** The target could not be reached; the attempt is recorded as stream `stream_id`. */
+  | {
+      error: string;
+      status: "failed";
+      stream_id: number;
+    }
+  | {
+      approval_id: string;
+      reasons: string[];
+      status: "pending_approval";
+      summary: string;
+    }
+  | {
+      reasons: string[];
+      status: "denied";
+    };
+
+/** One stream, without its chunks. */
+export interface StreamRow {
+  actor_id: string;
+  /** The ALPN protocol agreed, when it was not HTTP. */
+  alpn?: string | null;
+  bytes_to_client: number;
+  /** Bytes sent towards the server and towards the client (all of them, also those past the recording cap). */
+  bytes_to_server: number;
+  /** Chunks stored. */
+  chunks: number;
+  /** The client's IP address; absent for streams ProxyMind opened itself. */
+  client_addr?: string | null;
+  /** Absent while the stream is open. */
+  end_ms?: number | null;
+  /** How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open. */
+  ended?: string | null;
+  error?: string | null;
+  host: string;
+  id: number;
+  port: number;
+  /** The stream this one replays. */
+  replay_of?: number | null;
+  sni?: string | null;
+  /** `proxy` or `stream_replay`. */
+  source: string;
+  start_ms: number;
+  /** The chunks are the decrypted bytes of a TLS connection. */
+  tls: boolean;
+  /** The recording cap was reached: later bytes were relayed and counted but not kept. */
+  truncated: boolean;
+}
+
 export interface TargetAnalysis {
   content_types: { [key: string]: number };
   /** URLs that take input (with a query or a body), up to 300. */

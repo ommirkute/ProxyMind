@@ -3552,6 +3552,185 @@ class StatusQuery(TypedDict, total=False):
     status: _t.Optional[str]
 
 
+class _StreamChunkPageRequired(TypedDict):
+    chunks: _t.List["StreamChunkView"]
+    stream_id: int
+    # Chunks stored for the stream.
+    total: int
+
+
+class StreamChunkPage(_StreamChunkPageRequired, total=False):
+    """A page of a stream's chunks, oldest first."""
+    # Pass as `after` to read the next page.
+    next_after_id: _t.Optional[int]
+    notice: _t.Optional[str]
+
+
+# One chunk of a stream as `actor` may see it.
+_StreamChunkViewRequired = TypedDict("_StreamChunkViewRequired", {
+    "from": str,
+    "id": int,
+    "kept": int,
+    "len": int,
+    "text": str,
+    "text_truncated": bool,
+    "ts_ms": int,
+})
+
+_StreamChunkViewOptional = TypedDict("_StreamChunkViewOptional", {
+    "data_b64": _t.Optional[str],
+    "possible_prompt_injection": _t.List[str],
+}, total=False)
+
+class StreamChunkView(_StreamChunkViewRequired, _StreamChunkViewOptional):
+    pass
+
+
+class StreamChunksQuery(TypedDict, total=False):
+    """Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`."""
+    # Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.
+    after: _t.Optional[int]
+    # Most chunks to return (default 100, at most 500).
+    limit: _t.Optional[int]
+
+
+class StreamDetail(TypedDict):
+    """One stream with its first chunks."""
+    chunks: "StreamChunkPage"
+    stream: "StreamRow"
+
+
+class StreamFilter(TypedDict, total=False):
+    """Filters of the stream list. Unknown keys are refused."""
+    # Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).
+    before_id: _t.Optional[int]
+    # Only streams from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
+    # Only targets whose host contains this text (case-insensitive).
+    host: _t.Optional[str]
+    # Most rows (default 50, max 500).
+    limit: _t.Optional[int]
+    # Only this target port.
+    port: _t.Optional[int]
+    # Only streams that started at or after this time (milliseconds since 1970).
+    since_ms: _t.Optional[int]
+    # With true: only TLS streams; with false: only plain ones.
+    tls: _t.Optional[bool]
+    # Only streams that started at or before this time (milliseconds since 1970).
+    until_ms: _t.Optional[int]
+
+
+class _StreamPageRequired(TypedDict):
+    streams: _t.List["StreamRow"]
+
+
+class StreamPage(_StreamPageRequired, total=False):
+    """Streams, newest first."""
+    # Pass as `before_id` for older streams.
+    next_before_id: _t.Optional[int]
+
+
+class _StreamReplayRequestRequired(TypedDict):
+    # The recorded stream to replay.
+    stream_id: int
+
+
+class StreamReplayRequest(_StreamReplayRequestRequired, total=False):
+    # From a previous pending_approval result: runs the approved send. All other fields must be identical.
+    approval_id: _t.Optional[str]
+    # Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB
+    # in all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.
+    chunks: _t.Optional[_t.List[str]]
+    # Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile.
+    delay_ms: _t.Optional[int]
+    # Characters of each chunk shown back (default 2000).
+    max_chars: _t.Optional[int]
+    # Stop reading after this many bytes from the server (default 1 MB, at most 16 MB).
+    max_response_bytes: _t.Optional[int]
+    # After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A
+    # server that spoke first in the original is waited for before the first chunk, for the same time.
+    read_ms: _t.Optional[int]
+    # Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`.
+    text_chunks: _t.Optional[_t.List[str]]
+
+
+class _StreamReplayResultDoneRequired(TypedDict):
+    chunks: "StreamChunkPage"
+    # `server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or
+    # `error`.
+    ended: str
+    received_bytes: int
+    sent_bytes: int
+    status: _t.Literal["done"]
+    stream_id: int
+
+
+class StreamReplayResultDone(_StreamReplayResultDoneRequired, total=False):
+    """The connection opened; everything sent and received is recorded as the new stream `stream_id`."""
+    note: _t.Optional[str]
+
+
+class StreamReplayResultFailed(TypedDict):
+    """The target could not be reached; the attempt is recorded as stream `stream_id`."""
+    error: str
+    status: _t.Literal["failed"]
+    stream_id: int
+
+
+class StreamReplayResultPendingApproval(TypedDict):
+    approval_id: str
+    reasons: _t.List[str]
+    status: _t.Literal["pending_approval"]
+    summary: str
+
+
+class StreamReplayResultDenied(TypedDict):
+    reasons: _t.List[str]
+    status: _t.Literal["denied"]
+
+
+StreamReplayResult = _t.Union[
+    "StreamReplayResultDone",
+    "StreamReplayResultFailed",
+    "StreamReplayResultPendingApproval",
+    "StreamReplayResultDenied",
+]
+
+class _StreamRowRequired(TypedDict):
+    actor_id: str
+    bytes_to_client: int
+    # Bytes sent towards the server and towards the client (all of them, also those past the recording cap).
+    bytes_to_server: int
+    # Chunks stored.
+    chunks: int
+    host: str
+    id: int
+    port: int
+    # `proxy` or `stream_replay`.
+    source: str
+    start_ms: int
+    # The chunks are the decrypted bytes of a TLS connection.
+    tls: bool
+    # The recording cap was reached: later bytes were relayed and counted but not kept.
+    truncated: bool
+
+
+class StreamRow(_StreamRowRequired, total=False):
+    """One stream, without its chunks."""
+    # The ALPN protocol agreed, when it was not HTTP.
+    alpn: _t.Optional[str]
+    # The client's IP address; absent for streams ProxyMind opened itself.
+    client_addr: _t.Optional[str]
+    # Absent while the stream is open.
+    end_ms: _t.Optional[int]
+    # How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open.
+    ended: _t.Optional[str]
+    error: _t.Optional[str]
+    # The stream this one replays.
+    replay_of: _t.Optional[int]
+    sni: _t.Optional[str]
+
+
 class TargetAnalysis(TypedDict):
     content_types: _t.Dict[str, int]
     # URLs that take input (with a query or a body), up to 300.

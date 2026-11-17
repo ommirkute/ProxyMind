@@ -16,6 +16,7 @@ pub mod listeners;
 pub mod presets;
 pub mod rewrite;
 pub mod setup_page;
+mod stream_rec;
 pub mod transparent;
 mod ws_relay;
 
@@ -37,8 +38,8 @@ use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings, QueueChange, QueueObserver};
 pub use listeners::{ListenerConfig, ListenerKind, ListenerStatus, Listeners, Redirect};
 pub use pm_store::NewExchange as RecordedExchange;
-use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, WsTarget};
-use pm_tls::{CertAuthority, TlsAcceptor};
+use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, StreamOp, WsTarget};
+use pm_tls::CertAuthority;
 pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -62,6 +63,8 @@ enum Record {
     Exchange(Box<NewExchange>, Option<u64>),
     Ws(u64, NewWsMessage),
     WsDone(u64),
+    /// A change to a raw stream's rows (roadmap 2.6); the key names the stream.
+    Stream(StreamOp),
 }
 
 /// Counters shared by every clone of a [`Recorder`].
@@ -101,8 +104,10 @@ impl Recorder {
             // Upgraded exchanges by key, so their WebSocket messages can be
             // linked to the row id. Records arrive in order on one thread.
             let mut ids = std::collections::HashMap::<u64, i64>::new();
+            let mut stream_ids = std::collections::HashMap::<u64, i64>::new();
             for rec in rx {
                 let r = match rec {
+                    Record::Stream(op) => store.apply_stream_ops(&mut stream_ids, vec![op]).map(drop),
                     Record::Exchange(ex, key) => store.insert_exchange(&ex).map(|id| {
                         if let Some(k) = key {
                             ids.insert(k, id);
@@ -146,6 +151,7 @@ impl Recorder {
             .name("recorder".into())
             .spawn(move || {
                 let mut ids = std::collections::HashMap::<u64, i64>::new();
+                let mut stream_ids = std::collections::HashMap::<u64, i64>::new();
                 let mut batch = Vec::with_capacity(BATCH_MAX);
                 while let Ok(first) = rx.recv() {
                     batch.push(first);
@@ -157,7 +163,7 @@ impl Recorder {
                         }
                     }
                     let n = batch.len() as u64;
-                    write_batch(&handle, &mut ids, std::mem::take(&mut batch));
+                    write_batch(&handle, &mut ids, &mut stream_ids, std::mem::take(&mut batch));
                     st.written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                     st.batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -226,15 +232,22 @@ impl Recorder {
 /// Writes drained records through the shared handle in one transaction, then updates the key -> row id map.
 /// Records are never reordered: exchanges go in arrival order, and each WebSocket message is resolved against the
 /// exchange it follows (in this batch or an earlier one).
-fn write_batch(handle: &StoreHandle, ids: &mut std::collections::HashMap<u64, i64>, records: Vec<Record>) {
+fn write_batch(
+    handle: &StoreHandle,
+    ids: &mut std::collections::HashMap<u64, i64>,
+    stream_ids: &mut std::collections::HashMap<u64, i64>,
+    records: Vec<Record>,
+) {
     use std::collections::{HashMap, HashSet};
     let mut exchanges: Vec<NewExchange> = Vec::new();
     let mut keys: Vec<Option<u64>> = Vec::new();
     let mut ws: Vec<(WsTarget, NewWsMessage)> = Vec::new();
     let mut pending = HashMap::<u64, usize>::new();
     let mut done = HashSet::<u64>::new();
+    let mut stream_ops: Vec<StreamOp> = Vec::new();
     for rec in records {
         match rec {
+            Record::Stream(op) => stream_ops.push(op),
             Record::Exchange(ex, key) => {
                 if let Some(k) = key {
                     pending.insert(k, exchanges.len());
@@ -280,6 +293,21 @@ fn write_batch(handle: &StoreHandle, ids: &mut std::collections::HashMap<u64, i6
                     let m = NewWsMessage { exchange_id: id, ..m.clone() };
                     if let Err(e) = handle.write(|s| s.insert_ws_message(&m)) {
                         tracing::error!(error = %e, "failed to record traffic");
+                    }
+                }
+            }
+        }
+    }
+    if !stream_ops.is_empty() {
+        // Stream rows are independent of exchanges; one transaction for the batch's stream changes, in order.
+        let mut work = stream_ids.clone();
+        match handle.write(|s| s.apply_stream_ops(&mut work, stream_ops.clone())) {
+            Ok(_) => *stream_ids = work,
+            Err(e) => {
+                tracing::warn!(error = %e, "batch write of streams failed; retrying its records one by one");
+                for op in stream_ops {
+                    if let Err(e) = handle.write(|s| s.apply_stream_ops(stream_ids, vec![op])) {
+                        tracing::error!(error = %e, "failed to record a stream");
                     }
                 }
             }
@@ -438,12 +466,10 @@ impl Proxy {
             return self.tunnel(tcp, &to_host, to_port, &ctx).await;
         }
 
-        // Peek at the first byte: 0x16 starts a TLS handshake. Anything else
-        // is plain HTTP inside the tunnel (e.g. WebSockets on port 80).
-        if tcp.peek(&mut first).await? == 0 {
-            return Ok(());
-        }
-        self.intercept_tunnel(tcp, host, port, ctx, first[0] == 0x16).await
+        // The first bytes decide: a TLS handshake is intercepted, an HTTP/1.x request (e.g. WebSockets on port 80)
+        // is read, and anything else (a protocol where the server speaks first, SSH, a database, a custom
+        // protocol) is relayed and recorded as a raw stream.
+        self.serve_flow(tcp, host, port, ctx, false).await
     }
 
     /// Whether TLS to this host is passed through without interception.
@@ -498,12 +524,7 @@ impl Proxy {
             (None, Some(o)) => o.ip().to_string(),
             (None, None) => bail!("transparent HTTPS needs the client to send a server name (SNI)"),
         };
-        let tls = start.into_stream(self.tls_config(&sni)?).await.context("TLS handshake with client")?;
-        if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-            let (host, port) = ctx.redirect.as_ref().map_or((sni, default_port), |r| (r.host.clone(), r.port));
-            return self.serve_h2(tls, host, port, ctx).await;
-        }
-        self.serve_http(Conn::new(tls), "https", None, None, ctx).await
+        self.serve_tls_client(start, sni.clone(), (sni, default_port), None, ctx).await
     }
 
     /// Checks resolved addresses against ProxyMind's own (direct connections only).

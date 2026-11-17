@@ -4,11 +4,14 @@
 //! zstd-compressed blobs keyed by their blake3 hash, so identical bodies
 //! (static files, repeated replays) are stored once.
 
+mod streams;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+pub use streams::*;
 
 /// Schema migrations, applied in order. Never edit a released entry;
 /// add a new one instead.
@@ -384,6 +387,44 @@ ALTER TABLE exchanges ADD COLUMN req_orig_hash BLOB REFERENCES blobs(hash);
 ALTER TABLE exchanges ADD COLUMN resp_deliv_hash BLOB REFERENCES blobs(hash);
 ALTER TABLE exchanges ADD COLUMN changes TEXT;
 "#,
+    r#"
+-- Raw TCP and TLS streams the proxy relayed (roadmap 2.6): one row per connection, its chunks in order. Chunk bytes
+-- are stored like bodies (zstd, deduplicated, in `blobs`; NULL when none were kept). `end_ms`, `ended` are NULL while
+-- the stream is open. `truncated` says the recording cap was reached: later bytes were relayed and counted only.
+CREATE TABLE streams (
+    id              INTEGER PRIMARY KEY,
+    start_ms        INTEGER NOT NULL,
+    end_ms          INTEGER,
+    host            TEXT NOT NULL,
+    port            INTEGER NOT NULL,
+    client_addr     TEXT,
+    tls             INTEGER NOT NULL,
+    sni             TEXT,
+    alpn            TEXT,
+    source          TEXT NOT NULL,
+    actor_id        TEXT NOT NULL,
+    bytes_to_server INTEGER NOT NULL DEFAULT 0,
+    bytes_to_client INTEGER NOT NULL DEFAULT 0,
+    chunk_count     INTEGER NOT NULL DEFAULT 0,
+    truncated       INTEGER NOT NULL DEFAULT 0,
+    ended           TEXT,
+    error           TEXT,
+    replay_of       INTEGER REFERENCES streams(id)
+);
+CREATE INDEX streams_host ON streams(host);
+CREATE INDEX streams_start ON streams(start_ms);
+CREATE INDEX streams_client ON streams(client_addr);
+CREATE TABLE stream_chunks (
+    id         INTEGER PRIMARY KEY,
+    stream_id  INTEGER NOT NULL REFERENCES streams(id),
+    ts_ms      INTEGER NOT NULL,
+    to_server  INTEGER NOT NULL,
+    len        INTEGER NOT NULL,
+    stored_len INTEGER NOT NULL,
+    data_hash  BLOB REFERENCES blobs(hash)
+);
+CREATE INDEX stream_chunks_stream ON stream_chunks(stream_id, id);
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -749,6 +790,8 @@ pub struct Store {
     committed: Option<Vec<CommittedExchange>>,
     /// Exchange ids that got WebSocket messages since `StoreHandle::write` last drained this (None = nobody observes).
     committed_ws: Option<Vec<i64>>,
+    /// Stream changes since `StoreHandle::write` last drained this (None = nobody observes).
+    committed_streams: Option<Vec<CommittedStream>>,
 }
 
 /// What a commit observer is told about a stored exchange: ids and short summary fields only, never bodies.
@@ -845,6 +888,7 @@ impl Store {
             index_inline: false,
             committed: None,
             committed_ws: None,
+            committed_streams: None,
         })
     }
 
@@ -865,6 +909,7 @@ impl Store {
             index_inline: false,
             committed: None,
             committed_ws: None,
+            committed_streams: None,
         })
     }
 
@@ -879,8 +924,15 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let index_inline = conn.path().is_none_or(str::is_empty);
-        let mut store =
-            Self { conn, text_of: raw_text, extractor_set: false, index_inline, committed: None, committed_ws: None };
+        let mut store = Self {
+            conn,
+            text_of: raw_text,
+            extractor_set: false,
+            index_inline,
+            committed: None,
+            committed_ws: None,
+            committed_streams: None,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -2191,6 +2243,7 @@ pub struct StoreHandle {
     readers: Option<Pool>,
     on_exchanges: std::sync::OnceLock<ExchangeObserver>,
     on_ws_messages: std::sync::OnceLock<WsObserver>,
+    on_streams: std::sync::OnceLock<StreamObserver>,
 }
 
 /// Read-only connections for one project file, opened lazily up to a cap.
@@ -2323,6 +2376,7 @@ impl StoreHandle {
             readers,
             on_exchanges: std::sync::OnceLock::new(),
             on_ws_messages: std::sync::OnceLock::new(),
+            on_streams: std::sync::OnceLock::new(),
         }
     }
 
@@ -2364,7 +2418,29 @@ impl StoreHandle {
                 observer(&batch);
             }
         }
+        if let Some(observer) = self.on_streams.get() {
+            let mut seen = std::collections::HashSet::new();
+            let batch: Vec<CommittedStream> = guard
+                .committed_streams
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| seen.insert((c.id, c.what)))
+                .collect();
+            if !batch.is_empty() {
+                observer(&batch);
+            }
+        }
         out
+    }
+
+    /// Installs the stream observer, once (a second call is ignored and returns false). After every `write` in which
+    /// stream rows committed, `observer` gets what happened to each stream (started, chunks, ended), each once per
+    /// `write`, after `COMMIT` and under the write lock (same rules as [`StoreHandle::set_on_exchanges`]).
+    pub fn set_on_streams(&self, observer: StreamObserver) -> bool {
+        self.inner.lock().committed_streams.get_or_insert_with(Vec::new);
+        self.on_streams.set(observer).is_ok()
     }
 
     /// Installs the WebSocket observer, once (a second call is ignored and returns false). After every `write` in
@@ -2539,10 +2615,11 @@ mod tests {
             conn.execute_batch(
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes;
-                 DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;",
+                 DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;
+                 DROP TABLE stream_chunks; DROP TABLE streams;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 2) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 3) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2574,10 +2651,10 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
-                 ALTER TABLE exchanges DROP COLUMN changes;",
+                 ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 2) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         let old = s.get_exchange(old_id).unwrap().unwrap();

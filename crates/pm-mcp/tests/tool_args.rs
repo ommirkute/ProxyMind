@@ -4,12 +4,12 @@
 
 use pm_service::api_types::ProtobufDecodeRequest;
 use pm_service::mcp_args::*;
-use pm_service::pm_store::HistoryFilter;
+use pm_service::pm_store::{HistoryFilter, StreamFilter};
 use pm_service::{
     ActiveScanRequest, AuthzMatrixRequest, CrawlRequest, CustomScanRequest, DecodeRequest, DiscoverRequest,
     DomTestRequest, FuzzerRequest, GraphQlImportRequest, GroupRequest, HypothesisUpdate, ImportRequest, NewAttackPath,
     NewHypothesis, OpenApiImportRequest, PluginCheckRequest, RaceRequest, ScanFilter, SearchRequest,
-    TokenAnalyzerRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WsSearchRequest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -53,6 +53,19 @@ fn history_and_websocket_search() {
     accepts::<WsMessagesArgs>(json!({"exchange_id": 5, "after_id": 2, "limit": 50, "max_chars": 2000}));
     refuses::<ExchangeGetArgs>(json!({"view": "full"}));
     refuses::<WsMessagesArgs>(json!({"limit": 5}));
+}
+
+#[test]
+fn raw_stream_tools() {
+    accepts::<StreamFilter>(json!({"host": "mail", "port": 25, "client": "10.0.0.7", "since_ms": 1, "until_ms": 2,
+        "tls": true, "before_id": 9, "limit": 10}));
+    accepts::<StreamGetArgs>(json!({"id": 3, "after": 10, "limit": 50, "max_chars": 2000}));
+    refuses::<StreamGetArgs>(json!({"limit": 5}));
+    accepts::<StreamReplayRequest>(
+        json!({"stream_id": 3, "text_chunks": ["EHLO x\r\n"], "delay_ms": 100, "read_ms": 500,
+        "max_response_bytes": 1000, "approval_id": "a1", "max_chars": 500}),
+    );
+    accepts::<StreamReplayRequest>(json!({"stream_id": 3, "chunks": ["RUhMTw=="]}));
 }
 
 #[test]
