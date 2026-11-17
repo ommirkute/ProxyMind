@@ -264,6 +264,7 @@ export default function History() {
     { label: "Active scan", onClick: () => go("issues", r.id) },
     { label: "Plugin check…", onClick: () => go("plugins", r.id) },
     { label: "Run custom checks…", onClick: () => go("checks", r.id) },
+    { label: "Run workflow…", onClick: () => go("workflows", r.id) },
     { label: "Authorization check…", onClick: () => go("authz", r.id) },
     {
       label: "Send to Organizer",

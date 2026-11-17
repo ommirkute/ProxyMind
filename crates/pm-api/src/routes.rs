@@ -16,7 +16,7 @@ use pm_service::api_types::{
     LimitQuery, ListenBody, ListenersBody, OrganizerAdd, OrganizerQuery, PackQuery, PanelQuery, PayloadBody, PluginSet,
     ProbesQuery, ReconDns, ReconWayback, RecordLoginBody, ReportQuery, RoeBody, RulesBody, ScanQuery, SendBody,
     SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet,
-    UpstreamResolveRequest, WsHistoryQuery, WsQuery,
+    UpstreamResolveRequest, WorkflowRunBody, WorkflowRunsQuery, WorkflowTriggerBody, WsHistoryQuery, WsQuery,
 };
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
@@ -236,6 +236,12 @@ pub fn api() -> Router<AppState> {
         .route("/session", get(session_get).put(session_put))
         .route("/session/jar", get(session_jar).delete(session_jar_clear))
         .route("/session/macros/{name}/run", post(session_macro_run))
+        .route("/workflows", get(workflows_list).post(workflow_create))
+        .route("/workflows/runs", get(workflow_runs))
+        .route("/workflows/runs/{id}", get(workflow_run_get))
+        .route("/workflows/{id}", get(workflow_get).put(workflow_update).delete(workflow_delete))
+        .route("/workflows/{id}/trigger", axum::routing::put(workflow_trigger))
+        .route("/workflows/{id}/run", post(workflow_run))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/key", axum::routing::put(model_key_set))
@@ -1443,6 +1449,52 @@ async fn session_jar(State(st): State<AppState>) -> ApiResult {
 async fn session_jar_clear(State(st): State<AppState>) -> ApiResult {
     st.service.session_jar_clear(&st.actor)?;
     ok(json!({ "cleared": true }))
+}
+
+async fn workflows_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.workflow_list(&st.actor)?)
+}
+
+async fn workflow_create(State(st): State<AppState>, Json(w): Json<pm_service::WorkflowInput>) -> ApiResult {
+    ok(st.service.workflow_create(&st.actor, w)?)
+}
+
+async fn workflow_get(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.workflow_get(&st.actor, &id)?)
+}
+
+async fn workflow_update(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(w): Json<pm_service::WorkflowInput>,
+) -> ApiResult {
+    ok(st.service.workflow_update(&st.actor, &id, w)?)
+}
+
+async fn workflow_delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    st.service.workflow_delete(&st.actor, &id)?;
+    ok(json!({ "deleted": id }))
+}
+
+async fn workflow_trigger(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<WorkflowTriggerBody>,
+) -> ApiResult {
+    ok(st.service.workflow_trigger_set(&st.actor, &id, b.enabled, b.max_per_minute)?)
+}
+
+async fn workflow_run(State(st): State<AppState>, Path(id): Path<String>, Json(b): Json<WorkflowRunBody>) -> ApiResult {
+    let req = pm_service::WorkflowRunRequest { workflow: id, exchange_id: b.exchange_id, approval_id: b.approval_id };
+    ok(st.service.workflow_run(&st.actor, req).await?)
+}
+
+async fn workflow_runs(State(st): State<AppState>, Query(q): Query<WorkflowRunsQuery>) -> ApiResult {
+    ok(st.service.workflow_runs(&st.actor, q.workflow.as_deref(), q.limit.unwrap_or(50))?)
+}
+
+async fn workflow_run_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.workflow_run_get(&st.actor, id)?)
 }
 
 async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {

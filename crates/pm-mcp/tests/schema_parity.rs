@@ -13,7 +13,7 @@ use pm_service::mcp_args::{
     FindingIdArgs, FindingListArgs, HypothesisListArgs, IdentityCaptureArgs, IdentityNameArgs, IssueLibraryArgs,
     MemoryListArgs, MemorySaveArgs, ModelChangesArgs, NoArgs, OrganizerAddArgs, OrganizerListArgs, OrganizerUpdateArgs,
     ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, StreamGetArgs, TaskIdArgs,
-    TrafficTriageArgs, WsMessagesArgs,
+    TrafficTriageArgs, WorkflowRefArgs, WsMessagesArgs,
 };
 use pm_service::pm_store::{HistoryFilter, StreamFilter};
 use pm_service::{
@@ -21,7 +21,7 @@ use pm_service::{
     DiscoverRequest, DomTestRequest, EngageFilter, FindingUpdate, FuzzerRequest, GraphQlImportRequest, GroupRequest,
     HypothesisUpdate, ImportRequest, ModelFilter, NewAttackPath, NewFinding, NewHypothesis, OpenApiImportRequest,
     PluginCheckRequest, ProofRequest, RaceRequest, ReplayRequest, ScanFilter, ScanTaskRequest, SearchRequest,
-    StreamReplayRequest, TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WorkflowRunRequest, WsReplayRequest, WsSearchRequest,
 };
 use schemars::JsonSchema;
 use serde_json::Value;
@@ -127,6 +127,9 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("finding_prove", generated::<FindingIdArgs>()),
         ("issue_library", generated::<IssueLibraryArgs>()),
         ("finding_list", generated::<FindingListArgs>()),
+        ("workflow_list", generated::<NoArgs>()),
+        ("workflow_get", generated::<WorkflowRefArgs>()),
+        ("workflow_run", generated::<WorkflowRunRequest>()),
         ("approval_status", generated::<ApprovalStatusArgs>()),
     ]
 }
@@ -178,7 +181,7 @@ fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
 #[test]
 fn no_tool_input_schema_needs_ref_resolution() {
     let tools = pm_mcp::tool_definitions();
-    assert_eq!(tools.len(), 83);
+    assert_eq!(tools.len(), 86);
     for t in &tools {
         if let Some(key) = contains_ref(&t["inputSchema"]) {
             panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);
@@ -210,9 +213,16 @@ fn every_tool_has_a_generated_schema_that_is_checked_against_its_type() {
 #[test]
 fn tools_without_arguments_have_an_empty_object_schema() {
     let tools = pm_mcp::tool_definitions();
-    for name in
-        ["roe_get", "identity_list", "scan_profiles", "custom_checks", "skills_list", "plugin_list", "authz_candidates"]
-    {
+    for name in [
+        "roe_get",
+        "identity_list",
+        "scan_profiles",
+        "custom_checks",
+        "skills_list",
+        "plugin_list",
+        "authz_candidates",
+        "workflow_list",
+    ] {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();
         assert_eq!(
             t["inputSchema"],
@@ -233,6 +243,8 @@ fn arguments_the_hand_written_schemas_required_are_still_required() {
         ("ws_messages", &["exchange_id"]),
         ("stream_get", &["id"]),
         ("stream_replay", &["stream_id"]),
+        ("workflow_get", &["workflow"]),
+        ("workflow_run", &["workflow"]),
         ("replay_group", &["requests"]),
         ("fuzzer_run", &["raw", "payload_sets"]),
         ("identity_capture", &["name", "exchange_id"]),

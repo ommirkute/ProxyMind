@@ -1924,6 +1924,90 @@ match:
     await page.screenshot({ path: join(SHOTS, "8-audit.png") });
   });
 
+  await section("Workflows (extract + send, run on an exchange, History, live runs, Fuzzer option)", async () => {
+    const api = (method, path, body) =>
+      page.evaluate(async ([method, path, body]) => {
+        const r = await fetch(`/api/v1${path}`, { method, headers: { "Content-Type": "application/json", "X-ProxyMind": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
+        return [r.status, await r.json()];
+      }, [method, path, body]);
+
+    // History's right-click menu opens the Workflows page with the exchange filled in.
+    await open("history");
+    await (await rowFor("/api/orders/1001", 0)).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Run workflow…" }).click();
+    await page.waitForFunction(() => window.location.hash.startsWith("#/workflows/"));
+    await page.getByTestId("workflows-page").waitFor();
+    // The row is alice's own request through the proxy (the oldest with this path), so its answer is her order.
+    const orderEx = Number(await page.getByLabel("Run on exchange").inputValue());
+    check(orderEx > 0, `Run workflow… from History fills in the exchange (#${orderEx})`);
+
+    // Build a two-step workflow: read the order's id from the response, send a request with it.
+    await page.getByTestId("wf-new").click();
+    await page.getByLabel("Workflow name").fill("e2e-order-id");
+    await page.getByLabel("Workflow description").fill("Read the order id, look it up as a product query");
+    await page.getByLabel("Step 1 type").selectOption("extract");
+    await page.getByLabel("Step 1 variable").fill("oid");
+    await page.getByLabel("Step 1 kind").selectOption("json");
+    await page.getByLabel("Step 1 expression").fill("/id");
+    await page.getByTestId("add-send").click();
+    await page.getByLabel("Step 2 request").fill("GET /api/products?order={{oid}} HTTP/1.1\nHost: shop\n\n");
+    await page.getByTestId("wf-save").click();
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).waitFor();
+    check(await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).textContent().then((t) => t.includes("extract → send")), "the saved workflow lists its steps");
+    await page.screenshot({ path: join(SHOTS, "7f-workflows.png"), fullPage: true });
+
+    // Run it on the exchange: the run shows both steps, the variable and the exchange it sent.
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).getByTestId("wf-run").click();
+    await page.getByTestId("run-detail").waitFor();
+    check(await page.getByTestId("run-status").first().textContent().then((t) => t.trim() === "ok"), "the run is ok");
+    check((await page.getByTestId("run-step").count()) === 2, "the run lists its two steps");
+    check(await page.getByTestId("run-variables").textContent().then((t) => t.includes("oid = 1001")), "the run shows the variable the extract set");
+    const sentLink = page.getByTestId("run-step").nth(1).locator("a");
+    const sentId = Number((await sentLink.textContent()).replace("#", ""));
+    check(sentId > orderEx, `the send step links the exchange it made (#${sentId})`);
+    await page.getByTestId("wf-run-row").first().waitFor();
+    await sentLink.click();
+    await page.waitForFunction((id) => window.location.hash === `#/history/${id}`, sentId);
+    const [st, ex] = await api("GET", `/exchanges/${sentId}`);
+    check(st === 200 && ex.summary.source === "workflow" && ex.summary.path === "/api/products?order=1001", "History has the request the workflow sent, as source workflow, with the variable filled in");
+
+    // ADR-0018: a run started elsewhere shows up in the run history with every page timer frozen.
+    await open("workflows");
+    const before = await page.getByTestId("wf-run-row").count();
+    await withFrozenTimers(async () => {
+      await api("POST", "/workflows/e2e-order-id/run", { exchange_id: orderEx });
+      await page.waitForFunction((n) => document.querySelectorAll('[data-testid="wf-run-row"]').length > n, before, { timeout: 15000 });
+    });
+    check((await page.getByTestId("wf-run-row").count()) === before + 1, "a run started elsewhere appears in the run history without a page timer");
+    await page.getByTestId("wf-run-row").first().click();
+    check(await page.getByTestId("run-detail").textContent().then((t) => t.includes("sent, status 200")), "clicking a run shows its steps");
+
+    // A match that does not fit stops the run with the reason; the trigger needs a first match step.
+    await api("POST", "/workflows", { name: "e2e-only-posts", steps: [{ type: "match", method: "POST", message: "only POSTs" }, { type: "send", url: `http://127.0.0.1:${shop}`, raw: "GET / HTTP/1.1\r\nHost: x\r\n\r\n" }] });
+    await open("workflows");
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-only-posts" }).getByTestId("wf-run").click();
+    await page.getByTestId("run-reason").waitFor();
+    check(await page.getByTestId("run-reason").textContent().then((t) => t.includes("only POSTs")), "a failed match stops the run and says why");
+    const trig = page.getByLabel("Run e2e-only-posts on new traffic");
+    check(await trig.isEnabled(), "a workflow with a first match step can run on new traffic");
+    check(await page.getByLabel("Run e2e-order-id on new traffic").isDisabled(), "one without cannot");
+    check((await api("PUT", "/workflows/e2e-order-id/trigger", { enabled: true }))[0] === 400, "the API refuses a trigger without a first match step");
+
+    // The Fuzzer can run a workflow on each result.
+    await api("POST", "/workflows", { name: "e2e-per-result", steps: [{ type: "assert", status: "200", message: "ok" }] });
+    await page.goto(link.replace(/\/auth.*/, "/#/fuzzer"));
+    await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
+    await page.getByLabel("Request").fill("GET /api/products?q=§a§ HTTP/1.1\nHost: shop\n\n");
+    await page.getByLabel("Payload type").selectOption("list");
+    await page.getByLabel("Payloads", { exact: true }).fill("a\nb");
+    await page.getByLabel("Workflow on each result").selectOption("e2e-per-result");
+    await page.getByTestId("fuzzer-run").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"), null, { timeout: 30000 });
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="workflow-cell"]').length === 2);
+    check((await page.getByTestId("workflow-cell").allTextContents()).every((t) => t.startsWith("ok")), "each Fuzzer result shows what its workflow made of it");
+    await page.getByLabel("Workflow on each result").selectOption("");
+  });
+
   // ADR-0018: no live page polls. The built bundle must not call setInterval at all. A polling setTimeout chain
   // cannot be told from a debounce in minified code, so it is checked two other ways: the sections above run with
   // the page's timers frozen, and the sources may call setTimeout only in the files below, each a one-shot (toast
@@ -1947,7 +2031,7 @@ match:
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns") && !(e.includes("400 (Bad Request)") && e.endsWith("/api/v1/network)")));
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns") && !(e.includes("400 (Bad Request)") && e.includes("/workflows/e2e-order-id/trigger")) && !(e.includes("400 (Bad Request)") && e.endsWith("/api/v1/network)")));
   check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
   if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();

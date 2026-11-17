@@ -185,6 +185,12 @@ export interface Arg {
   type: string;
 }
 
+export interface AssertionResult {
+  message: string;
+  ok: boolean;
+  step: number;
+}
+
 export interface AssistantConfig {
   /**
    * Name of the environment variable holding the API key (the key itself
@@ -918,6 +924,33 @@ export interface DomTestResult {
   url: string;
 }
 
+/** A change to a request. `{{variable}}` works in the values. */
+export type Edit =
+  /** Replace a header's value, or add the header. */
+  | {
+      name: string;
+      op: "set_header";
+      value: string;
+    }
+  | {
+      name: string;
+      op: "remove_header";
+    }
+  /** Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it. */
+  | {
+      name: string;
+      op: "set_param";
+      value: string;
+    }
+  /** Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op. */
+  | {
+      find: string;
+      op: "replace_text";
+      /** `find` is a regular expression and `replace` may use `$1`. */
+      regex?: boolean;
+      replace: string;
+    };
+
 /** Body of `POST /engage/references`, `/engage/csrf` and `/engage/clickjacking`. */
 export interface EngageExchange {
   /** CSRF only: submit the form when the page loads. */
@@ -1133,6 +1166,22 @@ export type ExtractKind =
   /** A cookie the response sets. */
   | "cookie";
 
+/** How an extraction reads its source. */
+export type ExtractType =
+  /**
+   * A capture group of a regular expression over the head and the decoded body (`group`, default 1, else the whole
+   * match).
+   */
+  | "regex"
+  /** A JSON pointer into the body, e.g. `/data/token`. */
+  | "json"
+  /** A header's value. */
+  | "header"
+  /** A cookie: from `Set-Cookie` in a response, from `Cookie` in a request. */
+  | "cookie"
+  /** The `value` of an HTML `<input>` found by its `name` (or `id`), entities decoded: the hidden CSRF field. */
+  | "html_input";
+
 export interface Extraction {
   expr?: string;
   kind?: ExtractKind;
@@ -1290,6 +1339,13 @@ export interface FuzzerRequest {
   throttle_ms?: number | null;
   /** Target as scheme://host[:port], when not using exchange_id. */
   url?: string | null;
+  /**
+   * A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a
+   * value or assert something about every response. The workflow's own sends are gated one by one as the actor
+   * who runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack
+   * approves this workflow's definition (it is part of what the approval covers).
+   */
+  workflow?: string | null;
 }
 
 export type FuzzerResult =
@@ -1328,6 +1384,8 @@ export interface FuzzerRow {
   payloads: (string | null)[];
   reflected: boolean;
   status?: number | null;
+  /** What the attack's workflow made of this result (`workflow` in the request). */
+  workflow?: FuzzerWorkflow | null;
 }
 
 /** What starting a background attack did. */
@@ -1347,6 +1405,18 @@ export type FuzzerStart =
       reasons: string[];
       status: "denied";
     };
+
+/** What a fuzzer result got from the workflow attached to the attack. */
+export interface FuzzerWorkflow {
+  reason?: string | null;
+  run_id: number;
+  status: RunStatus;
+  /**
+   * The run's variables (hidden or marked as target content for agents): what the workflow extracted from this
+   * result's response.
+   */
+  variables: { [key: string]: string };
+}
 
 export interface GraphEdge {
   from: string;
@@ -2349,6 +2419,21 @@ export interface PayloadSet {
   url_encode?: boolean;
 }
 
+/** Where a run waits for an approval. */
+export interface Pending {
+  approval_id: string;
+  /** The exchange that was current, and what the run had used up, so it continues exactly from here. */
+  current_exchange: number | null;
+  /** The definition's digest when the run paused: a run does not continue on a workflow edited since. */
+  digest: string;
+  elapsed_ms: number;
+  reasons: string[];
+  sends: number;
+  /** The send step (from 1) that needs the approval. */
+  step: number;
+  summary: string;
+}
+
 export interface PluginCheckIssue {
   /** `<plugin>/<check>`. */
   check: string;
@@ -3104,6 +3189,19 @@ export type RunOn =
   /** One changed copy of the request (see `request`). */
   | "per_request";
 
+export type RunStatus =
+  | "running"
+  /** Every step ran and every assertion held. */
+  | "ok"
+  /** An assertion failed, a step could not run (nothing extracted, a send error) or a limit was reached. */
+  | "failed"
+  /** A `match` step did not fit: the exchange is not one this workflow is for. */
+  | "stopped"
+  /** The policy gate refused a send (scope, tier, actor). */
+  | "denied"
+  /** A send waits for a person's approval; run it again with `approval_id` to continue from that step. */
+  | "pending_approval";
+
 export type RunWhen =
   /** Before every request the rule covers (e.g. a fresh CSRF token). */
   | "always"
@@ -3407,7 +3505,7 @@ export interface SessionRule {
   set?: SetValue[];
   /**
    * Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-   * discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+   * discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
    * Older names (repeater, intruder, sequencer) still match.
    */
   tools?: string[];
@@ -3437,6 +3535,9 @@ export type SetWhere =
   | "param";
 
 export type Severity = "info" | "low" | "medium" | "high";
+
+/** Which message of the current exchange a test or extraction looks at. */
+export type Side = "request" | "response";
 
 export type Signature =
   | {
@@ -3527,6 +3628,143 @@ export interface StatusQuery {
   /** Only rows with this status. */
   status?: string | null;
 }
+
+/** One step of a workflow. */
+export type Step =
+  /** Stop the run (status `stopped`) unless the current exchange fits the condition. */
+  | {
+      /** Text the body must contain (decoded: de-chunked and decompressed). */
+      body_contains?: string | null;
+      /** A regular expression the body must match. */
+      body_regex?: string | null;
+      /** A header that must be present (by name). */
+      header?: string | null;
+      /** With `header`: text one of its values must contain (case-insensitive). */
+      header_contains?: string | null;
+      /** A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`. */
+      hql?: string | null;
+      /** What a failed `assert` says, or why a `match` stopped the run (default: what failed). */
+      message?: string | null;
+      /** Methods the request may have, separated by commas: `POST` or `GET,HEAD`. */
+      method?: string | null;
+      /** Pass when the tests do NOT all hold. */
+      negate?: boolean;
+      /** Text the request path (with its query) must contain. */
+      path_contains?: string | null;
+      /** Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response). */
+      side?: Side | null;
+      /** Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`. */
+      status?: string | null;
+      type: "match";
+      /** A variable to test. Alone: it must be set and not empty. */
+      var?: string | null;
+      /** With `var`: text the value must contain. */
+      var_contains?: string | null;
+      /** With `var`: the exact value. */
+      var_equals?: string | null;
+      /** With `var`: a regular expression the value must match. */
+      var_matches?: string | null;
+    }
+  /** Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on. */
+  | {
+      /** Text the body must contain (decoded: de-chunked and decompressed). */
+      body_contains?: string | null;
+      /** A regular expression the body must match. */
+      body_regex?: string | null;
+      /** A header that must be present (by name). */
+      header?: string | null;
+      /** With `header`: text one of its values must contain (case-insensitive). */
+      header_contains?: string | null;
+      /** A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`. */
+      hql?: string | null;
+      /** What a failed `assert` says, or why a `match` stopped the run (default: what failed). */
+      message?: string | null;
+      /** Methods the request may have, separated by commas: `POST` or `GET,HEAD`. */
+      method?: string | null;
+      /** Pass when the tests do NOT all hold. */
+      negate?: boolean;
+      /** Text the request path (with its query) must contain. */
+      path_contains?: string | null;
+      /** Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response). */
+      side?: Side | null;
+      /** Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`. */
+      status?: string | null;
+      type: "assert";
+      /** A variable to test. Alone: it must be set and not empty. */
+      var?: string | null;
+      /** With `var`: text the value must contain. */
+      var_contains?: string | null;
+      /** With `var`: the exact value. */
+      var_equals?: string | null;
+      /** With `var`: a regular expression the value must match. */
+      var_matches?: string | null;
+    }
+  /** Read a value out of the current request or response into a variable. */
+  | {
+      /** The regular expression, JSON pointer, header name, cookie name or input name. */
+      expr?: string;
+      /** For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one. */
+      group?: number | null;
+      kind?: ExtractType;
+      /** The variable to set: letters, digits and `_`, not starting with a digit or `current_`. */
+      name?: string;
+      /** When nothing is found: leave the variable unset and go on (default: the run fails here). */
+      optional?: boolean;
+      /** Read the request or the response (default response; `html_input` reads responses only). */
+      side?: Side | null;
+      type: "extract";
+    }
+  /** Set a variable from a template, then apply encodings, decodings or hashes to it. */
+  | {
+      /** The variable to set. */
+      name?: string;
+      /**
+       * Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,
+       * url_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,
+       * hex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,
+       * sha1, sha256. None: the variable is just the template.
+       */
+      ops?: string[];
+      type: "transform";
+      /** The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`. */
+      value?: string;
+    }
+  /** Send a request through the policy gate; its response becomes the current exchange. */
+  | {
+      /** Changes made to the request after the template is filled in, in order. */
+      edits?: Edit[];
+      /** Update Content-Length to match the body (default true). */
+      fix_content_length?: boolean | null;
+      /** Send with this test identity's credentials ("anonymous" for none). */
+      identity?: string | null;
+      /**
+       * A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current
+       * exchange's request.
+       */
+      raw?: string | null;
+      type: "send";
+      /**
+       * Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a
+       * response cannot choose where the next request goes.
+       */
+      url?: string | null;
+    };
+
+/** What one step did. */
+export interface StepRun {
+  elapsed_ms: number;
+  /** For a send: the recorded exchange (also when it failed on the wire). */
+  exchange_id?: number | null;
+  /** `match`, `assert`, `extract`, `transform` or `send`. */
+  kind: string;
+  /** What happened, without target content. */
+  message: string;
+  status: StepStatus;
+  /** Position in the workflow, from 1. */
+  step: number;
+}
+
+export type StepStatus = "ok" | "failed" | "stopped" | "denied" | "pending_approval";
 
 /** A page of a stream's chunks, oldest first. */
 export interface StreamChunkPage {
@@ -3776,6 +4014,19 @@ export interface TriageItem {
   url: string;
 }
 
+/** The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step. */
+export interface Trigger {
+  /** Off by default. Only a person turns it on; editing the steps turns it off again. */
+  enabled: boolean;
+  /** Who turned it on. Runs go through the gate as this person. */
+  enabled_by: string;
+  enabled_ms: number;
+  /** At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued. */
+  max_per_minute: number;
+  /** Exchanges skipped because of the rate cap or because other runs were busy, since this process started. */
+  skipped: number;
+}
+
 /** What one user message produced. */
 export interface Turn {
   chat_id: number;
@@ -3930,6 +4181,85 @@ export interface WaybackReport {
   interesting: number;
   /** Captures on this host (before `limit` cut the list). */
   total: number;
+}
+
+/** A saved workflow. */
+export interface Workflow {
+  description: string;
+  /** Assigned when the workflow is first saved. */
+  id: number;
+  /** A unique name, 1 to 64 characters. */
+  name: string;
+  /** Up to 50 steps, run in order. No loops. */
+  steps: Step[];
+  /** Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on). */
+  trigger: Trigger;
+  /** Who saved it last. */
+  updated_by: string;
+  updated_ms: number;
+}
+
+/** What a person edits: a workflow without the fields the service manages. */
+export interface WorkflowInput {
+  description?: string;
+  name?: string;
+  steps?: Step[];
+}
+
+/** One run of a workflow. */
+export interface WorkflowRun {
+  /** Who ran it, e.g. `human:local` or `agent:claude`. */
+  actor: string;
+  assertions: AssertionResult[];
+  duration_ms: number;
+  /** Every exchange the run sent, in order. */
+  exchanges: number[];
+  id: number;
+  pending?: Pending | null;
+  /** Why it did not finish `ok`. */
+  reason?: string | null;
+  sends: number;
+  /** The exchange it started on, if any. */
+  start_exchange?: number | null;
+  started_ms: number;
+  status: RunStatus;
+  /** The steps that ran, in order. */
+  steps: StepRun[];
+  /** How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`. */
+  trigger: string;
+  /** Variables at the end of the run. For agents, values are hidden or marked as target content. */
+  variables: { [key: string]: string };
+  workflow_id: number;
+  workflow_name: string;
+}
+
+/** Body of `POST /workflows/{id}/run`. */
+export interface WorkflowRunBody {
+  /** Continue a run that waits for this approval (give the same `exchange_id` as before). */
+  approval_id?: string | null;
+  /**
+   * Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+   */
+  exchange_id?: number | null;
+}
+
+/** Query of `GET /workflows/runs`. */
+export interface WorkflowRunsQuery {
+  /** How many runs (default 50, at most 200). */
+  limit?: number | null;
+  /** Only runs of this workflow (name or id). */
+  workflow?: string | null;
+}
+
+/** Body of `PUT /workflows/{id}/trigger`. */
+export interface WorkflowTriggerBody {
+  /**
+   * Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+   * can turn it on (audited), and editing the workflow's steps turns it off again.
+   */
+  enabled: boolean;
+  /** At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued. */
+  max_per_minute?: number | null;
 }
 
 /** A message in the history across connections. */

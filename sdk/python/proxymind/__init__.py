@@ -63,6 +63,8 @@ if TYPE_CHECKING:  # the generated shapes of the API (see proxymind/types.py); a
         SiteView,
         TargetAnalysis,
         TokenAnalyzerResult,
+        Workflow,
+        WorkflowRun,
         WsSearchResult,
     )
 
@@ -405,6 +407,28 @@ class Client:
     def dom_test(self, exchange_id: int, storage: bool = False, pollution: bool = True) -> DomTestResult:
         """DOM sources reaching sinks on a recorded page (rendered offline; sends nothing)."""
         return self._post("/dom/test", {"exchange_id": exchange_id, "storage": storage, "pollution": pollution})
+
+    def workflows(self) -> List[Workflow]:
+        """Saved workflows (chains of match, extract, transform, send and assert steps)."""
+        return self._get("/workflows")
+
+    def workflow_create(self, name: str, steps: list, description: str = "") -> Workflow:
+        """Saves a new workflow (people only). Steps are dicts such as {"type": "send", "raw": "GET / HTTP/1.1..."}."""
+        return self._post("/workflows", {"name": name, "description": description, "steps": steps})
+
+    def workflow_run(self, workflow: str, exchange_id: Optional[int] = None, approval_id: Optional[str] = None) -> WorkflowRun:
+        """Runs a workflow (name or id), optionally on a recorded exchange. Every send goes through the policy
+        gate. A send that needs approval pauses the run: the result has status "pending_approval" and
+        pending["approval_id"]; once approved, call again with approval_id to continue from that step."""
+        body = self._args(exchange_id=exchange_id, approval_id=approval_id)
+        return self._post(f"/workflows/{urllib.parse.quote(str(workflow), safe='')}/run", body)
+
+    def workflow_runs(self, workflow: Optional[str] = None, limit: Optional[int] = None) -> List[WorkflowRun]:
+        """Recent workflow runs, newest first."""
+        return self._get("/workflows/runs", workflow=workflow, limit=limit)
+
+    def workflow_run_get(self, run_id: int) -> WorkflowRun:
+        return self._get(f"/workflows/runs/{run_id}")
 
     def custom_checks(self) -> List[SavedCustomCheck]:
         """Saved custom checks (YAML scan checks)."""

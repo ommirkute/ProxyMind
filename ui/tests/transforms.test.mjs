@@ -3,6 +3,7 @@
 // re-implemented here and no dependency is added.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import * as T from "../src/transforms.ts";
 
 let failures = 0;
@@ -158,6 +159,24 @@ await test("unknown operations fail and the catalogue is consistent", async () =
     assert.equal(typeof r.ok, "boolean"); // none throws
   }
   assert.deepEqual(T.TRANSFORMS.filter((o) => !o.reversible).map((o) => o.id), ["md5", "sha1", "sha256"]);
+});
+
+await test("shared vectors with the server (crates/pm-tools/testdata/transform_vectors.json)", async () => {
+  // The same file is run by pm_tools::transform's tests, so the browser's transforms and the workflow engine's
+  // cannot disagree about a result or about what fails.
+  const vectors = JSON.parse(readFileSync(new URL("../../crates/pm-tools/testdata/transform_vectors.json", import.meta.url), "utf8"));
+  assert.ok(vectors.length >= 100);
+  const seen = new Set();
+  for (const v of vectors) {
+    seen.add(v.op);
+    const r = await T.transform(v.op, v.input);
+    if (v.error) assert.equal(r.ok, false, `${v.op}(${JSON.stringify(v.input)}) should fail`);
+    else {
+      assert.ok(r.ok, `${v.op}(${JSON.stringify(v.input)}) failed: ${r.error}`);
+      assert.equal(r.value, v.output, `${v.op}(${JSON.stringify(v.input)})`);
+    }
+  }
+  for (const op of T.TRANSFORMS) assert.ok(seen.has(op.id), `no shared vector for ${op.id}`);
 });
 
 console.log(failures ? `\n${failures} test(s) failed` : "\nAll transform tests passed");

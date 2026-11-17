@@ -71,7 +71,7 @@ impl hql::Fetch for Lazy<'_> {
     }
 }
 
-fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTreeMap<String, String>) -> hql::Meta<'a> {
+pub(crate) fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTreeMap<String, String>) -> hql::Meta<'a> {
     hql::Meta {
         id: r.id,
         scheme: &r.scheme,

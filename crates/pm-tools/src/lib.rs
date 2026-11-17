@@ -4,6 +4,7 @@
 //! - [`search`] and [`sitemap`]: matching text in history, and history as a tree.
 //! - [`codec`]: encode, decode and hash, one step or a chain, and a
 //!   "smart decode" that peels common layers.
+//! - [`transform`]: strict encode, decode and hash operations, the same as the editors' inline transforms.
 //! - [`linediff`]: a line diff for the Diff tool.
 //! - [`token_analyzer`]: how random a sample of tokens looks.
 //! - [`reqedit`]: change a request's method or body encoding, keeping its parameters.
@@ -24,6 +25,7 @@ pub mod search;
 pub mod sign;
 pub mod sitemap;
 pub mod token_analyzer;
+pub mod transform;
 pub mod triage;
 pub mod wayback;
 pub mod zip;

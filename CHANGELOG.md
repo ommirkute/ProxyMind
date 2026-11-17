@@ -7,6 +7,23 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Workflows: saved chains of steps** (roadmap 2.2). A workflow is a named chain of `match`, `extract`, `transform`,
+  `send` and `assert` steps that works on a current exchange: log in, read a token out of the answer, call an API with
+  it, assert on the result. `extract` reads a regex group, a JSON pointer, a header, a cookie or a hidden HTML input;
+  `transform` applies the editor's encodings, decodings and hashes (now also in `pm_tools::transform`, with test vectors
+  shared with the browser's tests) or fills a template; `send` builds a request from a template with `{{variables}}`,
+  or resends the current one with edits (set header or parameter, replace text). Every send goes through the same gate
+  as Replay (scope, risk tier from the payload, approvals, rate limits, identity, audit) and is recorded in history as
+  `workflow`; a send that needs approval pauses the run and continues from that step once approved, without sending
+  the earlier steps again. Runs are stored (the newest 200) with each step, the variables, the exchanges sent and the
+  assertion results, and update the page through a new `workflows` event topic. A workflow runs on demand (the
+  Workflows page, History's right-click **Run workflow…**, `proxymind workflow run`, `POST /workflows/{id}/run`, MCP
+  `workflow_run`), by itself on new proxied exchanges that fit its first `match` step (off by default, only a person turns
+  it on, editing the steps turns it off, runs off the proxy path from the event bus with a per-minute cap), and on each
+  result of a Fuzzer attack (**Workflow on each result**). Limits: 50 steps, 20 sends and 2 minutes per run, and no
+  loops. Agents can list, read and run workflows (templates and secret-looking values hidden) but not create, edit or
+  switch triggers. See `docs/workflows.md`. Needs a project migration (a new table; older ProxyMind versions cannot
+  open the project after).
 - **Raw TCP and TLS streams are recorded and can be replayed.** Protocols that are not HTTP (databases, mail, SSH,
   a custom protocol), arriving through a CONNECT tunnel, SOCKS5 or a transparent listener, are still relayed byte for
   byte, and now each connection is also stored as a **stream**: target, client, start and end, bytes each way, TLS or

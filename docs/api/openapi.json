@@ -692,6 +692,27 @@
         ],
         "type": "object"
       },
+      "AssertionResult": {
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "step": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "ok",
+          "message"
+        ],
+        "type": "object"
+      },
       "AssistantConfig": {
         "additionalProperties": false,
         "properties": {
@@ -3145,6 +3166,99 @@
         ],
         "type": "object"
       },
+      "Edit": {
+        "description": "A change to a request. `{{variable}}` works in the values.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Replace a header's value, or add the header.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "set_header",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "remove_header",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "set_param",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op.",
+            "properties": {
+              "find": {
+                "type": "string"
+              },
+              "op": {
+                "const": "replace_text",
+                "type": "string"
+              },
+              "regex": {
+                "default": false,
+                "description": "`find` is a regular expression and `replace` may use `$1`.",
+                "type": "boolean"
+              },
+              "replace": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "find",
+              "replace"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "EngageExchange": {
         "additionalProperties": false,
         "description": "Body of `POST /engage/references`, `/engage/csrf` and `/engage/clickjacking`.",
@@ -3832,6 +3946,36 @@
           }
         ]
       },
+      "ExtractType": {
+        "description": "How an extraction reads its source.",
+        "oneOf": [
+          {
+            "const": "regex",
+            "description": "A capture group of a regular expression over the head and the decoded body (`group`, default 1, else the whole\nmatch).",
+            "type": "string"
+          },
+          {
+            "const": "json",
+            "description": "A JSON pointer into the body, e.g. `/data/token`.",
+            "type": "string"
+          },
+          {
+            "const": "header",
+            "description": "A header's value.",
+            "type": "string"
+          },
+          {
+            "const": "cookie",
+            "description": "A cookie: from `Set-Cookie` in a response, from `Cookie` in a request.",
+            "type": "string"
+          },
+          {
+            "const": "html_input",
+            "description": "The `value` of an HTML `<input>` found by its `name` (or `id`), entities decoded: the hidden CSRF field.",
+            "type": "string"
+          }
+        ]
+      },
       "Extraction": {
         "additionalProperties": false,
         "properties": {
@@ -4354,6 +4498,14 @@
               "string",
               "null"
             ]
+          },
+          "workflow": {
+            "default": null,
+            "description": "A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a\nvalue or assert something about every response. The workflow's own sends are gated one by one as the actor\nwho runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack\napproves this workflow's definition (it is part of what the approval covers).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4519,6 +4671,17 @@
               "integer",
               "null"
             ]
+          },
+          "workflow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FuzzerWorkflow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the attack's workflow made of this result (`workflow` in the request)."
           }
         },
         "required": [
@@ -4602,6 +4765,37 @@
             "type": "object"
           }
         ]
+      },
+      "FuzzerWorkflow": {
+        "description": "What a fuzzer result got from the workflow attached to the attack.",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The run's variables (hidden or marked as target content for agents): what the workflow extracted from this\nresult's response.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "variables"
+        ],
+        "type": "object"
       },
       "GraphEdge": {
         "properties": {
@@ -7846,6 +8040,62 @@
         },
         "type": "object"
       },
+      "Pending": {
+        "description": "Where a run waits for an approval.",
+        "properties": {
+          "approval_id": {
+            "type": "string"
+          },
+          "current_exchange": {
+            "description": "The exchange that was current, and what the run had used up, so it continues exactly from here.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "The definition's digest when the run paused: a run does not continue on a workflow edited since.",
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sends": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "step": {
+            "description": "The send step (from 1) that needs the approval.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "approval_id",
+          "summary",
+          "reasons",
+          "current_exchange",
+          "sends",
+          "elapsed_ms",
+          "digest"
+        ],
+        "type": "object"
+      },
       "PluginCheckIssue": {
         "properties": {
           "check": {
@@ -10118,6 +10368,41 @@
           }
         ]
       },
+      "RunStatus": {
+        "oneOf": [
+          {
+            "enum": [
+              "running"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "ok",
+            "description": "Every step ran and every assertion held.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "An assertion failed, a step could not run (nothing extracted, a send error) or a limit was reached.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "A `match` step did not fit: the exchange is not one this workflow is for.",
+            "type": "string"
+          },
+          {
+            "const": "denied",
+            "description": "The policy gate refused a send (scope, tier, actor).",
+            "type": "string"
+          },
+          {
+            "const": "pending_approval",
+            "description": "A send waits for a person's approval; run it again with `approval_id` to continue from that step.",
+            "type": "string"
+          }
+        ]
+      },
       "RunWhen": {
         "oneOf": [
           {
@@ -11088,7 +11373,7 @@
           },
           "tools": {
             "default": [],
-            "description": "Tools (exchange sources) covered: replay, fuzzer, scan, crawl,\ndiscover, token_analyzer, proof, authz, graphql, openapi. Empty: all.\nOlder names (repeater, intruder, sequencer) still match.",
+            "description": "Tools (exchange sources) covered: replay, fuzzer, scan, crawl,\ndiscover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.\nOlder names (repeater, intruder, sequencer) still match.",
             "items": {
               "type": "string"
             },
@@ -11179,6 +11464,14 @@
           "low",
           "medium",
           "high"
+        ],
+        "type": "string"
+      },
+      "Side": {
+        "description": "Which message of the current exchange a test or extraction looks at.",
+        "enum": [
+          "request",
+          "response"
         ],
         "type": "string"
       },
@@ -11447,6 +11740,441 @@
           }
         },
         "type": "object"
+      },
+      "Step": {
+        "description": "One step of a workflow.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stop the run (status `stopped`) unless the current exchange fits the condition.",
+            "properties": {
+              "body_contains": {
+                "description": "Text the body must contain (decoded: de-chunked and decompressed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "body_regex": {
+                "description": "A regular expression the body must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "description": "A header that must be present (by name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header_contains": {
+                "description": "With `header`: text one of its values must contain (case-insensitive).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hql": {
+                "description": "A history query (HQL) the current exchange must match, e.g. `status:200 resp:\"token\"`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What a failed `assert` says, or why a `match` stopped the run (default: what failed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "description": "Methods the request may have, separated by commas: `POST` or `GET,HEAD`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "negate": {
+                "default": false,
+                "description": "Pass when the tests do NOT all hold.",
+                "type": "boolean"
+              },
+              "path_contains": {
+                "description": "Text the request path (with its query) must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response)."
+              },
+              "status": {
+                "description": "Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "match",
+                "type": "string"
+              },
+              "var": {
+                "description": "A variable to test. Alone: it must be set and not empty.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_contains": {
+                "description": "With `var`: text the value must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_equals": {
+                "description": "With `var`: the exact value.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_matches": {
+                "description": "With `var`: a regular expression the value must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on.",
+            "properties": {
+              "body_contains": {
+                "description": "Text the body must contain (decoded: de-chunked and decompressed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "body_regex": {
+                "description": "A regular expression the body must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "description": "A header that must be present (by name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header_contains": {
+                "description": "With `header`: text one of its values must contain (case-insensitive).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hql": {
+                "description": "A history query (HQL) the current exchange must match, e.g. `status:200 resp:\"token\"`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What a failed `assert` says, or why a `match` stopped the run (default: what failed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "description": "Methods the request may have, separated by commas: `POST` or `GET,HEAD`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "negate": {
+                "default": false,
+                "description": "Pass when the tests do NOT all hold.",
+                "type": "boolean"
+              },
+              "path_contains": {
+                "description": "Text the request path (with its query) must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response)."
+              },
+              "status": {
+                "description": "Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "assert",
+                "type": "string"
+              },
+              "var": {
+                "description": "A variable to test. Alone: it must be set and not empty.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_contains": {
+                "description": "With `var`: text the value must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_equals": {
+                "description": "With `var`: the exact value.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_matches": {
+                "description": "With `var`: a regular expression the value must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Read a value out of the current request or response into a variable.",
+            "properties": {
+              "expr": {
+                "default": "",
+                "description": "The regular expression, JSON pointer, header name, cookie name or input name.",
+                "type": "string"
+              },
+              "group": {
+                "description": "For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one.",
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/ExtractType",
+                "default": "regex"
+              },
+              "name": {
+                "default": "",
+                "description": "The variable to set: letters, digits and `_`, not starting with a digit or `current_`.",
+                "type": "string"
+              },
+              "optional": {
+                "default": false,
+                "description": "When nothing is found: leave the variable unset and go on (default: the run fails here).",
+                "type": "boolean"
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Read the request or the response (default response; `html_input` reads responses only)."
+              },
+              "type": {
+                "const": "extract",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Set a variable from a template, then apply encodings, decodings or hashes to it.",
+            "properties": {
+              "name": {
+                "default": "",
+                "description": "The variable to set.",
+                "type": "string"
+              },
+              "ops": {
+                "default": [],
+                "description": "Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,\nurl_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,\nhex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,\nsha1, sha256. None: the variable is just the template.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "transform",
+                "type": "string"
+              },
+              "value": {
+                "default": "",
+                "description": "The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Send a request through the policy gate; its response becomes the current exchange.",
+            "properties": {
+              "edits": {
+                "default": [],
+                "description": "Changes made to the request after the template is filled in, in order.",
+                "items": {
+                  "$ref": "#/components/schemas/Edit"
+                },
+                "type": "array"
+              },
+              "fix_content_length": {
+                "description": "Update Content-Length to match the body (default true).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "identity": {
+                "description": "Send with this test identity's credentials (\"anonymous\" for none).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "raw": {
+                "description": "A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current\nexchange's request.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              },
+              "url": {
+                "description": "Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a\nresponse cannot choose where the next request goes.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StepRun": {
+        "description": "What one step did.",
+        "properties": {
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exchange_id": {
+            "description": "For a send: the recorded exchange (also when it failed on the wire).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "`match`, `assert`, `extract`, `transform` or `send`.",
+            "type": "string"
+          },
+          "message": {
+            "description": "What happened, without target content.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "step": {
+            "description": "Position in the workflow, from 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "kind",
+          "status",
+          "message",
+          "elapsed_ms"
+        ],
+        "type": "object"
+      },
+      "StepStatus": {
+        "enum": [
+          "ok",
+          "failed",
+          "stopped",
+          "denied",
+          "pending_approval"
+        ],
+        "type": "string"
       },
       "StreamChunkPage": {
         "description": "A page of a stream's chunks, oldest first.",
@@ -12352,6 +13080,49 @@
         ],
         "type": "object"
       },
+      "Trigger": {
+        "additionalProperties": false,
+        "description": "The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "description": "Off by default. Only a person turns it on; editing the steps turns it off again.",
+            "type": "boolean"
+          },
+          "enabled_by": {
+            "default": "",
+            "description": "Who turned it on. Runs go through the gate as this person.",
+            "type": "string"
+          },
+          "enabled_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_per_minute": {
+            "default": 6,
+            "description": "At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "description": "Exchanges skipped because of the rate cap or because other runs were busy, since this process started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "max_per_minute",
+          "enabled_by",
+          "enabled_ms",
+          "skipped"
+        ],
+        "type": "object"
+      },
       "Turn": {
         "description": "What one user message produced.",
         "properties": {
@@ -12743,6 +13514,271 @@
           "total",
           "interesting",
           "captures"
+        ],
+        "type": "object"
+      },
+      "Workflow": {
+        "additionalProperties": false,
+        "description": "A saved workflow.",
+        "properties": {
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "id": {
+            "default": 0,
+            "description": "Assigned when the workflow is first saved.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "description": "A unique name, 1 to 64 characters.",
+            "type": "string"
+          },
+          "steps": {
+            "default": [],
+            "description": "Up to 50 steps, run in order. No loops.",
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/Trigger",
+            "default": {
+              "enabled": false,
+              "enabled_by": "",
+              "enabled_ms": 0,
+              "max_per_minute": 6,
+              "skipped": 0
+            },
+            "description": "Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on)."
+          },
+          "updated_by": {
+            "default": "",
+            "description": "Who saved it last.",
+            "type": "string"
+          },
+          "updated_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "steps",
+          "trigger",
+          "updated_by",
+          "updated_ms"
+        ],
+        "type": "object"
+      },
+      "WorkflowInput": {
+        "additionalProperties": false,
+        "description": "What a person edits: a workflow without the fields the service manages.",
+        "properties": {
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "type": "string"
+          },
+          "steps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowRun": {
+        "description": "One run of a workflow.",
+        "properties": {
+          "actor": {
+            "description": "Who ran it, e.g. `human:local` or `agent:claude`.",
+            "type": "string"
+          },
+          "assertions": {
+            "items": {
+              "$ref": "#/components/schemas/AssertionResult"
+            },
+            "type": "array"
+          },
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exchanges": {
+            "description": "Every exchange the run sent, in order.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Pending"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "description": "Why it did not finish `ok`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sends": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_exchange": {
+            "description": "The exchange it started on, if any.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "started_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "steps": {
+            "description": "The steps that ran, in order.",
+            "items": {
+              "$ref": "#/components/schemas/StepRun"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "description": "How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`.",
+            "type": "string"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variables at the end of the run. For agents, values are hidden or marked as target content.",
+            "type": "object"
+          },
+          "workflow_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "workflow_name",
+          "actor",
+          "trigger",
+          "status",
+          "started_ms",
+          "duration_ms",
+          "steps",
+          "variables",
+          "exchanges",
+          "assertions",
+          "sends"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunBody": {
+        "additionalProperties": false,
+        "description": "Body of `POST /workflows/{id}/run`.",
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "Continue a run that waits for this approval (give the same `exchange_id` as before).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowRunsQuery": {
+        "additionalProperties": false,
+        "description": "Query of `GET /workflows/runs`.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "How many runs (default 50, at most 200).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workflow": {
+            "default": null,
+            "description": "Only runs of this workflow (name or id).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowTriggerBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /workflows/{id}/trigger`.",
+        "properties": {
+          "enabled": {
+            "description": "Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person\ncan turn it on (audited), and editing the workflow's steps turns it off again.",
+            "type": "boolean"
+          },
+          "max_per_minute": {
+            "default": null,
+            "description": "At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "enabled"
         ],
         "type": "object"
       },
@@ -21029,6 +22065,389 @@
           }
         },
         "summary": "Check for a new version now."
+      }
+    },
+    "/api/v1/workflows": {
+      "get": {
+        "operationId": "workflows_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Workflow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Saved workflows (chains of match, extract, transform, send and assert steps)."
+      },
+      "post": {
+        "operationId": "workflow_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Save a new workflow. People only; audited."
+      }
+    },
+    "/api/v1/workflows/runs": {
+      "get": {
+        "operationId": "workflow_runs",
+        "parameters": [
+          {
+            "description": "Only runs of this workflow (name or id).",
+            "in": "query",
+            "name": "workflow",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "How many runs (default 50, at most 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkflowRun"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Recent workflow runs, newest first."
+      }
+    },
+    "/api/v1/workflows/runs/{id}": {
+      "get": {
+        "operationId": "workflow_run_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRun"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One workflow run: its steps, variables, sent exchanges and assertions."
+      }
+    },
+    "/api/v1/workflows/{id}": {
+      "delete": {
+        "operationId": "workflow_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the id or name given).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Delete a workflow and its runs. People only; audited."
+      },
+      "get": {
+        "operationId": "workflow_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One workflow, by id or name."
+      },
+      "put": {
+        "operationId": "workflow_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Replace a workflow's name, description and steps. Turns its trigger off when the steps change. People only; audited."
+      }
+    },
+    "/api/v1/workflows/{id}/run": {
+      "post": {
+        "operationId": "workflow_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRun"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Run a workflow on a recorded exchange, or continue a run that waits for an approval. Every send goes through the policy gate."
+      }
+    },
+    "/api/v1/workflows/{id}/trigger": {
+      "put": {
+        "operationId": "workflow_trigger",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowTriggerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn the per-exchange trigger on or off, with its per-minute cap. People only; audited."
       }
     },
     "/api/v1/ws/history": {

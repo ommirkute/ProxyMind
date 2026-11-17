@@ -168,6 +168,11 @@ enum Command {
         #[command(subcommand)]
         action: ReconAction,
     },
+    /// Saved workflows: chains of match, extract, transform, send and assert steps (built in the UI's Workflows page).
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
     /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
     Skills {
         /// A skill to print; none lists them.
@@ -479,6 +484,9 @@ enum Command {
         /// Send with this identity's credentials
         #[arg(long)]
         identity: Option<String>,
+        /// Run this workflow (name or id) on each result
+        #[arg(long)]
+        workflow: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -1064,6 +1072,31 @@ enum ReconAction {
         /// Most URLs to print (default 100).
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// The project's workflows: name, steps, whether the per-exchange trigger is on.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a workflow by name or id. Every send goes through the rules of engagement as you; a send that needs an
+    /// approval pauses the run (continue with --approval once it is approved). Exits 1 unless the run is ok.
+    Run {
+        /// The workflow's name or id.
+        workflow: String,
+        /// Start on this recorded exchange (needed unless the first step sends a request of its own).
+        #[arg(long)]
+        exchange: Option<i64>,
+        /// Continue a run that waits for this approval (give the same --exchange).
+        #[arg(long)]
+        approval: Option<String>,
+        #[arg(long)]
+        json: bool,
         #[arg(long = "as")]
         actor: Option<String>,
     },
@@ -1887,6 +1920,66 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        Command::Workflow { action } => {
+            let service = open_service(&cli.project, None)?;
+            match action {
+                WorkflowAction::List { json } => {
+                    let list = service.workflow_list(&human_actor(None)?)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&list)?);
+                    } else if list.is_empty() {
+                        out!("No workflows yet: create one on the Workflows page.");
+                    }
+                    for w in list.iter().filter(|_| !*json) {
+                        let kinds: Vec<&str> = w.steps.iter().map(|s| s.kind()).collect();
+                        let trig = if w.trigger.enabled { "  [runs on new traffic]" } else { "" };
+                        out!("#{:<3} {:<28} {}{trig}", w.id, w.name, kinds.join(" → "));
+                    }
+                }
+                WorkflowAction::Run { workflow, exchange, approval, json, actor } => {
+                    let me = human_actor(actor.as_deref())?;
+                    let req = pm_service::WorkflowRunRequest {
+                        workflow: workflow.clone(),
+                        exchange_id: *exchange,
+                        approval_id: approval.clone(),
+                    };
+                    let run = service.workflow_run(&me, req).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&run)?);
+                    } else {
+                        out!("run #{} of {}: {}", run.id, run.workflow_name, run.status.as_str());
+                        for s in &run.steps {
+                            let ex = s.exchange_id.map(|e| format!("  → exchange #{e}")).unwrap_or_default();
+                            out!(
+                                "  {}. {:<9} {:<16} {}{ex}",
+                                s.step,
+                                s.kind,
+                                format!("{:?}", s.status).to_lowercase(),
+                                s.message
+                            );
+                        }
+                        for (k, v) in &run.variables {
+                            out!("  {k} = {v}");
+                        }
+                        if let Some(r) = &run.reason {
+                            out!("  {r}");
+                        }
+                        if let Some(p) = &run.pending {
+                            out!(
+                                "  Approve {} (proxymind approvals), then: proxymind workflow run {} --approval {}{}",
+                                p.approval_id,
+                                workflow,
+                                p.approval_id,
+                                exchange.map(|e| format!(" --exchange {e}")).unwrap_or_default()
+                            );
+                        }
+                    }
+                    if run.status != pm_service::RunStatus::Ok {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
         Command::Skills { name, focus } => {
             let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://example.invalid/\"]\n")?;
             let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
@@ -2103,6 +2196,8 @@ async fn run() -> Result<()> {
             pm_service::watch_roe(service.clone());
             // Scheduled scans start while the UI server runs.
             tokio::spawn(service.clone().run_scheduler());
+            // Workflows a person switched to "run on new traffic" react to exchanges the proxy records.
+            tokio::spawn(service.clone().run_workflow_triggers());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
                 .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
@@ -2821,6 +2916,7 @@ async fn run() -> Result<()> {
             url_encode,
             grep,
             identity,
+            workflow,
             json,
         } => {
             let service = open_service(&cli.project, None)?;
@@ -2855,6 +2951,7 @@ async fn run() -> Result<()> {
                         payload_sets: sets,
                         grep: grep.clone(),
                         identity: identity.clone(),
+                        workflow: workflow.clone(),
                         ..Default::default()
                     },
                 )

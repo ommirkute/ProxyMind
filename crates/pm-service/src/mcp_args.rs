@@ -336,3 +336,11 @@ pub struct ApprovalStatusArgs {
     /// Id of the approval (approval_id of a pending_approval result).
     pub approval_id: String,
 }
+
+/// `workflow_get`
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRefArgs {
+    /// The workflow's name or id (from workflow_list).
+    pub workflow: String,
+}

@@ -974,3 +974,122 @@ async fn raw_streams_routes_and_the_streams_topic() {
     assert_ne!(new_id, id);
     read_until(&mut sub, &mut got, &format!("\"id\":{new_id}")).await;
 }
+
+#[tokio::test]
+async fn workflows_are_saved_run_listed_and_triggered_over_the_api() {
+    let (port, shop) = start().await;
+    let call = |method: &'static str, path: String, body: Option<Value>| async move {
+        let r = http(port, method, &path, &[AUTH, CHANGE], body).await;
+        (r.0, serde_json::from_str::<Value>(&r.2).unwrap_or(Value::Null))
+    };
+    let host = format!("127.0.0.1:{shop}");
+    let wf = json!({
+        "name": "products-check",
+        "description": "GET the products and check the answer",
+        "steps": [
+            {"type": "send", "url": format!("http://{host}"),
+             "raw": format!("GET /api/products HTTP/1.1\r\nHost: {host}\r\n\r\n")},
+            {"type": "extract", "name": "first", "kind": "regex", "expr": "\"name\":\"([^\"]+)\""},
+            {"type": "assert", "status": "200", "body_contains": "{{first}}", "message": "the list names its first product"},
+        ],
+    });
+    let (st, created) = call("POST", "/api/v1/workflows".into(), Some(wf.clone())).await;
+    assert_eq!(st, 200, "{created}");
+    assert_eq!((created["id"].as_i64(), created["trigger"]["enabled"].as_bool()), (Some(1), Some(false)));
+    // Bad definitions are a 400 with the reason; unknown fields and unknown step kinds are refused.
+    let (st, e) = call("POST", "/api/v1/workflows".into(), Some(json!({"name": "x", "steps": []}))).await;
+    assert_eq!(st, 400);
+    assert!(e["error"].as_str().unwrap().contains("1 to 50 steps"), "{e}");
+    let mut loops = wf.clone();
+    loops["name"] = json!("loops");
+    loops["steps"] = json!([{"type": "loop", "times": 3}]);
+    assert!(call("POST", "/api/v1/workflows".into(), Some(loops)).await.0 >= 400);
+    let mut extra = wf.clone();
+    extra["name"] = json!("extra");
+    extra["bogus"] = json!(1);
+    assert!(call("POST", "/api/v1/workflows".into(), Some(extra)).await.0 >= 400);
+
+    let (_, list) = call("GET", "/api/v1/workflows".into(), None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(call("GET", "/api/v1/workflows/products-check".into(), None).await.1["id"], 1);
+    assert_eq!(call("GET", "/api/v1/workflows/nope".into(), None).await.0, 404);
+
+    // Run it (by id), then list and fetch the run.
+    let (st, run) = call("POST", "/api/v1/workflows/1/run".into(), Some(json!({}))).await;
+    assert_eq!(st, 200, "{run}");
+    assert_eq!(run["status"], "ok", "{run}");
+    assert_eq!((run["sends"].as_i64(), run["steps"].as_array().map(Vec::len)), (Some(1), Some(3)));
+    assert_eq!(run["steps"][0]["kind"], "send");
+    let sent = run["exchanges"][0].as_i64().unwrap();
+    let (_, ex) = call("GET", format!("/api/v1/exchanges/{sent}"), None).await;
+    assert_eq!(ex["summary"]["source"], "workflow");
+    let id = run["id"].as_i64().unwrap();
+    assert_eq!(call("GET", format!("/api/v1/workflows/runs/{id}"), None).await.1["status"], "ok");
+    let (_, runs) = call("GET", "/api/v1/workflows/runs?workflow=products-check&limit=5".into(), None).await;
+    assert_eq!(runs.as_array().unwrap().len(), 1);
+    assert_eq!(call("GET", "/api/v1/workflows/runs/999".into(), None).await.0, 404);
+    // A workflow that needs an exchange and gets none stops (not an error of the call).
+    let mut m = wf.clone();
+    m["name"] = json!("needs-exchange");
+    m["steps"] = json!([{"type": "match", "status": "200"}]);
+    call("POST", "/api/v1/workflows".into(), Some(m)).await;
+    let (st, run) = call("POST", "/api/v1/workflows/needs-exchange/run".into(), Some(json!({}))).await;
+    assert_eq!((st, run["status"].as_str()), (200, Some("stopped")));
+    let (_, run) =
+        call("POST", "/api/v1/workflows/needs-exchange/run".into(), Some(json!({"exchange_id": sent}))).await;
+    assert_eq!(run["status"], "ok");
+
+    // The trigger: on and off, validated, audited.
+    let (st, on) = call(
+        "PUT",
+        "/api/v1/workflows/needs-exchange/trigger".into(),
+        Some(json!({"enabled": true, "max_per_minute": 5})),
+    )
+    .await;
+    assert_eq!(
+        (st, on["trigger"]["enabled"].as_bool(), on["trigger"]["max_per_minute"].as_i64()),
+        (200, Some(true), Some(5))
+    );
+    assert_eq!(
+        call(
+            "PUT",
+            "/api/v1/workflows/needs-exchange/trigger".into(),
+            Some(json!({"enabled": true, "max_per_minute": 0}))
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        call("PUT", "/api/v1/workflows/products-check/trigger".into(), Some(json!({"enabled": true}))).await.0,
+        400,
+        "no match step first"
+    );
+    let (_, audit) = call("GET", "/api/v1/audit".into(), None).await;
+    assert!(audit.to_string().contains("workflow_trigger"));
+    // Edit and delete.
+    let mut edited = wf.clone();
+    edited["description"] = json!("changed");
+    let (st, e) = call("PUT", "/api/v1/workflows/1".into(), Some(edited)).await;
+    assert_eq!((st, e["description"].as_str()), (200, Some("changed")));
+    let (st, d) = call("DELETE", "/api/v1/workflows/needs-exchange".into(), None).await;
+    assert_eq!((st, d["deleted"].as_str()), (200, Some("needs-exchange")));
+    assert_eq!(call("GET", "/api/v1/workflows".into(), None).await.1.as_array().unwrap().len(), 1);
+    // Changes need the header like every other change.
+    assert_eq!(http(port, "POST", "/api/v1/workflows", &[AUTH], Some(wf)).await.0, 403);
+}
+
+#[tokio::test]
+async fn the_workflows_topic_streams_run_events() {
+    let (port, shop) = start().await;
+    let mut s = open_events(port, "?topics=workflows", "").await;
+    let mut got = String::new();
+    let host = format!("127.0.0.1:{shop}");
+    let wf = json!({"name": "w", "steps": [{"type": "send", "url": format!("http://{host}"),
+        "raw": format!("GET /api/products HTTP/1.1\r\nHost: {host}\r\n\r\n")}]});
+    assert_eq!(http(port, "POST", "/api/v1/workflows", &[AUTH, CHANGE], Some(wf)).await.0, 200);
+    read_until(&mut s, &mut got, "workflow_changed").await;
+    assert_eq!(http(port, "POST", "/api/v1/workflows/w/run", &[AUTH, CHANGE], Some(json!({}))).await.0, 200);
+    read_until(&mut s, &mut got, "\"state\":\"ok\"").await;
+    assert!(got.contains("event: workflows") && got.contains("workflow_run_changed"), "{got}");
+}

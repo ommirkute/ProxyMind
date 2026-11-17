@@ -202,6 +202,12 @@ class Arg(TypedDict):
     type: str
 
 
+class AssertionResult(TypedDict):
+    message: str
+    ok: bool
+    step: int
+
+
 class AssistantConfig(TypedDict, total=False):
     # Name of the environment variable holding the API key (the key itself
     # is never stored in the project). Empty: no key (local servers).
@@ -968,6 +974,40 @@ class DomTestResult(TypedDict):
     url: str
 
 
+class EditSetHeader(TypedDict):
+    """Replace a header's value, or add the header."""
+    name: str
+    op: _t.Literal["set_header"]
+    value: str
+
+
+class EditRemoveHeader(TypedDict):
+    name: str
+    op: _t.Literal["remove_header"]
+
+
+class EditSetParam(TypedDict):
+    """Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it."""
+    name: str
+    op: _t.Literal["set_param"]
+    value: str
+
+
+class _EditReplaceTextRequired(TypedDict):
+    find: str
+    op: _t.Literal["replace_text"]
+    replace: str
+
+
+class EditReplaceText(_EditReplaceTextRequired, total=False):
+    """Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op."""
+    # `find` is a regular expression and `replace` may use `$1`.
+    regex: bool
+
+
+# A change to a request. `{{variable}}` works in the values.
+Edit = _t.Union["EditSetHeader", "EditRemoveHeader", "EditSetParam", "EditReplaceText"]
+
 class _EngageExchangeRequired(TypedDict):
     # The recorded exchange to work on.
     exchange_id: int
@@ -1173,6 +1213,9 @@ class Extract(TypedDict, total=False):
 
 ExtractKind = _t.Literal["regex", "json", "header", "cookie"]
 
+# How an extraction reads its source.
+ExtractType = _t.Literal["regex", "json", "header", "cookie", "html_input"]
+
 class Extraction(TypedDict, total=False):
     expr: str
     kind: "ExtractKind"
@@ -1344,6 +1387,11 @@ class FuzzerRequest(_FuzzerRequestRequired, total=False):
     throttle_ms: _t.Optional[int]
     # Target as scheme://host[:port], when not using exchange_id.
     url: _t.Optional[str]
+    # A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a
+    # value or assert something about every response. The workflow's own sends are gated one by one as the actor
+    # who runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack
+    # approves this workflow's definition (it is part of what the approval covers).
+    workflow: _t.Optional[str]
 
 
 class _FuzzerResultDoneRequired(TypedDict):
@@ -1391,6 +1439,8 @@ class FuzzerRow(_FuzzerRowRequired, total=False):
     index: _t.Optional[int]
     matches: _t.List[str]
     status: _t.Optional[int]
+    # What the attack's workflow made of this result (`workflow` in the request).
+    workflow: _t.Optional["FuzzerWorkflow"]
 
 
 class FuzzerStartStarted(TypedDict):
@@ -1413,6 +1463,19 @@ class FuzzerStartDenied(TypedDict):
 
 # What starting a background attack did.
 FuzzerStart = _t.Union["FuzzerStartStarted", "FuzzerStartPendingApproval", "FuzzerStartDenied"]
+
+class _FuzzerWorkflowRequired(TypedDict):
+    run_id: int
+    status: "RunStatus"
+    # The run's variables (hidden or marked as target content for agents): what the workflow extracted from this
+    # result's response.
+    variables: _t.Dict[str, str]
+
+
+class FuzzerWorkflow(_FuzzerWorkflowRequired, total=False):
+    """What a fuzzer result got from the workflow attached to the attack."""
+    reason: _t.Optional[str]
+
 
 GraphEdge = TypedDict("GraphEdge", {
     "from": str,
@@ -2411,6 +2474,21 @@ class PayloadSet(TypedDict, total=False):
     url_encode: bool
 
 
+class Pending(TypedDict):
+    """Where a run waits for an approval."""
+    approval_id: str
+    # The exchange that was current, and what the run had used up, so it continues exactly from here.
+    current_exchange: _t.Optional[int]
+    # The definition's digest when the run paused: a run does not continue on a workflow edited since.
+    digest: str
+    elapsed_ms: int
+    reasons: _t.List[str]
+    sends: int
+    # The send step (from 1) that needs the approval.
+    step: int
+    summary: str
+
+
 class PluginCheckIssue(TypedDict):
     # `<plugin>/<check>`.
     check: str
@@ -3149,6 +3227,8 @@ class RulesBody(TypedDict):
 
 RunOn = _t.Literal["per_insertion_point", "per_request"]
 
+RunStatus = _t.Literal["running", "ok", "failed", "stopped", "denied", "pending_approval"]
+
 RunWhen = _t.Literal["always", "when_invalid"]
 
 class SavedCustomCheck(TypedDict):
@@ -3434,7 +3514,7 @@ class SessionRule(TypedDict, total=False):
     run: "RunWhen"
     set: _t.List["SetValue"]
     # Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-    # discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    # discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
     # Older names (repeater, intruder, sequencer) still match.
     tools: _t.List[str]
     use_cookie_jar: bool
@@ -3459,6 +3539,9 @@ class SetValue(TypedDict, total=False):
 SetWhere = _t.Literal["header", "cookie", "param"]
 
 Severity = _t.Literal["info", "low", "medium", "high"]
+
+# Which message of the current exchange a test or extraction looks at.
+Side = _t.Literal["request", "response"]
 
 class SignatureUnsigned(TypedDict):
     state: _t.Literal["unsigned"]
@@ -3551,6 +3634,160 @@ class StatusQuery(TypedDict, total=False):
     # Only rows with this status.
     status: _t.Optional[str]
 
+
+class _StepMatchRequired(TypedDict):
+    type: _t.Literal["match"]
+
+
+class StepMatch(_StepMatchRequired, total=False):
+    """Stop the run (status `stopped`) unless the current exchange fits the condition."""
+    # Text the body must contain (decoded: de-chunked and decompressed).
+    body_contains: _t.Optional[str]
+    # A regular expression the body must match.
+    body_regex: _t.Optional[str]
+    # A header that must be present (by name).
+    header: _t.Optional[str]
+    # With `header`: text one of its values must contain (case-insensitive).
+    header_contains: _t.Optional[str]
+    # A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`.
+    hql: _t.Optional[str]
+    # What a failed `assert` says, or why a `match` stopped the run (default: what failed).
+    message: _t.Optional[str]
+    # Methods the request may have, separated by commas: `POST` or `GET,HEAD`.
+    method: _t.Optional[str]
+    # Pass when the tests do NOT all hold.
+    negate: bool
+    # Text the request path (with its query) must contain.
+    path_contains: _t.Optional[str]
+    # Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response).
+    side: _t.Optional["Side"]
+    # Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.
+    status: _t.Optional[str]
+    # A variable to test. Alone: it must be set and not empty.
+    var: _t.Optional[str]
+    # With `var`: text the value must contain.
+    var_contains: _t.Optional[str]
+    # With `var`: the exact value.
+    var_equals: _t.Optional[str]
+    # With `var`: a regular expression the value must match.
+    var_matches: _t.Optional[str]
+
+
+class _StepAssertRequired(TypedDict):
+    type: _t.Literal["assert"]
+
+
+class StepAssert(_StepAssertRequired, total=False):
+    """Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on."""
+    # Text the body must contain (decoded: de-chunked and decompressed).
+    body_contains: _t.Optional[str]
+    # A regular expression the body must match.
+    body_regex: _t.Optional[str]
+    # A header that must be present (by name).
+    header: _t.Optional[str]
+    # With `header`: text one of its values must contain (case-insensitive).
+    header_contains: _t.Optional[str]
+    # A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`.
+    hql: _t.Optional[str]
+    # What a failed `assert` says, or why a `match` stopped the run (default: what failed).
+    message: _t.Optional[str]
+    # Methods the request may have, separated by commas: `POST` or `GET,HEAD`.
+    method: _t.Optional[str]
+    # Pass when the tests do NOT all hold.
+    negate: bool
+    # Text the request path (with its query) must contain.
+    path_contains: _t.Optional[str]
+    # Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response).
+    side: _t.Optional["Side"]
+    # Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.
+    status: _t.Optional[str]
+    # A variable to test. Alone: it must be set and not empty.
+    var: _t.Optional[str]
+    # With `var`: text the value must contain.
+    var_contains: _t.Optional[str]
+    # With `var`: the exact value.
+    var_equals: _t.Optional[str]
+    # With `var`: a regular expression the value must match.
+    var_matches: _t.Optional[str]
+
+
+class _StepExtractRequired(TypedDict):
+    type: _t.Literal["extract"]
+
+
+class StepExtract(_StepExtractRequired, total=False):
+    """Read a value out of the current request or response into a variable."""
+    # The regular expression, JSON pointer, header name, cookie name or input name.
+    expr: str
+    # For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one.
+    group: _t.Optional[int]
+    kind: "ExtractType"
+    # The variable to set: letters, digits and `_`, not starting with a digit or `current_`.
+    name: str
+    # When nothing is found: leave the variable unset and go on (default: the run fails here).
+    optional: bool
+    # Read the request or the response (default response; `html_input` reads responses only).
+    side: _t.Optional["Side"]
+
+
+class _StepTransformRequired(TypedDict):
+    type: _t.Literal["transform"]
+
+
+class StepTransform(_StepTransformRequired, total=False):
+    """Set a variable from a template, then apply encodings, decodings or hashes to it."""
+    # The variable to set.
+    name: str
+    # Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,
+    # url_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,
+    # hex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,
+    # sha1, sha256. None: the variable is just the template.
+    ops: _t.List[str]
+    # The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`.
+    value: str
+
+
+class _StepSendRequired(TypedDict):
+    type: _t.Literal["send"]
+
+
+class StepSend(_StepSendRequired, total=False):
+    """Send a request through the policy gate; its response becomes the current exchange."""
+    # Changes made to the request after the template is filled in, in order.
+    edits: _t.List["Edit"]
+    # Update Content-Length to match the body (default true).
+    fix_content_length: _t.Optional[bool]
+    # Send with this test identity's credentials ("anonymous" for none).
+    identity: _t.Optional[str]
+    # A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current
+    # exchange's request.
+    raw: _t.Optional[str]
+    # Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a
+    # response cannot choose where the next request goes.
+    url: _t.Optional[str]
+
+
+# One step of a workflow.
+Step = _t.Union["StepMatch", "StepAssert", "StepExtract", "StepTransform", "StepSend"]
+
+class _StepRunRequired(TypedDict):
+    elapsed_ms: int
+    # `match`, `assert`, `extract`, `transform` or `send`.
+    kind: str
+    # What happened, without target content.
+    message: str
+    status: "StepStatus"
+    # Position in the workflow, from 1.
+    step: int
+
+
+class StepRun(_StepRunRequired, total=False):
+    """What one step did."""
+    # For a send: the recorded exchange (also when it failed on the wire).
+    exchange_id: _t.Optional[int]
+
+
+StepStatus = _t.Literal["ok", "failed", "stopped", "denied", "pending_approval"]
 
 class _StreamChunkPageRequired(TypedDict):
     chunks: _t.List["StreamChunkView"]
@@ -3826,6 +4063,19 @@ class TriageItem(TypedDict):
     url: str
 
 
+class Trigger(TypedDict):
+    """The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step."""
+    # Off by default. Only a person turns it on; editing the steps turns it off again.
+    enabled: bool
+    # Who turned it on. Runs go through the gate as this person.
+    enabled_by: str
+    enabled_ms: int
+    # At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued.
+    max_per_minute: int
+    # Exchanges skipped because of the rate cap or because other runs were busy, since this process started.
+    skipped: int
+
+
 class _TurnRequired(TypedDict):
     chat_id: int
     # Messages added in this turn (user, assistant and tool results).
@@ -3971,6 +4221,87 @@ class WaybackReport(TypedDict):
     interesting: int
     # Captures on this host (before `limit` cut the list).
     total: int
+
+
+class Workflow(TypedDict):
+    """A saved workflow."""
+    description: str
+    # Assigned when the workflow is first saved.
+    id: int
+    # A unique name, 1 to 64 characters.
+    name: str
+    # Up to 50 steps, run in order. No loops.
+    steps: _t.List["Step"]
+    # Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on).
+    trigger: "Trigger"
+    # Who saved it last.
+    updated_by: str
+    updated_ms: int
+
+
+class WorkflowInput(TypedDict, total=False):
+    """What a person edits: a workflow without the fields the service manages."""
+    description: str
+    name: str
+    steps: _t.List["Step"]
+
+
+class _WorkflowRunRequired(TypedDict):
+    # Who ran it, e.g. `human:local` or `agent:claude`.
+    actor: str
+    assertions: _t.List["AssertionResult"]
+    duration_ms: int
+    # Every exchange the run sent, in order.
+    exchanges: _t.List[int]
+    id: int
+    sends: int
+    started_ms: int
+    status: "RunStatus"
+    # The steps that ran, in order.
+    steps: _t.List["StepRun"]
+    # How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`.
+    trigger: str
+    # Variables at the end of the run. For agents, values are hidden or marked as target content.
+    variables: _t.Dict[str, str]
+    workflow_id: int
+    workflow_name: str
+
+
+class WorkflowRun(_WorkflowRunRequired, total=False):
+    """One run of a workflow."""
+    pending: _t.Optional["Pending"]
+    # Why it did not finish `ok`.
+    reason: _t.Optional[str]
+    # The exchange it started on, if any.
+    start_exchange: _t.Optional[int]
+
+
+class WorkflowRunBody(TypedDict, total=False):
+    """Body of `POST /workflows/{id}/run`."""
+    # Continue a run that waits for this approval (give the same `exchange_id` as before).
+    approval_id: _t.Optional[str]
+    # Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+    exchange_id: _t.Optional[int]
+
+
+class WorkflowRunsQuery(TypedDict, total=False):
+    """Query of `GET /workflows/runs`."""
+    # How many runs (default 50, at most 200).
+    limit: _t.Optional[int]
+    # Only runs of this workflow (name or id).
+    workflow: _t.Optional[str]
+
+
+class _WorkflowTriggerBodyRequired(TypedDict):
+    # Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+    # can turn it on (audited), and editing the workflow's steps turns it off again.
+    enabled: bool
+
+
+class WorkflowTriggerBody(_WorkflowTriggerBodyRequired, total=False):
+    """Body of `PUT /workflows/{id}/trigger`."""
+    # At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.
+    max_per_minute: _t.Optional[int]
 
 
 # A message in the history across connections.

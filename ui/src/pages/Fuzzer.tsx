@@ -15,6 +15,8 @@ interface Row {
   extracted?: (string | null)[];
   reflected: boolean;
   error?: string;
+  /** What the attack's workflow made of this result. */
+  workflow?: { run_id: number; status: string; reason?: string | null; variables: Record<string, string> };
 }
 interface Anomaly {
   index: number;
@@ -112,6 +114,8 @@ interface Config {
   extract: ExtractCfg[];
   concurrency: number;
   throttle: number;
+  /** A workflow (name) to run on each result. */
+  workflow: string;
 }
 
 const newSet = (): SetCfg => ({
@@ -142,6 +146,7 @@ const INITIAL: Config = {
   extract: [],
   concurrency: 1,
   throttle: 0,
+  workflow: "",
 };
 
 /** The API's payload set for a configured set. */
@@ -203,6 +208,7 @@ export default function Fuzzer() {
   const [view, setView] = useState<AttackView | null>(null);
   const [sel, setSel] = useState<Row | null>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
+  const workflows = useLoad(() => api.get<{ id: number; name: string }[]>("/workflows"), []);
   const attacks = useLoad(() => api.get<AttackSummary[]>("/fuzzer/attacks"), [attackId, view?.status]);
   const action = useAction();
   const editor = useRef<HTMLTextAreaElement>(null);
@@ -262,6 +268,7 @@ export default function Fuzzer() {
         concurrency: cfg.concurrency,
         throttle_ms: cfg.throttle,
         identity: cfg.identity || undefined,
+        workflow: cfg.workflow || undefined,
         approval_id: approval || undefined,
       });
       setOutcome(r);
@@ -457,7 +464,16 @@ export default function Fuzzer() {
             <label>in flight <input aria-label="Concurrency" type="number" min={1} max={20} value={cfg.concurrency} onChange={(e) => setCfg({ concurrency: Number(e.target.value) })} style={{ width: 55 }} /></label>
             <label>delay <input aria-label="Throttle" type="number" min={0} step={50} value={cfg.throttle} onChange={(e) => setCfg({ throttle: Number(e.target.value) })} style={{ width: 75 }} /> ms</label>
           </div>
-          <p className="small muted">The rules of engagement's rate limits apply on top. One approval covers the whole attack.</p>
+          <div className="row small" style={{ marginTop: 6 }}>
+            <label>
+              workflow on each result{" "}
+              <select aria-label="Workflow on each result" value={cfg.workflow ?? ""} onChange={(e) => setCfg({ workflow: e.target.value })}>
+                <option value="">none</option>
+                {workflows.data?.map((w) => <option key={w.id} value={w.name}>{w.name}</option>)}
+              </select>
+            </label>
+          </div>
+          <p className="small muted">The rules of engagement's rate limits apply on top. One approval covers the whole attack (and the workflow's definition); the workflow's own sends are checked one by one as you.</p>
           <button className="btn primary" disabled={action.busy || !cfg.url || !Number.isInteger(positions) || positions < 1} onClick={start} data-testid="fuzzer-run">
             {approval ? "Start approved attack" : `Start attack${total != null ? ` (${total})` : ""}`}
           </button>
@@ -505,6 +521,7 @@ function Results({
   const [detail, setDetail] = useState<ExchangeDetail | null>(null);
   const [tab, setTab] = useState<"response" | "request">("response");
   const reasons = new Map(view.anomalies.map((a) => [a.index, a.reasons]));
+  const hasWorkflow = view.rows.some((r) => r.workflow);
   const hidden = new Set(hideStatus.split(/[\s,]+/).filter(Boolean));
   const rows = view.rows
     .filter((r) => !onlyAnomalies || reasons.has(r.index ?? -1))
@@ -552,6 +569,7 @@ function Results({
                 {head("time", "Time")}
                 <th>Grep</th>
                 {view.extract_columns.map((c) => <th key={c} className="mono">{c}</th>)}
+                {hasWorkflow && <th>Workflow</th>}
                 <th>Why it stands out</th>
               </tr>
             </thead>
@@ -565,6 +583,7 @@ function Results({
                   <td>{view.baseline.elapsed_ms} ms</td>
                   <td>{view.baseline.matches?.join(", ")}</td>
                   {view.extract_columns.map((c, i) => <td key={c} className="mono">{view.baseline!.extracted?.[i] ?? ""}</td>)}
+                  {hasWorkflow && <td />}
                   <td />
                 </tr>
               )}
@@ -581,6 +600,11 @@ function Results({
                     <td>{r.elapsed_ms} ms</td>
                     <td>{r.matches?.join(", ")}{r.reflected ? " ↩" : ""}</td>
                     {view.extract_columns.map((c, i) => <td key={c} className="mono" data-testid="extract-cell">{r.extracted?.[i] ?? ""}</td>)}
+                    {hasWorkflow && (
+                      <td className="small mono" data-testid="workflow-cell" title={r.workflow?.reason ?? ""}>
+                        {r.workflow ? `${r.workflow.status.replace(/_/g, " ")}${Object.keys(r.workflow.variables).length ? ": " + Object.entries(r.workflow.variables).map(([k, v]) => `${k}=${v.length > 24 ? v.slice(0, 24) + "…" : v}`).join(", ") : ""}` : ""}
+                      </td>
+                    )}
                     <td className="small">{why?.join("; ")}</td>
                   </tr>
                 );

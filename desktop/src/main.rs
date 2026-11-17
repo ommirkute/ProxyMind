@@ -103,6 +103,7 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
     pm_service::watch_roe(service.clone());
     // Scheduled scans start while the app is open.
     tauri::async_runtime::spawn(service.clone().run_scheduler());
+    tauri::async_runtime::spawn(service.clone().run_workflow_triggers());
     let token = pm_api::load_or_create_token(&home.join("api-token"))?;
 
     // The proxy, as in `proxymind ui`; the UI still works if 8080 is taken.

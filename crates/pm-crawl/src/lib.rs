@@ -207,6 +207,18 @@ fn tags(html: &str) -> Vec<Tag> {
     out
 }
 
+/// The raw `value` attribute of the first `<input>` whose `name` (or, failing that, `id`) is `name`, as written in the
+/// page (entities not decoded). `None` when there is no such input or it has no `value`. Hidden CSRF fields are the
+/// usual use.
+pub fn input_value(html: &str, name: &str) -> Option<String> {
+    let inputs: Vec<Tag> = tags(html).into_iter().filter(|t| t.name == "input").collect();
+    let found = inputs
+        .iter()
+        .find(|t| t.attr("name") == Some(name))
+        .or_else(|| inputs.iter().find(|t| t.attr("id") == Some(name)))?;
+    found.attr("value").map(str::to_string)
+}
+
 /// Paths named in robots.txt (Allow/Disallow without wildcards) and its
 /// Sitemap URLs: often the most interesting places on a site.
 pub fn robots(base: &Url, text: &str) -> (Vec<Url>, Vec<Url>) {
@@ -324,6 +336,16 @@ impl Frontier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_values_by_name_then_id() {
+        let html = r#"<form><input type=hidden name="csrf" value="a&amp;b"><INPUT id=other VALUE='x y'>
+            <input name=empty><script>var s = '<input name="csrf" value="evil">';</script></form>"#;
+        assert_eq!(super::input_value(html, "csrf").as_deref(), Some("a&amp;b"));
+        assert_eq!(super::input_value(html, "other").as_deref(), Some("x y"));
+        assert_eq!(super::input_value(html, "empty"), None);
+        assert_eq!(super::input_value(html, "missing"), None);
+    }
+
     use super::*;
 
     fn u(s: &str) -> Url {

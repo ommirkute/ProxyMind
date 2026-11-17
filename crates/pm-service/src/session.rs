@@ -147,7 +147,7 @@ pub struct SessionRule {
     pub name: String,
     pub enabled: bool,
     /// Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-    /// discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    /// discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
     /// Older names (repeater, intruder, sequencer) still match.
     pub tools: Vec<String>,
     /// Host patterns (`api.example.com`, `*.example.com`). Empty: all.
@@ -383,7 +383,7 @@ pub fn substitute(text: &str, vars: &HashMap<String, String>) -> String {
 /// Head lines (without line endings), the line ending, and the body.
 type Split<'a> = (Vec<Vec<u8>>, &'static [u8], &'a [u8]);
 
-fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
+pub(crate) fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
     let end = pm_http::find_head_end(raw).ok().flatten()?;
     let (head, body) = raw.split_at(end);
     let eol: &'static [u8] = if head.windows(2).any(|w| w == b"\r\n") { b"\r\n" } else { b"\n" };
@@ -395,7 +395,7 @@ fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
     Some((lines, eol, body))
 }
 
-fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
+pub(crate) fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + lines.iter().map(|l| l.len() + 2).sum::<usize>() + 2);
     for l in lines {
         out.extend_from_slice(l);
@@ -406,7 +406,7 @@ fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn header_name(line: &[u8]) -> Option<&[u8]> {
+pub(crate) fn header_name(line: &[u8]) -> Option<&[u8]> {
     let c = line.iter().position(|&b| b == b':')?;
     Some(line[..c].trim_ascii())
 }
@@ -471,7 +471,7 @@ pub fn set_cookies(raw: &[u8], cookies: &[(String, String)]) -> Vec<u8> {
     join_lines(&lines, eol, body)
 }
 
-fn form_encode(v: &str) -> String {
+pub(crate) fn form_encode(v: &str) -> String {
     url::form_urlencoded::byte_serialize(v.as_bytes()).collect()
 }
 

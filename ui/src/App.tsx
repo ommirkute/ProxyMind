@@ -36,6 +36,7 @@ import CustomChecks from "./pages/CustomChecks";
 import AiScan from "./pages/AiScan";
 import Evidence from "./pages/Evidence";
 import Streams from "./pages/Streams";
+import Workflows from "./pages/Workflows";
 
 interface Group {
   id: string;
@@ -75,6 +76,7 @@ const GROUPS: Group[] = [
   { id: "aiscan", label: "AI scan", icon: "scan", section: "Testing", pages: [{ id: "aiscan", label: "AI scan" }] },
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
+  { id: "workflows", label: "Workflows", icon: "activity", section: "Testing", pages: [{ id: "workflows", label: "Workflows" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
   { id: "collaborator", label: "Collaborator", icon: "collab", section: "Testing", pages: [{ id: "collaborator", label: "Collaborator" }] },
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
@@ -226,6 +228,7 @@ export default function App() {
     setup: Setup,
     wshistory: WsHistory,
     streams: Streams,
+    workflows: Workflows,
     sessions: Sessions,
     findings: Findings,
     evidence: Evidence,

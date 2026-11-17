@@ -623,3 +623,35 @@ pub struct DeviceNameBody {
     /// The name to show for this address (1 to 60 characters).
     pub name: String,
 }
+
+/// Body of `POST /workflows/{id}/run`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowRunBody {
+    /// Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+    pub exchange_id: Option<i64>,
+    /// Continue a run that waits for this approval (give the same `exchange_id` as before).
+    pub approval_id: Option<String>,
+}
+
+/// Body of `PUT /workflows/{id}/trigger`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowTriggerBody {
+    /// Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+    /// can turn it on (audited), and editing the workflow's steps turns it off again.
+    pub enabled: bool,
+    /// At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.
+    #[serde(default)]
+    pub max_per_minute: Option<u32>,
+}
+
+/// Query of `GET /workflows/runs`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowRunsQuery {
+    /// Only runs of this workflow (name or id).
+    pub workflow: Option<String>,
+    /// How many runs (default 50, at most 200).
+    pub limit: Option<usize>,
+}

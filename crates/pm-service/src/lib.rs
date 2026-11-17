@@ -63,6 +63,8 @@ mod streams;
 mod tools;
 mod traffic;
 mod update;
+mod workflow;
+mod workflow_service;
 mod write_checks;
 mod ws;
 mod ws_replay;
@@ -134,6 +136,12 @@ pub use streams::{
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
 pub use update::{UpdateState, UpdateStatus};
+pub use workflow::{
+    AssertionResult, Condition, DEFAULT_TRIGGER_RATE, Edit, ExtractStep, ExtractType, MAX_RUN_SECS, MAX_SENDS,
+    MAX_STEPS, MAX_TRIGGER_RATE, MAX_VALUE_LEN, MAX_VARS, MAX_WORKFLOWS, Pending, RunStatus, SendStep, Side, Step,
+    StepRun, StepStatus, TransformStep, Trigger, WORKFLOWS_SETTING, Workflow, WorkflowInput, WorkflowRun,
+};
+pub use workflow_service::{FuzzerWorkflow, KEEP_RUNS, WorkflowRunRequest, WorkflowSummary};
 pub use write_checks::WriteSweep;
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
@@ -220,6 +228,8 @@ pub struct Service {
     record_devices: parking_lot::RwLock<std::collections::HashSet<String>>,
     /// Typed events published after writes commit (ADR-0018).
     bus: std::sync::Arc<events::Bus>,
+    /// Per-exchange workflow triggers: cached list, rate windows, counters.
+    workflows: parking_lot::Mutex<workflow_service::Runtime>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -388,6 +398,7 @@ impl Service {
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
             record_devices: parking_lot::RwLock::new(std::collections::HashSet::new()),
             bus,
+            workflows: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
         Ok(svc)

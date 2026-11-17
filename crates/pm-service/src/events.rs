@@ -44,10 +44,11 @@ pub enum Topic {
     AiScan,
     Plugins,
     Streams,
+    Workflows,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 13] = [
+    pub const ALL: [Topic; 14] = [
         Topic::Exchanges,
         Topic::Findings,
         Topic::Scans,
@@ -61,6 +62,7 @@ impl Topic {
         Topic::AiScan,
         Topic::Plugins,
         Topic::Streams,
+        Topic::Workflows,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -78,6 +80,7 @@ impl Topic {
             Topic::AiScan => "ai_scan",
             Topic::Plugins => "plugins",
             Topic::Streams => "streams",
+            Topic::Workflows => "workflows",
         }
     }
 
@@ -179,6 +182,21 @@ pub enum Event {
         host: String,
         port: u16,
     },
+    /// A workflow was saved, deleted or had its per-exchange trigger switched: `what` is `saved`, `deleted`,
+    /// `trigger_enabled` or `trigger_disabled`. Carries only the id (the page refetches the list).
+    WorkflowChanged {
+        id: i64,
+        what: String,
+    },
+    /// A workflow run started, moved on, paused for an approval or ended. `state` is `running`, `ok`, `failed`,
+    /// `stopped`, `denied` or `pending_approval`; `steps` how many steps have run. Progress is rate-limited, state
+    /// changes are not. Agents only get the runs they started. No variables, request or response text.
+    WorkflowRunChanged {
+        run_id: i64,
+        workflow_id: i64,
+        state: String,
+        steps: usize,
+    },
 }
 
 impl Event {
@@ -198,6 +216,7 @@ impl Event {
             Event::AiScanChanged { .. } => Topic::AiScan,
             Event::PluginsChanged { .. } => Topic::Plugins,
             Event::StreamChanged { .. } => Topic::Streams,
+            Event::WorkflowChanged { .. } | Event::WorkflowRunChanged { .. } => Topic::Workflows,
         }
     }
 }

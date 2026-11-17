@@ -5,6 +5,7 @@
 //! (static files, repeated replays) are stored once.
 
 mod streams;
+mod workflow_runs;
 
 use std::path::Path;
 
@@ -12,6 +13,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 pub use streams::*;
+pub use workflow_runs::*;
 
 /// Schema migrations, applied in order. Never edit a released entry;
 /// add a new one instead.
@@ -424,6 +426,26 @@ CREATE TABLE stream_chunks (
     data_hash  BLOB REFERENCES blobs(hash)
 );
 CREATE INDEX stream_chunks_stream ON stream_chunks(stream_id, id);
+"#,
+    r#"
+-- Workflow runs (roadmap 2.2): one row per run of a saved workflow (the definitions live in the `workflows` setting).
+-- `record` is the run as JSON (steps, variables, sent exchanges, assertions, where it paused); the other columns
+-- are what lists filter and sort on. Only the newest rows are kept (`Store::prune_workflow_runs`).
+CREATE TABLE workflow_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id    INTEGER NOT NULL,
+    workflow_name  TEXT NOT NULL,
+    actor          TEXT NOT NULL,
+    trigger        TEXT NOT NULL,
+    start_exchange INTEGER,
+    status         TEXT NOT NULL,
+    started_ms     INTEGER NOT NULL,
+    duration_ms    INTEGER,
+    approval_id    TEXT,
+    record         TEXT NOT NULL
+);
+CREATE INDEX workflow_runs_by_workflow ON workflow_runs(workflow_id, id DESC);
+CREATE INDEX workflow_runs_by_approval ON workflow_runs(approval_id) WHERE approval_id IS NOT NULL;
 "#,
 ];
 
@@ -2616,10 +2638,10 @@ mod tests {
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes;
                  DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;
-                 DROP TABLE stream_chunks; DROP TABLE streams;",
+                 DROP TABLE stream_chunks; DROP TABLE streams; DROP TABLE workflow_runs;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 3) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 4) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2651,10 +2673,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
-                 ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;",
+                 ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;
+                 DROP TABLE workflow_runs;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 2) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 3) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         let old = s.get_exchange(old_id).unwrap().unwrap();

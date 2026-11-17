@@ -9,7 +9,7 @@ use pm_service::{
     ActiveScanRequest, AuthzMatrixRequest, CrawlRequest, CustomScanRequest, DecodeRequest, DiscoverRequest,
     DomTestRequest, FuzzerRequest, GraphQlImportRequest, GroupRequest, HypothesisUpdate, ImportRequest, NewAttackPath,
     NewHypothesis, OpenApiImportRequest, PluginCheckRequest, RaceRequest, ScanFilter, SearchRequest,
-    StreamReplayRequest, TokenAnalyzerRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WorkflowRunRequest, WsSearchRequest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -66,6 +66,15 @@ fn raw_stream_tools() {
         "max_response_bytes": 1000, "approval_id": "a1", "max_chars": 500}),
     );
     accepts::<StreamReplayRequest>(json!({"stream_id": 3, "chunks": ["RUhMTw=="]}));
+}
+
+#[test]
+fn workflow_tools() {
+    accepts::<WorkflowRefArgs>(json!({"workflow": "login-and-orders"}));
+    refuses::<WorkflowRefArgs>(json!({}));
+    accepts::<WorkflowRunRequest>(json!({"workflow": "7", "exchange_id": 12, "approval_id": "a1"}));
+    accepts::<WorkflowRunRequest>(json!({"workflow": "login"}));
+    refuses::<WorkflowRunRequest>(json!({"workflow": "x", "steps": []}));
 }
 
 #[test]
