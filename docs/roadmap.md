@@ -3,6 +3,7 @@
 Written 2026-11-14. The working copy, with comments, is a shared doc; this file is the version the code follows.
 Update the status columns here as work lands.
 
+As of 2026-11-17 (end of Phase 2; the ProxyMind column is updated, the others are as checked on 2026-11-14).
 ProxyMind already leads on proof, governance (the policy gate and audit log) and AI integration. To lead overall it
 needs team collaboration, traffic scripting, HTTP/3 and gRPC, a self-hostable callback server and wider proof
 coverage, on a store and event layer that scales.
@@ -28,10 +29,10 @@ benchmark job for AI scan scoring (4.7).
 | Automated scanning | Passive and active checks, crawl and audit, YAML custom checks | Passive and active, custom checks | Not stated | Packaged scans | No |
 | Proof that a finding is real | Stored, re-runnable oracles | Not stated | Not stated | Not stated | No |
 | Out-of-band testing | Local DNS, HTTP, SMTP listener | Built in | Not stated | Not stated | No |
-| Scripting live traffic | Regex match and replace only | Extensions | Workflows | Not stated | Python addons |
-| Protocols | HTTP/1.1, HTTP/2, WebSockets | HTTP/2, WebSockets | Not stated | Not stated | Adds HTTP/3 |
+| Scripting live traffic | Match and replace, plugin traffic hooks (2.1), saved workflows (2.2) | Extensions | Workflows | Not stated | Python addons |
+| Protocols | HTTP/1.1, HTTP/2, HTTP/3 to targets, WebSockets, gRPC/Protobuf, raw TCP/TLS streams; SOCKS5 and transparent capture | HTTP/2, WebSockets | Not stated | Not stated | Adds HTTP/3 |
 | Team collaboration | None | Not stated | Teams offering | Not stated | No |
-| AI and agents | MCP (80 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
+| AI and agents | MCP (86 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
 | Policy gate and tamper-evident audit | Yes | Not stated | Not stated | Not stated | No |
 
 "Not stated" means the vendor page checked did not say. Sources: [Burp Suite Pro
