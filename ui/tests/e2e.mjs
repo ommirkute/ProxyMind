@@ -472,16 +472,19 @@ try {
     await selectRaw("boots");
     await page.getByRole("button", { name: "Transform", exact: true }).click();
     check(await page.getByTestId("transform-before").textContent() === "boots", "Transform shows the selected text as the 'before'");
+    // The preview re-renders after each choice; wait for the expected text, not just the element (it stays mounted).
+    const afterBecomes = (text) =>
+      page
+        .waitForFunction((t) => document.querySelector('[data-testid="transform-after"]')?.textContent === t, text, { timeout: 5000 })
+        .then(() => true, () => false);
     await page.getByLabel("Transform operation").selectOption("base64_encode");
-    await page.getByTestId("transform-after").waitFor();
-    check(await page.getByTestId("transform-after").textContent() === "Ym9vdHM=", "Transform previews the Base64 of the selection");
+    check(await afterBecomes("Ym9vdHM="), "Transform previews the Base64 of the selection");
     check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "the preview does not change the raw request");
     await page.getByTestId("transform-apply").click();
     check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM=&page=1 ")'), "Apply replaces the selection with the encoded value");
     check(await rawEditor.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd)) === "Ym9vdHM=", "the applied result stays selected for chaining");
     await page.getByLabel("Transform operation").selectOption("url_encode");
-    await page.getByTestId("transform-after").waitFor();
-    check(await page.getByTestId("transform-after").textContent() === "Ym9vdHM%3D", "a second transform chains onto the result");
+    check(await afterBecomes("Ym9vdHM%3D"), "a second transform chains onto the result");
     await page.getByTestId("transform-apply").click();
     check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM%3D&page=1 ")'), "the chained transform is applied");
     await page.getByTestId("transform-undo").click();
