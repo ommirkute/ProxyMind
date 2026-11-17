@@ -41,16 +41,24 @@ impl OriginalDst for SystemOriginalDst {
 
         use nix::sys::socket::{getsockopt, sockopt};
 
+        let local = tcp.local_addr().ok()?;
+        // With connection tracking on, `SO_ORIGINAL_DST` also answers for connections nothing redirected, giving the
+        // address they were made to: the socket's own. Only a different address means the connection was redirected.
+        let redirected = |orig: SocketAddr| {
+            (orig.ip().to_canonical() != local.ip().to_canonical() || orig.port() != local.port()).then_some(orig)
+        };
         if let Ok(a) = getsockopt(tcp, sockopt::OriginalDst) {
             let ip = Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr));
-            return Some(SocketAddr::new(ip.into(), u16::from_be(a.sin_port)));
-        }
-        if let Ok(a) = getsockopt(tcp, sockopt::Ip6tOriginalDst) {
+            if let Some(orig) = redirected(SocketAddr::new(ip.into(), u16::from_be(a.sin_port))) {
+                return Some(orig);
+            }
+        } else if let Ok(a) = getsockopt(tcp, sockopt::Ip6tOriginalDst) {
             let ip = Ipv6Addr::from(a.sin6_addr.s6_addr);
-            return Some(SocketAddr::new(ip.into(), u16::from_be(a.sin6_port)));
+            if let Some(orig) = redirected(SocketAddr::new(ip.into(), u16::from_be(a.sin6_port))) {
+                return Some(orig);
+            }
         }
         // TPROXY delivers the connection with its destination intact: the local address is not the listener's.
-        let local = tcp.local_addr().ok()?;
         let same_port = local.port() == self.listener.port();
         let same_ip =
             self.listener.ip().is_unspecified() || local.ip().to_canonical() == self.listener.ip().to_canonical();
