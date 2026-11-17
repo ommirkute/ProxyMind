@@ -159,6 +159,26 @@ Every parser change follows ADR-0002 (bytes unchanged unless a user or rule chan
 
 **Gate:** byte-exact tests for every new protocol, fuzz targets in CI, the Phase 1 benchmark no more than 10% worse.
 
+**Phase 2 gate (2026-11-17): met.** All nine work packages are done (2.4's client-side QUIC listener and
+transparent mode on macOS and Windows are deferred, see ADR-0021 and `docs/capture.md`). Each new protocol has
+byte-exact tests and a fuzz target in the Nightly matrix (`protobuf_decode`, `socks5_handshake`, `http3_text`).
+The 1M-exchange release benchmark, rerun on the Phase 2 code, is no worse on any measure:
+
+| Measure | Phase 1 (2026-11-16) | Phase 2 (2026-11-17) |
+| --- | --- | --- |
+| Recording while content searches run | 5,821/s | 7,541/s |
+| Proxy hand-off to the recorder, paced at 2,000/s | max 5.7 ms | max 3.9 ms |
+| Enqueue to commit, paced at 2,000/s | p99 65.5 ms, max 95.2 ms | p99 51.7 ms, max 80.3 ms |
+| Plain-text content search; with 50 hits | 2.3 ms; 166 ms | 1.3 ms; 78.7 ms |
+| `resp:"user996@shop.test"` | 204.6 ms | 107.6 ms |
+| Regex path query; site map; rare text filter | 1,242; 407; 342 ms | 968; 204; 280 ms |
+| Sequential inserts; findings created | 2,982/s; 2,041/s | 3,856/s; 2,730/s |
+| Audited service writes during regex searches | 1,057/s, p99 5.4 ms | 1,560/s, p99 4.3 ms |
+
+Both runs used the same 4-core cloud container type, but not the same machine, and the Phase 2 run shared the CPU
+with a build for part of the time, so the gains are mostly machine variance: the result is "not worse", not "faster".
+
+
 ## Phase 3: teams and integrations
 
 Starts with an ADR on identity and a written threat model.
