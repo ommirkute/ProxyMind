@@ -62,6 +62,8 @@ pub fn to_curl(url: &str, raw: &[u8]) -> Result<String, String> {
     }
     if head.version.eq_ignore_ascii_case("HTTP/2") || head.version == "HTTP/2.0" {
         cmd.push_str(" --http2");
+    } else if head.version.eq_ignore_ascii_case("HTTP/3") || head.version == "HTTP/3.0" {
+        cmd.push_str(" --http3-only");
     }
     let default_method = if body.is_empty() { "GET" } else { "POST" };
     if head.method != default_method {
@@ -274,6 +276,8 @@ const IGNORED_FLAGS: &[&str] = &[
     "--http1.1",
     "--http2",
     "--http2-prior-knowledge",
+    "--http3",
+    "--http3-only",
     "-g",
     "--globoff",
     "--path-as-is",

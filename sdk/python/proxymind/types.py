@@ -2999,7 +2999,8 @@ class ReplayRequest(TypedDict, total=False):
     max_tokens: _t.Optional[int]
     # Convert bare "\n" line endings in the head to "\r\n" (default true).
     normalize_newlines: _t.Optional[bool]
-    # Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+    # Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+    # `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
     # If omitted, the request of `exchange_id` is resent unchanged.
     raw: _t.Optional[str]
     # Target as scheme://host[:port], used when there is no `exchange_id`.

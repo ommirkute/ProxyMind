@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
 import type { DevicesView } from "../api-types.gen";
+import { altSvcH3 } from "../altsvc";
 import { Chip, ContextMenu, DiffView, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
 import { useLiveEvent } from "../live";
 
@@ -599,6 +600,10 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   // The list may have newer annotations (set from the right-click menu).
   const s = live ? { ...ex.summary, highlight: live.highlight, comment: live.comment } : ex.summary;
   const resp = ex.view.response?.body;
+  // The recorded response (the server's own, not a rule's copy) advertised HTTP/3 in Alt-Svc.
+  const offersH3 = altSvcH3(ex.response).length > 0;
+  // HTTP/2 and HTTP/3 messages are stored as text with that version on the request line (ADR-0009, ADR-0021).
+  const protocol = ex.request.match(/^[^\r\n]* (HTTP\/[23])(?:\.0)?\r?\n/i)?.[1]?.toUpperCase();
   const changes = ex.changes ?? [];
   // A hook that was bypassed or failed leaves a note but changed nothing.
   const isNote = (c: { by: string; note?: string | null }) => c.by === "hook" && /^(bypassed|failed):/.test(c.note ?? "");
@@ -656,7 +661,9 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <span>#{s.id}</span>
         <span>{s.source}</span>
         <span>{s.actor_id}</span>
+        {protocol && <Chip value={protocol} />}
         {s.identity && <Chip value={`as ${s.identity}`} />}
+        {offersH3 && <Chip value="offers HTTP/3" />}
         {s.duration_ms != null && <span>{s.duration_ms} ms</span>}
         {s.hypothesis_id && <span>hypothesis #{s.hypothesis_id}</span>}
       </div>
@@ -674,6 +681,11 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn" onClick={() => go("replay", id)}>Send to Replay</button>
+        {offersH3 && (
+          <button className="btn" data-testid="replay-http3" title="Opens Replay with this request written for HTTP/3, at the address the response's Alt-Svc offered" onClick={() => go("replay", `h3:${id}`)}>
+            Send with HTTP/3
+          </button>
+        )}
         <button className="btn" onClick={() => go("fuzzer", id)}>Send to Fuzzer</button>
         <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
         <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>

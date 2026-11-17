@@ -94,6 +94,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 
 ### 🔁 Proxy & history
 - HTTP/1.1, HTTP/2 and WebSockets, **byte-exact**: nothing is changed unless you ask
+- Send to targets over **HTTP/3** (QUIC), shown as text like HTTP/2; `Alt-Svc` h3 detection and a preset that removes it
 - Intercept requests, responses and WebSocket messages; edit, forward or drop
 - Match & replace rules, with presets (unhide fields, strip security headers…)
 - History with a query language: `status:>=400 -ext:png resp:"error"`
@@ -105,7 +106,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 <td width="50%" valign="top">
 
 ### 🎯 Replay & Fuzzer
-- Replay tabs with an inspector, history, HTTP/2 pseudo-headers
+- Replay tabs with an inspector, history, HTTP/2 and HTTP/3 pseudo-headers
 - Send as any identity; send a group of tabs in sequence or **at the same moment**
 - Race conditions with the HTTP/2 **single-packet attack**
 - Fuzzer: marked positions, attack modes, payload lists, number ranges, processing rules, recursive grep, anomaly highlighting
@@ -266,12 +267,12 @@ One service layer that every client uses (UI, REST API, MCP, CLI), and every act
 
 ```
 crates/
-  pm-http      raw HTTP/1.x parsing, HTTP/2 text form (no I/O, fuzzed)
+  pm-http      raw HTTP/1.x parsing, HTTP/2 and HTTP/3 text forms (no I/O, fuzzed)
   pm-tls       CA and per-host certificates, upstream TLS
   pm-proxy     proxy, intercept, match/replace, WebSockets
   pm-store     SQLite project file and compressed blob store
   pm-policy    scope, rules of engagement, approvals, rate limits, audit chain
-  pm-replay    send engine (incl. single-packet parallel sends)
+  pm-replay    send engine (HTTP/1.1, HTTP/2, HTTP/3 over QUIC, single-packet parallel sends)
   pm-identity  multi-identity sessions, recorded logins, re-login
   pm-model     live app model: operations, objects, ownership
   pm-diff      semantic diff with learned noise masks

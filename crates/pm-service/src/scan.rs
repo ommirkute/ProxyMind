@@ -71,7 +71,7 @@ impl Service {
             let Some(ex) = self.store.read(|db| db.get_exchange(s.id))? else { continue };
             let Some(resp) = ex.response.as_deref() else { continue };
             let converted;
-            let resp = if pm_http::h2text::is_http2_response(resp) {
+            let resp = if pm_http::h3text::is_multiplexed_response(resp) {
                 match pm_http::h2text::to_http1_response(resp) {
                     Some(r) => {
                         converted = r;
@@ -381,7 +381,7 @@ fn adv_issue(
 fn seen_of(resp: Option<&[u8]>) -> pm_scan::active::Seen {
     let Some(r) = resp else { return Default::default() };
     let converted;
-    let r = if pm_http::h2text::is_http2_response(r) {
+    let r = if pm_http::h3text::is_multiplexed_response(r) {
         match pm_http::h2text::to_http1_response(r) {
             Some(c) => {
                 converted = c;

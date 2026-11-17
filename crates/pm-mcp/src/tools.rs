@@ -232,9 +232,9 @@ pub fn tool_definitions() -> Vec<Value> {
         ),
         typed_tool::<ReplayRequest>(
             "replay_send",
-            "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 in the request line for HTTP/2, \
-             with a host: header for :authority). Give exchange_id to resend or edit a recorded \
-             request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
+            "Send a request to the target and get the response (HTTP/1.1; write HTTP/2 or HTTP/3 in the request line for \
+             that protocol, with a host: header for :authority; HTTP/3 needs an https target and a direct route). Give \
+             exchange_id to resend or edit a recorded request (its target is used), or url + raw for a new one. Use {{secret:...}} placeholders exactly as shown \
              to you. GET/HEAD/OPTIONS usually run directly; other methods may return status=pending_approval: ask the \
              user to approve, then call again with identical arguments plus approval_id.",
         ),

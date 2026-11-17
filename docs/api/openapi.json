@@ -9712,7 +9712,7 @@
           },
           "raw": {
             "default": null,
-            "description": "Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.\nIf omitted, the request of `exchange_id` is resent unchanged.",
+            "description": "Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for\n`:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.\nIf omitted, the request of `exchange_id` is resent unchanged.",
             "type": [
               "string",
               "null"

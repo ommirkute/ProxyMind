@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import TransformMenu from "../TransformMenu";
 import { api, originOf, toast, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
+import { altSvcH3, altTarget } from "../altsvc";
 import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, b64ToBytes, bytesToB64, copyText, useAction, useLoad, useNav } from "../components";
 import {
   cookies,
@@ -17,6 +18,7 @@ import {
   setQueryParam,
   setAuthority,
   setRequestLine,
+  isMultiplexed,
   toProtocol,
 } from "../http";
 
@@ -227,9 +229,12 @@ export default function Replay() {
     if (!state) return;
     if (arg) {
       window.history.replaceState(null, "", "#/replay");
+      // "h3:<id>": the recorded request written for HTTP/3, at the alternative its response advertised (Alt-Svc).
+      const asH3 = String(arg).startsWith("h3:");
+      const id = asH3 ? String(arg).slice(3) : String(arg);
       api
-        .get<ExchangeDetail>(`/exchanges/${arg}`)
-        .then((ex) => tabFromExchange(String(arg), ex))
+        .get<ExchangeDetail>(`/exchanges/${id}`)
+        .then((ex) => tabFromExchange(id, ex).then((t) => (asH3 ? withHttp3(t, ex.response) : t)))
         .then((t) => addTab(t))
         .catch((e) => action.setError(e.message));
       return;
@@ -322,6 +327,13 @@ export default function Replay() {
       }
     });
 
+  /** Switches this tab to HTTP/3 at the host and port the response's Alt-Svc offered, and sends it. */
+  const sendHttp3 = (response: string | null | undefined) => {
+    const t3 = withHttp3({ url: tab.url, raw: tab.raw }, response);
+    update({ url: t3.url, raw: t3.raw });
+    send(t3.url, t3.raw);
+  };
+
   const follow = () => {
     const d = step?.exchange_id != null ? details[step.exchange_id] : undefined;
     const next = step && d ? followTarget(step.url, step.raw, d.response) : null;
@@ -371,6 +383,7 @@ export default function Replay() {
   const pbEdited = !!tab.pb && tab.pb.text !== tab.pb.orig;
   const detail = step?.exchange_id != null ? details[step.exchange_id] : undefined;
   const redirect = redirectOf(detail?.response);
+  const offersH3 = altSvcH3(detail?.response).length > 0;
   const onKey = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
@@ -536,6 +549,12 @@ export default function Replay() {
                 {detail?.summary.resp_len != null && <span className="muted">{detail.summary.resp_len} bytes</span>}
                 {step.exchange_id != null && <span className="muted">recorded as <ExchangeLink id={step.exchange_id} /></span>}
                 {step.notes?.map((n) => <Chip key={n} value={n} />)}
+                {offersH3 && <Chip value="offers HTTP/3" />}
+                {offersH3 && !isMultiplexed(parseRequest(step.raw).version) && (
+                  <button className="btn" onClick={() => sendHttp3(detail?.response)} disabled={action.busy} data-testid="send-http3" title="The response advertised HTTP/3 (Alt-Svc). Sends this request again over QUIC.">
+                    Send with HTTP/3
+                  </button>
+                )}
                 {redirect && <button className="btn" onClick={follow} disabled={action.busy} data-testid="follow-redirect">Follow redirect → {redirect}</button>}
               </div>
               <MessageView
@@ -555,6 +574,16 @@ export default function Replay() {
       </div>
     </div>
   );
+}
+
+/** A request tab written for HTTP/3, at the target the response's Alt-Svc offered when there is one. */
+function withHttp3<T extends { url?: string; raw?: string }>(t: T, response: string | null | undefined): T {
+  const alt = altSvcH3(response)[0];
+  return {
+    ...t,
+    ...(t.raw != null ? { raw: toProtocol(t.raw, "HTTP/3") } : {}),
+    ...(alt && t.url ? { url: altTarget(t.url, alt) } : {}),
+  };
 }
 
 /** The request to send next when a response redirects, or null. */
@@ -589,7 +618,9 @@ function Field({ value, label, set }: { value: string; label: string; set: (v: s
 /** Parameters, cookies and headers of the request, editable in place. */
 function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string) => void; url: string }) {
   const p = parseRequest(raw);
-  const h2 = /^HTTP\/2(\.0)?$/i.test(p.version);
+  const h2 = isMultiplexed(p.version); // HTTP/2 and HTTP/3 are edited the same way (pseudo-headers)
+  const h3 = /^HTTP\/3/i.test(p.version);
+  const proto = h3 ? "HTTP/3" : h2 ? "HTTP/2" : "HTTP/1.1";
   const host = p.headers.find((h) => h.name.toLowerCase() === "host")?.value ?? "";
   const q = queryParams(p);
   const form = formParams(p);
@@ -618,13 +649,14 @@ function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string
     <section className="pane inspector" aria-label="Inspector">
       <h3 className="pane-title">Inspector</h3>
       <div className="row small" style={{ marginBottom: 6 }}>
-        <select aria-label="Protocol" value={h2 ? "HTTP/2" : "HTTP/1.1"} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/2" | "HTTP/1.1"))}>
+        <select aria-label="Protocol" value={proto} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/3" | "HTTP/2" | "HTTP/1.1"))}>
           <option value="HTTP/1.1">HTTP/1.1</option>
           <option value="HTTP/2">HTTP/2</option>
+          <option value="HTTP/3">HTTP/3 (QUIC)</option>
         </select>
         <span className="mono">{p.method} {p.target.split("?")[0]}</span>
       </div>
-      {section(h2 ? "HTTP/2 pseudo-headers" : "Request line", [
+      {section(h2 ? `${proto} pseudo-headers` : "Request line", [
         { name: h2 ? ":method" : "method", value: p.method, set: (v: string) => onChange(setRequestLine(raw, { method: v })) },
         { name: h2 ? ":path" : "path", value: p.target, set: (v: string) => onChange(setRequestLine(raw, { target: v })) },
         ...(h2 ? [{ name: ":authority", value: host, set: (v: string) => onChange(setAuthority(raw, v)) }] : []),

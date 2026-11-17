@@ -149,10 +149,13 @@ export function setRequestLine(raw: string, change: { method?: string; target?: 
 /** Headers HTTP/2 doesn't allow (RFC 9113 8.2.2): dropped when switching to HTTP/2. */
 const CONNECTION_SPECIFIC = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"];
 
-/** The request written for another protocol: HTTP/2 (lower-case names, no connection headers) or HTTP/1.1. */
-export function toProtocol(raw: string, version: "HTTP/2" | "HTTP/1.1"): string {
+/** True for the HTTP/2 and HTTP/3 text forms (lower-case names, `host` for :authority). */
+export const isMultiplexed = (version: string) => /^HTTP\/[23](\.0)?$/i.test(version);
+
+/** The request written for another protocol: HTTP/2 or HTTP/3 (lower-case names, no connection headers) or HTTP/1.1. */
+export function toProtocol(raw: string, version: "HTTP/3" | "HTTP/2" | "HTTP/1.1"): string {
   const p = parseRequest(raw);
-  if (version === "HTTP/2") {
+  if (version === "HTTP/2" || version === "HTTP/3") {
     const headers = p.headers
       .filter((h) => !CONNECTION_SPECIFIC.includes(h.name.toLowerCase()))
       .map((h) => ({ ...h, name: h.name.toLowerCase() }));
@@ -168,7 +171,7 @@ export function setAuthority(raw: string, value: string): string {
   const i = p.headers.findIndex((h) => h.name.toLowerCase() === "host");
   const headers = p.headers.slice();
   if (i >= 0) headers[i] = { ...headers[i], value };
-  else headers.unshift({ name: p.version.startsWith("HTTP/2") ? "host" : "Host", value });
+  else headers.unshift({ name: isMultiplexed(p.version) ? "host" : "Host", value });
   return buildRequest({ ...p, headers });
 }
 

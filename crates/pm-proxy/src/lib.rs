@@ -787,7 +787,7 @@ impl Proxy {
             };
             edits.note_on(&mut record);
 
-            let buffered = pm_http::h2text::is_http2_request(&record.request)
+            let buffered = pm_http::h3text::is_multiplexed_request(&record.request)
                 || self.buffers_response(&target.scheme, &target.host, target.port, &path);
             if !buffered {
                 let start =
@@ -993,9 +993,9 @@ impl Proxy {
                             }
                         }
                     }
-                    // An HTTP/1.1 client can't read an HTTP/2 response (the
-                    // request was edited to HTTP/2 in the intercept queue).
-                    if pm_http::h2text::is_http2_response(to_client.as_deref().unwrap_or(&resp.raw)) {
+                    // An HTTP/1.1 client can't read an HTTP/2 or HTTP/3 response (the
+                    // request was edited to that version in the intercept queue).
+                    if pm_http::h3text::is_multiplexed_response(to_client.as_deref().unwrap_or(&resp.raw)) {
                         to_client = pm_http::h2text::to_http1_response(to_client.as_deref().unwrap_or(&resp.raw));
                     }
                     client.io.write_all(to_client.as_deref().unwrap_or(&resp.raw)).await?;

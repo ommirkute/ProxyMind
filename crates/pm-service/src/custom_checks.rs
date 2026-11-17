@@ -154,7 +154,7 @@ impl Service {
             .store
             .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
-        if pm_http::h2text::is_http2_request(&ex.request) {
+        if pm_http::h3text::is_multiplexed_request(&ex.request) {
             return Err(ServiceError::Invalid("custom checks run on HTTP/1.1 requests; resend it as HTTP/1.1".into()));
         }
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);

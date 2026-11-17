@@ -1078,6 +1078,77 @@ try {
     check(h2text, "History shows the request in HTTP/2 text form");
   });
 
+  await section("HTTP/3 (Replay ↔ an in-process HTTP/3 server)", async () => {
+    // The test server is an example of pm-replay (quinn + h3 with a self-signed certificate). Build it if the
+    // binary is not there yet (CI builds it next to the proxymind binary).
+    const h3bin = join(BIN, "..", "examples", "h3_server");
+    if (!existsSync(h3bin)) {
+      execFileSync("cargo", ["build", "-p", "pm-replay", "--example", "h3_server"], { cwd: join(BIN, "..", "..", ".."), stdio: "ignore" });
+    }
+    const h3 = spawn(h3bin, ["127.0.0.1:0"], { stdio: ["ignore", "pipe", "inherit"] });
+    children.push(h3);
+    const h3port = await new Promise((resolve, reject) => {
+      let out = "";
+      h3.stdout.on("data", (d) => {
+        out += d;
+        const m = out.match(/h3 listening on 127\.0\.0\.1:(\d+)/);
+        if (m) resolve(Number(m[1]));
+      });
+      h3.on("exit", () => reject(new Error("the HTTP/3 test server stopped")));
+      setTimeout(() => reject(new Error("the HTTP/3 test server did not start")), 20000);
+    });
+    const putRoe = (text) =>
+      page.evaluate(async (text) => (await fetch("/api/v1/roe", { method: "PUT", headers: { "content-type": "application/json", "x-proxymind": "1" }, body: JSON.stringify({ text }) })).status, text);
+    const originalRoe = await page.evaluate(async () => (await (await fetch("/api/v1/roe")).json()).text);
+    try {
+      check((await putRoe(`version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/", "https://localhost:${h3port}/"]\n`)) === 200, "the HTTP/3 server is added to the scope");
+      await open("replay");
+      await page.getByLabel("New tab").click();
+      await page.getByLabel("Target").fill(`https://localhost:${h3port}`);
+      await page.getByLabel("Raw request").fill(`GET /h3-check?x=1 HTTP/1.1\nHost: localhost:${h3port}\naccept: */*\n\n`);
+      await page.getByLabel("Protocol").selectOption("HTTP/3");
+      const rawBecomes = (pred) =>
+        page
+          .waitForFunction(`(() => { const v = document.querySelector('[aria-label="Raw request"]')?.value ?? ""; return ${pred}; })()`, null, { timeout: 5000 })
+          .then(() => true, () => false);
+      check(await rawBecomes('v.startsWith("GET /h3-check?x=1 HTTP/3\\n") && v.includes("host: localhost:")'), "Replay's Protocol selector writes the request for HTTP/3");
+      check(await page.getByLabel("HTTP/3 pseudo-headers :path").inputValue() === "/h3-check?x=1", "the Inspector shows HTTP/3 pseudo-headers");
+      await page.getByTestId("send").click();
+      await page.locator('[data-testid="replay-result"]', { hasText: "201" }).waitFor({ timeout: 15000 });
+      const answer = await page.locator('[data-testid="replay-response"] pre.raw').first().textContent();
+      check(answer.startsWith("HTTP/3 201") && answer.includes("x-proto: h3") && answer.includes("x-sni: localhost") && answer.includes(`GET /h3-check?x=1 localhost:${h3port}`),
+        "a Replay request with HTTP/3 reaches the server over QUIC (the response is shown as HTTP/3 text, SNI is the host name)");
+      check(await page.locator('[data-testid="replay-result"]').getByText("offers HTTP/3").isVisible(), "Replay marks a response that advertises HTTP/3 (Alt-Svc)");
+      check(await page.getByTestId("send-http3").count() === 0, "no \"Send with HTTP/3\" offer when the request already uses it");
+
+      // History: the exchange is recorded with the HTTP/3 text form, and Alt-Svc is shown.
+      await open("history");
+      await page.getByLabel("Filter", { exact: true }).fill("/h3-check");
+      await sleep(500);
+      await page.locator('[data-testid^="row-"]').first().click();
+      await page.getByRole("tab", { name: "Request", exact: true }).click();
+      const h3text = await page
+        .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "GET /h3-check?x=1 HTTP/3" })
+        .waitFor({ timeout: 5000 })
+        .then(() => true, () => false);
+      check(h3text, "History shows the request in HTTP/3 text form");
+      const detail = page.getByTestId("exchange-detail");
+      check((await detail.getByText("HTTP/3", { exact: true }).count()) > 0 && await detail.getByText("offers HTTP/3").isVisible(), "History labels the protocol and shows \"offers HTTP/3\"");
+      await page.getByTestId("replay-http3").click();
+      await page.locator(".rtab.active", { hasText: "#" }).waitFor();
+      check(await rawBecomes('v.startsWith("GET /h3-check?x=1 HTTP/3\\n")'), "\"Send with HTTP/3\" opens Replay with the request written for HTTP/3");
+      await page.screenshot({ path: join(SHOTS, "6k-http3.png") });
+
+      // The preset that removes the advertisement is offered on the Rules page.
+      await open("rules");
+      const titles = await page.getByTestId("rules-preset").locator("option").allTextContents();
+      check(titles.includes("Remove HTTP/3 advertisements (Alt-Svc h3)"), "the Rules page offers the \"Remove HTTP/3 advertisements\" preset");
+    } finally {
+      await putRoe(originalRoe);
+      h3.kill();
+    }
+  });
+
   await section("Network: upstream proxy", async () => {
     // A minimal upstream HTTP proxy that records request lines and forwards.
     const upstreamSeen = [];

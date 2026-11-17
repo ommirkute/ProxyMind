@@ -156,6 +156,28 @@ in History. The Host or SNI name is recorded; the connection went to the address
 The automated tests use a fake original-destination provider. One more test redirects real connections with iptables
 and needs root: `PROXYMIND_TEST_TRANSPARENT=1 cargo test -p pm-proxy --test transparent_mode -- real_redirect`.
 
+### HTTP/3 (QUIC) and interception
+
+A browser that uses ProxyMind as its HTTP or SOCKS5 proxy never uses HTTP/3: CONNECT and SOCKS5 carry TCP, so it
+falls back to HTTP/2 or HTTP/1.1. A client that is **redirected** (transparent mode, a gateway) is different. When a
+server it talks to through ProxyMind says `Alt-Svc: h3=":443"`, the client may open a QUIC connection (UDP/443) to the
+target next time, and if UDP reaches the target that traffic goes around ProxyMind. ProxyMind has no QUIC listener yet
+(ADR-0021), so keep UDP/443 from reaching the target:
+
+- **Block it** at the same place that redirects TCP, so the client falls back to TCP at once (this is what the gateway
+  example above does with `-p udp --dport 443 -j REJECT`). On the machine that runs ProxyMind itself, for a client that is
+  another user or container: `sudo iptables -A OUTPUT -m owner ! --uid-owner proxymind -p udp --dport 443 -j REJECT`
+  (remove it with `-D`). A client that already holds an `Alt-Svc` alternative keeps trying QUIC until it expires
+  (`ma`, up to a day or more) and then falls back, so block UDP first.
+- **Remove the advertisement** with the **Remove HTTP/3 advertisements (Alt-Svc h3)** preset (Proxy, Rules, "Add a
+  preset…"). It drops only the `h3` alternatives from `Alt-Svc` headers of in-scope responses; other alternatives stay.
+  It is off until you add it (nothing changes traffic by itself), and History keeps the server's original response
+  under **Delivered response**. It cannot reach a cached alternative or an HTTPS DNS record, so it complements the block.
+
+To *test* an HTTP/3 target, write `HTTP/3` in the request line in Replay (or pick it in the Protocol selector). That
+needs an `https` target and a direct route: a host that an upstream rule sends through an HTTP or SOCKS5 proxy is
+refused for HTTP/3, because those proxies carry TCP only.
+
 ## Raw TCP and TLS streams
 
 Traffic that is not HTTP is recorded as a **stream**, whichever way it reached ProxyMind (a CONNECT tunnel from an HTTP

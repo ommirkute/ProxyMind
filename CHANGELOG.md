@@ -7,6 +7,21 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **HTTP/3 (QUIC)** (roadmap 2.4, ADR-0021). Write `HTTP/3` in a request line (Replay's Protocol selector does it) and
+  the request is sent over QUIC with `quinn` and `h3` on the rustls build ProxyMind already uses. HTTP/3 is shown,
+  stored and edited as text like HTTP/2 (`HTTP/3` as the version, `host:` for `:authority`, pseudo-headers in the
+  Inspector), so rules, intercept, identities, search, the scanner, the Fuzzer, workflows, agents (`replay_send`) and
+  History work on it unchanged; the History detail shows the protocol. Nothing switches protocol by itself. The same
+  guards as every send apply: the policy gate, the resolved addresses are checked and the QUIC sockets connect to
+  exactly those addresses (DNS-rebinding protection), the server name is the host, `--verify-upstream` and client
+  certificates are honoured, timeouts and a 64 MB body limit. QUIC cannot pass through an HTTP or SOCKS5 proxy, so a
+  host that an upstream rule sends through one is **refused** for HTTP/3 with an explanation, never sent direct. History
+  and Replay show an **offers HTTP/3** chip when a response advertises `h3` in `Alt-Svc`, with **Send with HTTP/3**. A
+  new response preset, **Remove HTTP/3 advertisements (Alt-Svc h3)**, drops the `h3` alternatives (other `Alt-Svc`
+  values stay; off until a person adds it; History keeps the server's original response) so redirected clients don't
+  move to QUIC past the proxy. Not yet: a QUIC listener for clients in transparent mode (block UDP/443 instead,
+  `docs/capture.md`), HTTP/3 in race and parallel sends, a connection pool, WebSockets over HTTP/3. Adds 18 crates
+  (all MIT or Apache-2.0), fuzz target `http3_text`.
 - **Workflows: saved chains of steps** (roadmap 2.2). A workflow is a named chain of `match`, `extract`, `transform`,
   `send` and `assert` steps that works on a current exchange: log in, read a token out of the answer, call an API with
   it, assert on the result. `extract` reads a regex group, a JSON pointer, a header, a cookie or a hidden HTML input;

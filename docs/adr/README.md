@@ -12,7 +12,7 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0006](0006-ui-tauri.md) | Tauri 2 + React + TypeScript for the UI | Amended by 0008 |
 | [0007](0007-license.md) | AGPL-3.0 core, Apache-2.0 SDKs | Accepted |
 | [0008](0008-web-ui-first.md) | Web UI served by the binary first; Tauri shell later | Accepted |
-| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Accepted |
+| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Extended by 0021 |
 | [0010](0010-assistant-is-an-agent.md) | The built-in assistant is an agent like any other | Accepted |
 | [0011](0011-xss-proofs-offline-browser.md) | XSS proofs render the recorded response in an offline headless browser | Accepted |
 | [0012](0012-desktop-shell.md) | The desktop app runs the local stack in-process and shows the web UI | Accepted |
@@ -24,3 +24,4 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0018](0018-event-bus.md) | Typed events from the service layer | Accepted |
 | [0019](0019-typed-api-contracts.md) | One source of truth for API contracts | Accepted |
 | [0020](0020-traffic-hooks-and-plugin-api-v2.md) | Traffic hooks run in long-lived sandboxed plugin processes; plugin API v2 declares permissions | Accepted |
+| [0021](0021-http3.md) | HTTP/3 as text, sent over QUIC with quinn and h3; Alt-Svc handling; no client QUIC listener yet | Accepted |

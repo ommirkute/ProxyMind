@@ -21,6 +21,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 h2 = "0.4.20"
 http = "1.5.0"
 bytes = "1.12.1"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 
 [lints]
 workspace = true

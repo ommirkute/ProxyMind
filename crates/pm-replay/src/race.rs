@@ -48,6 +48,10 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
     ) -> Result<RaceOutcome> {
         anyhow::ensure!(!requests.is_empty() && requests.len() <= MAX_RACE, "a race needs 1 to {MAX_RACE} requests");
+        anyhow::ensure!(
+            !requests.iter().any(|(r, _)| pm_http::h3text::is_http3_request(r)),
+            "races and parallel sends speak HTTP/1.1 and HTTP/2: HTTP/3 requests can't be sent that way"
+        );
         if prefer_h2 {
             let (io, is_h2) = self.connect_with(ep, check, true).await?;
             if is_h2 {

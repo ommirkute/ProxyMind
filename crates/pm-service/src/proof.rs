@@ -1401,7 +1401,7 @@ fn percent_decode(s: &str) -> String {
 /// body de-chunked and decompressed.
 pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
     let converted;
-    let raw = if pm_http::h2text::is_http2_response(raw) {
+    let raw = if pm_http::h3text::is_multiplexed_response(raw) {
         converted = pm_http::h2text::to_http1_response(raw)?;
         &converted[..]
     } else {

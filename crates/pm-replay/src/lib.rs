@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 mod h2send;
+mod h3send;
 pub mod net;
 mod pool;
 pub mod race;
@@ -306,6 +307,8 @@ pub struct Sender {
     net: Network,
     connect_timeout: Duration,
     read_timeout: Duration,
+    /// The most of an HTTP/3 response body that is read (ADR-0021).
+    h3_max_body: usize,
     /// Connections kept for the proxy (see [`Sender::send_start_pooled`]).
     pool: std::sync::Arc<pool::Pool>,
 }
@@ -318,6 +321,7 @@ impl Sender {
             net: Network::default(),
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(60),
+            h3_max_body: h3send::MAX_BODY,
             pool: std::sync::Arc::default(),
         })
     }
@@ -340,6 +344,9 @@ impl Sender {
     /// The bytes to write for `request`: unchanged, except when plain HTTP
     /// goes through an HTTP proxy (absolute-form target, proxy login).
     fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if pm_http::h3text::is_http3_request(request) {
+            bail!("parallel sends speak HTTP/1.1 and HTTP/2: HTTP/3 requests can't be sent that way");
+        }
         // Parallel sends speak HTTP/1.1: HTTP/2 text is downgraded for them.
         if pm_http::h2text::is_http2_request(request)
             && let Ok(r) = pm_http::h2text::h2_request(request)
@@ -353,6 +360,12 @@ impl Sender {
             }
             _ => Ok(std::borrow::Cow::Borrowed(request)),
         }
+    }
+
+    /// Limits how much of an HTTP/3 response body is read (default 64 MB, like HTTP/2).
+    pub fn with_h3_max_body(mut self, bytes: usize) -> Self {
+        self.h3_max_body = bytes;
+        self
     }
 
     pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Self {
@@ -559,8 +572,10 @@ impl Sender {
         method: &str,
         check: Option<AddrCheck<'_>>,
     ) -> Result<Response> {
-        if pm_http::h2text::is_http2_request(request) {
-            return self.send_h2(ep, request, method, check).await;
+        match pm_http::h3text::request_protocol(request) {
+            Some(pm_http::h3text::Multiplexed::Http3) => return self.send_h3(ep, request, check).await,
+            Some(pm_http::h3text::Multiplexed::Http2) => return self.send_h2(ep, request, method, check).await,
+            None => {}
         }
         let started = Instant::now();
         let wire = self.wire_bytes(ep, request)?;
@@ -584,7 +599,7 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         head_timeout: Duration,
     ) -> Result<ResponseStart> {
-        if pm_http::h2text::is_http2_request(request) {
+        if pm_http::h3text::is_multiplexed_request(request) {
             bail!("streaming sends speak HTTP/1.1");
         }
         let wire = self.wire_bytes(ep, request)?;
@@ -622,7 +637,7 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         head_timeout: Duration,
     ) -> Result<ResponseStart> {
-        if pm_http::h2text::is_http2_request(request) || !retry_safe(method) {
+        if pm_http::h3text::is_multiplexed_request(request) || !retry_safe(method) {
             return self.send_start(ep, request, method, check, head_timeout).await;
         }
         let key = self.pool_key(ep);
@@ -666,6 +681,10 @@ impl Sender {
         requests: &[(Vec<u8>, String)],
         check: Option<AddrCheck<'_>>,
     ) -> Vec<Result<Response>> {
+        if let Some((r, _)) = requests.iter().find(|(r, _)| pm_http::h3text::is_http3_request(r)) {
+            let why = self.wire_bytes(ep, r).err().map(|e| e.to_string()).unwrap_or_default();
+            return requests.iter().map(|_| Err(anyhow!("{why}"))).collect();
+        }
         let wire: Vec<Vec<u8>> =
             requests.iter().map(|(r, _)| self.wire_bytes(ep, r).map(|w| w.into_owned()).unwrap_or_default()).collect();
         let mut conns = Vec::with_capacity(requests.len());

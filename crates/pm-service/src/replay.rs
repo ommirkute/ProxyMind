@@ -21,7 +21,8 @@ const MAX_LIMIT_WAIT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReplayRequest {
-    /// Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+    /// Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+    /// `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
     /// If omitted, the request of `exchange_id` is resent unchanged.
     pub raw: Option<String>,
     /// Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these

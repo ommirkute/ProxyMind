@@ -2990,7 +2990,8 @@ export interface ReplayRequest {
   /** Convert bare "\n" line endings in the head to "\r\n" (default true). */
   normalize_newlines?: boolean | null;
   /**
-   * Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+   * Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+   * `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
    * If omitted, the request of `exchange_id` is resent unchanged.
    */
   raw?: string | null;
