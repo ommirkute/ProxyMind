@@ -157,6 +157,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - **Signed evidence packs** the client verifies themselves (`proxymind evidence`, `proxymind verify`)
 - **Authorization matrix**: every endpoint as every role, as one grid; IDOR, missing function-level checks and missing login flagged and proven automatically
 - **What changed since the last test**: model snapshots and a diff that points the retest at new and changed endpoints
+- **Scanning in CI**: `proxymind ci` crawls, scans and proves against a staging URL under a scope file, compares with a baseline of known findings and fails a pipeline on new ones (SARIF for GitHub code scanning, JUnit, JSON; [docs/ci.md](docs/ci.md))
 - **Findings as CI regression tests**: every proven finding exports as a test developers run against staging until it's fixed (`proxymind regress run`, JUnit output)
 - Issue library with CWE/OWASP mapping and fix advice
 - Reports in **HTML, Markdown, JSON and SARIF**; executive, technical, compliance or your own template
@@ -258,7 +259,7 @@ Other ways to run it:
 
 - **Docker**: `docker build -t proxymind .` ([running it](docs/releasing.md#container-image); includes Chromium for XSS proofs)
 - **Desktop app**: `desktop/` wraps the same UI in a Tauri window with a tray icon ([ADR-0012](docs/adr/0012-desktop-shell.md))
-- **Headless / CI**: every feature is also a CLI command (`proxymind --help`) with `--json` output
+- **Headless / CI**: every feature is also a CLI command (`proxymind --help`) with `--json` output; `proxymind ci` is the one-command pipeline scan ([docs/ci.md](docs/ci.md), examples for [GitHub Actions](examples/ci/github-actions.yml) and [GitLab CI](examples/ci/gitlab-ci.yml))
 
 <details>
 <summary><b>Architecture</b></summary>

@@ -254,6 +254,8 @@ be met (no open high-severity findings).
 | F-11 | Low | **Review items** found while reading, not shown to be bugs: confirm no `GET` route changes state (CSRF relies on it); `style-src 'unsafe-inline'` in the UI CSP; no API rate limit; `~/.proxymind` mode; token printed in a URL; every redirect hop followed by a tool is gated again | `pm-api/src/lib.rs`, `routes.rs` | Add a test that walks the route table and fails when a GET handler writes; drop `unsafe-inline` if the UI allows; create the home directory 0700 | Hardening |
 | F-12 | Low | **Upstream TLS is unverified by default** | `pm-cli` (`--verify-upstream`) | Keep for compatibility, but show "upstream certificates are not verified" in the UI near the setting and in `proxymind proxy` output | Not gating |
 
+`proxymind ci` (roadmap 3.7) is not exposed to F-2: it uses a fresh in-memory project unless `--project` is given, and then it never starts the file's listeners, schedules or workflow triggers, ignores its network settings, session rules and OAST settings while it runs, runs identity logins as the CI actor, and does not write the ROE it was given into the file (`docs/ci.md`, "Safety"). Interactive opening of a project (UI, desktop, `proxymind proxy`) is still open. CI's upstream TLS is verified by default (F-12) unless `--insecure`.
+
 F-1 and F-2 are the two to resolve for the gate: F-1 changes what ProxyMind promises, F-2 changes what opening a file
 does. Both are cheap compared with the identity work and both get more serious the moment projects are shared.
 

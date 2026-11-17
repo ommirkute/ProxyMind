@@ -9,7 +9,9 @@
 //! - [`token_analyzer`]: how random a sample of tokens looks.
 //! - [`reqedit`]: change a request's method or body encoding, keeping its parameters.
 //! - [`engage`]: engagement tools (comments, scripts, parameters, CSRF and clickjacking pages).
+//! - [`ci`]: `proxymind ci`: fingerprints, baselines, the pass/fail rule and the SARIF/JUnit/JSON outputs.
 
+pub mod ci;
 pub mod codec;
 pub mod codegen;
 pub mod curl;

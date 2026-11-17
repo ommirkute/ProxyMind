@@ -9,7 +9,7 @@ Defines the one service layer (`pm-service`) that every client uses, how actions
 ## Principles
 
 1. **One API, many clients.** REST, MCP, CLI and the UI are thin adapters over the same service calls.
-2. **Every call has an actor.** `human:<name>`, `agent:<id>`, `plugin:<id>`, `scanner`. The actor is set by the adapter from its credentials, never from the request body.
+2. **Every call has an actor.** `human:<name>`, `agent:<id>`, `plugin:<id>`, `scanner`, `ci:<name>` (an unattended pipeline run: nothing it needs approved is granted, see `docs/ci.md`). The actor is set by the adapter from its credentials, never from the request body.
 3. **Every call has a tier.** The policy gate uses it with the ROE file to decide: allow, require approval, or deny.
 4. **Responses are token-aware.** Anything that returns traffic accepts `view` and `max_tokens`.
 5. **Target content is labelled untrusted.** Agent-facing responses wrap target-originated text so models can tell data from instructions.

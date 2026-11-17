@@ -667,8 +667,8 @@ impl Service {
         // Out-of-band probes, when an OAST listener is configured.
         // One lock at a time: in one struct literal both guards would live
         // to the end of the statement and deadlock.
-        let url = self.store.read(|db| db.get_setting(crate::proof::OAST_SETTING))?;
-        let domain = self.store.read(|db| db.get_setting(crate::proof::OAST_DNS_SETTING))?;
+        let url = self.setting_unless_isolated(crate::proof::OAST_SETTING)?;
+        let domain = self.setting_unless_isolated(crate::proof::OAST_DNS_SETTING)?;
         let callback = pm_scan::oob::Callback { url, domain };
         let oob = pm_scan::oob::probes(&raw, &req.checks, &callback, &id_segments, limit, pm_oast::new_token);
         if !callback.is_set() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {

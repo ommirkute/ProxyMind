@@ -475,8 +475,8 @@ impl Service {
                 "put {{oast}} in raw where the callback URL should go, or {{oast_dns}} where a host name goes",
             );
         }
-        let public = self.store.read(|db| db.get_setting(OAST_SETTING))?;
-        let dns_domain = self.store.read(|db| db.get_setting(OAST_DNS_SETTING))?;
+        let public = self.setting_unless_isolated(OAST_SETTING)?;
+        let dns_domain = self.setting_unless_isolated(OAST_DNS_SETTING)?;
         if wants_http && public.is_none() {
             return invalid("no OAST listener configured: run `proxymind oast-server` or start mcp with --oast-listen");
         }

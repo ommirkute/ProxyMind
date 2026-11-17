@@ -209,7 +209,11 @@ impl Service {
         let mut ident = self.load_identity(name)?;
         let recipe = ident.login.clone().ok_or_else(|| ServiceError::Invalid(format!("{name} has no login recipe")))?;
         let created_by = self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_default();
-        let owner = Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        // A CI run logs in as the CI actor, never as the person who saved the identity in a project file.
+        let owner = match self.run_guard.lock().login_actor.clone() {
+            Some(a) => a,
+            None => Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?,
+        };
         let mut learned = Vec::new();
         // What this run has learned: cookies set by its steps (sent on to
         // later steps) and values read from responses.

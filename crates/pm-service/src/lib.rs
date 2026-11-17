@@ -14,6 +14,7 @@ mod authz_matrix;
 mod auto;
 mod browser;
 mod changes;
+mod ci;
 mod collaborator;
 mod crawl;
 mod custom_checks;
@@ -77,6 +78,7 @@ pub use authz_matrix::{AuthzMatrix, AuthzMatrixRequest, MatrixCell, MatrixFlag, 
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use changes::{ModelChanges, OpChange, OpShape, RetestItem, SnapshotInfo};
+pub use ci::{CiOptions, CiRun};
 pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorProbe, CollaboratorStatus};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
@@ -230,6 +232,8 @@ pub struct Service {
     bus: std::sync::Arc<events::Bus>,
     /// Per-exchange workflow triggers: cached list, rate windows, counters.
     workflows: parking_lot::Mutex<workflow_service::Runtime>,
+    /// Limits of a `proxymind ci` run: request and time caps, and what a project file may not change.
+    run_guard: parking_lot::Mutex<ci::RunGuard>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -399,6 +403,7 @@ impl Service {
             record_devices: parking_lot::RwLock::new(std::collections::HashSet::new()),
             bus,
             workflows: parking_lot::Mutex::default(),
+            run_guard: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
         Ok(svc)

@@ -106,9 +106,12 @@ pub enum ActorKind {
     Agent,
     Plugin,
     Scanner,
+    /// `ci:<name>`: an unattended pipeline run (`proxymind ci`). Nobody is there to approve anything, so what the
+    /// rules leave at `approve` is skipped and reported, never granted.
+    Ci,
 }
 
-/// Who is acting, e.g. `agent:claude-1`. Set by the client adapter from its
+/// Who is acting, e.g. `agent:claude-1` or `ci:pipeline`. Set by the client adapter from its
 /// credentials, never from request content.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Actor {
@@ -124,6 +127,7 @@ impl Actor {
             "agent" => ActorKind::Agent,
             "plugin" => ActorKind::Plugin,
             "scanner" => ActorKind::Scanner,
+            "ci" => ActorKind::Ci,
             _ => return Err(PolicyError::Actor(id.into())),
         };
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c)) {
@@ -138,6 +142,7 @@ impl Actor {
             ActorKind::Agent => "agent",
             ActorKind::Plugin => "plugin",
             ActorKind::Scanner => "scanner",
+            ActorKind::Ci => "ci",
         };
         format!("{kind}:{}", self.name)
     }

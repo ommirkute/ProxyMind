@@ -33,6 +33,7 @@ pub fn summarize(roe: &Roe) -> Value {
         ("agent", ActorKind::Agent),
         ("plugin", ActorKind::Plugin),
         ("scanner", ActorKind::Scanner),
+        ("ci", ActorKind::Ci),
     ];
     let tiers = [Tier::Read, Tier::Passive, Tier::ActiveSafe, Tier::ActiveIntrusive, Tier::Destructive];
     let permissions: serde_json::Map<String, Value> = kinds

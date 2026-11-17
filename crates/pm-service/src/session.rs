@@ -809,7 +809,8 @@ impl Service {
         fix_cl: bool,
         source: &str,
     ) -> Result<Option<Sent>> {
-        if EXEMPT.contains(&source) {
+        // A CI run ignores the project's session rules and macros: a macro is gated as the person who saved it.
+        if EXEMPT.contains(&source) || self.run_guard.lock().isolated {
             return Ok(None);
         }
         let cfg = self.store.read(load)?;

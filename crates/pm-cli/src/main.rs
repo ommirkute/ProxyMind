@@ -135,6 +135,8 @@ enum Command {
         #[arg(long = "as")]
         actor: Option<String>,
     },
+    /// Scan a staging URL in a pipeline: scope file, crawl, scan, prove, SARIF/JUnit/JSON, fail on new findings.
+    Ci(CiArgs),
     /// Proven findings as regression tests for CI: export them, or run them against a test environment.
     Regress {
         #[command(subcommand)]
@@ -560,6 +562,90 @@ enum Command {
         #[arg(long, short, default_value = "127.0.0.1:8899")]
         listen: SocketAddr,
     },
+}
+
+/// Exit codes of `proxymind ci`, shown by `--help`.
+const CI_HELP: &str = "\
+EXIT CODES:
+  0  The run finished and found no new finding at or above --fail-on and --min-severity.
+  1  The run found new findings that fail it (not in the baseline, severe enough, proven or, with
+     --fail-on suspected, also suspected). This wins over 2.
+  2  The run could not finish properly, so it says nothing about the target: the ROE is invalid or does not
+     allow the target, the target is unreachable, a login failed, the request or time budget ran out before
+     the scan finished, the rules of engagement skipped checks or operations (unless --allow-skipped), nothing
+     was found to scan, or an input or output file could not be read or written.
+
+CI acts as the actor ci:pipeline. Nobody can approve anything in a pipeline, so what the ROE leaves at
+\"approve\" for CI is skipped and reported, never granted. CI's section in the ROE is tiers.ci; without it CI
+may send safe (GET) requests only, so scanning needs `tiers: {ci: {active_intrusive: allow}}`.
+
+A fresh in-memory project is used unless --project is given. Even then, listeners, schedules and workflow
+triggers in the project file are not started, and its network settings, session rules and OAST settings are
+ignored. The target's TLS certificate is verified unless --insecure is given.
+
+Credentials: identity files may name environment variables as ${NAME}; the values never appear in output.
+See docs/ci.md.";
+
+#[derive(clap::Args)]
+#[command(after_long_help = CI_HELP)]
+struct CiArgs {
+    /// Rules of engagement (required): the scope, the time windows and what CI may do (tiers.ci).
+    #[arg(long, value_name = "ROE.YAML")]
+    roe: PathBuf,
+    /// The URL to test (must be in scope; default: the first scope entry without a wildcard).
+    #[arg(long)]
+    target: Option<String>,
+    /// Known findings (from --write-baseline): only findings not in it fail the run.
+    #[arg(long, value_name = "FILE")]
+    baseline: Option<PathBuf>,
+    /// Write this run's proven findings (with --baseline-suspected, also suspected ones) as a baseline.
+    #[arg(long, value_name = "FILE")]
+    write_baseline: Option<PathBuf>,
+    /// With --write-baseline: include suspected findings.
+    #[arg(long)]
+    baseline_suspected: bool,
+    /// Write SARIF 2.1.0 here (fingerprints and baseline states included).
+    #[arg(long, value_name = "FILE")]
+    sarif: Option<PathBuf>,
+    /// Write JUnit XML here: a test case per finding and per step of the run.
+    #[arg(long, value_name = "FILE")]
+    junit: Option<PathBuf>,
+    /// Write the JSON summary here.
+    #[arg(long, value_name = "FILE")]
+    json: Option<PathBuf>,
+    /// What a new finding must be to fail the run.
+    #[arg(long, value_parser = ["proven", "suspected", "none"], default_value = "proven")]
+    fail_on: String,
+    /// Ignore findings below this severity.
+    #[arg(long, value_parser = ["info", "low", "medium", "high", "critical"], default_value = "low")]
+    min_severity: String,
+    /// light, default, thorough, api-only (see `proxymind scan-profile list`).
+    #[arg(long, default_value = "default")]
+    profile: String,
+    /// Stop after this many minutes (a hard cap: the run then exits 2).
+    #[arg(long, value_name = "N")]
+    budget_minutes: Option<u64>,
+    /// Send at most this many requests to the target (a hard cap: the run then exits 2).
+    #[arg(long, value_name = "N")]
+    max_requests: Option<u64>,
+    /// Identity to log in and scan as; repeat for more (the first scans, all are used for access-control checks).
+    #[arg(long = "identity", value_name = "NAME")]
+    identities: Vec<String>,
+    /// JSON file defining identities (auth, health check, login recipe); ${ENV_VAR} in values is filled in.
+    #[arg(long = "identity-file", value_name = "FILE")]
+    identity_files: Vec<PathBuf>,
+    /// An OpenAPI or Swagger description to import (its GET examples are sent).
+    #[arg(long, value_name = "FILE")]
+    openapi: Option<PathBuf>,
+    /// Do not verify the target's TLS certificate (staging hosts with self-signed certificates).
+    #[arg(long)]
+    insecure: bool,
+    /// Crawl without a headless browser (links and forms only).
+    #[arg(long)]
+    no_browser: bool,
+    /// Accept a run where the rules skipped some checks, or nothing was found to scan (still reported).
+    #[arg(long)]
+    allow_skipped: bool,
 }
 
 #[derive(Subcommand)]
@@ -1309,6 +1395,161 @@ fn print_scan_task(v: &pm_service::ScanTaskView) -> Result<()> {
     Ok(())
 }
 
+/// Identity definitions from JSON files (one object or a list per file), with `${NAME}` in string values filled in
+/// from the environment. Returns the identities and every credential value, so nothing prints them.
+fn load_identity_files(paths: &[PathBuf]) -> Result<(Vec<pm_service::pm_identity::Identity>, Vec<String>)> {
+    fn expand(v: &mut serde_json::Value, secrets: &mut Vec<String>) -> Result<(), String> {
+        match v {
+            serde_json::Value::String(s) => {
+                *s = pm_service::pm_tools::ci::expand_env(s, &|k| std::env::var(k).ok(), secrets)?;
+                Ok(())
+            }
+            serde_json::Value::Array(a) => a.iter_mut().try_for_each(|x| expand(x, secrets)),
+            serde_json::Value::Object(o) => o.values_mut().try_for_each(|x| expand(x, secrets)),
+            _ => Ok(()),
+        }
+    }
+    let (mut identities, mut secrets) = (Vec::new(), Vec::new());
+    for path in paths {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))?;
+        let items = match value {
+            serde_json::Value::Array(a) => a,
+            one => vec![one],
+        };
+        for mut item in items {
+            expand(&mut item, &mut secrets).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let ident: pm_service::pm_identity::Identity = serde_json::from_value(item).map_err(|e| {
+                // serde's messages can quote the offending value, which may be a credential.
+                let mut msg = e.to_string();
+                for secret in &secrets {
+                    msg = msg.replace(secret.as_str(), "[redacted]");
+                }
+                anyhow::anyhow!("{}: not a valid identity definition: {msg}", path.display())
+            })?;
+            for (_, v) in ident.auth.cookies.iter().chain(&ident.auth.headers) {
+                if !v.is_empty() {
+                    secrets.push(v.clone());
+                }
+            }
+            identities.push(ident);
+        }
+    }
+    Ok((identities, secrets))
+}
+
+/// `proxymind ci`. Returns the exit code (see `CI_HELP`); an `Err` is a run that could not start, which is exit 2 too.
+async fn run_ci(cli: &Cli, project_given: bool, a: &CiArgs) -> Result<i32> {
+    use pm_service::pm_tools::ci::{Baseline, FailOn, Gate};
+    let roe_text = std::fs::read_to_string(&a.roe).with_context(|| format!("reading {}", a.roe.display()))?;
+    let roe = Roe::parse(&roe_text).with_context(|| format!("the rules of engagement in {}", a.roe.display()))?;
+    let target = match &a.target {
+        Some(t) => t.clone(),
+        None => roe
+            .include
+            .iter()
+            .map(|p| p.text.clone())
+            .find(|t| !t.contains('*'))
+            .context("no --target given and the ROE's scope has no entry without a wildcard to use")?,
+    };
+    let baseline = match &a.baseline {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).with_context(|| {
+                format!("reading the baseline {} (create one with --write-baseline on a first run)", path.display())
+            })?;
+            let b = Baseline::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            Some((path.display().to_string(), b))
+        }
+        None => None,
+    };
+    let (identity_defs, secrets) = load_identity_files(&a.identity_files)?;
+    let openapi = match &a.openapi {
+        Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+        None => None,
+    };
+    let store = if project_given {
+        anyhow::ensure!(
+            !is_locked(&cli.project),
+            "{} is sealed; `proxymind project unlock` it first",
+            cli.project.display()
+        );
+        Store::open(&cli.project)?
+    } else {
+        Store::open_in_memory()?
+    };
+    let sender = pm_service::pm_replay::Sender::new(!a.insecure)?
+        .with_timeouts(std::time::Duration::from_secs(15), std::time::Duration::from_secs(60));
+    let service = Arc::new(Service::with_sender(store, Policy::new(roe), sender)?);
+
+    let tool = format!("ProxyMind {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("{tool}: CI run against {target} as ci:pipeline, profile {}", a.profile);
+    if a.insecure {
+        eprintln!("  WARNING: TLS verification is OFF (--insecure): the target's certificate is not checked");
+    } else {
+        eprintln!("  TLS verification of the target: on");
+    }
+    if project_given {
+        eprintln!(
+            "  project {}: listeners, schedules and workflow triggers in it are not started; its network settings, \
+             session rules and OAST settings are ignored",
+            cli.project.display()
+        );
+    } else {
+        eprintln!("  project: fresh and in memory, discarded afterwards");
+    }
+    let opts = pm_service::CiOptions {
+        target,
+        profile: a.profile.clone(),
+        actor_name: "pipeline".into(),
+        max_requests: a.max_requests,
+        budget_minutes: a.budget_minutes,
+        identity_defs,
+        use_identities: a.identities.clone(),
+        secrets,
+        openapi,
+        browser: !a.no_browser,
+        baseline,
+        gate: Gate {
+            fail_on: FailOn::parse(&a.fail_on).context("--fail-on is proven, suspected or none")?,
+            min_severity: a.min_severity.clone(),
+        },
+        allow_skipped: a.allow_skipped,
+        tls_verified: !a.insecure,
+        tool: tool.clone(),
+    };
+    let progress = |m: &str| eprintln!("  {m}");
+    let mut run = service.ci_run(&opts, &progress).await?;
+
+    if let Some(path) = &a.write_baseline {
+        if run.summary.complete {
+            let b = Baseline::from_findings(
+                &run.summary.findings,
+                a.baseline_suspected,
+                &run.summary.target,
+                &tool,
+                &jiff::Timestamp::now().to_string(),
+            );
+            std::fs::write(path, b.to_json()).with_context(|| format!("writing {}", path.display()))?;
+            run.summary.baseline_written = Some(path.display().to_string());
+        } else {
+            eprintln!("  baseline NOT written: the run did not finish, so it would record a partial picture");
+        }
+    }
+    if let Some(path) = &a.sarif {
+        std::fs::write(path, serde_json::to_string_pretty(&run.sarif)? + "\n")
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    if let Some(path) = &a.junit {
+        std::fs::write(path, run.summary.junit()).with_context(|| format!("writing {}", path.display()))?;
+    }
+    if let Some(path) = &a.json {
+        std::fs::write(path, run.summary.json()).with_context(|| format!("writing {}", path.display()))?;
+    }
+    out!("{}", run.summary.text().trim_end());
+    Ok(run.summary.exit_code)
+}
+
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
     let mut store = Store::open(project)?;
     let text = match roe_file {
@@ -1404,8 +1645,26 @@ async fn run() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    // `proxymind ci` opens a project only when `--project` is on the command line (not from the environment).
+    let project_given = matches.value_source("project") == Some(clap::parser::ValueSource::CommandLine)
+        || matches
+            .subcommand()
+            .is_some_and(|(_, m)| m.value_source("project") == Some(clap::parser::ValueSource::CommandLine));
     match &cli.command {
+        Command::Ci(args) => {
+            let code = match run_ci(&cli, project_given, args).await {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    2
+                }
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
             // With a Service for this project in this process, the recorder shares its write connection
@@ -1578,6 +1837,7 @@ async fn run() -> Result<()> {
             );
             out!("  Agents:     {}", tier_line(&roe, ActorKind::Agent));
             out!("  Humans:     {}", tier_line(&roe, ActorKind::Human));
+            out!("  CI runs:    {}", tier_line(&roe, ActorKind::Ci));
         }
         Command::Roe { action: RoeAction::Test { file, url, actor, method, tier } } => {
             let roe = Roe::load(file)?;

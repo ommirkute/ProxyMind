@@ -303,7 +303,10 @@ impl Service {
         let check = |ips: &[std::net::IpAddr]| self.policy.check_resolved(ips);
         let started = Instant::now();
         let result = match &in_scope {
-            Ok(()) => self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await,
+            Ok(()) => match self.spend_request() {
+                Ok(()) => self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await,
+                Err(why) => Err(anyhow::anyhow!("not sent: {why}")),
+            },
             Err(why) => Err(anyhow::anyhow!("refused before sending: out of scope ({why})")),
         };
         let mut record = NewExchange {

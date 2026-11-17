@@ -7,6 +7,26 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **`proxymind ci`: scanning in a pipeline** (roadmap 3.7, `docs/ci.md`). One command checks a rules-of-engagement file
+  (required) and that the target is in scope, logs in the identities it is given (`--identity-file` with `${ENV_VAR}`
+  references, `--identity`), imports an API description (`--openapi`), discovers content, crawls, runs the active scanner
+  with a profile, proves what it can, and compares the findings with a **baseline** (`--baseline`, `--write-baseline`).
+  Findings are keyed by a stable fingerprint (`v1|issue|METHOD|normalised path|insertion point`, hashed; no ids or
+  times) so the same bug matches across runs, projects and pull-request environments; "fixed" findings are only
+  reported. Outputs: **SARIF 2.1.0** (`partialFingerprints` for GitHub code scanning, `baselineState` new, unchanged and
+  absent, an invocation that says whether the run finished), **JUnit** (a test case per finding and per step) and a
+  **JSON** summary, plus a short summary on stdout. **Exit codes:** 0 no new findings at or above `--fail-on` and
+  `--min-severity`; 1 new findings (wins over 2); 2 the run could not finish (ROE invalid or target out of scope,
+  target unreachable, login failed, budget spent, checks skipped by the rules unless `--allow-skipped`, nothing to
+  scan): never reported as clean, and the files are still written. Safety: CI acts as the new actor kind **`ci`**
+  (`ci:pipeline`) with its own ROE section `tiers.ci`: reads and safe GETs are allowed, scan probes need
+  `active_intrusive: allow`, destructive-tier checks are left out unless allowed, and **nothing is ever approved**:
+  what needs approval is skipped and reported. `--max-requests` and `--budget-minutes` are hard caps; the target's TLS
+  certificate is verified unless `--insecure` (printed); a fresh in-memory project is used unless `--project`, and even
+  then listeners, schedules and workflow triggers in the file are not started and its network settings, session rules
+  and OAST settings are ignored (threat model F-2); credentials from the environment are kept out of every output.
+  Examples for GitHub Actions and GitLab CI in `examples/ci/`. Adds `ActorKind::Ci` and `tiers.ci` to the ROE (and its
+  JSON schema), `pm_tools::ci` (fingerprints, baselines, outputs) and `proxymind roe show` lists CI's tiers.
 - **HTTP/3 (QUIC)** (roadmap 2.4, ADR-0021). Write `HTTP/3` in a request line (Replay's Protocol selector does it) and
   the request is sent over QUIC with `quinn` and `h3` on the rustls build ProxyMind already uses. HTTP/3 is shown,
   stored and edited as text like HTTP/2 (`HTTP/3` as the version, `host:` for `:authority`, pseudo-headers in the

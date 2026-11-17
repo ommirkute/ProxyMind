@@ -222,6 +222,8 @@ The **coverage proof** (`proxymind coverage --all`, the same page, MCP `coverage
 
 ## Regression tests for CI
 
+(To scan a staging URL in a pipeline and fail on new findings, see [`proxymind ci`](ci.md).)
+
 Every proven finding can become a small test that the development team runs in CI until it is fixed: **Evidence & coverage → Regression tests** or `proxymind regress export --out tests.zip`. The ZIP holds one JSON file per finding, a README and an example GitHub Actions workflow.
 
 ```bash
