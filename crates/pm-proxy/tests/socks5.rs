@@ -359,6 +359,12 @@ async fn upstream_socks5() -> (u16, Arc<Mutex<Vec<String>>>) {
                         c.read_exact(&mut a).await.unwrap();
                         IpAddr::from(a).to_string()
                     }
+                    // IPv6: where `localhost` resolves to ::1 first, ProxyMind asks for that address and falls back.
+                    4 => {
+                        let mut a = [0u8; 16];
+                        c.read_exact(&mut a).await.unwrap();
+                        format!("[{}]", IpAddr::from(a))
+                    }
                     _ => {
                         let mut n = [0u8; 1];
                         c.read_exact(&mut n).await.unwrap();
