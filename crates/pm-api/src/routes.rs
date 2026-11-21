@@ -21,7 +21,8 @@ use pm_service::api_types::{
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
-    AuthzCheckRequest, FindingUpdate, ModelFilter, NewFinding, ProofRequest, ReplayRequest, ServiceError,
+    AuthzCheckRequest, DeliveriesQuery, FindingUpdate, IntegrationEnabledBody, IntegrationInput, ModelFilter,
+    NewFinding, ProofRequest, ReplayRequest, SendFindingBody, ServiceError,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -242,6 +243,12 @@ pub fn api() -> Router<AppState> {
         .route("/workflows/{id}", get(workflow_get).put(workflow_update).delete(workflow_delete))
         .route("/workflows/{id}/trigger", axum::routing::put(workflow_trigger))
         .route("/workflows/{id}/run", post(workflow_run))
+        .route("/integrations", get(integrations_list))
+        .route("/integrations/{name}", get(integration_get).put(integration_put).delete(integration_delete))
+        .route("/integrations/{name}/enabled", axum::routing::put(integration_enabled))
+        .route("/integrations/{name}/test", post(integration_test))
+        .route("/integrations/{name}/deliveries", get(integration_deliveries))
+        .route("/findings/{id}/issue", post(finding_issue))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/key", axum::routing::put(model_key_set))
@@ -1523,4 +1530,49 @@ async fn rules_put(State(st): State<AppState>, Json(b): Json<RulesBody>) -> ApiR
 
 async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
     ok(json!({ "forwarded": st.service.intercept_forward_all(&st.actor)? }))
+}
+
+async fn integrations_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.integration_list(&st.actor)?)
+}
+
+async fn integration_get(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_get(&st.actor, &name)?)
+}
+
+async fn integration_put(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(b): Json<IntegrationInput>,
+) -> ApiResult {
+    ok(st.service.integration_set(&st.actor, &name, b)?)
+}
+
+async fn integration_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    st.service.integration_delete(&st.actor, &name)?;
+    ok(json!({ "deleted": name }))
+}
+
+async fn integration_enabled(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(b): Json<IntegrationEnabledBody>,
+) -> ApiResult {
+    ok(st.service.integration_enable(&st.actor, &name, b.enabled)?)
+}
+
+async fn integration_test(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_test(&st.actor, &name).await?)
+}
+
+async fn integration_deliveries(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<DeliveriesQuery>,
+) -> ApiResult {
+    ok(st.service.integration_deliveries(&st.actor, &name, q.limit.unwrap_or(50))?)
+}
+
+async fn finding_issue(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<SendFindingBody>) -> ApiResult {
+    ok(st.service.integration_send_finding(&st.actor, id, b).await?)
 }

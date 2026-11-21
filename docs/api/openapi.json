@@ -2828,6 +2828,93 @@
         ],
         "type": "object"
       },
+      "DeliveriesQuery": {
+        "additionalProperties": false,
+        "description": "Query of `GET /integrations/{name}/deliveries`.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "How many (default 50, at most 200).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DeliveryRow": {
+        "description": "One stored delivery.",
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "finding_id": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "http_status": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "integration": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "integration",
+          "ts_ms",
+          "kind",
+          "event",
+          "finding_id",
+          "status",
+          "http_status",
+          "attempts",
+          "host",
+          "detail",
+          "actor"
+        ],
+        "type": "object"
+      },
       "DeviceNameBody": {
         "additionalProperties": false,
         "description": "Body of `PUT /devices/{addr}`.",
@@ -5332,6 +5419,28 @@
           }
         ]
       },
+      "HeaderInput": {
+        "additionalProperties": false,
+        "description": "A custom header of a webhook, as sent to `PUT /integrations/{name}`.",
+        "properties": {
+          "name": {
+            "description": "The header's name.",
+            "type": "string"
+          },
+          "value": {
+            "default": null,
+            "description": "Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved\nvalue of a header with this name. Values are write-only: they are never returned.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "Held": {
         "description": "A message waiting for a decision.",
         "properties": {
@@ -5972,6 +6081,329 @@
         ],
         "type": "object"
       },
+      "IntegrationEnabledBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /integrations/{name}/enabled`.",
+        "properties": {
+          "enabled": {
+            "description": "Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "IntegrationEvent": {
+        "description": "What a notification integration can subscribe to.",
+        "oneOf": [
+          {
+            "const": "finding_proven",
+            "description": "A proof run proved a finding.",
+            "type": "string"
+          },
+          {
+            "const": "finding_status_changed",
+            "description": "A finding's status changed to anything but `proven` (that has its own event).",
+            "type": "string"
+          },
+          {
+            "const": "scan_finished",
+            "description": "A scan task ended (done, failed or cancelled).",
+            "type": "string"
+          },
+          {
+            "const": "ci_summary",
+            "description": "A summary of the project's findings, sent when a scan task ends.",
+            "type": "string"
+          }
+        ]
+      },
+      "IntegrationInput": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only.",
+        "properties": {
+          "allow_private": {
+            "default": false,
+            "description": "See `Integration.allow_private`.",
+            "type": "boolean"
+          },
+          "base_url": {
+            "default": "",
+            "description": "See `Integration.base_url`.",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "description": "See `Integration.email`.",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "description": "Turn it on (default true). Saving it here, as a person, is what enables it in this installation.",
+            "type": "boolean"
+          },
+          "events": {
+            "default": [],
+            "description": "See `Integration.events`.",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationEvent"
+            },
+            "type": "array"
+          },
+          "headers": {
+            "default": null,
+            "description": "Webhook: custom headers. Absent: keep the saved set; present: replace it.",
+            "items": {
+              "$ref": "#/components/schemas/HeaderInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "issue_type": {
+            "default": "",
+            "description": "See `Integration.issue_type`.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind"
+          },
+          "labels": {
+            "default": [],
+            "description": "See `Integration.labels`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "The integration's name; it must be the same as the name in the path.",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "description": "See `Integration.project`.",
+            "type": "string"
+          },
+          "rate_per_minute": {
+            "default": 0,
+            "description": "See `Integration.rate_per_minute` (0 or absent: the default).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "signing_secret": {
+            "default": null,
+            "description": "Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "default": null,
+            "description": "The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep\nthe saved one; an empty string removes it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "webhook_url": {
+            "default": null,
+            "description": "Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "IntegrationKind": {
+        "description": "What an integration talks to.",
+        "oneOf": [
+          {
+            "const": "jira",
+            "description": "Jira (Cloud, Server or Data Center), REST API v2: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "github",
+            "description": "GitHub or GitHub Enterprise Server: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "gitlab",
+            "description": "GitLab.com or self-managed GitLab: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "slack",
+            "description": "A Slack incoming webhook (or a compatible one): notifications.",
+            "type": "string"
+          },
+          {
+            "const": "webhook",
+            "description": "Any HTTPS endpoint: notifications as signed JSON.",
+            "type": "string"
+          }
+        ]
+      },
+      "IntegrationView": {
+        "description": "An integration as the API shows it: its configuration, the state of its secrets, and how it is doing.",
+        "properties": {
+          "active": {
+            "description": "It will send (enabled and trusted here, with every required secret present).",
+            "type": "boolean"
+          },
+          "allow_private": {
+            "default": false,
+            "description": "Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test\nserver). Off by default so a project file cannot point an integration at an internal service. Link-local\naddresses (cloud metadata) are refused either way.",
+            "type": "boolean"
+          },
+          "base_url": {
+            "default": "",
+            "description": "Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to\ngitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default\n`https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "description": "Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal\naccess token (Bearer), as Jira Server and Data Center use.",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "description": "A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an\nintegration that came with a project file stays off until a person enables it in this installation.",
+            "type": "boolean"
+          },
+          "events": {
+            "default": [],
+            "description": "Slack and webhook: the events to send.",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationEvent"
+            },
+            "type": "array"
+          },
+          "header_names": {
+            "default": [],
+            "description": "Names of the webhook's custom headers (their values are secrets, kept like the others).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "issue_type": {
+            "default": "",
+            "description": "Jira: the issue type's name (default `Bug`).",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind",
+            "default": "webhook"
+          },
+          "labels": {
+            "default": [],
+            "description": "Labels put on created issues (none by default: Jira refuses a label when its create screen has no label\nfield, and GitHub creates missing labels only for people with push access).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last delivery, when it failed."
+          },
+          "name": {
+            "default": "",
+            "description": "Its name (letters, digits, `-`, `_`, `.`), unique in the project.",
+            "type": "string"
+          },
+          "needs_review": {
+            "description": "Enabled in the file but not by a person in this installation (it came with the project, or what it points at\nchanged since a person enabled it). It sends nothing until it is enabled here.",
+            "type": "boolean"
+          },
+          "problems": {
+            "description": "What is missing for it to work, in words.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project": {
+            "default": "",
+            "description": "Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`.",
+            "type": "string"
+          },
+          "rate_per_minute": {
+            "default": 20,
+            "description": "Most notifications per minute (1 to 60, default 20); more are skipped and logged.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secret_status": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SecretStatus"
+            },
+            "description": "Per secret slot: where it comes from. Values are never returned.",
+            "type": "object"
+          },
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or\n`env:NAME`. Never the secret itself.",
+            "type": "object"
+          },
+          "updated_by": {
+            "default": "",
+            "description": "Who saved it last and when.",
+            "type": "string"
+          },
+          "updated_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "enabled",
+          "base_url",
+          "project",
+          "issue_type",
+          "email",
+          "labels",
+          "events",
+          "allow_private",
+          "rate_per_minute",
+          "secrets",
+          "header_names",
+          "updated_by",
+          "updated_ms",
+          "secret_status",
+          "needs_review",
+          "active",
+          "problems"
+        ],
+        "type": "object"
+      },
       "InterceptSettings": {
         "additionalProperties": false,
         "properties": {
@@ -6054,6 +6486,52 @@
           "attached",
           "settings",
           "held"
+        ],
+        "type": "object"
+      },
+      "IssueLink": {
+        "description": "An issue created for a finding in another system.",
+        "properties": {
+          "by": {
+            "type": "string"
+          },
+          "created_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The provider's id for updates: the Jira key, the GitHub number, the GitLab iid.",
+            "type": "string"
+          },
+          "integration": {
+            "description": "The integration that created it.",
+            "type": "string"
+          },
+          "key": {
+            "description": "`PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab).",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind"
+          },
+          "updated_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "url": {
+            "description": "The issue's page.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "kind",
+          "key",
+          "url",
+          "id",
+          "created_ms",
+          "updated_ms",
+          "by"
         ],
         "type": "object"
       },
@@ -6193,6 +6671,23 @@
           "powershell"
         ],
         "type": "string"
+      },
+      "LastError": {
+        "description": "The last delivery's failure, when the last delivery failed.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ts_ms",
+          "message"
+        ],
+        "type": "object"
       },
       "LimitQuery": {
         "description": "Query of `GET /audit`.",
@@ -11254,6 +11749,33 @@
         ],
         "type": "object"
       },
+      "SecretStatus": {
+        "description": "Where one secret comes from, never the secret itself.",
+        "properties": {
+          "hint": {
+            "description": "The last four characters of a long secret, e.g. `…a1b2`; absent for short ones.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "For an environment reference: `env:NAME`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "`saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
       "SendBody": {
         "description": "Body of `POST /assistant/send`.",
         "properties": {
@@ -11272,6 +11794,25 @@
         },
         "required": [
           "text"
+        ],
+        "type": "object"
+      },
+      "SendFindingBody": {
+        "additionalProperties": false,
+        "description": "Body of `POST /findings/{id}/issue`.",
+        "properties": {
+          "integration": {
+            "description": "The Jira, GitHub or GitLab integration to create the issue in.",
+            "type": "string"
+          },
+          "update": {
+            "default": false,
+            "description": "When the finding already has an issue there: update it instead of refusing. Default false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "integration"
         ],
         "type": "object"
       },
@@ -17373,6 +17914,54 @@
         "summary": "Ask the assistant to explain a finding."
       }
     },
+    "/api/v1/findings/{id}/issue": {
+      "post": {
+        "operationId": "finding_issue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendFindingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueLink"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Create (or with `update`, refresh) the finding's issue in a Jira, GitHub or GitLab integration, with redacted text and reproduction. The issue's key and URL are kept on the finding as `issue_links`. People only; audited."
+      }
+    },
     "/api/v1/findings/{id}/prove": {
       "post": {
         "operationId": "finding_prove",
@@ -18076,6 +18665,300 @@
           }
         },
         "summary": "Import a HAR document as recorded traffic."
+      }
+    },
+    "/api/v1/integrations": {
+      "get": {
+        "operationId": "integrations_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IntegrationView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Configured integrations (Jira, GitHub, GitLab, Slack, webhooks) with the state of their secrets, whether they came with a project file and need review, and the last error. Secrets are never returned. People only."
+      }
+    },
+    "/api/v1/integrations/{name}": {
+      "delete": {
+        "operationId": "integration_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the name).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Delete an integration with its saved secrets, trust and delivery log. People only; audited."
+      },
+      "get": {
+        "operationId": "integration_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One integration. People only."
+      },
+      "put": {
+        "operationId": "integration_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Create or replace an integration; secrets (token, webhook_url, signing_secret, header values) are write-only and go to the user's private secrets file or an `env:NAME` reference, never the project. Saving it enabled here is what lets it send in this installation. People only; audited."
+      }
+    },
+    "/api/v1/integrations/{name}/deliveries": {
+      "get": {
+        "operationId": "integration_deliveries",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How many (default 50, at most 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeliveryRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "The last deliveries of an integration (status, HTTP status, attempts, host; never bodies or secrets), newest first. People only."
+      }
+    },
+    "/api/v1/integrations/{name}/enabled": {
+      "put": {
+        "operationId": "integration_enabled",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationEnabledBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn an integration on or off. Turning it on here, as a person, is what makes an integration that came with a project file send. People only; audited."
+      }
+    },
+    "/api/v1/integrations/{name}/test": {
+      "post": {
+        "operationId": "integration_test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryRow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Test an integration: read the tracker's project, post a test message to Slack, or send a `test` event to a webhook. Recorded in the delivery log. People only."
       }
     },
     "/api/v1/intercept": {

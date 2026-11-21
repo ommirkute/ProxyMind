@@ -866,6 +866,28 @@ class DecodeRequest(_DecodeRequestRequired, total=False):
     ops: _t.List[str]
 
 
+class DeliveriesQuery(TypedDict, total=False):
+    """Query of `GET /integrations/{name}/deliveries`."""
+    # How many (default 50, at most 200).
+    limit: _t.Optional[int]
+
+
+class DeliveryRow(TypedDict):
+    """One stored delivery."""
+    actor: str
+    attempts: int
+    detail: str
+    event: str
+    finding_id: _t.Optional[int]
+    host: str
+    http_status: _t.Optional[int]
+    id: int
+    integration: str
+    kind: str
+    status: str
+    ts_ms: int
+
+
 class DeviceNameBody(TypedDict):
     """Body of `PUT /devices/{addr}`."""
     # The name to show for this address (1 to 60 characters).
@@ -1642,6 +1664,18 @@ class GroupResultDenied(TypedDict):
 
 GroupResult = _t.Union["GroupResultDone", "GroupResultPendingApproval", "GroupResultDenied"]
 
+class _HeaderInputRequired(TypedDict):
+    # The header's name.
+    name: str
+
+
+class HeaderInput(_HeaderInputRequired, total=False):
+    """A custom header of a webhook, as sent to `PUT /integrations/{name}`."""
+    # Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved
+    # value of a header with this name. Values are write-only: they are never returned.
+    value: _t.Optional[str]
+
+
 class Held(TypedDict):
     """A message waiting for a decision."""
     # False when the message isn't valid UTF-8: it can be forwarded or
@@ -1826,6 +1860,109 @@ class ImportResult(TypedDict):
     skipped: _t.List[str]
 
 
+class IntegrationEnabledBody(TypedDict):
+    """Body of `PUT /integrations/{name}/enabled`."""
+    # Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send.
+    enabled: bool
+
+
+# What a notification integration can subscribe to.
+IntegrationEvent = _t.Literal["finding_proven", "finding_status_changed", "scan_finished", "ci_summary"]
+
+class _IntegrationInputRequired(TypedDict):
+    kind: "IntegrationKind"
+    # The integration's name; it must be the same as the name in the path.
+    name: str
+
+
+class IntegrationInput(_IntegrationInputRequired, total=False):
+    """Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only."""
+    # See `Integration.allow_private`.
+    allow_private: bool
+    # See `Integration.base_url`.
+    base_url: str
+    # See `Integration.email`.
+    email: str
+    # Turn it on (default true). Saving it here, as a person, is what enables it in this installation.
+    enabled: bool
+    # See `Integration.events`.
+    events: _t.List["IntegrationEvent"]
+    # Webhook: custom headers. Absent: keep the saved set; present: replace it.
+    headers: _t.Optional[_t.List["HeaderInput"]]
+    # See `Integration.issue_type`.
+    issue_type: str
+    # See `Integration.labels`.
+    labels: _t.List[str]
+    # See `Integration.project`.
+    project: str
+    # See `Integration.rate_per_minute` (0 or absent: the default).
+    rate_per_minute: int
+    # Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only.
+    signing_secret: _t.Optional[str]
+    # The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep
+    # the saved one; an empty string removes it.
+    token: _t.Optional[str]
+    # Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential).
+    webhook_url: _t.Optional[str]
+
+
+# What an integration talks to.
+IntegrationKind = _t.Literal["jira", "github", "gitlab", "slack", "webhook"]
+
+class _IntegrationViewRequired(TypedDict):
+    # It will send (enabled and trusted here, with every required secret present).
+    active: bool
+    # Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test
+    # server). Off by default so a project file cannot point an integration at an internal service. Link-local
+    # addresses (cloud metadata) are refused either way.
+    allow_private: bool
+    # Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to
+    # gitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default
+    # `https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).
+    base_url: str
+    # Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal
+    # access token (Bearer), as Jira Server and Data Center use.
+    email: str
+    # A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an
+    # integration that came with a project file stays off until a person enables it in this installation.
+    enabled: bool
+    # Slack and webhook: the events to send.
+    events: _t.List["IntegrationEvent"]
+    # Names of the webhook's custom headers (their values are secrets, kept like the others).
+    header_names: _t.List[str]
+    # Jira: the issue type's name (default `Bug`).
+    issue_type: str
+    kind: "IntegrationKind"
+    # Labels put on created issues (none by default: Jira refuses a label when its create screen has no label
+    # field, and GitHub creates missing labels only for people with push access).
+    labels: _t.List[str]
+    # Its name (letters, digits, `-`, `_`, `.`), unique in the project.
+    name: str
+    # Enabled in the file but not by a person in this installation (it came with the project, or what it points at
+    # changed since a person enabled it). It sends nothing until it is enabled here.
+    needs_review: bool
+    # What is missing for it to work, in words.
+    problems: _t.List[str]
+    # Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`.
+    project: str
+    # Most notifications per minute (1 to 60, default 20); more are skipped and logged.
+    rate_per_minute: int
+    # Per secret slot: where it comes from. Values are never returned.
+    secret_status: _t.Dict[str, "SecretStatus"]
+    # Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or
+    # `env:NAME`. Never the secret itself.
+    secrets: _t.Dict[str, str]
+    # Who saved it last and when.
+    updated_by: str
+    updated_ms: int
+
+
+class IntegrationView(_IntegrationViewRequired, total=False):
+    """An integration as the API shows it: its configuration, the state of its secrets, and how it is doing."""
+    # The last delivery, when it failed.
+    last_error: _t.Optional["LastError"]
+
+
 class InterceptSettings(TypedDict, total=False):
     # Hold traffic at all.
     enabled: bool
@@ -1851,6 +1988,22 @@ class InterceptState(TypedDict):
     attached: bool
     held: _t.List["Held"]
     settings: "InterceptSettings"
+
+
+class IssueLink(TypedDict):
+    """An issue created for a finding in another system."""
+    by: str
+    created_ms: int
+    # The provider's id for updates: the Jira key, the GitHub number, the GitLab iid.
+    id: str
+    # The integration that created it.
+    integration: str
+    # `PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab).
+    key: str
+    kind: "IntegrationKind"
+    updated_ms: int
+    # The issue's page.
+    url: str
 
 
 class _IssueTypeRequired(TypedDict):
@@ -1897,6 +2050,12 @@ class KeyStatus(_KeyStatusRequired, total=False):
 Kind = _t.Literal["request", "response", "ws_to_server", "ws_to_client"]
 
 Lang = _t.Literal["python", "javascript", "powershell"]
+
+class LastError(TypedDict):
+    """The last delivery's failure, when the last delivery failed."""
+    message: str
+    ts_ms: int
+
 
 class LimitQuery(TypedDict, total=False):
     """Query of `GET /audit`."""
@@ -3476,6 +3635,19 @@ class SearchResult(_SearchResultRequired, total=False):
     next_before_id: _t.Optional[int]
 
 
+class _SecretStatusRequired(TypedDict):
+    # `saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`.
+    source: str
+
+
+class SecretStatus(_SecretStatusRequired, total=False):
+    """Where one secret comes from, never the secret itself."""
+    # The last four characters of a long secret, e.g. `…a1b2`; absent for short ones.
+    hint: _t.Optional[str]
+    # For an environment reference: `env:NAME`.
+    reference: _t.Optional[str]
+
+
 class _SendBodyRequired(TypedDict):
     # The message. Must not be empty.
     text: str
@@ -3485,6 +3657,17 @@ class SendBody(_SendBodyRequired, total=False):
     """Body of `POST /assistant/send`."""
     # Continue this chat (default: start a new one).
     chat_id: _t.Optional[int]
+
+
+class _SendFindingBodyRequired(TypedDict):
+    # The Jira, GitHub or GitLab integration to create the issue in.
+    integration: str
+
+
+class SendFindingBody(_SendFindingBodyRequired, total=False):
+    """Body of `POST /findings/{id}/issue`."""
+    # When the finding already has an issue there: update it instead of refusing. Default false.
+    update: bool
 
 
 class _SentExampleRequired(TypedDict):

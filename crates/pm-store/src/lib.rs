@@ -4,12 +4,14 @@
 //! zstd-compressed blobs keyed by their blake3 hash, so identical bodies
 //! (static files, repeated replays) are stored once.
 
+mod integrations;
 mod streams;
 mod workflow_runs;
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
+pub use integrations::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 pub use streams::*;
@@ -446,6 +448,27 @@ CREATE TABLE workflow_runs (
 );
 CREATE INDEX workflow_runs_by_workflow ON workflow_runs(workflow_id, id DESC);
 CREATE INDEX workflow_runs_by_approval ON workflow_runs(approval_id) WHERE approval_id IS NOT NULL;
+"#,
+    r#"
+-- Integrations (roadmap 3.5). The configuration is the `integrations` setting (no secrets in it); a finding keeps the
+-- issues created for it in other systems (`issue_links`, a JSON list); every send to an integration leaves one row
+-- in `integration_deliveries` (never a body, a header or a secret: `detail` is a short note or the issue key).
+ALTER TABLE findings ADD COLUMN issue_links TEXT NOT NULL DEFAULT '';
+CREATE TABLE integration_deliveries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    integration TEXT NOT NULL,
+    ts_ms       INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    finding_id  INTEGER,
+    status      TEXT NOT NULL,
+    http_status INTEGER,
+    attempts    INTEGER NOT NULL,
+    host        TEXT NOT NULL,
+    detail      TEXT NOT NULL,
+    actor       TEXT NOT NULL
+);
+CREATE INDEX integration_deliveries_by_name ON integration_deliveries(integration, id DESC);
 "#,
 ];
 
@@ -2042,6 +2065,7 @@ impl Store {
                 "created_ms",
                 "updated_ms",
                 "explanation",
+                "issue_links",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
@@ -2638,10 +2662,11 @@ mod tests {
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes;
                  DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;
-                 DROP TABLE stream_chunks; DROP TABLE streams; DROP TABLE workflow_runs;",
+                 DROP TABLE stream_chunks; DROP TABLE streams; DROP TABLE workflow_runs;
+                 ALTER TABLE findings DROP COLUMN issue_links; DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 4) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 5) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2674,10 +2699,11 @@ mod tests {
             conn.execute_batch(
                 "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;
-                 DROP TABLE workflow_runs;",
+                 DROP TABLE workflow_runs; ALTER TABLE findings DROP COLUMN issue_links;
+                 DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 3) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 4) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         let old = s.get_exchange(old_id).unwrap().unwrap();

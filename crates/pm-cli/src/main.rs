@@ -175,6 +175,11 @@ enum Command {
         #[command(subcommand)]
         action: WorkflowAction,
     },
+    /// Integrations: Jira, GitHub, GitLab, Slack and webhooks (set up on the Integrations page; tokens never go in the project).
+    Integration {
+        #[command(subcommand)]
+        action: IntegrationAction,
+    },
     /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
     Skills {
         /// A skill to print; none lists them.
@@ -1160,6 +1165,35 @@ enum ReconAction {
         limit: usize,
         #[arg(long = "as")]
         actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntegrationAction {
+    /// The project's integrations: kind, whether each is on, what needs review, the last error.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check one integration (reads the tracker's project, posts a test message or a `test` event) and log it.
+    /// Exits 1 unless it worked.
+    Test {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create the finding's issue in a Jira, GitHub or GitLab integration (text and requests are redacted). A finding
+    /// that already has one there is refused unless --update.
+    SendFinding {
+        /// The finding's id.
+        finding: i64,
+        /// The integration's name.
+        integration: String,
+        /// Update the existing issue instead of refusing.
+        #[arg(long)]
+        update: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2180,6 +2214,64 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        Command::Integration { action } => {
+            let service = open_service(&cli.project, None)?;
+            attach_plugins(&cli, &service);
+            let me = human_actor(None)?;
+            match action {
+                IntegrationAction::List { json } => {
+                    let list = service.integration_list(&me)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&list)?);
+                    } else if list.is_empty() {
+                        out!("No integrations yet: set one up on the Integrations page.");
+                    }
+                    for v in list.iter().filter(|_| !*json) {
+                        let state = if v.needs_review {
+                            "needs review: enable it in this installation"
+                        } else if v.active {
+                            "on"
+                        } else {
+                            "off"
+                        };
+                        out!("{:<20} {:<8} {state}", v.config.name, v.config.kind.as_str());
+                        for p in &v.problems {
+                            out!("    {p}");
+                        }
+                        if let Some(e) = &v.last_error {
+                            out!("    last error: {}", e.message);
+                        }
+                    }
+                }
+                IntegrationAction::Test { name, json } => {
+                    let row = service.integration_test(&me, name).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&row)?);
+                    } else {
+                        out!(
+                            "{}: {} ({}, {} attempt(s)) {}",
+                            row.integration,
+                            row.status,
+                            row.host,
+                            row.attempts,
+                            row.detail
+                        );
+                    }
+                    if row.status != "ok" {
+                        std::process::exit(1);
+                    }
+                }
+                IntegrationAction::SendFinding { finding, integration, update, json } => {
+                    let body = pm_service::SendFindingBody { integration: integration.clone(), update: *update };
+                    let link = service.integration_send_finding(&me, *finding, body).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&link)?);
+                    } else {
+                        out!("finding #{finding} → {} {} {}", link.integration, link.key, link.url);
+                    }
+                }
+            }
+        }
         Command::Workflow { action } => {
             let service = open_service(&cli.project, None)?;
             match action {
@@ -2458,6 +2550,8 @@ async fn run() -> Result<()> {
             tokio::spawn(service.clone().run_scheduler());
             // Workflows a person switched to "run on new traffic" react to exchanges the proxy records.
             tokio::spawn(service.clone().run_workflow_triggers());
+            // Slack and webhook notifications a person enabled in this installation, from the event bus.
+            tokio::spawn(service.clone().run_integration_notifier());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
                 .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;

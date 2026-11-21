@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Integrations** (roadmap 3.5, `docs/integrations.md`). Settings → Integrations, `/api/v1/integrations`,
+  `proxymind integration list|test|send-finding`. **Jira, GitHub, GitLab:** "Create issue in…" on a finding makes an
+  issue (title, severity, CWE/OWASP from the issue library, proof summary, reproduction requests, exchange ids, the
+  ProxyMind finding id) and keeps its key and URL on the finding (`issue_links`, migration 25); sending again is
+  refused unless you update the same issue. **Slack and webhooks:** notifications for finding proven, finding status
+  changed, scan finished and a findings summary, from the event bus, with a per-integration rate limit, bounded retries
+  with backoff and a delivery log with the last error. Webhook payloads are versioned (`"v": 1`) JSON, optionally signed
+  `X-ProxyMind-Signature: sha256=<hmac>`. **Safety:** everything sent is redacted like agent views; tokens are never in
+  the project file (a private file in the home folder, or `env:NAME`), never returned, logged or audited; requests use
+  ProxyMind's sender with TLS verification always on, no redirects, and refuse private, loopback and link-local
+  destinations unless allowed per integration (metadata addresses never); integrations that came with a project file
+  stay off until a person turns them on in this installation; only people configure or send, agents may list names
+  (new MCP tool `integration_list`, 87 tools).
 - **`proxymind ci`: scanning in a pipeline** (roadmap 3.7, `docs/ci.md`). One command checks a rules-of-engagement file
   (required) and that the target is in scope, logs in the identities it is given (`--identity-file` with `${ENV_VAR}`
   references, `--identity`), imports an API description (`--openapi`), discovers content, crawls, runs the active scanner

@@ -826,6 +826,28 @@ export interface DecodeRequest {
   ops?: string[];
 }
 
+/** Query of `GET /integrations/{name}/deliveries`. */
+export interface DeliveriesQuery {
+  /** How many (default 50, at most 200). */
+  limit?: number | null;
+}
+
+/** One stored delivery. */
+export interface DeliveryRow {
+  actor: string;
+  attempts: number;
+  detail: string;
+  event: string;
+  finding_id: number | null;
+  host: string;
+  http_status: number | null;
+  id: number;
+  integration: string;
+  kind: string;
+  status: string;
+  ts_ms: number;
+}
+
 /** Body of `PUT /devices/{addr}`. */
 export interface DeviceNameBody {
   /** The name to show for this address (1 to 60 characters). */
@@ -1561,6 +1583,17 @@ export type GroupResult =
       status: "denied";
     };
 
+/** A custom header of a webhook, as sent to `PUT /integrations/{name}`. */
+export interface HeaderInput {
+  /** The header's name. */
+  name: string;
+  /**
+   * Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved
+   * value of a header with this name. Values are write-only: they are never returned.
+   */
+  value?: string | null;
+}
+
 /** A message waiting for a decision. */
 export interface Held {
   /**
@@ -1761,6 +1794,137 @@ export interface ImportResult {
   skipped: string[];
 }
 
+/** Body of `PUT /integrations/{name}/enabled`. */
+export interface IntegrationEnabledBody {
+  /** Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send. */
+  enabled: boolean;
+}
+
+/** What a notification integration can subscribe to. */
+export type IntegrationEvent =
+  /** A proof run proved a finding. */
+  | "finding_proven"
+  /** A finding's status changed to anything but `proven` (that has its own event). */
+  | "finding_status_changed"
+  /** A scan task ended (done, failed or cancelled). */
+  | "scan_finished"
+  /** A summary of the project's findings, sent when a scan task ends. */
+  | "ci_summary";
+
+/** Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only. */
+export interface IntegrationInput {
+  /** See `Integration.allow_private`. */
+  allow_private?: boolean;
+  /** See `Integration.base_url`. */
+  base_url?: string;
+  /** See `Integration.email`. */
+  email?: string;
+  /** Turn it on (default true). Saving it here, as a person, is what enables it in this installation. */
+  enabled?: boolean;
+  /** See `Integration.events`. */
+  events?: IntegrationEvent[];
+  /** Webhook: custom headers. Absent: keep the saved set; present: replace it. */
+  headers?: HeaderInput[] | null;
+  /** See `Integration.issue_type`. */
+  issue_type?: string;
+  kind: IntegrationKind;
+  /** See `Integration.labels`. */
+  labels?: string[];
+  /** The integration's name; it must be the same as the name in the path. */
+  name: string;
+  /** See `Integration.project`. */
+  project?: string;
+  /** See `Integration.rate_per_minute` (0 or absent: the default). */
+  rate_per_minute?: number;
+  /** Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only. */
+  signing_secret?: string | null;
+  /**
+   * The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep
+   * the saved one; an empty string removes it.
+   */
+  token?: string | null;
+  /** Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential). */
+  webhook_url?: string | null;
+}
+
+/** What an integration talks to. */
+export type IntegrationKind =
+  /** Jira (Cloud, Server or Data Center), REST API v2: create issues. */
+  | "jira"
+  /** GitHub or GitHub Enterprise Server: create issues. */
+  | "github"
+  /** GitLab.com or self-managed GitLab: create issues. */
+  | "gitlab"
+  /** A Slack incoming webhook (or a compatible one): notifications. */
+  | "slack"
+  /** Any HTTPS endpoint: notifications as signed JSON. */
+  | "webhook";
+
+/** An integration as the API shows it: its configuration, the state of its secrets, and how it is doing. */
+export interface IntegrationView {
+  /** It will send (enabled and trusted here, with every required secret present). */
+  active: boolean;
+  /**
+   * Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test
+   * server). Off by default so a project file cannot point an integration at an internal service. Link-local
+   * addresses (cloud metadata) are refused either way.
+   */
+  allow_private: boolean;
+  /**
+   * Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to
+   * gitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default
+   * `https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).
+   */
+  base_url: string;
+  /**
+   * Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal
+   * access token (Bearer), as Jira Server and Data Center use.
+   */
+  email: string;
+  /**
+   * A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an
+   * integration that came with a project file stays off until a person enables it in this installation.
+   */
+  enabled: boolean;
+  /** Slack and webhook: the events to send. */
+  events: IntegrationEvent[];
+  /** Names of the webhook's custom headers (their values are secrets, kept like the others). */
+  header_names: string[];
+  /** Jira: the issue type's name (default `Bug`). */
+  issue_type: string;
+  kind: IntegrationKind;
+  /**
+   * Labels put on created issues (none by default: Jira refuses a label when its create screen has no label
+   * field, and GitHub creates missing labels only for people with push access).
+   */
+  labels: string[];
+  /** The last delivery, when it failed. */
+  last_error?: LastError | null;
+  /** Its name (letters, digits, `-`, `_`, `.`), unique in the project. */
+  name: string;
+  /**
+   * Enabled in the file but not by a person in this installation (it came with the project, or what it points at
+   * changed since a person enabled it). It sends nothing until it is enabled here.
+   */
+  needs_review: boolean;
+  /** What is missing for it to work, in words. */
+  problems: string[];
+  /** Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`. */
+  project: string;
+  /** Most notifications per minute (1 to 60, default 20); more are skipped and logged. */
+  rate_per_minute: number;
+  /** Per secret slot: where it comes from. Values are never returned. */
+  secret_status: { [key: string]: SecretStatus };
+  /**
+   * Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or
+   * `env:NAME`. Never the secret itself.
+   */
+  secrets: { [key: string]: string };
+  /** Who saved it last and when. */
+  updated_by: string;
+  updated_ms: number;
+}
+
 export interface InterceptSettings {
   /** Hold traffic at all. */
   enabled?: boolean;
@@ -1788,6 +1952,22 @@ export interface InterceptState {
   attached: boolean;
   held: Held[];
   settings: InterceptSettings;
+}
+
+/** An issue created for a finding in another system. */
+export interface IssueLink {
+  by: string;
+  created_ms: number;
+  /** The provider's id for updates: the Jira key, the GitHub number, the GitLab iid. */
+  id: string;
+  /** The integration that created it. */
+  integration: string;
+  /** `PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab). */
+  key: string;
+  kind: IntegrationKind;
+  updated_ms: number;
+  /** The issue's page. */
+  url: string;
 }
 
 export interface IssueType {
@@ -1834,6 +2014,12 @@ export type Kind =
   | "ws_to_client";
 
 export type Lang = "python" | "javascript" | "powershell";
+
+/** The last delivery's failure, when the last delivery failed. */
+export interface LastError {
+  message: string;
+  ts_ms: number;
+}
 
 /** Query of `GET /audit`. */
 export interface LimitQuery {
@@ -3472,12 +3658,30 @@ export interface SearchResult {
   scanned: number;
 }
 
+/** Where one secret comes from, never the secret itself. */
+export interface SecretStatus {
+  /** The last four characters of a long secret, e.g. `…a1b2`; absent for short ones. */
+  hint?: string | null;
+  /** For an environment reference: `env:NAME`. */
+  reference?: string | null;
+  /** `saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`. */
+  source: string;
+}
+
 /** Body of `POST /assistant/send`. */
 export interface SendBody {
   /** Continue this chat (default: start a new one). */
   chat_id?: number | null;
   /** The message. Must not be empty. */
   text: string;
+}
+
+/** Body of `POST /findings/{id}/issue`. */
+export interface SendFindingBody {
+  /** The Jira, GitHub or GitLab integration to create the issue in. */
+  integration: string;
+  /** When the finding already has an issue there: update it instead of refusing. Default false. */
+  update?: boolean;
 }
 
 export interface SentExample {

@@ -68,8 +68,8 @@ export function qs(params: Record<string, string | number | boolean | undefined 
 // ---- types ----------------------------------------------------------------
 // Types that match the API contract come from api-types.gen.ts (cargo xtask contracts).
 
-import type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
-export type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, Approval };
+import type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
+export type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, Approval };
 
 // Hand-written types: narrower than the contract or shaped for the UI.
 
@@ -211,6 +211,8 @@ export interface Finding {
   issue?: IssueType;
   retest?: Retest | null;
   duplicates?: number;
+  /** Issues created for it in Jira, GitHub or GitLab. */
+  issue_links?: IssueLink[];
   /** Model-written explanation and fix (Markdown), if someone asked for one. */
   explanation?: string;
 }

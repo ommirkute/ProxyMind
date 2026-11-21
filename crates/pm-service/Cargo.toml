@@ -56,3 +56,4 @@ workspace = true
 flate2 = "1.1.10"
 pm-demo = { path = "../pm-demo" }
 rusqlite = { version = "0.41", features = ["bundled"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }

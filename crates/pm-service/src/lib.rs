@@ -32,6 +32,10 @@ mod group;
 mod hidden_paths;
 mod history;
 mod identity;
+mod integration_events;
+mod integration_payload;
+mod integration_send;
+mod integrations;
 mod intercept;
 mod login_record;
 pub mod mcp_args;
@@ -94,6 +98,15 @@ pub use group::{GroupItem, GroupItemResult, GroupMode, GroupRequest, GroupResult
 pub use hidden_paths::JsSweep;
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
+pub use integration_payload::{
+    WEBHOOK_VERSION, WebhookCount, WebhookData, WebhookFinding, WebhookIssue, WebhookLink, WebhookPayload,
+    WebhookProof, WebhookScan, WebhookSummary, WebhookTop,
+};
+pub use integrations::{
+    DEFAULT_RATE, DeliveriesQuery, HeaderInput, INTEGRATIONS_SETTING, Integration, IntegrationEnabledBody,
+    IntegrationEvent, IntegrationInput, IntegrationKind, IntegrationName, IntegrationTuning, IntegrationView,
+    IssueLink, LastError, MAX_INTEGRATIONS, MAX_RATE, SecretStatus, SendFindingBody,
+};
 pub use intercept::InterceptState;
 pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use memory::{FindingVerdict, MEMORY_KINDS, Memory};
@@ -234,6 +247,8 @@ pub struct Service {
     workflows: parking_lot::Mutex<workflow_service::Runtime>,
     /// Limits of a `proxymind ci` run: request and time caps, and what a project file may not change.
     run_guard: parking_lot::Mutex<ci::RunGuard>,
+    /// Integrations (roadmap 3.5): trust without a home, rate buckets, sends in flight, the sender.
+    integrations: parking_lot::Mutex<integrations::Runtime>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -404,6 +419,7 @@ impl Service {
             bus,
             workflows: parking_lot::Mutex::default(),
             run_guard: parking_lot::Mutex::default(),
+            integrations: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
         Ok(svc)

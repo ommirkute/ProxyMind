@@ -212,6 +212,28 @@ try {
   const browserPath = exe ?? chromium.executablePath();
   if (existsSync(browserPath)) process.env.PROXYMIND_CHROMIUM ??= browserPath;
   const [shop, proxy, ui] = [await freePort(), await freePort(), await freePort()];
+  // Receivers for the integrations section: a webhook, and a GitHub that creates issues. They record what they get.
+  const [hookPort, ghPort] = [await freePort(), await freePort()];
+  const hookGot = [];
+  const ghGot = [];
+  const receiver = (log, port, answer) =>
+    http
+      .createServer((req, res) => {
+        let body = "";
+        req.on("data", (d) => (body += d));
+        req.on("end", () => {
+          log.push({ method: req.method, url: req.url, headers: req.headers, body });
+          const [code, out] = answer(req);
+          res.writeHead(code, { "content-type": "application/json" });
+          res.end(out);
+        });
+      })
+      .listen(port, "127.0.0.1");
+  const receivers = [
+    receiver(hookGot, hookPort, () => [200, "{}"]),
+    receiver(ghGot, ghPort, (r) =>
+      r.method === "POST" ? [201, JSON.stringify({ number: 42, html_url: "https://github.com/acme/app/issues/42" })] : [200, JSON.stringify({ full_name: "acme/app" })]),
+  ];
   start(["demo-target", "--listen", `127.0.0.1:${shop}`]);
   writeFileSync(join(dir, "roe.yaml"), `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
   pm("roe", "use", join(dir, "roe.yaml"));
@@ -387,6 +409,51 @@ try {
     check(await page.locator('[data-testid="authz-results"]').first().textContent().then((t) => t.includes("denied")), "anonymous is denied");
 
     await page.screenshot({ path: join(SHOTS, "3-authz.png") });
+  });
+
+  const HOOK_SECRET = "e2e-signing-secret-0123456789";
+  const GH_TOKEN = "ghp_e2eTokenValue0123456789abcdef";
+  await section("Integrations: set up a webhook and a GitHub repository", async () => {
+    await open("integrations");
+    await page.getByTestId("add-integration").click();
+    await page.getByLabel("Integration kind").selectOption("webhook");
+    await page.getByLabel("Integration name").fill("e2e-hook");
+    await page.getByLabel("Integration URL").fill(`http://127.0.0.1:${hookPort}/hook`);
+    await page.getByLabel("Integration signing secret").fill(HOOK_SECRET);
+    await page.getByLabel("Event Finding proven").check();
+    await page.getByTestId("save-integration").click();
+    await page.getByTestId("integration-e2e-hook").waitFor();
+    // Private destinations are off by default: the first test is refused, and nothing reaches the receiver.
+    await page.getByTestId("send-test-e2e-hook").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="integration-error"]')?.textContent?.includes("private or loopback"));
+    check(hookGot.length === 0, "a loopback destination is refused until it is allowed for that integration");
+    await page.getByRole("button", { name: "Edit" }).click();
+    await page.getByLabel("Allow private destinations").check();
+    await page.getByTestId("save-integration").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="integration-e2e-hook"]')?.textContent?.includes("private destinations allowed"));
+    await page.getByTestId("send-test-e2e-hook").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-hook"]')?.textContent?.includes("test"));
+    for (let i = 0; i < 50 && !hookGot.length; i++) await sleep(100);
+    check(hookGot.length === 1 && JSON.parse(hookGot[0].body).event === "test", "Send test posts a test event to the webhook");
+    const sig = "sha256=" + createHmac("sha256", HOOK_SECRET).update(hookGot[0].body).digest("hex");
+    check(hookGot[0].headers["x-proxymind-signature"] === sig, "the test event is signed with HMAC-SHA256 over the body");
+    check(!(await page.content()).includes(HOOK_SECRET), "the signing secret is never shown in the page");
+    check((await page.getByTestId("integration-e2e-hook").textContent()).includes("signing_secret: saved"), "the page says where the secret is kept");
+
+    await page.getByTestId("add-integration").click();
+    await page.getByLabel("Integration kind").selectOption("github");
+    await page.getByLabel("Integration name").fill("e2e-gh");
+    await page.getByLabel("Integration URL").fill(`http://127.0.0.1:${ghPort}`);
+    await page.getByLabel("Integration project").fill("acme/app");
+    await page.getByLabel("Integration token").fill(GH_TOKEN);
+    await page.getByLabel("Allow private destinations").check();
+    await page.getByTestId("save-integration").click();
+    await page.getByTestId("integration-e2e-gh").waitFor();
+    await page.getByTestId("send-test-e2e-gh").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-gh"]')?.textContent?.includes("test"));
+    check(ghGot.length === 1 && ghGot[0].url === "/repos/acme/app" && ghGot[0].headers.authorization === `Bearer ${GH_TOKEN}`, "the GitHub test reads the repository with the token");
+    check(!(await page.content()).includes(GH_TOKEN), "the token is never shown in the page");
+    await page.screenshot({ path: join(SHOTS, "integrations.png") });
   });
 
   await section("Findings and proof", async () => {
@@ -2081,6 +2148,33 @@ match:
     await page.getByLabel("Workflow on each result").selectOption("");
   });
 
+  await section("Integrations: delivery of a proven finding, and an issue on GitHub", async () => {
+    // The IDOR was proven earlier; the webhook subscribed to "finding proven" got it, redacted and signed.
+    for (let i = 0; i < 50 && !hookGot.some((g) => JSON.parse(g.body).event === "finding_proven"); i++) await sleep(100);
+    const proven = hookGot.find((g) => JSON.parse(g.body).event === "finding_proven");
+    check(!!proven, "the webhook got the finding_proven event");
+    const p = JSON.parse(proven.body);
+    check(p.v === 1 && p.data.finding.status === "proven" && p.data.finding.title === "Any user can read any order", "the payload is version 1 and describes the finding");
+    check(proven.headers["x-proxymind-signature"] === "sha256=" + createHmac("sha256", HOOK_SECRET).update(proven.body).digest("hex"), "the finding event is signed");
+    const leak = proven.body.match(/.{0,40}(session=|Authorization:|Bearer ).{0,40}/i);
+    check(!leak, `no cookie or token is in the payload${leak ? `: ${leak[0]}` : ""}`);
+    await open("integrations");
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-hook"]')?.textContent?.includes("finding_proven"));
+    check(true, "the delivery log lists the finding_proven delivery");
+
+    await open("findings");
+    await page.getByTestId("findings").getByText("Any user can read any order").click();
+    await page.getByTestId("create-issue").click();
+    await page.waitForSelector('[data-testid="issue-link"]');
+    check((await page.getByTestId("issue-link").textContent()).includes("#42"), "the finding shows the created issue's key");
+    check((await page.getByTestId("issue-link").locator("a").getAttribute("href")) === "https://github.com/acme/app/issues/42", "and links to it");
+    const created = ghGot.find((g) => g.method === "POST");
+    check(created?.url === "/repos/acme/app/issues" && created.headers.authorization === `Bearer ${GH_TOKEN}`, "GitHub got POST /repos/acme/app/issues with the token");
+    const issue = JSON.parse(created.body);
+    check(issue.title.includes("Any user can read any order") && issue.body.includes("### Reproduction") && !/(session=|Bearer |Authorization: )(?!\{\{secret:)/i.test(issue.body), "the issue has the reproduction and no raw credentials");
+    check((await page.getByTestId("create-issue").textContent()).includes("Update issue"), "sending again offers an update, not a duplicate");
+  });
+
   // ADR-0018: no live page polls. The built bundle must not call setInterval at all. A polling setTimeout chain
   // cannot be told from a debounce in minified code, so it is checked two other ways: the sections above run with
   // the page's timers frozen, and the sources may call setTimeout only in the files below, each a one-shot (toast
@@ -2113,6 +2207,7 @@ match:
   failures++;
 } finally {
   for (const c of children) c.kill();
+  for (const r of typeof receivers === "undefined" ? [] : receivers) r.close();
 }
 console.log(failures ? `\n${failures} check(s) failed` : `\nAll UI checks passed. Screenshots: ${SHOTS}`);
 process.exit(failures ? 1 : 0);

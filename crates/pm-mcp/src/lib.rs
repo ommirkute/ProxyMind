@@ -426,6 +426,36 @@ mod tests {
         assert!(svc.workflow_runs(&Actor::parse("agent:other").unwrap(), None, 10).unwrap().is_empty());
     }
 
+    /// Agents learn integration names and kinds only, and no tool lets them configure, test or send.
+    #[tokio::test]
+    async fn agents_list_integration_names_but_cannot_use_them() {
+        use pm_service::{IntegrationInput, IntegrationKind};
+        let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://app.example.com/\"]\n").unwrap();
+        let svc = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(roe)).unwrap());
+        svc.integration_set(
+            &Actor::parse("human:omkar").unwrap(),
+            "hook",
+            IntegrationInput {
+                name: "hook".into(),
+                kind: IntegrationKind::Webhook,
+                base_url: "https://hooks.internal.example/secret-path".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let s = McpServer::new(svc, Actor::parse("agent:test").unwrap());
+        let call =
+            |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}});
+        let r = s.handle(call("integration_list")).await.unwrap();
+        let t = r["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(r["result"]["isError"] == false && t.contains("\"hook\"") && t.contains("webhook"), "{t}");
+        assert!(!t.contains("hooks.internal") && !t.contains("secret-path"), "{t}");
+        for name in ["integration_set", "integration_test", "integration_send", "finding_issue"] {
+            let r = s.handle(call(name)).await.unwrap();
+            assert_eq!(r["result"]["isError"], true, "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn skills_are_prompts_and_tools() {
         let s = server();

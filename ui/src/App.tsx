@@ -16,6 +16,7 @@ import Approvals from "./pages/Approvals";
 import Assistant from "./pages/Assistant";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
+import Integrations from "./pages/Integrations";
 import Network from "./pages/Network";
 import About, { type UpdateStatus } from "./pages/About";
 import Findings from "./pages/Findings";
@@ -82,7 +83,7 @@ const GROUPS: Group[] = [
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
   { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "checks", label: "Custom checks" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "about", label: "About & updates" }] },
+  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "integrations", label: "Integrations" }, { id: "about", label: "About & updates" }] },
 ];
 
 const PAGES = GROUPS.flatMap((g) => g.pages);
@@ -234,6 +235,7 @@ export default function App() {
     evidence: Evidence,
     audit: Audit,
     network: Network,
+    integrations: Integrations,
     collaborator: Collaborator,
     engage: Engage,
     search: Search,

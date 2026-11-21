@@ -620,6 +620,13 @@ pub fn tool_definitions() -> Vec<Value> {
              the result. Returns each one's id, name, what it is for, the kinds of its steps and whether it runs by \
              itself on new traffic. Sends nothing. Read one with workflow_get, run one with workflow_run.",
         ),
+        typed_tool::<NoArgs>(
+            "integration_list",
+            "The names and kinds of the project's integrations (Jira, GitHub, GitLab, Slack, webhook) and whether \
+             each one is on, so you can tell a person which tracker findings can go to. Returns no address, project \
+             or secret. You cannot configure integrations, test them or send findings to them: a person does that \
+             from the Integrations page or `proxymind integration`.",
+        ),
         typed_tool::<WorkflowRefArgs>(
             "workflow_get",
             "One workflow's steps: the tests of each match and assert, what each extract reads, each transform's \
@@ -1094,6 +1101,10 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "finding_list" => {
             let g: FindingListArgs = args(a)?;
             service.finding_list(g.status.as_deref()).map(to_json).map_err(|e| e.to_string())
+        }
+        "integration_list" => {
+            args::<NoArgs>(a)?;
+            service.integration_names().map(to_json).map_err(|e| e.to_string())
         }
         "workflow_list" => {
             args::<NoArgs>(a)?;

@@ -128,6 +128,7 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("issue_library", generated::<IssueLibraryArgs>()),
         ("finding_list", generated::<FindingListArgs>()),
         ("workflow_list", generated::<NoArgs>()),
+        ("integration_list", generated::<NoArgs>()),
         ("workflow_get", generated::<WorkflowRefArgs>()),
         ("workflow_run", generated::<WorkflowRunRequest>()),
         ("approval_status", generated::<ApprovalStatusArgs>()),
@@ -181,7 +182,7 @@ fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
 #[test]
 fn no_tool_input_schema_needs_ref_resolution() {
     let tools = pm_mcp::tool_definitions();
-    assert_eq!(tools.len(), 86);
+    assert_eq!(tools.len(), 87);
     for t in &tools {
         if let Some(key) = contains_ref(&t["inputSchema"]) {
             panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);
@@ -222,6 +223,7 @@ fn tools_without_arguments_have_an_empty_object_schema() {
         "plugin_list",
         "authz_candidates",
         "workflow_list",
+        "integration_list",
     ] {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();
         assert_eq!(

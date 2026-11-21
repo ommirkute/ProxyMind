@@ -543,8 +543,12 @@ mod tests {
         }
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch("DROP TABLE workflow_runs; DROP TABLE stream_chunks; DROP TABLE streams;").unwrap();
-            conn.pragma_update(None, "user_version", (crate::MIGRATIONS.len() - 2) as i64).unwrap();
+            conn.execute_batch(
+                "DROP TABLE integration_deliveries; ALTER TABLE findings DROP COLUMN issue_links;
+                 DROP TABLE workflow_runs; DROP TABLE stream_chunks; DROP TABLE streams;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", (crate::MIGRATIONS.len() - 3) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         assert_eq!(s.get_setting("keep").unwrap().as_deref(), Some("me"));

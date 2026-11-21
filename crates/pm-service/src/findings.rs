@@ -97,6 +97,11 @@ fn decode(row: &serde_json::Map<String, Value>) -> Value {
         Some(t) if !t.is_empty() => serde_json::from_str(t).unwrap_or(Value::Null),
         _ => Value::Null,
     };
+    // Issues created for it in Jira, GitHub or GitLab (`IssueLink`s); always a list.
+    v["issue_links"] = match row.get("issue_links").and_then(Value::as_str) {
+        Some(t) if !t.is_empty() => serde_json::from_str(t).unwrap_or(json!([])),
+        _ => json!([]),
+    };
     if let Some(i) = row.get("vuln_class").and_then(Value::as_str).and_then(pm_scan::library::lookup) {
         v["issue"] = json!(i);
     }
