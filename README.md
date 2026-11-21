@@ -288,6 +288,7 @@ crates/
   pm-ledger    hypotheses and coverage
   pm-plugin    plugins: protocols, sandbox, signatures
   pm-vault     sealed (encrypted) project files
+  pm-accounts  accounts, sessions and second factors for the project server (not wired in yet)
   pm-ai        model views, redaction, untrusted-content tagging
   pm-service   the one service layer
   pm-api       REST API and live events; serves the web UI

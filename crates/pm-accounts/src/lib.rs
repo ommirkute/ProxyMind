@@ -1,0 +1,55 @@
+//! Accounts of ProxyMind's own users (ADR-0022, step 3): who they are, how they prove it, and the sessions that follow.
+//!
+//! This crate has **no HTTP and no knowledge of projects beyond ids**. `pm-api` (step 4) turns requests into calls
+//! here; `pm-service` (step 6) turns a validated session into a `Principal`. It depends on neither, nor on any other
+//! ProxyMind crate. Accounts are *not* the test identities of `pm-identity`.
+//!
+//! * **Storage:** `server.db` (SQLite, WAL, append-only migrations), separate from every project file.
+//! * **Server key:** [`ServerKey`], 32 bytes in `server.key`; HKDF-SHA256 derives a key per [`KeyPurpose`].
+//! * **Passwords:** Argon2id PHC strings, upgraded at login when the stored cost is below the current one.
+//!   Unknown users cost the same: a dummy hash is verified and the failure looks identical.
+//! * **Second factor:** TOTP (RFC 6238; secret encrypted with ChaCha20-Poly1305, user id as associated data, a used
+//!   step is never accepted twice) or a single-use recovery code. Owners, server admins and testers must have one
+//!   (viewers too unless [`Config::allow_password_only_viewers`]); passkeys (step 7) will be a third kind of credential.
+//! * **Sessions:** random 256-bit ids returned once, stored as HMAC-SHA256; idle 8 h and absolute 7 d by default;
+//!   rotation invalidates the old id; revocation takes effect at the next validation.
+//! * **Throttling:** per account (by the claimed handle, so unknown names are throttled the same) and per address,
+//!   with exponential back-off; never a permanent lock.
+//! * **Invite only:** an account is created by accepting an invite, or by bootstrapping the first owner with a
+//!   one-time setup token. `reset_owner` (local console) is the recovery path.
+//! * **Security log:** every account event goes to an append-only, HMAC-chained table; never a secret.
+//!
+//! Everything here trusts its caller to have authenticated *the caller*: functions that act on behalf of a user
+//! (`create_invite`, `set_membership`, …) take the acting user's id and check what they can, but deciding who the
+//! acting user is belongs to the layer above.
+
+mod audit;
+mod clock;
+mod error;
+mod key;
+mod login;
+mod migrations;
+mod model;
+mod password;
+mod sessions;
+mod store;
+mod throttle;
+mod totp;
+mod users;
+mod util;
+
+#[cfg(test)]
+mod tests;
+
+pub use clock::{Clock, ManualClock, SystemClock};
+pub use error::{AccountError, Result};
+pub use key::{KeyPurpose, ServerKey};
+pub use model::{
+    ClientInfo, InviteInfo, LoginStep, LoginSuccess, Membership, NewInvite, NewSession, Role, SecurityEvent,
+    SessionInfo, SetupToken, TotpEnrolment, User, UserStatus,
+};
+pub use password::{Argon2Cost, check_policy as check_password_policy};
+pub use store::{Accounts, Config};
+pub use throttle::ThrottleConfig;
+pub use totp::{hotp, totp};
+pub use util::Secret;

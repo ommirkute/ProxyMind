@@ -379,6 +379,42 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
 3. **`pm-accounts`: users, passwords, TOTP, sessions, throttling,** with its own migrations and `server.db`. No HTTP yet.
    Test: Argon2 parameter upgrade at login, constant behaviour for unknown users, TOTP replay refused, recovery codes
    single use, throttle back-off, session expiry and rotation.
+
+   *Done 2026-11-21.* `crates/pm-accounts` (depends on no other ProxyMind crate; `ring`, `argon2` as in `pm-vault`,
+   `rusqlite` as in `pm-store`): `server.db` with append-only migrations (one so far), `ServerKey` (`server.key`, 0600,
+   HKDF-SHA256 subkeys per purpose), users, invites and the one-time bootstrap and `reset_owner`, Argon2id passwords with
+   upgrade at login and a dummy verification for unknown users, TOTP (own HOTP/TOTP on ring's HMAC; RFC 4226 and 6238
+   vectors tested) with replay protection, recovery codes, the login flow (`login_password`, `login_second_factor`,
+   `EnrolmentRequired`/`finish_enrolment`), sessions (hash only, idle and absolute expiry, rotation, revocation),
+   per-account and per-address throttling, minimal `memberships`, and a chained security log. 48 tests in the crate.
+   Deviations and decisions, on purpose:
+   - **Password blocklist:** a short hand-written list of common 12+ character passwords, plus "not the username, not
+     one character repeated", instead of a bundled large list (no list with a suitable licence is vendored yet; the
+     check is one function and the list can grow without an API change).
+   - **Pending sign-in token:** the password step returns a 5-minute token (stored as an HMAC, five attempts) for the
+     second factor, and for first enrolment (`EnrolmentRequired`), which is how an owner with no second factor yet
+     finishes setup. `bootstrap_owner` therefore makes a server admin who cannot sign in until a second factor exists.
+     A holder of only the password of an account that has *no* second factor yet can enrol one first; invited users
+     must therefore enrol straight after accepting their invite (the UI in step 4 does it in one flow). Admins clear a
+     lost factor with `reset_second_factor`; there is no enrolment-link table yet (step 4 or 7).
+   - **`credentials` is one generic table** (kind `password|totp|passkey|oidc`, `external_id`, `secret`, `counter`,
+     `meta`), as the Storage section says, so passkeys (step 7) and OIDC links (step 8) need no schema change. `tokens`,
+     `oidc_providers` and `checkpoints` come with their steps.
+   - **Audit key:** `pm-accounts` does not depend on `pm-policy`; it exposes `ServerKey::derive(KeyPurpose::AuditChain)`
+     (and `ApiToken` for step 5) and `pm-service` builds `pm_policy::audit::HmacKey::new(&bytes)` from it.
+   - **Security log** (`security_audit`): HMAC-SHA256 chain under the audit-chain key. No signed checkpoints yet, so a
+     deleted tail is not detected (with the project log's checkpoints, step 4 or later).
+   - **Roles:** `memberships` (project id, user, owner|tester|viewer) are stored and a demotion or removal ends the
+     user's sessions; what a role may do is `pm-service`'s table (step 6). `server_admin` is a column on `users`.
+     Invites may be created by an active server admin, or by an owner of the invite's project.
+   - **Throttling:** the account counter is keyed by an HMAC of the *claimed* handle (unknown names are throttled the
+     same and the table holds no names); the address counter is not reset by a success, so a valid login of the
+     attacker cannot clear it; both fade after an hour. The semaphore on concurrent hashes is a small `Gate` in
+     `password.rs` (default 4).
+   - **Not yet:** the HTTP layer, cookies and CSRF (step 4), the "fresh login within 10 minutes" check (sessions record
+     `authenticated_at`; the check is step 4's), `Principal::session_id` plumbing (step 6), `PROXYMIND_SERVER_KEY` and the
+     OS keychain as key sources (the `from_hex` constructor is there; the server home decides), the CLI
+     (`proxymind server reset-owner` calls `Accounts::reset_owner`).
 4. **Server mode in `pm-api`.** `proxymind serve --accounts`: session middleware replacing the token guard when accounts
    are on, cookies, CSRF layers, `allowed_hosts`, the setup page and bootstrap, TLS (own certificate, behind proxy,
    self-signed with pinning), refusal to listen beyond loopback without TLS. Test: route matrix without a session is 401,

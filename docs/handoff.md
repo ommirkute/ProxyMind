@@ -60,6 +60,7 @@ Rules that shape everything (ADR-0005, CLAUDE.md):
 | `pm-scan` | Passive checks (pure) over one exchange, and active checks: insertion points, probes, analysis | `lib.rs`, `active.rs` |
 | `pm-plugin` | Plugin manifests, the per-user registry, the passive and active JSON-lines protocols, the sandboxed runner | `lib.rs`, `active.rs`, `sandbox.rs` |
 | `pm-vault` | Passphrase sealing of project files (Argon2id, chunked ChaCha20-Poly1305) | `lib.rs` |
+| `pm-accounts` | Accounts of ProxyMind's own users for the project server (ADR-0022 step 3; not wired in yet, no HTTP): `server.db`, `ServerKey`, invites and bootstrap, Argon2id passwords, TOTP, recovery codes, login flow, sessions, throttling, memberships, chained security log. Depends on no other ProxyMind crate; not the test identities of `pm-identity` | `lib.rs` (overview), `store.rs`, `login.rs`, `sessions.rs`, `users.rs`, `throttle.rs`, `migrations.rs`, `tests.rs` |
 | `pm-crawl` | Crawler logic (pure): HTML links/forms, robots.txt, sitemaps, risky-link filter, frontier | `lib.rs` |
 | `pm-fuzz` | Fuzzer logic (pure): § positions, attack modes, payload sets, anomaly detection | `lib.rs` |
 | `pm-proof` | Oracles: differential authz, timing (Mann-Whitney), OAST, reflection (XSS verdict, payload templates) | `lib.rs` |
