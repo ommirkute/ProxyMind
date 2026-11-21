@@ -358,9 +358,24 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    outside `access.rs`) and the test that every `Perm` is used. Not yet done from the Authorization section: a `require`
    at the top of every public method (the scan that enforces it, and the matrix test, come with step 6, when roles
    become real), and the `Principal` fields `user_id`, `project`, `token_id`, `session_id`.
-2. **Audit v2.** Migration adding the nullable columns; record version 2 with user, token, project, session and address;
+2. **Audit v2. Done 2026-11-21** (see the note below this step). Migration adding the nullable columns; record version 2 with user, token, project, session and address;
    `verify` handles v1 and v2; keyed chain and signed checkpoints for server mode behind a feature of the service. Test:
    old logs verify; truncating the tail is detected with a checkpoint; a v2 record with a changed `user_id` fails.
+
+   *Done 2026-11-21.* Migration 26; version 2 records hash `principal_kind`, `user_id`, `token_id`, `project_id`,
+   `session_id` and `client_addr` (canonical serialization in the `pm_policy::audit` module doc); `Principal` gained
+   `user_id`, `token_id`, `session_id` and `client_addr` (all `None` in single-user mode) and `audit_context()`.
+   Deviations from the text above, on purpose: the keyed chain is **HMAC-SHA256 over each record's hash** (ring, as
+   for tokens) stored in a `mac` column, not `blake3::keyed_hash`, so the plain hash stays verifiable without the key
+   and verification without the key says the key check was skipped; once a record is keyed every later one must be.
+   The key is an `AuditKey` handed in by the caller (`Service::set_audit_security`); deriving it from `server.key` is
+   step 3. Checkpoints (`pm_policy::checkpoint`) are Ed25519 (the evidence packs' primitives) over sequence, head
+   hash, time and project id; they are stored in the project's `audit_checkpoints` table and exported as JSON
+   (`proxymind audit checkpoint -o`, `verify --checkpoint`, evidence packs). Automatic checkpoints every N records
+   happen only when the server calls `set_audit_security` with a signing key (the ADR's hourly and on-shutdown
+   schedule is the server's to add). Single-user mode: on demand only, signed with `<home>/audit-checkpoint-key.pk8`.
+   Not done: nothing yet supplies the client address, and the server security log is step 3. Tests:
+   `crates/pm-service/tests/audit_v2.rs` and `pm-policy` unit tests.
 3. **`pm-accounts`: users, passwords, TOTP, sessions, throttling,** with its own migrations and `server.db`. No HTTP yet.
    Test: Argon2 parameter upgrade at login, constant behaviour for unknown users, TOTP replay refused, recovery codes
    single use, throttle back-off, session expiry and rotation.

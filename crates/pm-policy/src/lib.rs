@@ -6,6 +6,7 @@
 //! cannot positively place in scope is refused.
 
 pub mod audit;
+pub mod checkpoint;
 pub mod payload;
 pub mod ratelimit;
 pub mod roe;
@@ -31,6 +32,10 @@ pub enum PolicyError {
     Actor(String),
     #[error("audit log is broken at record {seq}: {why}")]
     AuditBroken { seq: i64, why: &'static str },
+    #[error("audit checkpoint: {0}")]
+    Checkpoint(String),
+    #[error("audit key: {0}")]
+    AuditKey(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

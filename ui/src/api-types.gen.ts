@@ -286,17 +286,77 @@ export interface AttackView {
   total: number;
 }
 
-/** One audit log entry. Hashing and verification live in `pm-policy`. */
+/** How the checkpoints fared. */
+export interface AuditCheckpointStatus {
+  /** The newest checkpoint's signer. */
+  fingerprint: string | null;
+  /** The newest checkpoint's record count and time. */
+  latest_seq: number | null;
+  latest_ts_ms: number | null;
+  problems: string[];
+  /**
+   * Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the
+   * signatures only prove the checkpoint was not altered, not who made it.
+   */
+  signer_pinned: boolean;
+  /** `none` (no checkpoint to check), `ok` or `failed`. */
+  status: string;
+  /** Checkpoints stored in the project, and checkpoints supplied from files. */
+  stored: number;
+  supplied: number;
+}
+
+/**
+ * One audit log entry. Hashing and verification live in `pm-policy`.
+ *
+ * Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+ * `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+ * written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
+ */
 export interface AuditRecord {
   action: string;
   actor: string;
+  /** The client's IP address, when known. Version 2. */
+  client_addr?: string | null;
   decision: string;
   /** JSON text describing the action. */
   detail: string;
   hash: number[];
+  /** HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash. */
+  mac?: string | null;
   prev_hash: number[];
+  /** How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2. */
+  principal_kind?: string | null;
+  /** The project's id (setting `project_id`). Version 2. */
+  project_id?: string | null;
   seq: number;
+  /** The first 8 bytes (hex) of the stored hash of the session id. Version 2. */
+  session_id?: string | null;
+  /** The id of the token used (never the secret). Version 2. */
+  token_id?: string | null;
   ts_ms: number;
+  /** The stable account id (`u_...`) of the person; None in single-user mode. Version 2. */
+  user_id?: string | null;
+  /** Record version: 1 (original) or 2 (with context). Left out of JSON when 1. */
+  version?: number;
+}
+
+/** The result of checking the audit log. */
+export interface AuditVerification {
+  checkpoints: AuditCheckpointStatus;
+  error?: string | null;
+  /** Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later). */
+  head: string;
+  /** The chain, the key (when one applies) and the checkpoints all passed. */
+  intact: boolean;
+  /** `verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`. */
+  key_check: string;
+  /** The key check in words. */
+  key_note: string;
+  keyed_records: number;
+  records: number;
+  v1_records: number;
+  v2_records: number;
 }
 
 /**
@@ -509,6 +569,21 @@ export interface Check {
 export interface CheckYaml {
   /** The check, as YAML. */
   yaml: string;
+}
+
+export interface Checkpoint {
+  format: string;
+  /** Hex of the newest record's hash. */
+  head: string;
+  /** The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project. */
+  project_id?: string | null;
+  /** Hex of the Ed25519 public key that signed it. */
+  public_key: string;
+  /** How many records the log had (the newest one's sequence number). */
+  seq: number;
+  /** Hex of the signature over [`Checkpoint::message`]. */
+  signature: string;
+  ts_ms: number;
 }
 
 export interface Clickjacking {

@@ -10,6 +10,7 @@ pub mod api_types;
 mod approvals;
 mod assistant;
 mod attack_paths;
+mod audit_log;
 mod authz;
 mod authz_matrix;
 mod auto;
@@ -79,6 +80,10 @@ mod ws_replay;
 pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor, scan_of, worker_actor};
 pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind, ToolProfile};
 pub use attack_paths::{AttackGraph, AttackPath, AttackStep, GraphEdge, GraphNode, NewAttackPath};
+pub use audit_log::{
+    AuditCheckpointStatus, AuditSecurity, AuditVerification, AuditVerifyOptions, CHECKPOINT_KEY_FILE,
+    checkpoint_signer_public, verify_audit_report,
+};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use authz_matrix::{AuthzMatrix, AuthzMatrixRequest, MatrixCell, MatrixFlag, MatrixRow};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
@@ -227,6 +232,8 @@ pub struct Service {
     smtp_listening: std::sync::OnceLock<std::net::SocketAddr>,
     /// The user's home directory, whose plugin registry is read when used.
     plugin_home: std::sync::OnceLock<std::path::PathBuf>,
+    /// Keyed chain and signed checkpoints (server mode); the default is neither.
+    audit_security: parking_lot::RwLock<audit_log::AuditSecurity>,
     /// The proxy's plugin hook engine (ADR-0020), when this process runs the proxy.
     hook_engine: std::sync::OnceLock<std::sync::Arc<pm_plugin::hooks::HookEngine>>,
     /// Recent Fuzzer attacks (running ones keep going in the background).
@@ -418,6 +425,7 @@ impl Service {
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             plugin_home: std::sync::OnceLock::new(),
+            audit_security: parking_lot::RwLock::default(),
             hook_engine: std::sync::OnceLock::new(),
             oast_listening: std::sync::OnceLock::new(),
             smtp_listening: std::sync::OnceLock::new(),
@@ -499,17 +507,10 @@ impl Service {
         self.policy.evaluate(req, jiff::Timestamp::now())
     }
 
+    /// Appends one audit record with the single-user context (`local`, this project). See
+    /// [`Service::audit_with`] for a record that names a user, token, session or address.
     fn audit(&self, actor: &str, action: &str, detail: Value, decision: &str) -> Result<()> {
-        // One write closure: the read of the last record and the append must not interleave with another audit.
-        // Published after the write returned, i.e. after COMMIT.
-        let seq = self.store.write(|store| {
-            let prev = store.last_audit()?;
-            let rec = audit::next_record(prev.as_ref(), now_ms(), actor, action, &detail, decision);
-            store.append_audit(&rec)?;
-            Ok::<u64, anyhow::Error>(rec.seq as u64)
-        })?;
-        self.publish(Event::AuditAppended { seq });
-        Ok(())
+        self.audit_with(None, actor, action, detail, decision)
     }
 
     fn detail(req: &ActionRequest, params: &Value, verdict: &Verdict) -> Value {
@@ -602,8 +603,14 @@ impl Service {
         Ok(r)
     }
 
+    /// Checks the whole audit log (chain, key when one is set, stored checkpoints); the number of records.
     pub fn audit_verify(&self) -> Result<usize> {
-        self.store.read(verify_audit)
+        let v = self.audit_verify_report(Vec::new(), None);
+        if v.intact {
+            Ok(v.records)
+        } else {
+            Err(ServiceError::Store(anyhow::anyhow!(v.error.unwrap_or_else(|| "audit log failed verification".into()))))
+        }
     }
 
     /// The raw bytes of an exchange as text, for humans (no redaction).

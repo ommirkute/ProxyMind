@@ -301,8 +301,25 @@ class AttackView(_AttackViewRequired, total=False):
     note: _t.Optional[str]
 
 
-class AuditRecord(TypedDict):
-    """One audit log entry. Hashing and verification live in `pm-policy`."""
+class AuditCheckpointStatus(TypedDict):
+    """How the checkpoints fared."""
+    # The newest checkpoint's signer.
+    fingerprint: _t.Optional[str]
+    # The newest checkpoint's record count and time.
+    latest_seq: _t.Optional[int]
+    latest_ts_ms: _t.Optional[int]
+    problems: _t.List[str]
+    # Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the
+    # signatures only prove the checkpoint was not altered, not who made it.
+    signer_pinned: bool
+    # `none` (no checkpoint to check), `ok` or `failed`.
+    status: str
+    # Checkpoints stored in the project, and checkpoints supplied from files.
+    stored: int
+    supplied: int
+
+
+class _AuditRecordRequired(TypedDict):
     action: str
     actor: str
     decision: str
@@ -312,6 +329,52 @@ class AuditRecord(TypedDict):
     prev_hash: _t.List[int]
     seq: int
     ts_ms: int
+
+
+class AuditRecord(_AuditRecordRequired, total=False):
+    """One audit log entry. Hashing and verification live in `pm-policy`.
+
+    Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+    `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+    written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
+    """
+    # The client's IP address, when known. Version 2.
+    client_addr: _t.Optional[str]
+    # HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.
+    mac: _t.Optional[str]
+    # How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.
+    principal_kind: _t.Optional[str]
+    # The project's id (setting `project_id`). Version 2.
+    project_id: _t.Optional[str]
+    # The first 8 bytes (hex) of the stored hash of the session id. Version 2.
+    session_id: _t.Optional[str]
+    # The id of the token used (never the secret). Version 2.
+    token_id: _t.Optional[str]
+    # The stable account id (`u_...`) of the person; None in single-user mode. Version 2.
+    user_id: _t.Optional[str]
+    # Record version: 1 (original) or 2 (with context). Left out of JSON when 1.
+    version: int
+
+
+class _AuditVerificationRequired(TypedDict):
+    checkpoints: "AuditCheckpointStatus"
+    # Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later).
+    head: str
+    # The chain, the key (when one applies) and the checkpoints all passed.
+    intact: bool
+    # `verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`.
+    key_check: str
+    # The key check in words.
+    key_note: str
+    keyed_records: int
+    records: int
+    v1_records: int
+    v2_records: int
+
+
+class AuditVerification(_AuditVerificationRequired, total=False):
+    """The result of checking the audit log."""
+    error: _t.Optional[str]
 
 
 class _AuthCheckRequired(TypedDict):
@@ -537,6 +600,24 @@ class CheckYaml(TypedDict):
     """Body of `POST /scan/custom-checks`."""
     # The check, as YAML.
     yaml: str
+
+
+class _CheckpointRequired(TypedDict):
+    format: str
+    # Hex of the newest record's hash.
+    head: str
+    # Hex of the Ed25519 public key that signed it.
+    public_key: str
+    # How many records the log had (the newest one's sequence number).
+    seq: int
+    # Hex of the signature over [`Checkpoint::message`].
+    signature: str
+    ts_ms: int
+
+
+class Checkpoint(_CheckpointRequired, total=False):
+    # The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project.
+    project_id: _t.Optional[str]
 
 
 class Clickjacking(TypedDict):

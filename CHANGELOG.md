@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Security
 
+- **The audit log records more context and can be checkpointed** (threat model F-6, ADR-0022 step 2). New audit
+  records (version 2) also carry who and where: the project, and, once accounts exist, the user, token, session and
+  client address; these are part of each record's hash, so changing any of them fails `proxymind audit verify`. Logs
+  from earlier versions still verify, and new records follow them in the same chain (the project file gets a schema
+  update, so an older ProxyMind will refuse to open it). `proxymind audit checkpoint -o FILE` writes a signed
+  checkpoint (record count, head hash, time) and `proxymind audit verify --checkpoint FILE` uses it to detect records
+  cut off the end or a log rewritten before it; `verify` now also reports version 1 and 2 counts, the key check and the
+  checkpoint status (also in the web UI's Audit log page and `GET /audit/verify`), and evidence packs include the
+  latest checkpoint when there is one. Honest limits: in single-user mode the checkpoint key lives in your home
+  folder, so code running as you can still sign a new one; keep the exported file somewhere it cannot write. A keyed
+  chain (HMAC under a key the file's writers do not hold) is built in for the project server and is off in single-user
+  mode.
+
 - **A project that came from somewhere else now opens in safe mode** (threat model F-2, ADR-0022 step 0). A project
   file can carry extra proxy listeners (even on `0.0.0.0`), upstream proxy rules, match-and-replace rules, scheduled
   scans, workflow triggers, session macros, a model server address and the rules of engagement that decide what counts

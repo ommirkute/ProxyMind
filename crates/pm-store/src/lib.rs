@@ -470,6 +470,30 @@ CREATE TABLE integration_deliveries (
 );
 CREATE INDEX integration_deliveries_by_name ON integration_deliveries(integration, id DESC);
 "#,
+    r#"
+-- Audit record version 2 (ADR-0022 step 2): who and where, hashed into the record (see pm-policy::audit for the
+-- canonical serialization). Existing rows keep version 1 and their old hash; the new columns are NULL for them.
+-- `mac` is the HMAC-SHA256 of the record's hash under the server's audit key (server mode only).
+ALTER TABLE audit_log ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE audit_log ADD COLUMN principal_kind TEXT;
+ALTER TABLE audit_log ADD COLUMN user_id TEXT;
+ALTER TABLE audit_log ADD COLUMN token_id TEXT;
+ALTER TABLE audit_log ADD COLUMN project_id TEXT;
+ALTER TABLE audit_log ADD COLUMN session_id TEXT;
+ALTER TABLE audit_log ADD COLUMN client_addr TEXT;
+ALTER TABLE audit_log ADD COLUMN mac BLOB;
+-- Signed checkpoints of the audit chain (head hash, count, time; Ed25519). `body` is the checkpoint's JSON as
+-- exported. Append-only like the log, but a copy kept outside the file is what survives someone who can write it.
+CREATE TABLE audit_checkpoints (
+    seq   INTEGER PRIMARY KEY,
+    ts_ms INTEGER NOT NULL,
+    body  TEXT NOT NULL
+);
+CREATE TRIGGER audit_checkpoints_no_update BEFORE UPDATE ON audit_checkpoints
+BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
+CREATE TRIGGER audit_checkpoints_no_delete BEFORE DELETE ON audit_checkpoints
+BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -560,6 +584,10 @@ pub struct ApprovalRow {
 }
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
+///
+/// Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+/// `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+/// written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AuditRecord {
     pub seq: i64,
@@ -573,6 +601,56 @@ pub struct AuditRecord {
     pub prev_hash: Vec<u8>,
     #[serde(serialize_with = "hex_bytes", deserialize_with = "from_hex")]
     pub hash: Vec<u8>,
+    /// Record version: 1 (original) or 2 (with context). Left out of JSON when 1.
+    #[serde(default = "version_one", skip_serializing_if = "is_version_one")]
+    pub version: u8,
+    /// How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_kind: Option<String>,
+    /// The stable account id (`u_...`) of the person; None in single-user mode. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// The id of the token used (never the secret). Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    /// The project's id (setting `project_id`). Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The first 8 bytes (hex) of the stored hash of the session id. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The client's IP address, when known. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_addr: Option<String>,
+    /// HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_hex_bytes",
+        deserialize_with = "opt_from_hex"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub mac: Option<Vec<u8>>,
+}
+
+fn version_one() -> u8 {
+    1
+}
+
+fn is_version_one(v: &u8) -> bool {
+    *v == 1
+}
+
+fn opt_hex_bytes<S: serde::Serializer>(b: &Option<Vec<u8>>, s: S) -> std::result::Result<S::Ok, S::Error> {
+    match b {
+        Some(b) => hex_bytes(b, s),
+        None => s.serialize_none(),
+    }
+}
+
+fn opt_from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<u8>>, D::Error> {
+    let s: Option<String> = serde::Deserialize::deserialize(d)?;
+    s.map(|s| from_hex(serde::de::value::StrDeserializer::<D::Error>::new(&s))).transpose()
 }
 
 fn hex_bytes<S: serde::Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -1584,12 +1662,33 @@ impl Store {
     /// Appends an audit record. `rec.seq` must be one more than the last.
     pub fn append_audit(&mut self, rec: &AuditRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![rec.seq, rec.ts_ms, rec.actor, rec.action, rec.detail, rec.decision, rec.prev_hash, rec.hash],
+            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash,
+                                    version, principal_kind, user_id, token_id, project_id, session_id, client_addr, mac)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                rec.seq,
+                rec.ts_ms,
+                rec.actor,
+                rec.action,
+                rec.detail,
+                rec.decision,
+                rec.prev_hash,
+                rec.hash,
+                rec.version,
+                rec.principal_kind,
+                rec.user_id,
+                rec.token_id,
+                rec.project_id,
+                rec.session_id,
+                rec.client_addr,
+                rec.mac
+            ],
         )?;
         Ok(())
     }
+
+    const AUDIT_COLUMNS: &'static str = "seq, ts_ms, actor, action, detail, decision, prev_hash, hash, version, \
+        principal_kind, user_id, token_id, project_id, session_id, client_addr, mac";
 
     fn audit_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
         Ok(AuditRecord {
@@ -1601,6 +1700,14 @@ impl Store {
             decision: r.get(5)?,
             prev_hash: r.get(6)?,
             hash: r.get(7)?,
+            version: r.get(8)?,
+            principal_kind: r.get(9)?,
+            user_id: r.get(10)?,
+            token_id: r.get(11)?,
+            project_id: r.get(12)?,
+            session_id: r.get(13)?,
+            client_addr: r.get(14)?,
+            mac: r.get(15)?,
         })
     }
 
@@ -1608,8 +1715,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash
-                 FROM audit_log ORDER BY seq DESC LIMIT 1",
+                &format!("SELECT {} FROM audit_log ORDER BY seq DESC LIMIT 1", Self::AUDIT_COLUMNS),
                 [],
                 Self::audit_from_row,
             )
@@ -1619,10 +1725,25 @@ impl Store {
     /// All audit records in order. Loads everything; fine for verification
     /// of logs up to a few million entries.
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash FROM audit_log ORDER BY seq",
-        )?;
+        let mut stmt = self.conn.prepare(&format!("SELECT {} FROM audit_log ORDER BY seq", Self::AUDIT_COLUMNS))?;
         let rows = stmt.query_map([], Self::audit_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Stores a signed audit checkpoint (its JSON, as exported). One per sequence number; a second for the same
+    /// number is ignored.
+    pub fn append_audit_checkpoint(&mut self, seq: i64, ts_ms: i64, body: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO audit_checkpoints (seq, ts_ms, body) VALUES (?1, ?2, ?3)",
+            params![seq, ts_ms, body],
+        )?;
+        Ok(())
+    }
+
+    /// Stored audit checkpoints, oldest first: `(seq, ts_ms, JSON)`.
+    pub fn audit_checkpoints(&self) -> Result<Vec<(i64, i64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT seq, ts_ms, body FROM audit_checkpoints ORDER BY seq")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -2720,14 +2841,18 @@ mod tests {
             // Put the file back as the previous release left it: no column, no index, one version lower.
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                 ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
+                 ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
+                 ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
+                 ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes;
                  DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;
                  DROP TABLE stream_chunks; DROP TABLE streams; DROP TABLE workflow_runs;
                  ALTER TABLE findings DROP COLUMN issue_links; DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 5) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 6) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2758,13 +2883,17 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                 ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
+                 ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
+                 ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
+                 ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
                  ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;
                  DROP TABLE workflow_runs; ALTER TABLE findings DROP COLUMN issue_links;
                  DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 4) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 5) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         let old = s.get_exchange(old_id).unwrap().unwrap();
@@ -3181,12 +3310,26 @@ mod tests {
             decision: "allow".into(),
             prev_hash: vec![0; 32],
             hash: vec![1; 32],
+            version: 2,
+            principal_kind: Some("local".into()),
+            user_id: Some("u_1".into()),
+            token_id: None,
+            project_id: Some("p".into()),
+            session_id: None,
+            client_addr: Some("127.0.0.1".into()),
+            mac: Some(vec![9; 32]),
         };
         s.append_audit(&rec).unwrap();
         assert_eq!(s.last_audit().unwrap(), Some(rec.clone()));
         assert!(s.append_audit(&rec).is_err(), "duplicate seq");
         assert!(s.conn.execute("UPDATE audit_log SET decision = 'deny'", []).is_err());
         assert!(s.conn.execute("DELETE FROM audit_log", []).is_err());
+        // Checkpoints are append-only too, and one per sequence number.
+        s.append_audit_checkpoint(1, 5, "{}").unwrap();
+        s.append_audit_checkpoint(1, 6, "{\"again\":1}").unwrap();
+        assert_eq!(s.audit_checkpoints().unwrap(), vec![(1, 5, "{}".to_string())]);
+        assert!(s.conn.execute("UPDATE audit_checkpoints SET body = ''", []).is_err());
+        assert!(s.conn.execute("DELETE FROM audit_checkpoints", []).is_err());
     }
 
     #[test]

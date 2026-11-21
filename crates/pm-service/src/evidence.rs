@@ -324,6 +324,12 @@ impl Service {
         ));
         files.push(("coverage.json".into(), serde_json::to_vec_pretty(&coverage).unwrap_or_default()));
         files.push(("audit.jsonl".into(), (audit_lines.join("\n") + "\n").into_bytes()));
+        // The newest signed audit checkpoint, when there is one: it lets whoever holds the pack see that the log
+        // was not cut short or rewritten before it (optional; packs without it verify as before).
+        let checkpoint = self.latest_checkpoint_json()?;
+        if let Some((_, body)) = &checkpoint {
+            files.push(("audit-checkpoint.json".into(), body.clone().into_bytes()));
+        }
         files.push(("roe.yaml".into(), roe_text.into_bytes()));
         let fp = sign::fingerprint(&public);
         files.push((
@@ -346,7 +352,11 @@ impl Service {
             "engagement": { "name": roe.engagement.name, "client": roe.engagement.client },
             "files": hashes,
             "exchanges": exchanges,
-            "audit": { "records": records.len(), "head": head },
+            "audit": {
+                "records": records.len(),
+                "head": head,
+                "checkpoint": checkpoint.as_ref().map(|(c, _)| json!({ "seq": c.seq, "head": c.head, "fingerprint": c.fingerprint() })),
+            },
             "findings": findings.len(),
             "coverage": { "percent_tested": coverage.percent_tested, "totals": coverage.totals },
             "public_key": public.iter().map(|b| format!("{b:02x}")).collect::<String>(),
@@ -499,7 +509,19 @@ pub fn verify_evidence(bytes: &[u8]) -> EvidenceVerification {
                 "audit log",
                 same && n > 0,
                 if same && n > 0 {
-                    format!("{n} records, hash chain intact")
+                    let v2 = records.iter().filter(|r| r.version >= 2).count();
+                    let keyed = records.iter().filter(|r| r.mac.is_some()).count();
+                    let mut t = format!("{n} records, hash chain intact");
+                    if v2 > 0 {
+                        t.push_str(&format!(" ({} version 1, {v2} version 2", n - v2));
+                        if keyed > 0 {
+                            t.push_str(&format!(
+                                "; {keyed} keyed: the key check needs the audit key, so it was skipped"
+                            ));
+                        }
+                        t.push(')');
+                    }
+                    t
                 } else if n == 0 {
                     "the audit log is empty or unreadable".into()
                 } else {
@@ -508,6 +530,36 @@ pub fn verify_evidence(bytes: &[u8]) -> EvidenceVerification {
             );
         }
         Err(e) => check(&mut v, "audit log", false, e.to_string()),
+    }
+
+    // The signed checkpoint, when the pack has one. It is listed in the manifest, so the manifest's signature
+    // covers it; here it is compared with the log in the pack.
+    if let Some(body) = files.get("audit-checkpoint.json") {
+        let parsed = pm_policy::checkpoint::Checkpoint::parse_many(&String::from_utf8_lossy(body));
+        match parsed {
+            Ok(cps) if !cps.is_empty() => {
+                let bad: Vec<String> = cps
+                    .iter()
+                    .filter_map(|c| pm_policy::checkpoint::check(c, &records, None, None).err().map(|e| e.to_string()))
+                    .collect();
+                let last = &cps[cps.len() - 1];
+                check(
+                    &mut v,
+                    "audit checkpoint",
+                    bad.is_empty(),
+                    if bad.is_empty() {
+                        format!(
+                            "signed checkpoint at record {} matches the log (signer {})",
+                            last.seq,
+                            last.fingerprint()
+                        )
+                    } else {
+                        bad.join("; ")
+                    },
+                );
+            }
+            _ => check(&mut v, "audit checkpoint", false, "audit-checkpoint.json can't be read".into()),
+        }
     }
 
     // 4. Scope: every allowed action and every request ProxyMind's tools sent.

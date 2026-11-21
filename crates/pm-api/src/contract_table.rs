@@ -201,8 +201,12 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/proofs/{id}", "proof", "A stored proof result.").json("The stored proof as an object."),
         op("post", "/proofs/{id}/rerun", "proof_rerun", "Run a stored proof again.").out::<ProofResult>(),
         op("get", "/audit", "audit", "The audit log, newest first.").query::<LimitQuery>().out::<Vec<pm_service::pm_store::AuditRecord>>(),
-        op("get", "/audit/verify", "audit_verify", "Check the audit log's hash chain.")
-            .json("Object with `intact` and either `records` (how many were checked) or `error`."),
+        op("get", "/audit/verify", "audit_verify", "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints.")
+            .out::<AuditVerification>(),
+        op("post", "/audit/checkpoint", "audit_checkpoint", "Write a signed checkpoint of the audit log (head hash, count, time); people only. Export it and keep it elsewhere.")
+            .out::<pm_service::pm_policy::checkpoint::Checkpoint>(),
+        op("get", "/audit/checkpoints", "audit_checkpoints", "The signed checkpoints stored in the project, oldest first.")
+            .out::<Vec<pm_service::pm_policy::checkpoint::Checkpoint>>(),
         op("get", "/report", "report", "Render the report; always a download.").query::<ReportQuery>()
             .download("text/markdown, text/html", "The rendered report; the content type follows `format`."),
         op("get", "/evidence/pack", "evidence_pack", "A signed evidence pack (ZIP); its fingerprint is in the `X-Evidence-Fingerprint` header.")

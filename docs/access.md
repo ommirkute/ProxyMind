@@ -33,7 +33,7 @@ Who may do what in `pm-service` (ADR-0022, migration step 1). Every action that 
 | `IntegrationsWrite` | yes | no | no | yes | Create, change, enable, delete and test integrations | `integration_delete`, `integration_enable`, `integration_set`, `integration_test` |
 | `IntegrationsSend` | yes | yes | no | yes | Send a finding to an integration | `integration_send_finding` |
 | `DevicesWrite` | yes | yes | no | yes | Name or unname client devices | `device_remove_name`, `device_set_name` |
-| `ExportEvidence` | yes | yes | no | yes | Export evidence packs and regression tests | `evidence_pack`, `regression_zip` |
+| `ExportEvidence` | yes | yes | no | yes | Export evidence packs and regression tests | `audit_checkpoint`, `evidence_pack`, `regression_zip` |
 | `AiScanControl` | yes | yes | no | yes | Start an AI scan, send it messages | `ai_scan_create`, `ai_scan_message` |
 | `BrowserOpen` | yes | yes | no | yes | Open a browser window | `browser_open` |
 | `MemoryDelete` | yes | yes | no | yes | Delete agent memory notes | `memory_delete` |

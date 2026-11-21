@@ -1351,6 +1351,29 @@ enum AuditAction {
         /// A head hash printed by an earlier verify (a prefix of 12+ hex digits).
         #[arg(long)]
         anchor: Option<String>,
+        /// A signed checkpoint file (from `audit checkpoint -o`) to check the log against; repeatable. Detects
+        /// records cut off the end and a log rewritten before the checkpoint.
+        #[arg(long)]
+        checkpoint: Vec<PathBuf>,
+        /// Only accept checkpoints signed by the key with this fingerprint (from `audit checkpoint`'s output).
+        #[arg(long)]
+        checkpoint_key: Option<String>,
+        /// File holding the audit key (64 hex digits, or raw bytes) of a keyed (server) log: checks every record's MAC.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Fail unless the log is keyed (use with --key-file for a server project).
+        #[arg(long)]
+        require_keyed: bool,
+    },
+    /// Write a signed checkpoint of the audit log (head hash, record count, time). Keep the file somewhere the
+    /// project file's writers cannot reach; `audit verify --checkpoint` then detects truncation and rewriting.
+    Checkpoint {
+        /// Write the checkpoint to this file (JSON); without it, print it.
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        /// Who is asking (people only).
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// List audit records, newest first.
     List {
@@ -4109,11 +4132,35 @@ async fn run() -> Result<()> {
             eprintln!("Users: alice/alice123, bob/bob123, admin/admin123. Log in with POST /api/login.");
             pm_demo::VulnShop::new().serve(l).await;
         }
-        Command::Audit { action: AuditAction::Verify { anchor } } => {
+        Command::Audit {
+            action: AuditAction::Verify { anchor, checkpoint, checkpoint_key, key_file, require_keyed },
+        } => {
             let store = Store::open(&cli.project)?;
-            let n = pm_service::verify_audit(&store)?;
+            let mut checkpoints = Vec::new();
+            for f in checkpoint {
+                let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+                checkpoints.extend(pm_service::pm_policy::checkpoint::Checkpoint::parse_many(&text)?);
+            }
+            let key: Option<std::sync::Arc<dyn pm_service::pm_policy::audit::AuditKey>> = match key_file {
+                Some(f) => Some(std::sync::Arc::new(pm_service::pm_policy::audit::HmacKey::from_file_bytes(
+                    &std::fs::read(f).with_context(|| format!("reading {}", f.display()))?,
+                )?)),
+                None => None,
+            };
+            let trusted_signer = home_dir(&cli).ok().and_then(|h| pm_service::checkpoint_signer_public(&h));
+            let report = pm_service::verify_audit_report(
+                &store,
+                &pm_service::AuditVerifyOptions {
+                    key,
+                    require_keyed: *require_keyed,
+                    checkpoints,
+                    trusted_signer,
+                    pinned_fingerprint: checkpoint_key.clone(),
+                },
+            );
             let records = store.audit_records()?;
             let hex = |h: &[u8]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let n = report.records;
             if let Some(a) = anchor {
                 let a = a.trim().to_ascii_lowercase();
                 anyhow::ensure!(a.len() >= 12 && a.chars().all(|c| c.is_ascii_hexdigit()), "give 12+ hex digits");
@@ -4122,8 +4169,51 @@ async fn run() -> Result<()> {
                 };
                 out!("✓ anchor found at record {} of {n}", at + 1);
             }
-            let head = records.last().map(|r| hex(&r.hash)).unwrap_or_default();
-            out!("✓ audit log intact: {n} records, chain verified (head {})", &head[..head.len().min(24)]);
+            let head = &report.head[..report.head.len().min(24)];
+            out!(
+                "{} records: {} version 1, {} version 2 ({} keyed)",
+                report.records,
+                report.v1_records,
+                report.v2_records,
+                report.keyed_records
+            );
+            out!("  key check: {}: {}", report.key_check, report.key_note);
+            let c = &report.checkpoints;
+            match c.status.as_str() {
+                "none" => out!("  checkpoints: none (write one with `proxymind audit checkpoint -o FILE`)"),
+                st => {
+                    out!(
+                        "  checkpoints: {st} ({} stored, {} given; newest covers record {}, signer {}{})",
+                        c.stored,
+                        c.supplied,
+                        c.latest_seq.unwrap_or(0),
+                        c.fingerprint.clone().unwrap_or_default(),
+                        if c.signer_pinned { "" } else { ", signer not pinned: pass --checkpoint-key" }
+                    );
+                }
+            }
+            if let Some(e) = &report.error {
+                anyhow::bail!("audit log verification FAILED: {e}");
+            }
+            out!("✓ audit log intact: {n} records, chain verified (head {head})");
+        }
+        Command::Audit { action: AuditAction::Checkpoint { out: file, actor } } => {
+            let service = open_service(&cli.project, None)?;
+            attach_plugins(&cli, &service);
+            let cp = service.audit_checkpoint(&human_actor(actor.as_deref())?)?;
+            let text = serde_json::to_string_pretty(&cp)?;
+            match file {
+                Some(f) => {
+                    std::fs::write(f, text + "\n")?;
+                    out!("✓ checkpoint at record {} written to {}", cp.seq, f.display());
+                    out!("  signer {}; head {}", cp.fingerprint(), &cp.head[..24]);
+                    out!(
+                        "  Keep the file where whoever can write the project file cannot; check with `proxymind audit verify --checkpoint {}`.",
+                        f.display()
+                    );
+                }
+                None => out!("{text}"),
+            }
         }
         Command::Audit { action: AuditAction::List { limit, json } } => {
             let store = Store::open(&cli.project)?;

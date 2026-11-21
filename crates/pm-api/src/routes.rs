@@ -215,6 +215,8 @@ pub fn api() -> Router<AppState> {
         .route("/proofs/{id}/rerun", post(proof_rerun))
         .route("/audit", get(audit))
         .route("/audit/verify", get(audit_verify))
+        .route("/audit/checkpoint", post(audit_checkpoint))
+        .route("/audit/checkpoints", get(audit_checkpoints))
         .route("/report", get(report))
         .route("/evidence/pack", get(evidence_pack))
         .route("/evidence/fingerprint", get(evidence_fingerprint))
@@ -949,10 +951,15 @@ async fn audit(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> ApiRe
 }
 
 async fn audit_verify(State(st): State<AppState>) -> ApiResult {
-    match st.service.audit_verify() {
-        Ok(n) => ok(json!({ "intact": true, "records": n })),
-        Err(e) => ok(json!({ "intact": false, "error": e.to_string() })),
-    }
+    ok(st.service.audit_verify_report(Vec::new(), None))
+}
+
+async fn audit_checkpoint(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.audit_checkpoint(&st.actor)?)
+}
+
+async fn audit_checkpoints(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.audit_checkpoints()?)
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {

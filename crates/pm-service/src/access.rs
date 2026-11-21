@@ -11,6 +11,7 @@
 //! Only authorization lives here. Choosing what an agent is *shown* (redaction, untrusted-content wrapping) is not an
 //! access decision and stays where the content is built; `tests/access.rs` keeps an explicit allow-list of those.
 
+use pm_policy::audit::AuditContext;
 use pm_policy::{Actor, ActorKind};
 use serde_json::Value;
 
@@ -39,18 +40,52 @@ impl Role {
 pub struct Principal {
     pub actor: Actor,
     pub role: Role,
+    /// The stable account id (`u_...`); None in single-user mode.
+    pub user_id: Option<String>,
+    /// The token the request came with (its id, never the secret); None unless a token was used.
+    pub token_id: Option<String>,
+    /// The browser session (first 8 bytes, hex, of the stored hash of its id); None unless a session was used.
+    pub session_id: Option<String>,
+    /// The client's IP address, when known.
+    pub client_addr: Option<String>,
 }
 
 impl Principal {
     pub fn new(actor: Actor, role: Role) -> Self {
-        Self { actor, role }
+        Self { actor, role, user_id: None, token_id: None, session_id: None, client_addr: None }
+    }
+
+    /// The same principal, seen from this address.
+    pub fn with_addr(mut self, addr: impl Into<String>) -> Self {
+        self.client_addr = Some(addr.into());
+        self
+    }
+
+    /// The who-and-where that goes into the audit record (version 2): `token` or `session` when there is one,
+    /// else `local`. The project id is added by the audit writer.
+    pub fn audit_context(&self) -> AuditContext {
+        let kind = if self.token_id.is_some() {
+            "token"
+        } else if self.session_id.is_some() {
+            "session"
+        } else {
+            "local"
+        };
+        AuditContext {
+            principal_kind: Some(kind.into()),
+            user_id: self.user_id.clone(),
+            token_id: self.token_id.clone(),
+            project_id: None,
+            session_id: self.session_id.clone(),
+            client_addr: self.client_addr.clone(),
+        }
     }
 
     /// Single-user mode: a person is the implicit owner (every check passes for them); any other actor acts with the
     /// ceiling the ADR gives machine credentials, `tester`, and is further limited by `people_only`.
     pub fn from_actor(actor: &Actor) -> Self {
         let role = if actor.kind == ActorKind::Human { Role::Owner } else { Role::Tester };
-        Self { actor: actor.clone(), role }
+        Self::new(actor.clone(), role)
     }
 
     /// Whether this principal may take actions of kind `perm`.

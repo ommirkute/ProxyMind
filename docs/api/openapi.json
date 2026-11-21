@@ -1018,14 +1018,84 @@
         ],
         "type": "object"
       },
+      "AuditCheckpointStatus": {
+        "description": "How the checkpoints fared.",
+        "properties": {
+          "fingerprint": {
+            "description": "The newest checkpoint's signer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest_seq": {
+            "description": "The newest checkpoint's record count and time.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latest_ts_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "signer_pinned": {
+            "description": "Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the\nsignatures only prove the checkpoint was not altered, not who made it.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "`none` (no checkpoint to check), `ok` or `failed`.",
+            "type": "string"
+          },
+          "stored": {
+            "description": "Checkpoints stored in the project, and checkpoints supplied from files.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "supplied": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "stored",
+          "supplied",
+          "latest_seq",
+          "latest_ts_ms",
+          "fingerprint",
+          "signer_pinned",
+          "problems"
+        ],
+        "type": "object"
+      },
       "AuditRecord": {
-        "description": "One audit log entry. Hashing and verification live in `pm-policy`.",
+        "description": "One audit log entry. Hashing and verification live in `pm-policy`.\n\nVersion 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to\n`client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was\nwritten by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).",
         "properties": {
           "action": {
             "type": "string"
           },
           "actor": {
             "type": "string"
+          },
+          "client_addr": {
+            "description": "The client's IP address, when known. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "decision": {
             "type": "string"
@@ -1043,6 +1113,13 @@
             },
             "type": "array"
           },
+          "mac": {
+            "description": "HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "prev_hash": {
             "items": {
               "format": "uint8",
@@ -1052,12 +1129,54 @@
             },
             "type": "array"
           },
+          "principal_kind": {
+            "description": "How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "description": "The project's id (setting `project_id`). Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "seq": {
             "format": "int64",
             "type": "integer"
           },
+          "session_id": {
+            "description": "The first 8 bytes (hex) of the stored hash of the session id. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_id": {
+            "description": "The id of the token used (never the secret). Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ts_ms": {
             "format": "int64",
+            "type": "integer"
+          },
+          "user_id": {
+            "description": "The stable account id (`u_...`) of the person; None in single-user mode. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "Record version: 1 (original) or 2 (with context). Left out of JSON when 1.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -1070,6 +1189,68 @@
           "decision",
           "prev_hash",
           "hash"
+        ],
+        "type": "object"
+      },
+      "AuditVerification": {
+        "description": "The result of checking the audit log.",
+        "properties": {
+          "checkpoints": {
+            "$ref": "#/components/schemas/AuditCheckpointStatus"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "head": {
+            "description": "Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later).",
+            "type": "string"
+          },
+          "intact": {
+            "description": "The chain, the key (when one applies) and the checkpoints all passed.",
+            "type": "boolean"
+          },
+          "key_check": {
+            "description": "`verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`.",
+            "type": "string"
+          },
+          "key_note": {
+            "description": "The key check in words.",
+            "type": "string"
+          },
+          "keyed_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "v1_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "v2_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intact",
+          "records",
+          "v1_records",
+          "v2_records",
+          "keyed_records",
+          "head",
+          "key_check",
+          "key_note",
+          "checkpoints"
         ],
         "type": "object"
       },
@@ -1762,6 +1943,50 @@
         },
         "required": [
           "yaml"
+        ],
+        "type": "object"
+      },
+      "Checkpoint": {
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "head": {
+            "description": "Hex of the newest record's hash.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key": {
+            "description": "Hex of the Ed25519 public key that signed it.",
+            "type": "string"
+          },
+          "seq": {
+            "description": "How many records the log had (the newest one's sequence number).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "signature": {
+            "description": "Hex of the signature over [`Checkpoint::message`].",
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "seq",
+          "head",
+          "ts_ms",
+          "public_key",
+          "signature"
         ],
         "type": "object"
       },
@@ -15965,16 +16190,15 @@
         "summary": "The audit log, newest first."
       }
     },
-    "/api/v1/audit/verify": {
-      "get": {
-        "operationId": "audit_verify",
+    "/api/v1/audit/checkpoint": {
+      "post": {
+        "operationId": "audit_checkpoint",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `intact` and either `records` (how many were checked) or `error`.",
-                  "type": "object"
+                  "$ref": "#/components/schemas/Checkpoint"
                 }
               }
             },
@@ -15991,7 +16215,66 @@
             "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
           }
         },
-        "summary": "Check the audit log's hash chain."
+        "summary": "Write a signed checkpoint of the audit log (head hash, count, time); people only. Export it and keep it elsewhere."
+      }
+    },
+    "/api/v1/audit/checkpoints": {
+      "get": {
+        "operationId": "audit_checkpoints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Checkpoint"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "The signed checkpoints stored in the project, oldest first."
+      }
+    },
+    "/api/v1/audit/verify": {
+      "get": {
+        "operationId": "audit_verify",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditVerification"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints."
       }
     },
     "/api/v1/authz/candidates": {
