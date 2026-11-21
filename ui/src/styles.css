@@ -277,6 +277,11 @@ p.small.muted { line-height: 1.55; }
   background: var(--info-soft); color: var(--info); border: 1px solid color-mix(in srgb, var(--info) 22%, transparent);
   padding: 9px 12px; border-radius: var(--radius-sm); margin: 10px 0;
 }
+.safe-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 24px;
+  background: var(--warn-soft); color: var(--warn); border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.safe-banner > span { flex: 1; min-width: 240px; }
 .notice.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 25%, transparent); }
 
 /* ------------------------------------------------------------ inputs -- */

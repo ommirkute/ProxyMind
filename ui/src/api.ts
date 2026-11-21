@@ -90,6 +90,8 @@ export interface Status {
   engagement: string | null;
   in_scope: string[];
   counters: Counters;
+  /** This installation does not trust the project file (threat model F-2): its settings are held back. */
+  safe_mode?: boolean;
 }
 
 export interface ExchangePage {

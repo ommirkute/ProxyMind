@@ -627,6 +627,15 @@ pub fn tool_definitions() -> Vec<Value> {
              or secret. You cannot configure integrations, test them or send findings to them: a person does that \
              from the Integrations page or `proxymind integration`.",
         ),
+        typed_tool::<NoArgs>(
+            "project_trust_status",
+            "Whether the person who runs ProxyMind trusts this project file. In safe mode (`safe_mode: true`) the \
+             project did not come from this installation, or its settings changed since a person trusted it: every \
+             action of yours that would send traffic is refused until a person reviews and trusts the project, and \
+             the file's listeners, schedules, triggers, upstream and rewrite rules are off. Returns what is held back \
+             and why. You cannot trust a project yourself; tell the person to open the web UI banner or run \
+             `proxymind project trust`. Sends nothing.",
+        ),
         typed_tool::<WorkflowRefArgs>(
             "workflow_get",
             "One workflow's steps: the tests of each match and assert, what each extract reads, each transform's \
@@ -1105,6 +1114,10 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
         "integration_list" => {
             args::<NoArgs>(a)?;
             service.integration_names().map(to_json).map_err(|e| e.to_string())
+        }
+        "project_trust_status" => {
+            args::<NoArgs>(a)?;
+            service.trust_status().map(|v| service.json_for(actor, to_json(v))).map_err(|e| e.to_string())
         }
         "workflow_list" => {
             args::<NoArgs>(a)?;

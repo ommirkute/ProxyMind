@@ -22,7 +22,7 @@ use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
     AuthzCheckRequest, DeliveriesQuery, FindingUpdate, IntegrationEnabledBody, IntegrationInput, ModelFilter,
-    NewFinding, ProofRequest, ReplayRequest, SendFindingBody, ServiceError,
+    NewFinding, ProofRequest, ReplayRequest, SendFindingBody, ServiceError, TrustConfirmRequest,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -248,6 +248,7 @@ pub fn api() -> Router<AppState> {
         .route("/integrations/{name}/enabled", axum::routing::put(integration_enabled))
         .route("/integrations/{name}/test", post(integration_test))
         .route("/integrations/{name}/deliveries", get(integration_deliveries))
+        .route("/project/trust", get(project_trust).post(project_trust_confirm))
         .route("/findings/{id}/issue", post(finding_issue))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
@@ -291,6 +292,7 @@ async fn status(State(st): State<AppState>) -> ApiResult {
         "engagement": roe.engagement.name,
         "in_scope": roe.include.iter().map(|p| &p.text).collect::<Vec<_>>(),
         "counters": st.service.counters()?,
+        "safe_mode": st.service.safe_mode(),
     }))
 }
 
@@ -1530,6 +1532,16 @@ async fn rules_put(State(st): State<AppState>, Json(b): Json<RulesBody>) -> ApiR
 
 async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
     ok(json!({ "forwarded": st.service.intercept_forward_all(&st.actor)? }))
+}
+
+/// Whether this installation trusts the project, and what is held back if not. Anyone who can call the API may read it.
+async fn project_trust(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.trust_status()?)
+}
+
+/// A person confirms the project's current settings. The API acts as the human who started it.
+async fn project_trust_confirm(State(st): State<AppState>, Json(b): Json<TrustConfirmRequest>) -> ApiResult {
+    ok(st.service.trust_confirm(&st.actor, &b)?)
 }
 
 async fn integrations_list(State(st): State<AppState>) -> ApiResult {

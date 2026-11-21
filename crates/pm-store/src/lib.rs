@@ -887,6 +887,23 @@ pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     o.open(path)
 }
 
+/// Project files this process created, by canonical path.
+static CREATED_HERE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn note_created(path: &Path) {
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(mut v) = CREATED_HERE.lock()
+        && !v.contains(&p)
+    {
+        v.push(p);
+    }
+}
+
+fn was_created_here(path: &Path) -> bool {
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    CREATED_HERE.lock().is_ok_and(|v| v.contains(&p))
+}
+
 impl Store {
     /// Rejects a sealed project (pm-vault): it must be unlocked first.
     fn reject_locked(path: &Path) -> Result<()> {
@@ -907,11 +924,18 @@ impl Store {
         Self::reject_locked(path)?;
         // A project holds traffic and credentials: a new one is readable by
         // its owner only (SQLite gives the -wal and -shm files the same mode).
-        if !path.exists() {
-            let _ = create_private(path);
+        if !path.exists() && create_private(path).is_ok() {
+            note_created(path);
         }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
+    }
+
+    /// Whether this process made the project file (it did not exist when `open` was first called on it here).
+    /// A file that arrived any other way (a download, a copy, a hand-over) is not "created here", and nothing
+    /// inside a file can change that: the answer lives in this process only. Used for threat model F-2 (safe open).
+    pub fn created_here(&self) -> bool {
+        self.path().is_some_and(|p| was_created_here(&p))
     }
 
     /// Opens an existing project file for reading only (a read-pool connection, ADR-0017). It does not set the
@@ -1819,6 +1843,13 @@ impl Store {
         Ok(())
     }
 
+    /// Stores `value` under `key` unless the key already has one, and returns what is stored. One statement, so two
+    /// processes that both find the key missing end up agreeing (used for the project id).
+    pub fn init_setting(&mut self, key: &str, value: &str) -> Result<String> {
+        self.conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
+        Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))?)
+    }
+
     pub fn upsert_identity(&mut self, row: &IdentityRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO identities (name, role, data, created_by, status, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1902,6 +1933,12 @@ impl Store {
             params![r.id, r.data, r.enabled, r.next_run_ms],
         )?;
         Ok(r.id)
+    }
+
+    /// Changes the name a schedule is attributed to (`save_schedule` keeps the one it was inserted with).
+    pub fn set_schedule_owner(&mut self, id: i64, created_by: &str) -> Result<()> {
+        self.conn.execute("UPDATE scan_schedules SET created_by = ?2 WHERE id = ?1", params![id, created_by])?;
+        Ok(())
     }
 
     /// Moves a due schedule's next run from `due` to `next`, only if no one
@@ -2514,6 +2551,30 @@ impl StoreHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_file_this_process_made_is_created_here() {
+        let dir = std::env::temp_dir().join(format!("pm-store-created-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (made, copied) = (dir.join("made.pmproj"), dir.join("copied.pmproj"));
+        let mut s = Store::open(&made).unwrap();
+        s.set_setting("k", "v").unwrap();
+        assert!(s.created_here());
+        assert!(Store::open(&made).unwrap().created_here(), "reopening it in this process is still creating it");
+        s.snapshot_to(&copied).unwrap();
+        assert!(!Store::open(&copied).unwrap().created_here(), "a copy arrives from outside, whatever it contains");
+        assert!(!Store::open_in_memory().unwrap().created_here());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_setting_keeps_the_first_value() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.init_setting("id", "first").unwrap(), "first");
+        assert_eq!(s.init_setting("id", "second").unwrap(), "first");
+        assert_eq!(s.get_setting("id").unwrap().as_deref(), Some("first"));
+    }
 
     #[cfg(unix)]
     #[test]

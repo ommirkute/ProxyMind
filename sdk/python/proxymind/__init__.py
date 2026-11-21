@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # the generated shapes of the API (see proxymind/types.py); a
         SiteView,
         TargetAnalysis,
         TokenAnalyzerResult,
+        TrustView,
         Workflow,
         WorkflowRun,
         WsSearchResult,
@@ -170,6 +171,15 @@ class Client:
 
     def status(self) -> dict:
         return self._get("/status")
+
+    def project_trust(self) -> "TrustView":
+        """Whether this installation trusts the project (`safe_mode` false) and what safe mode holds back."""
+        return self._get("/project/trust")
+
+    def project_trust_confirm(self, digest: Optional[str] = None) -> "TrustView":
+        """Trusts the project's current settings (people only: an agent's client gets a refusal). Pass the
+        `digest` of the `project_trust()` you reviewed to confirm exactly that."""
+        return self._post("/project/trust", {"digest": digest} if digest else {})
 
     def roe(self) -> RoeView:
         """The rules of engagement in force: {text, summary}."""

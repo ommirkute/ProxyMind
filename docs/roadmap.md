@@ -33,7 +33,7 @@ benchmark job for AI scan scoring (4.7).
 | Scripting live traffic | Match and replace, plugin traffic hooks (2.1), saved workflows (2.2) | Extensions | Workflows | Not stated | Python addons |
 | Protocols | HTTP/1.1, HTTP/2, HTTP/3 to targets, WebSockets, gRPC/Protobuf, raw TCP/TLS streams; SOCKS5 and transparent capture | HTTP/2, WebSockets | Not stated | Not stated | Adds HTTP/3 |
 | Team collaboration | None | Not stated | Teams offering | Not stated | No |
-| AI and agents | MCP (87 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
+| AI and agents | MCP (88 tools), assistant, AI scan inside the policy gate | Not stated | Agents | Not stated | No |
 | Policy gate and tamper-evident audit | Yes | Not stated | Not stated | Not stated | No |
 
 "Not stated" means the vendor page checked did not say. Sources: [Burp Suite Pro
@@ -187,7 +187,7 @@ Starts with an ADR on identity and a written threat model.
 
 | Work package | What |
 | --- | --- |
-| 3.1 Identity ADR | Local accounts with passkeys, OIDC, or both; sessions; how the API token fits. ADR-0022 accepted 2026-11-21 (local accounts first, then OIDC; invite only; viewers see redacted traffic), threat model in `docs/threat-model.md` |
+| 3.1 Identity ADR | Local accounts with passkeys, OIDC, or both; sessions; how the API token fits. ADR-0022 accepted 2026-11-21 (local accounts first, then OIDC; invite only; viewers see redacted traffic), threat model in `docs/threat-model.md`. **Step 0 done 2026-11-21:** F-1 documented (`docs/agents.md`, ADR-0005); F-2 fixed by a safe open (a project not made by this install is held back until a person trusts it; trust in the home folder) and model keys bound to their server (B4.1). The identity code itself (steps 1 to 9) is not started |
 | 3.2 Users and roles | Owner, tester, viewer; authorization in `pm-service` for every action; audit of who did what |
 | 3.3 Project server | One server, many projects, each with its own scope and rules of engagement |
 | 3.4 Shared work | Assignment, comments on exchanges and issues, presence over the event bus |

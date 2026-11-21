@@ -100,7 +100,13 @@ impl Assistant {
     /// from in the settings. Sends nothing from the project; the key is sent
     /// only to the configured server, as for any call.
     pub async fn list_models(&self, cfg: &AssistantConfig) -> Result<Vec<String>> {
-        let key = if cfg.api_key_env.is_empty() { None } else { self.service.model_key(&cfg.api_key_env) };
+        if let Some(why) = self.service.safe_mode_reason() {
+            return Err(AssistantError::Refused(why));
+        }
+        let key = self
+            .service
+            .model_key_for(&cfg.api_key_env, &cfg.base_url)
+            .map_err(|e| AssistantError::Refused(e.to_string()))?;
         let url = url::Url::parse(&cfg.base_url).map_err(|e| AssistantError::Setup(format!("base URL: {e}")))?;
         let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string();
         let port = url.port_or_known_default().unwrap_or(443);

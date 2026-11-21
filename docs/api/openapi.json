@@ -5497,6 +5497,28 @@
         ],
         "type": "object"
       },
+      "HeldBack": {
+        "description": "One thing the project file would switch on.",
+        "properties": {
+          "kind": {
+            "description": "`listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`",
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "why": {
+            "description": "What safe mode does about it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "what",
+          "why"
+        ],
+        "type": "object"
+      },
       "Hint": {
         "properties": {
           "kind": {
@@ -10579,6 +10601,30 @@
         ],
         "type": "object"
       },
+      "ReviewItem": {
+        "description": "One line of the review page.",
+        "properties": {
+          "claimed_by": {
+            "description": "A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as\nwritten in the file, never used as an identity.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "what",
+          "detail",
+          "claimed_by"
+        ],
+        "type": "object"
+      },
       "RoeBody": {
         "description": "Body of `PUT /roe` and `POST /roe/check`.",
         "properties": {
@@ -13661,6 +13707,160 @@
           "enabled_by",
           "enabled_ms",
           "skipped"
+        ],
+        "type": "object"
+      },
+      "TrustConfirmRequest": {
+        "additionalProperties": false,
+        "description": "`POST /project/trust`.",
+        "properties": {
+          "digest": {
+            "default": null,
+            "description": "The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the\nconfirmation is refused. Omit to confirm whatever is there now (scripts).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TrustReview": {
+        "description": "Everything the file would do, grouped, for the person who is deciding.",
+        "properties": {
+          "assistant": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "listeners": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "network_other": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "rewrite_rules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "roe_summary": true,
+          "roe_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "session": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "upstream_rules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "roe_text",
+          "roe_summary",
+          "listeners",
+          "upstream_rules",
+          "network_other",
+          "rewrite_rules",
+          "schedules",
+          "triggers",
+          "session",
+          "assistant"
+        ],
+        "type": "object"
+      },
+      "TrustView": {
+        "description": "Whether the project in this installation is trusted, and if not, what is held back.\n\n**Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command\nline, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network\nsettings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic\ngoes direct and unmodified, never through an address the file names); match-and-replace rules; session rules\nand macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file\nnames); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks\nis the file's own).\n\n**Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing\nsettings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,\n`integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores\nall of these settings anyway.",
+        "properties": {
+          "basis": {
+            "description": "`created`, `confirmed` or `edited`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed_since_trust": {
+            "description": "A record exists but the settings no longer match it: the file changed since.",
+            "type": "boolean"
+          },
+          "digest": {
+            "description": "The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read.",
+            "type": "string"
+          },
+          "held_back": {
+            "items": {
+              "$ref": "#/components/schemas/HeldBack"
+            },
+            "type": "array"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "review": {
+            "$ref": "#/components/schemas/TrustReview"
+          },
+          "safe_mode": {
+            "type": "boolean"
+          },
+          "status": {
+            "description": "`trusted` or `safe_mode`.",
+            "type": "string"
+          },
+          "trusted_at_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trusted_by": {
+            "description": "Who vouched for the project and when, if anyone did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "safe_mode",
+          "project_id",
+          "digest",
+          "trusted_by",
+          "trusted_at_ms",
+          "basis",
+          "changed_since_trust",
+          "held_back",
+          "review"
         ],
         "type": "object"
       },
@@ -20137,6 +20337,70 @@
         "summary": "The data of a plugin panel."
       }
     },
+    "/api/v1/project/trust": {
+      "get": {
+        "operationId": "project_trust",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Whether this installation trusts the project file (`trusted` or `safe_mode`), what safe mode holds back and why, and everything the file would switch on (listeners, upstream and rewrite rules, schedules, triggers, session macros, the assistant URL, the rules of engagement) for a person to review. Anyone may read it."
+      },
+      "post": {
+        "operationId": "project_trust_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrustConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Trust the project's current settings in this installation: listeners start, schedules and triggers run (as the person confirming), rules and network settings apply. Pass the `digest` from the review to confirm exactly what was read. People only; audited, a refusal too."
+      }
+    },
     "/api/v1/proofs": {
       "post": {
         "operationId": "proof_run",
@@ -22034,7 +22298,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns) and `counters`.",
+                  "description": "Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns), `counters` and `safe_mode` (true while this installation does not trust the project).",
                   "type": "object"
                 }
               }

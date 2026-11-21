@@ -610,15 +610,22 @@ impl Service {
         Ok(t.view.lock().clone())
     }
 
-    /// Continues a paused, cancelled or failed task as the actor that
-    /// started it, skipping the operations it already scanned.
+    /// Continues a paused, cancelled or failed task, skipping the operations it already scanned. It runs as the
+    /// actor that started it, except that a person resuming a person's task runs it as themselves.
     pub fn scan_task_resume(self: &Arc<Self>, actor: &Actor, id: &str) -> Result<ScanTaskView> {
         let t = self.scan_task(actor, id)?;
         let status = t.view.lock().status;
         if status.running() || status == ScanTaskStatus::Done {
             return Err(ServiceError::Invalid(format!("scan task {id} is {}; nothing to resume", status.as_str())));
         }
-        let owner = Actor::parse(&t.actor).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let stored = Actor::parse(&t.actor).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        // The name stored with a task is data from the project file. A person who continues a person's task takes it
+        // over (it runs, and is audited, as them); an agent's task keeps the agent's own limits.
+        let owner = if stored.kind == pm_policy::ActorKind::Human && actor.kind == pm_policy::ActorKind::Human {
+            actor.clone()
+        } else {
+            stored
+        };
         t.cancelled.store(false, Ordering::Relaxed);
         t.paused.store(false, Ordering::Relaxed);
         let (crawl, crawled) = {

@@ -5,6 +5,36 @@ version may change project files, APIs and the CLI.
 
 ## Unreleased
 
+### Security
+
+- **A project that came from somewhere else now opens in safe mode** (threat model F-2, ADR-0022 step 0). A project
+  file can carry extra proxy listeners (even on `0.0.0.0`), upstream proxy rules, match-and-replace rules, scheduled
+  scans, workflow triggers, session macros, a model server address and the rules of engagement that decide what counts
+  as in scope. Until now opening it started all of that. Now ProxyMind keeps a record in your home folder
+  (`project-trust.json`, never in the project) of which projects it trusts. A project this installation created is
+  trusted, and stays trusted when you change it yourself. Any other project, and any trusted project whose file is
+  changed by something else, opens in safe mode: extra listeners are not started, scheduled scans do not fire, workflow
+  triggers do not run, upstream proxy rules, client certificates and hostname overrides are not applied (traffic goes
+  direct), rewrite rules are not applied, session rules and macros are ignored, the assistant makes no call, and agents,
+  plugins and the AI scan cannot send anything (the scope the gate checks was written by the file's author). The web UI
+  shows a banner on every page with "Review and trust this project" and a review page that lists the rules of
+  engagement, listeners, upstream and rewrite rules, schedules and triggers before you confirm; `proxymind project
+  status` and `proxymind project trust` do the same in a terminal; the desktop app uses the same path. Only a person
+  can confirm (agents can read the status with the new MCP tool `project_trust_status`, 88 tools; an agent's attempt is
+  an audited denial). Scheduled scans and triggers then run as you, whatever name the file says created them.
+  **Projects you already have** ask for one confirmation the first time they open after this update (there is no
+  honest way to tell them from a download): run `proxymind project trust` or click the banner. New API:
+  `GET /project/trust`, `POST /project/trust`; `/status` has `safe_mode`.
+- **A saved model API key is bound to the server it was saved for.** A project file that points the assistant at another
+  address can no longer receive your key (or the traffic): the key, and an environment-variable key too, is sent only to
+  the server you confirmed by saving the key or the assistant settings. A key saved by an older version is bound the
+  next time you save the assistant settings (the error message says so).
+- **Documented: the policy gate does not contain an agent that can run commands as you** (threat model F-1).
+  `docs/agents.md` now says what the gate covers (agents that reach ProxyMind only through MCP) and what it does not
+  (an agent with a shell or file access can read the API token, edit the project and the audit table, and read the CA
+  key), with the two ways to run agents safely: without shell and file tools, or ProxyMind as a different user with
+  only the MCP pipe given to the agent.
+
 ### Added
 
 - **Integrations** (roadmap 3.5, `docs/integrations.md`). Settings → Integrations, `/api/v1/integrations`,

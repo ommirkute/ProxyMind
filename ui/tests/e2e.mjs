@@ -5,7 +5,7 @@
 // Uses the real `proxymind` binary (PROXYMIND, default ../target/debug/proxymind)
 // and Chromium (CHROMIUM, default: Playwright's bundled path).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -2173,6 +2173,73 @@ match:
     const issue = JSON.parse(created.body);
     check(issue.title.includes("Any user can read any order") && issue.body.includes("### Reproduction") && !/(session=|Bearer |Authorization: )(?!\{\{secret:)/i.test(issue.body), "the issue has the reproduction and no raw credentials");
     check((await page.getByTestId("create-issue").textContent()).includes("Update issue"), "sending again offers an update, not a duplicate");
+  });
+
+  await section("Safe mode: a project that came from somewhere else (banner, review page, confirm)", async () => {
+    // A project made under another home folder, with things a hostile file could carry: a rewrite rule, an upstream
+    // proxy rule and a schedule. Removing this install's record of it is what "it came from somewhere else" means.
+    const fdir = join(dir, "foreign");
+    mkdirSync(fdir);
+    const fproj = join(fdir, "foreign.pmproj");
+    const fhome = join(fdir, "home");
+    const fpm = (...a) => execFileSync(BIN, ["-p", fproj, "--home", fhome, ...a], { encoding: "utf8" });
+    writeFileSync(join(fdir, "roe.yaml"), `version: 1\nengagement:\n  name: "Their engagement"\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
+    fpm("roe", "use", join(fdir, "roe.yaml"));
+    writeFileSync(join(fdir, "rules.json"), JSON.stringify([{ enabled: true, part: "request_header", match: "X-Evil: 1", replace: "X-Evil: 2", comment: "theirs" }]));
+    fpm("rules", "load", join(fdir, "rules.json"));
+    writeFileSync(join(fdir, "net.json"), JSON.stringify({ upstream_rules: [{ match: ["*"], via: "http://127.0.0.1:9" }] }));
+    fpm("network", "set", join(fdir, "net.json"));
+    fpm("schedule", "add", "--name", "their-nightly", "--url", `http://127.0.0.1:${shop}/`, "--hourly");
+    check(JSON.parse(fpm("project", "status", "--json")).status === "trusted", "a project this install made is trusted without a prompt");
+    rmSync(join(fhome, "project-trust.json"));
+    check(JSON.parse(fpm("project", "status", "--json")).safe_mode === true, "without this install's record the same file is in safe mode");
+
+    const [fui, fproxy] = [await freePort(), await freePort()];
+    let flink = "";
+    const fchild = spawn(BIN, ["-p", fproj, "--home", fhome, "ui", "--listen", `127.0.0.1:${fui}`, "--proxy", `127.0.0.1:${fproxy}`, "--as", "human:tester"], { stdio: ["pipe", "pipe", "pipe"] });
+    fchild.stdout.on("data", (d) => {
+      const m = String(d).match(/Open: (\S+)/);
+      if (m) flink = m[1];
+    });
+    children.push(fchild);
+    for (let i = 0; i < 80 && !flink; i++) await sleep(100);
+    if (!flink) throw new Error("the second proxymind ui did not print a login link");
+    const fpage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const fErrors = [];
+    fpage.on("pageerror", (e) => fErrors.push(String(e)));
+    try {
+      await fpage.goto(flink);
+      await fpage.waitForSelector('[data-testid="safe-banner"]');
+      check(true, "the banner says safe mode on the first page");
+      check((await fpage.getByTestId("safe-banner").textContent()).includes("Safe mode"), "and names it");
+      await fpage.evaluate(() => (window.location.hash = "#/overview"));
+      check(await fpage.getByTestId("safe-banner").isVisible(), "the banner is on other pages too");
+      const held = await fpage.evaluate(async () => (await (await fetch("/api/v1/project/trust")).json()).held_back.map((h) => h.kind));
+      check(["roe", "upstream", "rewrite_rule", "schedule"].every((k) => held.includes(k)), `the held-back list names the rules, upstream rule, rewrite rule and schedule (${held.join(", ")})`);
+      const refused = await fpage.evaluate(async () => {
+        const r = await fetch("/api/v1/project/trust", { method: "POST", headers: { "X-ProxyMind": "1", "Content-Type": "application/json" }, body: JSON.stringify({ digest: "0".repeat(64) }) });
+        return [r.status, (await r.json()).error];
+      });
+      check(refused[0] >= 400 && /changed since you reviewed/.test(refused[1]), "confirming a digest the person did not read is refused");
+
+      await fpage.getByTestId("safe-banner-review").click();
+      await fpage.waitForSelector('[data-testid="review-roe"]');
+      check((await fpage.getByTestId("review-roe").textContent()).includes("Their engagement"), "the review page shows the file's rules of engagement");
+      check((await fpage.getByTestId("review-upstream").textContent()).includes("127.0.0.1:9"), "the upstream proxy rule is listed");
+      check((await fpage.getByTestId("review-rewrite").textContent()).includes("X-Evil"), "the rewrite rule is listed");
+      check((await fpage.getByTestId("review-schedules").textContent()).includes("their-nightly"), "the schedule is listed");
+      check(await fpage.getByTestId("trust-confirm").isDisabled(), "the confirm button waits for the box to be ticked");
+      await fpage.getByRole("checkbox", { name: "I have read this" }).check();
+      await fpage.getByTestId("trust-confirm").click();
+      await fpage.waitForSelector('[data-testid="safe-banner"]', { state: "detached" });
+      check(true, "the banner is gone after confirming");
+      const after = await fpage.evaluate(async () => (await fetch("/api/v1/project/trust")).json());
+      check(after.status === "trusted" && after.trusted_by === "human:tester" && after.basis === "confirmed", "the project is trusted, by the person who confirmed");
+      check(existsSync(join(fhome, "project-trust.json")), "the record is in the home folder, not in the project");
+      check(fErrors.length === 0, `no page errors${fErrors.length ? ": " + fErrors.join(" | ") : ""}`);
+    } finally {
+      await fpage.close();
+    }
   });
 
   // ADR-0018: no live page polls. The built bundle must not call setInterval at all. A polling setTimeout chain

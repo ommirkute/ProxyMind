@@ -128,6 +128,10 @@ impl Service {
                 .map_err(|e| ServiceError::Invalid(e.to_string()))?,
             summary: row.summary.clone(),
         };
+        if let Some(reason) = self.safe_mode_refusal(&req.actor) {
+            self.audit(&row.actor, &row.action, json!({ "approval_id": approval_id, "reasons": [reason] }), "deny")?;
+            return Ok(Authorization::Denied { reasons: vec![reason] });
+        }
         let verdict = self.policy.evaluate(&req, jiff::Timestamp::now());
         // The human approval satisfies the tier rule; only hard limits
         // (scope, dates, time windows, a tier set to deny) can still refuse.

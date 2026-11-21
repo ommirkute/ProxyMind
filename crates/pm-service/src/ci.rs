@@ -72,9 +72,10 @@ impl Service {
         Ok(())
     }
 
-    /// A project setting, or nothing during a CI run (a project file must not point probes at a callback server).
+    /// A project setting, or nothing during a CI run or in safe mode (a project file must not point probes at a
+    /// callback server).
     pub(crate) fn setting_unless_isolated(&self, key: &str) -> Result<Option<String>> {
-        if self.run_guard.lock().isolated {
+        if self.run_guard.lock().isolated || self.safe_mode() {
             return Ok(None);
         }
         Ok(self.store.read(|db| db.get_setting(key))?)

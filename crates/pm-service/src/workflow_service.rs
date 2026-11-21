@@ -105,6 +105,15 @@ fn load(store: &Store) -> Result<Vec<Workflow>> {
     }
 }
 
+/// The saved workflows (for the trust digest and review).
+pub(crate) fn load_workflows(store: &Store) -> Result<Vec<Workflow>> {
+    load(store)
+}
+
+pub(crate) fn save_workflows(store: &mut Store, list: &[Workflow]) -> Result<()> {
+    save(store, list)
+}
+
 fn save(store: &mut Store, list: &[Workflow]) -> Result<()> {
     let text = serde_json::to_string(list).map_err(|e| ServiceError::Invalid(e.to_string()))?;
     store.set_setting(WORKFLOWS_SETTING, &text)?;
@@ -154,7 +163,7 @@ impl Service {
         ServiceError::Invalid("only people can create, change or delete workflows and switch their triggers".into())
     }
 
-    fn workflow_invalidate(&self) {
+    pub(crate) fn workflow_invalidate(&self) {
         self.workflows.lock().cache = None;
     }
 
@@ -234,6 +243,7 @@ impl Service {
         if !people_only(actor) {
             return Err(self.workflow_deny(actor, "workflow_save", key));
         }
+        let was_trusted = self.trust_before();
         let (wf, trigger_cleared) = self.store.write(|db| -> Result<(Workflow, bool)> {
             let mut list = load(db)?;
             let id = find(&list, key).map(|w| w.id).ok_or_else(|| ServiceError::NotFound(format!("workflow {key}")))?;
@@ -263,6 +273,7 @@ impl Service {
         let mut detail = wf.for_audit();
         detail["trigger_turned_off_by_edit"] = json!(trigger_cleared);
         self.audit(&actor.id(), "workflow_save", detail, "allow")?;
+        self.trust_after(actor, was_trusted);
         self.workflow_invalidate();
         self.publish(Event::WorkflowChanged { id: wf.id, what: "saved".into() });
         Ok(self.workflow_view(actor, wf))
@@ -273,6 +284,7 @@ impl Service {
         if !people_only(actor) {
             return Err(self.workflow_deny(actor, "workflow_delete", key));
         }
+        let was_trusted = self.trust_before();
         let gone = self.store.write(|db| -> Result<Workflow> {
             let mut list = load(db)?;
             let id = find(&list, key).map(|w| w.id).ok_or_else(|| ServiceError::NotFound(format!("workflow {key}")))?;
@@ -283,6 +295,7 @@ impl Service {
             Ok(gone)
         })?;
         self.audit(&actor.id(), "workflow_delete", gone.for_audit(), "allow")?;
+        self.trust_after(actor, was_trusted);
         self.workflow_invalidate();
         self.publish(Event::WorkflowChanged { id: gone.id, what: "deleted".into() });
         Ok(())
@@ -305,6 +318,7 @@ impl Service {
         {
             return Err(ServiceError::Invalid(format!("max_per_minute is 1 to {MAX_TRIGGER_RATE}")));
         }
+        let was_trusted = self.trust_before();
         let wf = self.store.write(|db| -> Result<Workflow> {
             let mut list = load(db)?;
             let id = find(&list, key).map(|w| w.id).ok_or_else(|| ServiceError::NotFound(format!("workflow {key}")))?;
@@ -328,6 +342,7 @@ impl Service {
         let mut detail = wf.for_audit();
         detail["trigger"]["enabled_by"] = json!(wf.trigger.enabled_by);
         self.audit(&actor.id(), "workflow_trigger", detail, "allow")?;
+        self.trust_after(actor, was_trusted);
         self.workflow_invalidate();
         self.publish(Event::WorkflowChanged {
             id: wf.id,
@@ -575,8 +590,12 @@ impl Service {
                 return list.clone();
             }
         }
-        let list: Vec<Workflow> =
-            self.store.read(load).map(|l| l.into_iter().filter(|w| w.trigger.enabled).collect()).unwrap_or_default();
+        // Safe mode: triggers that came with the file do not run until a person has confirmed the project.
+        let list: Vec<Workflow> = if self.safe_mode() {
+            Vec::new()
+        } else {
+            self.store.read(load).map(|l| l.into_iter().filter(|w| w.trigger.enabled).collect()).unwrap_or_default()
+        };
         let list = Arc::new(list);
         self.workflows.lock().cache = Some((Instant::now(), list.clone()));
         list
@@ -625,7 +644,8 @@ impl Service {
             if workflow::check_condition(m, Some(&cur), &workflow::Vars::new(), in_scope).is_err() {
                 continue;
             }
-            let Ok(actor) = Actor::parse(&wf.trigger.enabled_by) else { continue };
+            // Runs as the person who trusted the project here, never as the name the file says enabled it.
+            let Ok(actor) = self.run_as(&wf.trigger.enabled_by) else { continue };
             if !people_only(&actor) || !self.trigger_admit(wf) {
                 continue;
             }

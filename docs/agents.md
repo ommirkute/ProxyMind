@@ -2,6 +2,28 @@
 
 ProxyMind includes an MCP server, so any MCP client (Claude Code, Claude Desktop, Cursor, your own agent) can read recorded traffic and send requests, under the rules of engagement you set.
 
+## What the policy gate does and doesn't contain
+
+Read this before you connect an agent. The gate (scope, tiers, approvals, rate limits, the audit log) governs an agent that reaches ProxyMind **only through MCP**, or through a REST path scoped to the agent. It is not a sandbox around the agent.
+
+An agent that can **run shell commands or read files as the same operating-system user** as ProxyMind does not need MCP at all. It can:
+
+- read `~/.proxymind/api-token` and call the REST API as the human: change the rules of engagement, approve its own requests, start listeners, set model keys;
+- open the project file (a SQLite database) and edit the rules of engagement, approvals and the audit table, and recompute the audit chain (it is not keyed: whoever can write the file can rebuild it);
+- read the CA private key (`proxymind-ca.key`) and your saved model keys.
+
+Claude Code and most coding agents have a shell and file tools by default, so with them the gate is a guard rail for an agent that behaves, not a wall against one that has been talked into misbehaving by a hostile page. This is threat model finding F-1 (`docs/threat-model.md`).
+
+What to do about it, in order of strength:
+
+1. **Run the agent without shell and file tools.** Give it only the ProxyMind MCP server (a client that has no `Bash`, file read or write tools, or a chat client with MCP only). Then the gate holds, because MCP is the only way in.
+2. **Run ProxyMind as a different operating-system user** (or in a container or VM) from the agent, with the home folder and the project file readable by that user only, and give the agent only the MCP stdio pipe (for example `ssh other-host proxymind mcp ...`, or `sudo -u proxymind proxymind -p ... mcp --actor agent:claude` started by the client). The agent then cannot read the token, the project file or the CA key.
+3. **Treat the agent as the human** when you cannot do either: only point it at targets you would let that person test, keep the rules of engagement narrow, and keep the audit head hash (`proxymind audit verify` prints it) somewhere the agent cannot write.
+
+What changes next: Phase 3 adds per-agent scoped tokens (ADR-0022: a token carries an actor, a role ceiling and a tier cap; the install token stops being the way an agent talks to ProxyMind), a project server that holds the project and the rules so the agent's machine does not, and a keyed audit chain with a key the agent's user cannot read. Until then, the sentence above is the guarantee.
+
+The gate also refuses agents in one more case: a project that this installation does not trust is in **safe mode** (a file that came from somewhere else), and in safe mode every action of an agent, plugin or AI scan that would send traffic is refused until a person has reviewed and trusted the project. `project_trust_status` tells you whether that is why a call was refused; you cannot trust a project yourself.
+
 ## 1. Record some traffic
 
 ```bash
@@ -90,6 +112,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `stream_list` | Raw TCP and TLS streams the proxy recorded (databases, mail, custom protocols): target, client, times, bytes, TLS, how they ended. Filters: `host`, `port`, `client`, `since_ms`, `until_ms`, `tls`, paging |
 | `stream_get` | One raw stream with its chunks in order (client or server, length, text preview), redacted and tagged as untrusted; no raw bytes for agents. Page with `after` |
 | `stream_replay` | Replay a stream on a new connection to the same target (TLS with the same server name), with the recorded or replacement chunks (`text_chunks` or base64 `chunks`); the target must be in scope and sending bytes needs approval by default |
+| `project_trust_status` | Whether the person running ProxyMind trusts this project file. In safe mode (`safe_mode: true`; the project came from elsewhere or its settings changed since it was trusted) your sends are refused, and the file's listeners, schedules, triggers, upstream and rewrite rules are off. Returns what is held back and why. You cannot trust a project: tell the person to use the banner in the web UI or `proxymind project trust`. Sends nothing |
 | `workflow_list` | The project's saved workflows (chains of match, extract, transform, send and assert steps a person wrote): id, name, what it is for, the kinds of its steps, whether it runs by itself on new traffic. Sends nothing |
 | `integration_list` | The names and kinds of the project's integrations (Jira, GitHub, GitLab, Slack, webhook) and whether each is on. No address, project or secret. There is no tool to send or configure: people do that |
 | `workflow_get` | One workflow's steps. Secrets typed into request templates (a password in a login body, a token in a header) are hidden; `{{variable}}` references stay |

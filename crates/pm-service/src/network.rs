@@ -44,6 +44,17 @@ pub fn sync_listeners(store: &Store, listeners: &Listeners) -> Result<()> {
     Ok(())
 }
 
+/// Like [`sync_listeners`], but a project that is not trusted in this installation gets no extra listeners
+/// (safe mode, threat model F-2): the file's say-so does not open sockets.
+pub fn sync_listeners_gated(store: &Store, listeners: &Listeners, gate: &crate::TrustGate) -> Result<()> {
+    if gate.is_trusted(store) {
+        sync_listeners(store, listeners)
+    } else {
+        listeners.sync(&[]);
+        Ok(())
+    }
+}
+
 /// Extra proxy listeners and whether each is running in this process.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ListenersView {
@@ -59,7 +70,17 @@ pub struct ListenersView {
 
 /// Applies the saved settings to `net` if they changed; true when they did.
 pub fn sync_network(store: &Store, net: &Network) -> Result<bool> {
-    let cfg = load_network(store)?;
+    apply_network(net, load_network(store)?)
+}
+
+/// Like [`sync_network`], but a project that is not trusted in this installation gets the default settings: every
+/// connection goes direct (no upstream rule, client certificate or hostname override from the file).
+pub fn sync_network_gated(store: &Store, net: &Network, gate: &crate::TrustGate) -> Result<bool> {
+    let cfg = if gate.is_trusted(store) { load_network(store)? } else { NetConfig::default() };
+    apply_network(net, cfg)
+}
+
+fn apply_network(net: &Network, cfg: NetConfig) -> Result<bool> {
     if cfg == net.config() {
         return Ok(false);
     }
@@ -107,10 +128,14 @@ impl Service {
                 }
             }
         }
-        self.network().set(cfg.clone()).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
+        // Rejects settings the sender cannot use before anything is saved.
+        Network::new().set(cfg.clone()).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(NETWORK_SETTING, &text))?;
         self.audit(&actor.id(), "network_settings", json!(cfg.masked()), "allow")?;
+        // Applies now when the project is trusted; in safe mode the settings are saved but held back.
+        self.trust_after(actor, was_trusted);
         Ok(cfg.masked())
     }
 
@@ -153,16 +178,27 @@ impl Service {
     }
 }
 /// Keeps match-and-replace rules and network settings in step with the
-/// project, so changes from the CLI or another UI apply without a restart.
+/// project, so changes from the CLI or another UI apply without a restart. `gate` is the service's trust gate
+/// (`Service::trust_gate`): while the project is not trusted in this installation (safe mode) the file's rules,
+/// network settings and extra listeners are not applied, and they start applying as soon as a person confirms.
 pub fn watch_project(
     project: &std::path::Path,
     rewriter: Option<std::sync::Arc<pm_proxy::Rewriter>>,
     network: pm_replay::Network,
     listeners: Option<Arc<Listeners>>,
+    gate: crate::TrustGate,
 ) -> anyhow::Result<()> {
     let store = pm_store::Store::open(project)?;
+    let safe = !gate.is_trusted(&store);
+    if safe {
+        eprintln!(
+            "SAFE MODE: this project is not trusted in this installation. Its listeners, upstream rules, rewrite \
+             rules, schedules and workflow triggers are held back. Review it, then `proxymind project trust` (or use \
+             the banner in the web UI)."
+        );
+    }
     if let Some(r) = &rewriter {
-        if let Err(e) = crate::sync_rules(&store, r) {
+        if let Err(e) = crate::rules::sync_rules_gated(&store, r, &gate) {
             eprintln!("Match-and-replace rules not loaded: {e}");
         }
         let n = r.rules().iter().filter(|r| r.enabled).count();
@@ -170,7 +206,7 @@ pub fn watch_project(
             eprintln!("{n} match-and-replace rule(s) active");
         }
     }
-    if let Err(e) = crate::sync_network(&store, &network) {
+    if let Err(e) = sync_network_gated(&store, &network, &gate) {
         eprintln!("Network settings not applied: {e}");
     }
     let net = network.config();
@@ -183,7 +219,7 @@ pub fn watch_project(
         eprintln!("{} client certificate(s) configured", net.client_certs.len());
     }
     if let Some(l) = &listeners {
-        sync_listeners(&store, l)?;
+        sync_listeners_gated(&store, l, &gate)?;
         for st in l.status() {
             match st.error {
                 Some(e) => eprintln!("Extra proxy listener {}: {e}", st.bind),
@@ -196,22 +232,35 @@ pub fn watch_project(
         }
     }
     tokio::spawn(async move {
+        let mut was_safe = safe;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let now_safe = !gate.is_trusted(&store);
+            if now_safe != was_safe {
+                eprintln!(
+                    "{}",
+                    if now_safe {
+                        "SAFE MODE: the project changed since it was trusted; its settings are held back again."
+                    } else {
+                        "Project trusted: its settings now apply."
+                    }
+                );
+                was_safe = now_safe;
+            }
             if let Some(r) = &rewriter {
-                match crate::sync_rules(&store, r) {
+                match crate::rules::sync_rules_gated(&store, r, &gate) {
                     Ok(true) => eprintln!("Match-and-replace rules reloaded"),
                     Ok(false) => {}
                     Err(e) => tracing::warn!("match-and-replace rules: {e}"),
                 }
             }
-            match crate::sync_network(&store, &network) {
+            match sync_network_gated(&store, &network, &gate) {
                 Ok(true) => eprintln!("Network settings reloaded"),
                 Ok(false) => {}
                 Err(e) => tracing::warn!("network settings: {e}"),
             }
             if let Some(l) = &listeners
-                && let Err(e) = sync_listeners(&store, l)
+                && let Err(e) = sync_listeners_gated(&store, l, &gate)
             {
                 tracing::warn!("proxy listeners: {e}");
             }
@@ -223,7 +272,7 @@ pub fn watch_project(
 impl Service {
     /// Lets the service start, stop and report the proxy's extra listeners.
     pub fn attach_listeners(&self, l: Arc<Listeners>) -> Result<()> {
-        self.store.read(|db| sync_listeners(db, &l))?;
+        self.store.read(|db| sync_listeners_gated(db, &l, &self.trust))?;
         let _ = self.listeners.set(l);
         Ok(())
     }
@@ -259,12 +308,12 @@ impl Service {
         }
         pm_proxy::listeners::validate(&list).map_err(|e| ServiceError::Invalid(format!("{e:#}")))?;
         let text = serde_json::to_string(&list).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(LISTENERS_SETTING, &text))?;
-        if let Some(l) = self.listeners.get() {
-            l.sync(&list);
-        }
         let shown: Vec<ListenerConfig> = list.iter().map(ListenerConfig::masked).collect();
         self.audit(&actor.id(), "proxy_listeners", json!(shown), "allow")?;
+        // Starts now when the project is trusted; in safe mode the listeners are saved but not started.
+        self.trust_after(actor, was_trusted);
         self.listeners_get()
     }
 }

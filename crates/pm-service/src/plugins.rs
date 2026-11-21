@@ -136,7 +136,9 @@ impl Service {
     /// Plugins come from the user's registry in `home`, read each time they
     /// are used (so `proxymind plugin add` takes effect without a restart).
     pub fn attach_plugin_home(&self, home: PathBuf) {
-        let _ = self.plugin_home.set(home);
+        let _ = self.plugin_home.set(home.clone());
+        // The same folder holds this installation's record of which projects it trusts.
+        self.trust_attach_home(home);
     }
 
     fn installed_plugins(&self) -> Vec<pm_plugin::Installed> {

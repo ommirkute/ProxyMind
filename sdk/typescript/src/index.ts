@@ -54,6 +54,7 @@ import type {
   SiteView,
   TargetAnalysis,
   TokenAnalyzerResult,
+  TrustView,
   Workflow,
   WorkflowRun,
   WsSearchResult,
@@ -196,6 +197,16 @@ export class Client {
 
   status(): Promise<Json> {
     return this.get("/status");
+  }
+
+  /** Whether this installation trusts the project (`safe_mode` false) and what safe mode holds back. */
+  projectTrust(): Promise<TrustView> {
+    return this.get("/project/trust");
+  }
+
+  /** Trusts the project's current settings (people only). Pass the `digest` of the `projectTrust()` you reviewed. */
+  projectTrustConfirm(digest?: string): Promise<TrustView> {
+    return this.post("/project/trust", digest ? { digest } : {});
   }
 
   /** Recorded exchanges, newest first. Filters: host, path, method, status, source, limit, before_id… */

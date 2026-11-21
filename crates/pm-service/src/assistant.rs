@@ -95,6 +95,9 @@ pub struct Chat {
 
 /// Saved model API keys, in the user's home.
 const KEYS_FILE: &str = "model-keys.json";
+/// Which server each key name may be sent to (`https://host:port`), in the user's home. Written only when a person
+/// saves a key or the assistant settings (threat model B4.1): a project file cannot move a key to another server.
+const KEY_HOSTS_FILE: &str = "model-key-hosts.json";
 
 /// Where a model API key comes from (never the key itself).
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -104,6 +107,23 @@ pub struct KeyStatus {
     /// The last four characters, e.g. "…a1b2".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+}
+
+fn write_private_json(path: &std::path::Path, text: &str) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp).map_err(|e| ServiceError::Invalid(format!("saving: {e}")))?;
+        std::io::Write::write_all(&mut f, text.as_bytes())
+            .map_err(|e| ServiceError::Invalid(format!("saving: {e}")))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| ServiceError::Invalid(format!("saving: {e}")))
 }
 
 fn valid_key_name(name: &str) -> Result<()> {
@@ -149,8 +169,14 @@ impl Service {
             ..cfg
         };
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(ASSISTANT_SETTING, &text))?;
+        // A person who saves the settings has read the server address: a key named here may go there (B4.1).
+        if !cfg.api_key_env.is_empty() {
+            self.model_key_bind(&cfg.api_key_env, &cfg.base_url)?;
+        }
         self.audit(&actor.id(), "assistant_settings", json!(cfg), "allow")?;
+        self.trust_after(actor, was_trusted);
         Ok(cfg)
     }
 
@@ -171,6 +197,9 @@ impl Service {
         let mut keys = self.model_keys()?;
         keys.insert(name.to_string(), key.to_string());
         self.save_model_keys(&keys)?;
+        // The key is for the server the assistant settings point at now (a person is saving it, looking at them).
+        // Saved settings that name another server rebind it when a person saves those (see `assistant_config_set`).
+        self.model_key_bind(name, &self.assistant_config()?.base_url)?;
         self.audit(&actor.id(), "model_key_set", json!({ "name": name }), "allow")?;
         Ok(self.model_key_status(name))
     }
@@ -188,8 +217,76 @@ impl Service {
         Ok(self.model_key_status(name))
     }
 
+    /// The server a key name is bound to: `https://host:port` of `base_url`, the unit a key is sent to.
+    pub fn model_key_origin(base_url: &str) -> Option<String> {
+        let u = url::Url::parse(base_url).ok()?;
+        Some(format!("{}://{}", u.scheme(), u.authority()))
+    }
+
+    /// The home folder for the key-host bindings (also known to one-shot CLI commands, which attach only trust).
+    fn key_home(&self) -> Option<std::path::PathBuf> {
+        self.plugin_home.get().cloned().or_else(|| self.trust.home())
+    }
+
+    fn key_hosts_read(&self) -> std::collections::BTreeMap<String, String> {
+        match self.key_home() {
+            Some(h) => std::fs::read_to_string(h.join(KEY_HOSTS_FILE))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default(),
+            None => self.key_hosts_mem.lock().clone(),
+        }
+    }
+
+    /// Binds the key `name` to the server `base_url` points at (what saving a key or the assistant settings does).
+    pub(crate) fn model_key_bind(&self, name: &str, base_url: &str) -> Result<()> {
+        let Some(origin) = Self::model_key_origin(base_url) else { return Ok(()) };
+        let mut m = self.key_hosts_read();
+        if m.get(name) == Some(&origin) {
+            return Ok(());
+        }
+        m.insert(name.to_string(), origin);
+        match self.key_home() {
+            Some(h) => {
+                let text = serde_json::to_string_pretty(&m).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+                std::fs::create_dir_all(&h)
+                    .map_err(|e| ServiceError::Invalid(format!("saving the key's server: {e}")))?;
+                write_private_json(&h.join(KEY_HOSTS_FILE), &text)
+            }
+            None => {
+                *self.key_hosts_mem.lock() = m;
+                Ok(())
+            }
+        }
+    }
+
+    /// The key to send to the model server at `base_url`: [`Service::model_key`] if the key is bound to that
+    /// server, an error saying so if it is bound elsewhere or not at all. Environment variables follow the same
+    /// rule: until a person confirms the server (by saving the assistant settings), a project cannot send a key
+    /// to an address it chose.
+    pub fn model_key_for(&self, name: &str, base_url: &str) -> Result<Option<String>> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let Some(key) = self.model_key(name) else { return Ok(None) };
+        let now = Self::model_key_origin(base_url).unwrap_or_default();
+        match self.key_hosts_read().get(name) {
+            Some(bound) if *bound == now => Ok(Some(key)),
+            Some(bound) => Err(ServiceError::Invalid(format!(
+                "the key {name} is bound to {bound}, but the assistant settings point at {now}: it is not sent there. \
+                 Save the assistant settings yourself to confirm the new server (and that the project is one you \
+                 trust)"
+            ))),
+            None => Err(ServiceError::Invalid(format!(
+                "the key {name} has not been confirmed for {now}: save the assistant settings yourself (Assistant \
+                 page, or `proxymind assistant set`) to use it with this server"
+            ))),
+        }
+    }
+
     /// The key to use for `name`: the environment variable, else the saved
     /// key. For the code that calls the model only; never returned by the API.
+    /// Use [`Service::model_key_for`] to send it anywhere.
     pub fn model_key(&self, name: &str) -> Option<String> {
         if name.is_empty() {
             return None;

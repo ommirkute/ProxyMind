@@ -20,7 +20,7 @@ const ZIP: &str = "application/zip";
 pub fn operations() -> Vec<Operation> {
     vec![
         op("get", "/status", "status", "Version, project, who you are, the engagement and its counters.")
-            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns) and `counters`."),
+            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns), `counters` and `safe_mode` (true while this installation does not trust the project)."),
         op("get", "/roe", "roe_get", "The rules of engagement as text and as parsed.").out::<RoeView>(),
         op("put", "/roe", "roe_put", "Replace the rules of engagement.").body::<RoeBody>().out::<RoeView>(),
         op("get", "/setup", "setup", "How to point a browser at the proxy: address, CA availability and fingerprint.")
@@ -237,6 +237,8 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/session/jar", "session_jar", "Cookies in the jar.").json("Object with `cookies` (list of cookies)."),
         op("delete", "/session/jar", "session_jar_clear", "Empty the cookie jar.").json("Object with `cleared`."),
         op("post", "/session/macros/{name}/run", "session_macro_run", "Run a session macro.").out::<MacroRun>(),
+        op("get", "/project/trust", "project_trust", "Whether this installation trusts the project file (`trusted` or `safe_mode`), what safe mode holds back and why, and everything the file would switch on (listeners, upstream and rewrite rules, schedules, triggers, session macros, the assistant URL, the rules of engagement) for a person to review. Anyone may read it.").out::<TrustView>(),
+        op("post", "/project/trust", "project_trust_confirm", "Trust the project's current settings in this installation: listeners start, schedules and triggers run (as the person confirming), rules and network settings apply. Pass the `digest` from the review to confirm exactly what was read. People only; audited, a refusal too.").body::<TrustConfirmRequest>().out::<TrustView>(),
         op("get", "/integrations", "integrations_list", "Configured integrations (Jira, GitHub, GitLab, Slack, webhooks) with the state of their secrets, whether they came with a project file and need review, and the last error. Secrets are never returned. People only.").out::<Vec<IntegrationView>>(),
         op("get", "/integrations/{name}", "integration_get", "One integration. People only.").id_is_string().out::<IntegrationView>(),
         op("put", "/integrations/{name}", "integration_put", "Create or replace an integration; secrets (token, webhook_url, signing_secret, header values) are write-only and go to the user's private secrets file or an `env:NAME` reference, never the project. Saving it enabled here is what lets it send in this installation. People only; audited.").id_is_string().body::<IntegrationInput>().out::<IntegrationView>(),

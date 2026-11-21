@@ -588,6 +588,10 @@ pub fn is_invalid(v: &Validity, response: &[u8]) -> bool {
 
 // ---- service --------------------------------------------------------------
 
+pub(crate) fn load_config(store: &pm_store::Store) -> Result<SessionConfig> {
+    load(store)
+}
+
 fn load(store: &pm_store::Store) -> Result<SessionConfig> {
     match store.get_setting(SESSION_SETTING)? {
         Some(t) => serde_json::from_str(&t)
@@ -617,8 +621,10 @@ impl Service {
         cfg.validate().map_err(ServiceError::Invalid)?;
         cfg.saved_by = actor.id();
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(SESSION_SETTING, &text))?;
         self.audit(&actor.id(), "session_handling", cfg.for_audit(), "allow")?;
+        self.trust_after(actor, was_trusted);
         self.session_get(actor)
     }
 
@@ -810,7 +816,8 @@ impl Service {
         source: &str,
     ) -> Result<Option<Sent>> {
         // A CI run ignores the project's session rules and macros: a macro is gated as the person who saved it.
-        if EXEMPT.contains(&source) || self.run_guard.lock().isolated {
+        // Safe mode ignores them too: they send credentials on their own, on the file's say-so.
+        if EXEMPT.contains(&source) || self.run_guard.lock().isolated || self.safe_mode() {
             return Ok(None);
         }
         let cfg = self.store.read(load)?;

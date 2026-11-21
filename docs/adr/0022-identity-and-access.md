@@ -320,12 +320,28 @@ accounts, OIDC and TLS but has no project access by itself. The first user is bo
 ## Migration
 Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-0005) until steps 4 to 6 change who calls it.
 
-0. **Preconditions (no identity code; the Phase 3 gate needs them).** Document F-1 in `docs/agents.md` and ADR-0005's
+0. **Preconditions (no identity code; the Phase 3 gate needs them). Done 2026-11-21** (see the note below this
+   step). Document F-1 in `docs/agents.md` and ADR-0005's
    consequences. Implement the safe open for F-2: a project not created by this install opens with schedules, workflow
    triggers and extra listeners off, upstream and rewrite rules shown as pending, the ROE displayed for confirmation,
    and `created_by`/`enabled_by` checked against the current user. Bind a saved model key to its provider host (B4.1).
    Test: a fixture project with an enabled schedule, a `0.0.0.0` listener and a hostile `base_url` does nothing until
    confirmed.
+
+   *Done 2026-11-21.* F-1 is in `docs/agents.md` and ADR-0005. F-2 is `pm-service/src/trust.rs`: trust is a record in
+   `<home>/project-trust.json` (project id from the `project_id` setting, so no migration was needed; a digest of the
+   ROE, network settings, listeners, rewrite rules, session handling, assistant settings, schedules and enabled
+   workflow triggers; who vouched and why). A project is trusted when this process created the file, when a person
+   confirms the digest (`POST /project/trust`, `proxymind project trust`), or when a person edits it through the
+   service while it was trusted; otherwise it is in safe mode, which holds back what the file would start (listeners,
+   schedules, triggers, network settings, rewrite rules, session macros, the assistant) and refuses non-person actors
+   at the gate. Scheduled scans and triggers run as the person who vouched, never as the stored `created_by` /
+   `enabled_by`. **Existing projects:** not trusted until confirmed once (nothing in a file can tell a project this
+   install used from a download); the choice was one click over silently trusting every file already on disk.
+   The saved model key is bound to its server (`<home>/model-key-hosts.json`; B4.1). Tests:
+   `crates/pm-service/tests/safe_open.rs`, `crates/pm-assistant/tests/assistant.rs`, e2e "Safe mode". Step 1 may now
+   assume that a project it reads came from this install or was confirmed by a person; in server mode (3.3) the trust
+   record moves into the server's own database, keyed by the same project id.
 1. **The access module over the existing checks.** Add `pm-service::access` (`Perm`, `Principal`, `require`); replace the
    53 `actor.kind != Human` checks with `Perm` entries marked `people_only`; single-user mode is the implicit owner.
    Test: the whole existing suite unchanged; the source-scan test; a table of every `people_only` action committed in

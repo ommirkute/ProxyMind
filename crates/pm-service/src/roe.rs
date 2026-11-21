@@ -90,8 +90,10 @@ impl Service {
         }
         let roe = Roe::parse(text).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         let old = self.store.read(|db| db.get_setting(ROE_SETTING))?.unwrap_or_default();
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(ROE_SETTING, text))?;
         self.apply_roe(roe, text);
+        self.trust_after(actor, was_trusted);
         self.audit(
             &actor.id(),
             "roe_change",

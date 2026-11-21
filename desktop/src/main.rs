@@ -137,7 +137,13 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
             let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
             let extra = pm_proxy::Listeners::new(p.clone(), Some(proxy_addr));
             service.attach_listeners(extra.clone())?;
-            pm_service::watch_project(project, Some(rewriter), service.network().clone(), Some(extra))?;
+            pm_service::watch_project(
+                project,
+                Some(rewriter),
+                service.network().clone(),
+                Some(extra),
+                service.trust_gate(),
+            )?;
             tokio::spawn(p.run(l));
             // The built-in browser (Proxy → Open browser) uses this proxy.
             service.attach_proxy_info(pm_service::ProxyInfo {
@@ -149,7 +155,7 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
         }
         Err(e) => {
             eprintln!("proxy not started on {proxy_addr}: {e}");
-            pm_service::watch_project(project, None, service.network().clone(), None)?;
+            pm_service::watch_project(project, None, service.network().clone(), None, service.trust_gate())?;
             None
         }
     };
@@ -276,6 +282,9 @@ fn create_project(app: tauri::AppHandle, path: String, name: String, scope: Vec<
         let text = new_roe(&name, &scope)?;
         let mut store = Store::open(&path)?;
         store.set_setting(pm_service::ROE_SETTING, &text)?;
+        // A project made here is trusted here (safe mode is for files that came from elsewhere): record it in the
+        // home folder now, because the app restarts on it as a new process.
+        pm_service::trust_gate_for(&mut store, Some(home()))?;
         drop(store);
         switch(&app, path)
     };

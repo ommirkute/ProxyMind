@@ -107,6 +107,10 @@ impl Assistant {
 
     /// Checks the settings without calling the model.
     pub fn check(&self, cfg: &AssistantConfig) -> Result<Option<String>> {
+        // A project this installation does not trust names its own model server: nothing is sent there (F-2).
+        if let Some(why) = self.service.safe_mode_reason() {
+            return Err(AssistantError::Refused(why));
+        }
         if cfg.model.trim().is_empty() {
             return Err(AssistantError::Setup("choose a model in the assistant settings".into()));
         }
@@ -121,7 +125,12 @@ impl Assistant {
         if cfg.api_key_env.is_empty() {
             return Ok(None);
         }
-        match self.service.model_key(&cfg.api_key_env) {
+        // A key is sent only to the server it was saved or confirmed for (B4.1).
+        match self
+            .service
+            .model_key_for(&cfg.api_key_env, &cfg.base_url)
+            .map_err(|e| AssistantError::Refused(e.to_string()))?
+        {
             Some(k) => Ok(Some(k)),
             None => Err(AssistantError::Setup(format!(
                 "add the API key ({}) in the assistant settings, or set that environment variable before starting \

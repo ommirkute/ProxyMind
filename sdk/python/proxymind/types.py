@@ -1693,6 +1693,15 @@ class Held(TypedDict):
     scheme: str
 
 
+class HeldBack(TypedDict):
+    """One thing the project file would switch on."""
+    # `listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`
+    kind: str
+    what: str
+    # What safe mode does about it.
+    why: str
+
+
 class Hint(TypedDict):
     # idor, ssrf, traversal, command, injection, xss, jwt, upload, graphql, unauthenticated, admin, error, debug
     kind: str
@@ -3277,6 +3286,15 @@ class RetestItem(_RetestItemRequired, total=False):
     findings: _t.List[int]
 
 
+class ReviewItem(TypedDict):
+    """One line of the review page."""
+    # A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as
+    # written in the file, never used as an identity.
+    claimed_by: _t.Optional[str]
+    detail: str
+    what: str
+
+
 class RoeBody(TypedDict):
     """Body of `PUT /roe` and `POST /roe/check`."""
     # The rules of engagement, as YAML.
@@ -4258,6 +4276,60 @@ class Trigger(TypedDict):
     max_per_minute: int
     # Exchanges skipped because of the rate cap or because other runs were busy, since this process started.
     skipped: int
+
+
+class TrustConfirmRequest(TypedDict, total=False):
+    """`POST /project/trust`."""
+    # The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the
+    # confirmation is refused. Omit to confirm whatever is there now (scripts).
+    digest: _t.Optional[str]
+
+
+class TrustReview(TypedDict):
+    """Everything the file would do, grouped, for the person who is deciding."""
+    assistant: _t.List["ReviewItem"]
+    listeners: _t.List["ReviewItem"]
+    network_other: _t.List["ReviewItem"]
+    rewrite_rules: _t.List["ReviewItem"]
+    roe_summary: _t.Any
+    roe_text: _t.Optional[str]
+    schedules: _t.List["ReviewItem"]
+    session: _t.List["ReviewItem"]
+    triggers: _t.List["ReviewItem"]
+    upstream_rules: _t.List["ReviewItem"]
+
+
+class TrustView(TypedDict):
+    """Whether the project in this installation is trusted, and if not, what is held back.
+
+    **Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command
+    line, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network
+    settings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic
+    goes direct and unmodified, never through an address the file names); match-and-replace rules; session rules
+    and macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file
+    names); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks
+    is the file's own).
+
+    **Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing
+    settings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,
+    `integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores
+    all of these settings anyway.
+    """
+    # `created`, `confirmed` or `edited`.
+    basis: _t.Optional[str]
+    # A record exists but the settings no longer match it: the file changed since.
+    changed_since_trust: bool
+    # The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read.
+    digest: str
+    held_back: _t.List["HeldBack"]
+    project_id: str
+    review: "TrustReview"
+    safe_mode: bool
+    # `trusted` or `safe_mode`.
+    status: str
+    trusted_at_ms: _t.Optional[int]
+    # Who vouched for the project and when, if anyone did.
+    trusted_by: _t.Optional[str]
 
 
 class _TurnRequired(TypedDict):

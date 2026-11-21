@@ -1613,6 +1613,17 @@ export interface Held {
   scheme: string;
 }
 
+/** One thing the project file would switch on. */
+export interface HeldBack {
+  /**
+   * `listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`
+   */
+  kind: string;
+  what: string;
+  /** What safe mode does about it. */
+  why: string;
+}
+
 export interface Hint {
   /** idor, ssrf, traversal, command, injection, xss, jwt, upload, graphql, unauthenticated, admin, error, debug */
   kind: string;
@@ -3284,6 +3295,17 @@ export interface RetestItem {
   why: string;
 }
 
+/** One line of the review page. */
+export interface ReviewItem {
+  /**
+   * A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as
+   * written in the file, never used as an identity.
+   */
+  claimed_by: string | null;
+  detail: string;
+  what: string;
+}
+
 /** Body of `PUT /roe` and `POST /roe/check`. */
 export interface RoeBody {
   /** The rules of engagement, as YAML. */
@@ -4230,6 +4252,63 @@ export interface Trigger {
   max_per_minute: number;
   /** Exchanges skipped because of the rate cap or because other runs were busy, since this process started. */
   skipped: number;
+}
+
+/** `POST /project/trust`. */
+export interface TrustConfirmRequest {
+  /**
+   * The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the
+   * confirmation is refused. Omit to confirm whatever is there now (scripts).
+   */
+  digest?: string | null;
+}
+
+/** Everything the file would do, grouped, for the person who is deciding. */
+export interface TrustReview {
+  assistant: ReviewItem[];
+  listeners: ReviewItem[];
+  network_other: ReviewItem[];
+  rewrite_rules: ReviewItem[];
+  roe_summary: unknown;
+  roe_text: string | null;
+  schedules: ReviewItem[];
+  session: ReviewItem[];
+  triggers: ReviewItem[];
+  upstream_rules: ReviewItem[];
+}
+
+/**
+ * Whether the project in this installation is trusted, and if not, what is held back.
+ *
+ * **Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command
+ * line, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network
+ * settings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic
+ * goes direct and unmodified, never through an address the file names); match-and-replace rules; session rules
+ * and macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file
+ * names); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks
+ * is the file's own).
+ *
+ * **Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing
+ * settings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,
+ * `integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores
+ * all of these settings anyway.
+ */
+export interface TrustView {
+  /** `created`, `confirmed` or `edited`. */
+  basis: string | null;
+  /** A record exists but the settings no longer match it: the file changed since. */
+  changed_since_trust: boolean;
+  /** The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read. */
+  digest: string;
+  held_back: HeldBack[];
+  project_id: string;
+  review: TrustReview;
+  safe_mode: boolean;
+  /** `trusted` or `safe_mode`. */
+  status: string;
+  trusted_at_ms: number | null;
+  /** Who vouched for the project and when, if anyone did. */
+  trusted_by: string | null;
 }
 
 /** What one user message produced. */

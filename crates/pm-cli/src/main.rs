@@ -806,6 +806,23 @@ enum ProjectAction {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Show whether this installation trusts the project (-p) and what safe mode holds back.
+    Status {
+        /// Print the full review as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Review the project (-p) and trust it: its listeners, schedules, workflow triggers, upstream and rewrite
+    /// rules and rules of engagement then take effect, and run as you. A project made by this installation is
+    /// trusted already; one that came from somewhere else opens in safe mode until you do this.
+    Trust {
+        /// Do not ask; trust what is shown (for scripts that have already reviewed it)
+        #[arg(long)]
+        yes: bool,
+        /// Act as this person (default: human:$USER)
+        #[arg(long)]
+        actor: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1584,8 +1601,14 @@ async fn run_ci(cli: &Cli, project_given: bool, a: &CiArgs) -> Result<i32> {
     Ok(run.summary.exit_code)
 }
 
+/// The user's home folder for this run, set once at start (the trust records live there, F-2).
+static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
     let mut store = Store::open(project)?;
+    // Whether this installation trusted the project before `roe use` changes it: a person who changes the rules of
+    // a project they already trust keeps it trusted; a project that is not trusted stays in safe mode.
+    let was_trusted = HOME.get().is_some_and(|h| pm_service::project_trusted_in(&store, h));
     let text = match roe_file {
         Some(f) => {
             let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
@@ -1597,7 +1620,14 @@ fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -
             "this project has no rules of engagement yet; run `proxymind roe use <file>` (see examples/roe.yaml)",
         )?,
     };
-    Ok(Service::new(store, Policy::new(Roe::parse(&text)?))?)
+    let service = Service::new(store, Policy::new(Roe::parse(&text)?))?;
+    if let Some(h) = HOME.get() {
+        service.attach_trust_home(h.clone());
+    }
+    if roe_file.is_some() {
+        service.note_person_edit(&human_actor(None)?, was_trusted);
+    }
+    Ok(service)
 }
 
 fn human_actor(given: Option<&str>) -> Result<Actor> {
@@ -1681,6 +1711,9 @@ async fn run() -> Result<()> {
 
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
     let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Ok(h) = home_dir(&cli) {
+        let _ = HOME.set(h);
+    }
     // `proxymind ci` opens a project only when `--project` is on the command line (not from the environment).
     let project_given = matches.value_source("project") == Some(clap::parser::ValueSource::CommandLine)
         || matches
@@ -1708,6 +1741,13 @@ async fn run() -> Result<()> {
                 Err(_) => {
                     eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off.");
                     None
+                }
+            };
+            let gate = match &service {
+                Some(service) => service.trust_gate(),
+                None => {
+                    let mut store = Store::open(&cli.project)?;
+                    pm_service::trust_gate_for(&mut store, HOME.get().cloned())?
                 }
             };
             let (recorder, writer) = match &service {
@@ -1739,7 +1779,7 @@ async fn run() -> Result<()> {
             };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let extra = pm_proxy::Listeners::new(proxy.clone(), Some(*listen));
-            pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra))?;
+            pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra), gate)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             pm_proxy::listeners::warn_if_exposed(*listen);
             eprintln!("ProxyMind listening on http://{listen}");
@@ -2485,7 +2525,7 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
-            pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
+            pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
             pm_service::watch_roe(service.clone());
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
@@ -2525,7 +2565,13 @@ async fn run() -> Result<()> {
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
                 service.attach_listeners(extra.clone())?;
-                pm_service::watch_project(&cli.project, Some(rewriter), service.network().clone(), Some(extra))?;
+                pm_service::watch_project(
+                    &cli.project,
+                    Some(rewriter),
+                    service.network().clone(),
+                    Some(extra),
+                    service.trust_gate(),
+                )?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 pm_proxy::listeners::warn_if_exposed(*proxy);
@@ -2543,7 +2589,7 @@ async fn run() -> Result<()> {
                     }
                 }
             } else {
-                pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
+                pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
             }
             pm_service::watch_roe(service.clone());
             // Scheduled scans start while the UI server runs.
@@ -2772,6 +2818,38 @@ async fn run() -> Result<()> {
                 }
                 out!("{} issues (leads to test, not findings)", issues.len());
             }
+        }
+        Command::Project { action: ProjectAction::Status { json } } => {
+            let view = open_service(&cli.project, None)?.trust_status()?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                out!("{}", trust_text(&view, false));
+            }
+        }
+        Command::Project { action: ProjectAction::Trust { yes, actor } } => {
+            let service = open_service(&cli.project, None)?;
+            let view = service.trust_status()?;
+            if !view.safe_mode {
+                out!("{} is already trusted in this installation.", cli.project.display());
+                return Ok(());
+            }
+            out!("{}", trust_text(&view, true));
+            if !*yes {
+                use std::io::IsTerminal;
+                anyhow::ensure!(
+                    std::io::stdin().is_terminal(),
+                    "not a terminal: read the review above, then run again with --yes to trust the project"
+                );
+                eprint!("Trust this project and switch all of this on? [y/N] ");
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                anyhow::ensure!(answer.trim().eq_ignore_ascii_case("y"), "not trusted");
+            }
+            let req = pm_service::TrustConfirmRequest { digest: Some(view.digest.clone()) };
+            let done = service.trust_confirm(&human_actor(actor.as_deref())?, &req)?;
+            out!("✓ {} is trusted (by {})", cli.project.display(), done.trusted_by.unwrap_or_default());
+            out!("  Running `proxymind ui` or `proxymind proxy` on it picks this up within seconds.");
         }
         Command::Project { action } => project_command(&cli.project, action)?,
         Command::Plugin { action } => {
@@ -4111,6 +4189,61 @@ fn temp_beside(path: &std::path::Path, tag: &str) -> PathBuf {
     path.with_file_name(format!(".{name}.{tag}-{}-{}", std::process::id(), jiff::Timestamp::now().as_millisecond()))
 }
 
+/// A project's trust state for a terminal; `full` adds everything the file would switch on.
+fn trust_text(v: &pm_service::TrustView, full: bool) -> String {
+    let mut t = String::new();
+    if v.safe_mode {
+        t.push_str("SAFE MODE: this installation does not trust this project");
+        if v.changed_since_trust {
+            t.push_str(" (its settings changed since it was trusted)");
+        }
+        t.push_str(
+            ".
+Held back until you trust it:
+",
+        );
+        for h in &v.held_back {
+            t.push_str(&format!(
+                "  - {} ({})
+",
+                h.what, h.why
+            ));
+        }
+    } else {
+        t.push_str(&format!(
+            "Trusted ({} by {}). Nothing is held back.
+",
+            v.basis.as_deref().unwrap_or("?"),
+            v.trusted_by.as_deref().unwrap_or("?")
+        ));
+    }
+    if full {
+        let r = &v.review;
+        let mut section = |title: &str, items: &[pm_service::ReviewItem]| {
+            if items.is_empty() {
+                return;
+            }
+            t.push_str(&format!("{title}:\n"));
+            for i in items {
+                let by = i.claimed_by.as_deref().map(|b| format!(" [the file says: {b}]")).unwrap_or_default();
+                t.push_str(&format!("  - {}: {}{by}\n", i.what, i.detail));
+            }
+        };
+        section("Listeners", &r.listeners);
+        section("Upstream proxy rules", &r.upstream_rules);
+        section("Other network settings", &r.network_other);
+        section("Match-and-replace rules", &r.rewrite_rules);
+        section("Scan schedules", &r.schedules);
+        section("Workflow triggers", &r.triggers);
+        section("Session rules and macros", &r.session);
+        section("Assistant", &r.assistant);
+        if let Some(roe) = &r.roe_text {
+            t.push_str(&format!("Rules of engagement (written by whoever made the file):\n{roe}\n"));
+        }
+    }
+    t
+}
+
 fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<()> {
     match action {
         ProjectAction::Lock { out, remove } => {
@@ -4150,6 +4283,7 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
                 );
             }
         }
+        ProjectAction::Status { .. } | ProjectAction::Trust { .. } => unreachable!("handled before"),
         ProjectAction::Unlock { file, out } => {
             anyhow::ensure!(is_locked(file), "{} is not a locked project", file.display());
             let out = out.clone().unwrap_or_else(|| file.with_extension("pmproj"));

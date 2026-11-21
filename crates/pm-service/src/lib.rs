@@ -67,6 +67,7 @@ mod skills;
 mod streams;
 mod tools;
 mod traffic;
+mod trust;
 mod update;
 mod workflow;
 mod workflow_service;
@@ -113,7 +114,7 @@ pub use memory::{FindingVerdict, MEMORY_KINDS, Memory};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
     LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,
-    load_network, sync_listeners, sync_network, watch_project,
+    load_network, sync_listeners, sync_listeners_gated, sync_network, sync_network_gated, watch_project,
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use organizer::{ORGANIZER_STATUSES, OrganizerItem, OrganizerUpdate};
@@ -150,6 +151,10 @@ pub use streams::{
 };
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
+pub use trust::{
+    HeldBack, PROJECT_ID_SETTING, ReviewItem, TRUST_FILE, TrustConfirmRequest, TrustGate, TrustRecord, TrustReview,
+    TrustView, default_person, project_trusted_in, trust_gate_for,
+};
 pub use update::{UpdateState, UpdateStatus};
 pub use workflow::{
     AssertionResult, Condition, DEFAULT_TRIGGER_RATE, Edit, ExtractStep, ExtractType, MAX_RUN_SECS, MAX_SENDS,
@@ -249,6 +254,10 @@ pub struct Service {
     run_guard: parking_lot::Mutex<ci::RunGuard>,
     /// Integrations (roadmap 3.5): trust without a home, rate buckets, sends in flight, the sender.
     integrations: parking_lot::Mutex<integrations::Runtime>,
+    /// Whether this installation trusts the project file (safe mode, threat model F-2).
+    trust: TrustGate,
+    /// Which server each model key name is bound to, when there is no home folder to keep that in.
+    key_hosts_mem: parking_lot::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -370,9 +379,13 @@ impl Service {
             }
         }
         let limits = policy.roe().limits;
-        // Saved network settings apply from the start; a bad entry (say, a
-        // moved certificate file) is reported but doesn't stop the project opening.
-        if let Err(e) = network::sync_network(&store, sender.network()) {
+        // Every project has an id (trust is filed under it); a project this process just created is trusted.
+        trust::ensure_project_id(&mut store)?;
+        let trust = TrustGate::new(store.path().is_none());
+        trust.note_creation(&store);
+        // Saved network settings apply from the start unless the project is not trusted here (safe mode); a bad
+        // entry (say, a moved certificate file) is reported but doesn't stop the project opening.
+        if let Err(e) = network::sync_network_gated(&store, sender.network(), &trust) {
             tracing::warn!("network settings not applied: {e}");
         }
         let store = std::sync::Arc::new(StoreHandle::new(store));
@@ -420,6 +433,8 @@ impl Service {
             workflows: parking_lot::Mutex::default(),
             run_guard: parking_lot::Mutex::default(),
             integrations: parking_lot::Mutex::default(),
+            trust,
+            key_hosts_mem: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
         Ok(svc)
@@ -519,6 +534,13 @@ impl Service {
 
     /// Asks to run an action with these exact parameters. Always audited.
     pub fn authorize(&self, req: ActionRequest, params: &Value) -> Result<Authorization> {
+        // Safe mode: the rules of engagement of a project this installation does not trust are the file's own, so
+        // nothing but a person acts on them (threat model F-2).
+        if let Some(reason) = self.safe_mode_refusal(&req.actor) {
+            let detail = json!({ "tier": req.tier, "summary": req.summary, "reasons": [reason] });
+            self.audit(&req.actor.id(), &req.action, detail, "deny")?;
+            return Ok(Authorization::Denied { reasons: vec![reason] });
+        }
         let verdict = self.policy.evaluate(&req, jiff::Timestamp::now());
         let detail = Self::detail(&req, params, &verdict);
         let actor = req.actor.id();
