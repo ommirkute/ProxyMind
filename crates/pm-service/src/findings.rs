@@ -6,11 +6,12 @@
 //! one is merged into it (its evidence added). Each finding is filled in
 //! from the issue library (`pm_scan::library`) by its class.
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::{Denial, Perm, Principal};
 use crate::{Result, Service, ServiceError, now_ms};
 
 pub(crate) const SEVERITIES: &[&str] = &["critical", "high", "medium", "low", "info"];
@@ -96,6 +97,11 @@ fn decode(row: &serde_json::Map<String, Value>) -> Value {
     v["retest"] = match row.get("retest").and_then(Value::as_str) {
         Some(t) if !t.is_empty() => serde_json::from_str(t).unwrap_or(Value::Null),
         _ => Value::Null,
+    };
+    // Issues created for it in Jira, GitHub or GitLab (`IssueLink`s); always a list.
+    v["issue_links"] = match row.get("issue_links").and_then(Value::as_str) {
+        Some(t) if !t.is_empty() => serde_json::from_str(t).unwrap_or(json!([])),
+        _ => json!([]),
     };
     if let Some(i) = row.get("vuln_class").and_then(Value::as_str).and_then(pm_scan::library::lookup) {
         v["issue"] = json!(i);
@@ -215,19 +221,22 @@ impl Service {
         // agent, possibly steered by target content, can't reopen, downgrade
         // or reword it. It can still attach evidence.
         let settled = current["status"].as_str().is_some_and(|s| s != "suspected");
-        if actor.kind != ActorKind::Human
-            && settled
-            && (u.status.is_some() || u.severity.is_some() || u.description.is_some())
-        {
-            return Err(ServiceError::Invalid(format!(
-                "finding {} is {}: only a person can change it (agents may add evidence)",
-                u.id,
-                current["status"].as_str().unwrap_or_default()
-            )));
+        let principal = Principal::from_actor(actor);
+        if settled && (u.status.is_some() || u.severity.is_some() || u.description.is_some()) {
+            self.require_with(
+                &principal,
+                Perm::FindingStatusFinal,
+                Denial::message(format!(
+                    "finding {} is {}: only a person can change it (agents may add evidence)",
+                    u.id,
+                    current["status"].as_str().unwrap_or_default()
+                )),
+            )?;
         }
         let mut changes = serde_json::Map::new();
         if let Some(st) = &u.status {
-            let allowed: &[&str] = if actor.kind == ActorKind::Human { HUMAN_STATUSES } else { &["suspected"] };
+            let allowed: &[&str] =
+                if principal.allows(Perm::FindingStatusFinal) { HUMAN_STATUSES } else { &["suspected"] };
             if !allowed.contains(&st.as_str()) {
                 return Err(ServiceError::Invalid(if st == "proven" {
                     "findings become proven only through a successful proof_run".into()
@@ -274,9 +283,7 @@ impl Service {
     /// Saves a model-written explanation and fix on a finding (people only:
     /// the assistant writes it when a person asks).
     pub fn finding_set_explanation(&self, actor: &Actor, id: i64, markdown: &str) -> Result<Value> {
-        if actor.kind != pm_policy::ActorKind::Human {
-            return Err(ServiceError::Invalid("only people save a finding explanation".into()));
-        }
+        self.require_actor(actor, Perm::FindingsExplain)?;
         let current = self.finding_get(id)?;
         let mut ch = serde_json::Map::new();
         ch.insert("explanation".into(), json!(markdown.chars().take(20_000).collect::<String>()));

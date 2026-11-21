@@ -475,8 +475,8 @@ impl Service {
                 "put {{oast}} in raw where the callback URL should go, or {{oast_dns}} where a host name goes",
             );
         }
-        let public = self.store.read(|db| db.get_setting(OAST_SETTING))?;
-        let dns_domain = self.store.read(|db| db.get_setting(OAST_DNS_SETTING))?;
+        let public = self.setting_unless_isolated(OAST_SETTING)?;
+        let dns_domain = self.setting_unless_isolated(OAST_DNS_SETTING)?;
         if wants_http && public.is_none() {
             return invalid("no OAST listener configured: run `proxymind oast-server` or start mcp with --oast-listen");
         }
@@ -1401,7 +1401,7 @@ fn percent_decode(s: &str) -> String {
 /// body de-chunked and decompressed.
 pub(crate) fn recorded_document(url: &str, raw: &[u8]) -> Option<pm_browser::Document> {
     let converted;
-    let raw = if pm_http::h2text::is_http2_response(raw) {
+    let raw = if pm_http::h3text::is_multiplexed_response(raw) {
         converted = pm_http::h2text::to_http1_response(raw)?;
         &converted[..]
     } else {

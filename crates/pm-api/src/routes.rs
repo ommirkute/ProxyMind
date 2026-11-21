@@ -15,13 +15,14 @@ use pm_service::api_types::{
     CoverageQuery, CurlBody, EngageExchange, ExchangeQuery, ExplainBody, ForwardBody, FromQuery, HostQuery, KeyBody,
     LimitQuery, ListenBody, ListenersBody, OrganizerAdd, OrganizerQuery, PackQuery, PanelQuery, PayloadBody, PluginSet,
     ProbesQuery, ReconDns, ReconWayback, RecordLoginBody, ReportQuery, RoeBody, RulesBody, ScanQuery, SendBody,
-    SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet, WsHistoryQuery,
-    WsQuery,
+    SiteQuery, SmtpBody, SnapshotBody, StatusQuery, TokensBody, TriageBody, UpdateCheck, UpdateSet,
+    UpstreamResolveRequest, WorkflowRunBody, WorkflowRunsQuery, WorkflowTriggerBody, WsHistoryQuery, WsQuery,
 };
 use pm_service::pm_ai::View;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::{
-    AuthzCheckRequest, FindingUpdate, ModelFilter, NewFinding, ProofRequest, ReplayRequest, ServiceError,
+    AuthzCheckRequest, DeliveriesQuery, FindingUpdate, IntegrationEnabledBody, IntegrationInput, ModelFilter,
+    NewFinding, ProofRequest, ReplayRequest, SendFindingBody, ServiceError, TrustConfirmRequest,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -84,6 +85,7 @@ pub fn api() -> Router<AppState> {
         .route("/status", get(status))
         .route("/roe", get(roe_get).put(roe_put))
         .route("/setup", get(setup))
+        .route("/setup/mobile", get(setup_mobile))
         .route("/ca.pem", get(ca_pem))
         .route("/browser/open", post(browser_open))
         .route("/roe/check", post(roe_check))
@@ -111,6 +113,10 @@ pub fn api() -> Router<AppState> {
         .route("/export/har", post(export_har))
         .route("/tools/curl", post(tools_curl))
         .route("/ws/replay", post(ws_replay))
+        .route("/streams", get(streams_list))
+        .route("/streams/{id}", get(stream_get))
+        .route("/streams/{id}/chunks", get(stream_chunks))
+        .route("/streams/{id}/replay", post(stream_replay).layer(axum::extract::DefaultBodyLimit::max(24 << 20)))
         .route("/race", post(race))
         .route("/replay/group", post(replay_group))
         .route("/fuzzer", post(fuzzer))
@@ -120,6 +126,8 @@ pub fn api() -> Router<AppState> {
         .route("/crawl", post(crawl))
         .route("/discover", post(discover))
         .route("/tools/decode", post(tools_decode))
+        .route("/tools/protobuf/decode", post(tools_protobuf_decode))
+        .route("/tools/protobuf/encode", post(tools_protobuf_encode))
         .route("/tools/request-transform", post(tools_request_transform))
         .route("/tools/compare", post(tools_compare))
         .route("/tools/token-analyzer", post(tools_token_analyzer))
@@ -181,6 +189,8 @@ pub fn api() -> Router<AppState> {
         .route("/plugins", get(plugins))
         .route("/plugins/check", post(plugin_check))
         .route("/plugins/{name}", axum::routing::put(plugin_set))
+        .route("/plugins/{name}/accept", post(plugin_accept))
+        .route("/plugins/{name}/hooks/{kind}", axum::routing::put(plugin_hook_set))
         .route("/plugins/{name}/panels/{panel}", get(plugin_panel))
         .route("/scan/profiles", get(scan_profiles).post(scan_profile_save))
         .route("/scan/custom-checks", get(custom_checks).post(custom_check_save))
@@ -205,6 +215,8 @@ pub fn api() -> Router<AppState> {
         .route("/proofs/{id}/rerun", post(proof_rerun))
         .route("/audit", get(audit))
         .route("/audit/verify", get(audit_verify))
+        .route("/audit/checkpoint", post(audit_checkpoint))
+        .route("/audit/checkpoints", get(audit_checkpoints))
         .route("/report", get(report))
         .route("/evidence/pack", get(evidence_pack))
         .route("/evidence/fingerprint", get(evidence_fingerprint))
@@ -219,11 +231,27 @@ pub fn api() -> Router<AppState> {
         .route("/intercept/{id}/drop", post(intercept_drop))
         .route("/match-replace", get(rules_get).put(rules_put))
         .route("/network", get(network_get).put(network_put))
+        .route("/network/upstream/resolve", post(network_resolve))
         .route("/proxy/listeners", get(listeners_get).put(listeners_put))
         .route("/history/recording", get(recording_get).put(recording_put))
+        .route("/devices", get(devices_get))
+        .route("/devices/{addr}", axum::routing::put(device_put).delete(device_delete))
         .route("/session", get(session_get).put(session_put))
         .route("/session/jar", get(session_jar).delete(session_jar_clear))
         .route("/session/macros/{name}/run", post(session_macro_run))
+        .route("/workflows", get(workflows_list).post(workflow_create))
+        .route("/workflows/runs", get(workflow_runs))
+        .route("/workflows/runs/{id}", get(workflow_run_get))
+        .route("/workflows/{id}", get(workflow_get).put(workflow_update).delete(workflow_delete))
+        .route("/workflows/{id}/trigger", axum::routing::put(workflow_trigger))
+        .route("/workflows/{id}/run", post(workflow_run))
+        .route("/integrations", get(integrations_list))
+        .route("/integrations/{name}", get(integration_get).put(integration_put).delete(integration_delete))
+        .route("/integrations/{name}/enabled", axum::routing::put(integration_enabled))
+        .route("/integrations/{name}/test", post(integration_test))
+        .route("/integrations/{name}/deliveries", get(integration_deliveries))
+        .route("/project/trust", get(project_trust).post(project_trust_confirm))
+        .route("/findings/{id}/issue", post(finding_issue))
         .route("/assistant", get(assistant_state))
         .route("/assistant/config", axum::routing::put(assistant_config))
         .route("/assistant/key", axum::routing::put(model_key_set))
@@ -266,6 +294,7 @@ async fn status(State(st): State<AppState>) -> ApiResult {
         "engagement": roe.engagement.name,
         "in_scope": roe.include.iter().map(|p| &p.text).collect::<Vec<_>>(),
         "counters": st.service.counters()?,
+        "safe_mode": st.service.safe_mode(),
     }))
 }
 
@@ -502,16 +531,45 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
         "response_body": ex.response.as_deref().and_then(decoded),
         "view": view,
     });
+    // gRPC and Protobuf bodies as text (per message, with the status from the trailers); absent for other traffic.
+    let proto = |raw: &[u8]| pm_service::pm_ai::body::protobuf_view(raw, true).map(|(_, r)| r.text);
+    if let Some(t) = proto(&ex.request) {
+        v["request_protobuf"] = json!(t);
+    }
+    if let Some(t) = ex.response.as_deref().and_then(proto) {
+        v["response_protobuf"] = json!(t);
+    }
     if let Some(n) = request_truncated {
         v["request_truncated"] = json!(n);
     }
     if let Some(n) = response.and_then(|r| r.1) {
         v["response_truncated"] = json!(n);
     }
+    // What rules or the intercept editor changed: the request as the client sent it (`request` is what went to
+    // the server) and the response as delivered to the client (`response` is the server's), the list of changes
+    // and a diff per changed message.
+    v["changes"] = json!(ex.changes);
+    v["diffs"] = json!(st.service.change_diffs(&st.actor, &ex));
+    for (key, original) in [("request_original", &ex.request_original), ("response_delivered", &ex.response_delivered)]
+    {
+        if let Some(raw) = original {
+            let (text, cut) = capped(raw, max);
+            v[key] = json!(text);
+            if let Some(n) = cut {
+                v[format!("{key}_truncated")] = json!(n);
+            }
+        }
+    }
     if q.bytes == Some(1) {
         let cut = |b: &[u8]| pm_core::base64(&b[..max.map_or(b.len(), |m| m.min(b.len()))]);
         v["request_b64"] = json!(cut(&ex.request));
         v["response_b64"] = json!(ex.response.as_deref().map(cut));
+        if let Some(b) = &ex.request_original {
+            v["request_original_b64"] = json!(cut(b));
+        }
+        if let Some(b) = &ex.response_delivered {
+            v["response_delivered_b64"] = json!(cut(b));
+        }
     }
     Ok(Json(v))
 }
@@ -760,6 +818,20 @@ async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b
     ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
 }
 
+async fn plugin_accept(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.plugin_accept_permissions(&st.actor, &name)?)
+}
+
+async fn plugin_hook_set(
+    State(st): State<AppState>,
+    Path((name, kind)): Path<(String, String)>,
+    Json(b): Json<pm_service::api_types::PluginHookSet>,
+) -> ApiResult {
+    let kind = pm_service::pm_plugin::v2::HookKind::parse(&kind)
+        .ok_or_else(|| ServiceError::Invalid("a hook kind is `request` or `response`".into()))?;
+    ok(st.service.plugin_hook_set(&st.actor, &name, kind, b.action)?)
+}
+
 async fn plugin_panel(
     State(st): State<AppState>,
     Path((name, panel)): Path<(String, String)>,
@@ -879,10 +951,15 @@ async fn audit(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> ApiRe
 }
 
 async fn audit_verify(State(st): State<AppState>) -> ApiResult {
-    match st.service.audit_verify() {
-        Ok(n) => ok(json!({ "intact": true, "records": n })),
-        Err(e) => ok(json!({ "intact": false, "error": e.to_string() })),
-    }
+    ok(st.service.audit_verify_report(Vec::new(), None))
+}
+
+async fn audit_checkpoint(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.audit_checkpoint(&st.actor)?)
+}
+
+async fn audit_checkpoints(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.audit_checkpoints()?)
 }
 
 async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
@@ -1025,6 +1102,11 @@ async fn setup(State(st): State<AppState>) -> ApiResult {
     }))
 }
 
+/// How a phone reaches ProxyMind's setup page: addresses, a QR code (SVG) and the CA fingerprint.
+async fn setup_mobile(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.mobile_setup()?)
+}
+
 async fn browser_open(State(st): State<AppState>, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
     ok(st.service.browser_open(&st.actor, r).await?)
 }
@@ -1131,6 +1213,20 @@ async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::Deco
     ok(st.service.decode(&r)?)
 }
 
+async fn tools_protobuf_decode(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::api_types::ProtobufDecodeRequest>,
+) -> ApiResult {
+    ok(st.service.protobuf_decode(&st.actor, &r)?)
+}
+
+async fn tools_protobuf_encode(
+    State(st): State<AppState>,
+    Json(r): Json<pm_service::api_types::ProtobufEncodeRequest>,
+) -> ApiResult {
+    ok(st.service.protobuf_encode(&r)?)
+}
+
 async fn tools_request_transform(State(st): State<AppState>, Json(t): Json<pm_service::RequestTransform>) -> ApiResult {
     ok(st.service.request_transform(&t)?)
 }
@@ -1184,6 +1280,43 @@ async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>
 
 async fn ws_replay(State(st): State<AppState>, Json(r): Json<pm_service::WsReplayRequest>) -> ApiResult {
     ok(st.service.ws_replay(&st.actor, r).await?)
+}
+
+async fn streams_list(State(st): State<AppState>, Query(q): Query<pm_service::pm_store::StreamFilter>) -> ApiResult {
+    ok(st.service.streams_list(&st.actor, &q)?)
+}
+
+async fn stream_get(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<pm_service::api_types::StreamChunksQuery>,
+) -> ApiResult {
+    ok(st.service.stream_get(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+}
+
+async fn stream_chunks(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<pm_service::api_types::StreamChunksQuery>,
+) -> ApiResult {
+    ok(st.service.stream_chunks(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+}
+
+/// The stream id comes from the path; a `stream_id` in the body must agree with it (or be left out).
+async fn stream_replay(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(mut r): Json<pm_service::StreamReplayRequest>,
+) -> ApiResult {
+    if r.stream_id != 0 && r.stream_id != id {
+        return Err(pm_service::ServiceError::Invalid(format!(
+            "stream_id {} does not match the path ({id})",
+            r.stream_id
+        ))
+        .into());
+    }
+    r.stream_id = id;
+    ok(st.service.stream_replay(&st.actor, r).await?)
 }
 
 async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
@@ -1284,6 +1417,10 @@ async fn network_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.network_get()?)
 }
 
+async fn network_resolve(State(st): State<AppState>, Json(b): Json<UpstreamResolveRequest>) -> ApiResult {
+    ok(st.service.network_resolve(&b)?)
+}
+
 async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
     ok(st.service.network_set(&st.actor, cfg)?)
 }
@@ -1294,6 +1431,23 @@ async fn recording_get(State(st): State<AppState>) -> ApiResult {
 
 async fn recording_put(State(st): State<AppState>, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
     ok(st.service.recording_set(&st.actor, r)?)
+}
+
+async fn devices_get(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.devices_list()?)
+}
+
+async fn device_put(
+    State(st): State<AppState>,
+    Path(addr): Path<String>,
+    Json(b): Json<pm_service::api_types::DeviceNameBody>,
+) -> ApiResult {
+    ok(st.service.device_set_name(&st.actor, &addr, &b.name)?)
+}
+
+async fn device_delete(State(st): State<AppState>, Path(addr): Path<String>) -> ApiResult {
+    st.service.device_remove_name(&st.actor, &addr)?;
+    ok(json!({ "deleted": addr }))
 }
 
 async fn session_get(State(st): State<AppState>) -> ApiResult {
@@ -1311,6 +1465,52 @@ async fn session_jar(State(st): State<AppState>) -> ApiResult {
 async fn session_jar_clear(State(st): State<AppState>) -> ApiResult {
     st.service.session_jar_clear(&st.actor)?;
     ok(json!({ "cleared": true }))
+}
+
+async fn workflows_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.workflow_list(&st.actor)?)
+}
+
+async fn workflow_create(State(st): State<AppState>, Json(w): Json<pm_service::WorkflowInput>) -> ApiResult {
+    ok(st.service.workflow_create(&st.actor, w)?)
+}
+
+async fn workflow_get(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.workflow_get(&st.actor, &id)?)
+}
+
+async fn workflow_update(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(w): Json<pm_service::WorkflowInput>,
+) -> ApiResult {
+    ok(st.service.workflow_update(&st.actor, &id, w)?)
+}
+
+async fn workflow_delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    st.service.workflow_delete(&st.actor, &id)?;
+    ok(json!({ "deleted": id }))
+}
+
+async fn workflow_trigger(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<WorkflowTriggerBody>,
+) -> ApiResult {
+    ok(st.service.workflow_trigger_set(&st.actor, &id, b.enabled, b.max_per_minute)?)
+}
+
+async fn workflow_run(State(st): State<AppState>, Path(id): Path<String>, Json(b): Json<WorkflowRunBody>) -> ApiResult {
+    let req = pm_service::WorkflowRunRequest { workflow: id, exchange_id: b.exchange_id, approval_id: b.approval_id };
+    ok(st.service.workflow_run(&st.actor, req).await?)
+}
+
+async fn workflow_runs(State(st): State<AppState>, Query(q): Query<WorkflowRunsQuery>) -> ApiResult {
+    ok(st.service.workflow_runs(&st.actor, q.workflow.as_deref(), q.limit.unwrap_or(50))?)
+}
+
+async fn workflow_run_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.workflow_run_get(&st.actor, id)?)
 }
 
 async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
@@ -1339,4 +1539,59 @@ async fn rules_put(State(st): State<AppState>, Json(b): Json<RulesBody>) -> ApiR
 
 async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
     ok(json!({ "forwarded": st.service.intercept_forward_all(&st.actor)? }))
+}
+
+/// Whether this installation trusts the project, and what is held back if not. Anyone who can call the API may read it.
+async fn project_trust(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.trust_status()?)
+}
+
+/// A person confirms the project's current settings. The API acts as the human who started it.
+async fn project_trust_confirm(State(st): State<AppState>, Json(b): Json<TrustConfirmRequest>) -> ApiResult {
+    ok(st.service.trust_confirm(&st.actor, &b)?)
+}
+
+async fn integrations_list(State(st): State<AppState>) -> ApiResult {
+    ok(st.service.integration_list(&st.actor)?)
+}
+
+async fn integration_get(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_get(&st.actor, &name)?)
+}
+
+async fn integration_put(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(b): Json<IntegrationInput>,
+) -> ApiResult {
+    ok(st.service.integration_set(&st.actor, &name, b)?)
+}
+
+async fn integration_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    st.service.integration_delete(&st.actor, &name)?;
+    ok(json!({ "deleted": name }))
+}
+
+async fn integration_enabled(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(b): Json<IntegrationEnabledBody>,
+) -> ApiResult {
+    ok(st.service.integration_enable(&st.actor, &name, b.enabled)?)
+}
+
+async fn integration_test(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_test(&st.actor, &name).await?)
+}
+
+async fn integration_deliveries(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<DeliveriesQuery>,
+) -> ApiResult {
+    ok(st.service.integration_deliveries(&st.actor, &name, q.limit.unwrap_or(50))?)
+}
+
+async fn finding_issue(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<SendFindingBody>) -> ApiResult {
+    ok(st.service.integration_send_finding(&st.actor, id, b).await?)
 }

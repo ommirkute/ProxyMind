@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, unwrapUntrusted, useAction, useLoad, useNav } from "../components";
+import { useLiveTick } from "../live";
 
 interface PluginInfo {
   name: string;
@@ -12,7 +13,27 @@ interface PluginInfo {
   max_requests?: number;
   panels: [string, string][];
   signature: { state: "unsigned" } | { state: "signed"; signer: string; key: string; trusted: boolean };
+  api: number;
+  permissions: string[];
+  accepted_permissions: string[];
+  needs_review: boolean;
+  hooks: HookInfo[];
 }
+interface HookInfo {
+  kind: "request" | "response";
+  enabled: boolean;
+  state: "off" | "on" | "paused" | "unavailable";
+  blocked_reason?: string;
+  paused_reason?: string;
+  on_error: "pass" | "drop";
+  timeout_ms: number;
+  matcher: { hosts: string[]; paths: string[]; methods: string[]; content_types: string[] };
+  order: number;
+  calls: number;
+  changed: number;
+  failures: { at_ms: number; reason: string }[];
+}
+type HookAction = "enable" | "disable" | "pause" | "resume" | "up" | "down";
 interface PanelData { title: string; text: string; columns: string[]; rows: string[][] }
 interface Sandbox { network_isolated: boolean; limits: boolean; summary: string }
 interface PluginsView { plugins: PluginInfo[]; sandbox: Sandbox; registry?: string }
@@ -25,11 +46,23 @@ type CheckResult =
 
 /** Installed plugins (per user), the sandbox, and active checks on one recorded request. */
 export default function Plugins() {
-  const { data, error, reload } = useLoad(() => api.get<PluginsView>("/plugins"), []);
+  // Hooks can pause themselves in the proxy: the server says so on the "plugins" topic, no polling.
+  const tick = useLiveTick(["plugins"]);
+  const { data, error, reload } = useLoad(() => api.get<PluginsView>("/plugins"), [tick]);
   const toggle = useAction();
   const set = (name: string, enabled: boolean) =>
     toggle.run(async () => {
       await api.put(`/plugins/${encodeURIComponent(name)}`, { enabled });
+      reload();
+    });
+  const accept = (name: string) =>
+    toggle.run(async () => {
+      await api.post(`/plugins/${encodeURIComponent(name)}/accept`, {});
+      reload();
+    });
+  const hookAction = (name: string, kind: string, action: HookAction) =>
+    toggle.run(async () => {
+      await api.put(`/plugins/${encodeURIComponent(name)}/hooks/${kind}`, { action });
       reload();
     });
   return (
@@ -63,9 +96,25 @@ export default function Plugins() {
                           <span className="small muted">unsigned</span>
                         )}
                       </td>
-                      <td className="small">{p.description}</td>
+                      <td className="small">
+                        {p.description}
+                        {p.api >= 2 && (
+                          <div data-testid={`plugin-permissions-${p.name}`}>
+                            <span className="muted">API {p.api}, permissions:</span> {p.permissions.map((x) => <Chip key={x} value={x} />)}
+                            {p.needs_review && (
+                              <div className="notice small">
+                                {p.accepted_permissions.length > 0 ? "This update asks for different permissions than you accepted." : "This plugin has not been turned on: it asks for the permissions above."}{" "}
+                                It stays off until you accept them.{" "}
+                                <button className="btn primary" disabled={toggle.busy} onClick={() => accept(p.name)} data-testid={`plugin-accept-${p.name}`}>
+                                  Accept permissions and turn on
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
                       <td>
-                        <button className="btn" disabled={toggle.busy} onClick={() => set(p.name, !p.enabled)} data-testid={`plugin-toggle-${p.name}`}>
+                        <button className="btn" disabled={toggle.busy || p.needs_review} onClick={() => set(p.name, !p.enabled)} data-testid={`plugin-toggle-${p.name}`}>
                           {p.enabled ? "On · turn off" : "Off · turn on"}
                         </button>
                       </td>
@@ -82,9 +131,81 @@ export default function Plugins() {
           </>
         )}
       </Panel>
+      {data && <HookTable plugins={data.plugins} busy={toggle.busy} act={hookAction} />}
       {data && <Panels plugins={data.plugins.filter((p) => p.enabled && p.panels.length > 0)} />}
       {data && <ActiveCheck plugins={data.plugins.filter((p) => p.enabled && p.kinds.includes("active"))} />}
     </div>
+  );
+}
+
+const matchText = (m: HookInfo["matcher"]) => {
+  const parts = [
+    m.hosts.length ? `hosts ${m.hosts.join(", ")}` : "",
+    m.paths.length ? `paths ${m.paths.join(", ")}` : "",
+    m.methods.length ? `methods ${m.methods.join(", ")}` : "",
+    m.content_types.length ? `types ${m.content_types.join(", ")}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("; ") : "everything in scope";
+};
+
+/** Traffic hooks (plugin API 2): on/off, order, pause and resume. Only people can change these. */
+function HookTable({ plugins, busy, act }: { plugins: PluginInfo[]; busy: boolean; act: (name: string, kind: string, action: HookAction) => void }) {
+  const rows = plugins
+    .flatMap((p) => p.hooks.map((h) => ({ p, h })))
+    .sort((a, b) => (a.h.kind === b.h.kind ? a.h.order - b.h.order : a.h.kind === "request" ? -1 : 1));
+  if (rows.length === 0) return null;
+  return (
+    <Panel title="Traffic hooks">
+      <p className="small muted">
+        Hooks see in-scope requests and responses that match, after match-and-replace rules and before the intercept queue
+        (responses: after the rules), and may replace them. They are bypassed, never waited for, when slow or broken; five failures
+        in a minute pause a hook until you resume it.
+      </p>
+      <table className="grid" data-testid="hook-table">
+        <thead>
+          <tr><th>Hook</th><th>Matches</th><th>On error</th><th>State</th><th>Activity</th><th>Order</th><th /></tr>
+        </thead>
+        <tbody>
+          {rows.map(({ p, h }) => {
+            const id = `${p.name}-${h.kind}`;
+            return (
+              <tr key={id}>
+                <td><strong>{p.name}</strong> <Chip value={h.kind} /></td>
+                <td className="small">{matchText(h.matcher)}<div className="muted">deadline {h.timeout_ms} ms</div></td>
+                <td className="small">{h.on_error === "drop" ? <span className="error">drop: blocks the message when the hook fails</span> : "pass: the original goes through"}</td>
+                <td>
+                  <span data-testid={`hook-state-${id}`}>{h.state}</span>
+                  {h.blocked_reason && <div className="small muted">{h.blocked_reason}</div>}
+                  {h.paused_reason && <div className="small muted">{h.paused_reason}</div>}
+                </td>
+                <td className="small">
+                  {h.calls} call(s), {h.changed} changed
+                  {h.failures.length > 0 && (
+                    <ul className="small muted" data-testid={`hook-failures-${id}`}>
+                      {h.failures.slice(-3).map((f, i) => <li key={i}>{new Date(f.at_ms).toLocaleTimeString()}: {f.reason}</li>)}
+                    </ul>
+                  )}
+                </td>
+                <td>
+                  <button className="btn" aria-label={`Run ${id} earlier`} disabled={busy || h.order <= 1} onClick={() => act(p.name, h.kind, "up")} data-testid={`hook-up-${id}`}>↑</button>{" "}
+                  <button className="btn" aria-label={`Run ${id} later`} disabled={busy} onClick={() => act(p.name, h.kind, "down")} data-testid={`hook-down-${id}`}>↓</button>
+                </td>
+                <td>
+                  <button className="btn" disabled={busy || (!h.enabled && !!h.blocked_reason)} onClick={() => act(p.name, h.kind, h.enabled ? "disable" : "enable")} data-testid={`hook-enable-${id}`}>
+                    {h.enabled ? "On · turn off" : "Off · turn on"}
+                  </button>{" "}
+                  {h.enabled && !h.blocked_reason && (
+                    <button className="btn" disabled={busy} onClick={() => act(p.name, h.kind, h.state === "paused" ? "resume" : "pause")} data-testid={`hook-pause-${id}`}>
+                      {h.state === "paused" ? "Resume" : "Pause"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </Panel>
   );
 }
 

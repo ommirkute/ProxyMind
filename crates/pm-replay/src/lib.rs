@@ -15,12 +15,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 mod h2send;
+mod h3send;
 pub mod net;
 mod pool;
 pub mod race;
 
 pub use h2send::StreamedResponse;
-pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy};
+pub use net::{ClientCert, HostOverride, NetConfig, Network, ProxyKind, UpstreamProxy, UpstreamRule, Via};
 
 const READ_CHUNK: usize = 16 * 1024;
 /// The most a connection buffers for one message (a hostile peer could
@@ -36,11 +37,21 @@ pub struct Endpoint {
     pub scheme: String,
     pub host: String,
     pub port: u16,
+    /// Connect to this address instead of resolving `host` (transparent mode: where the client was really going;
+    /// `host` still names the target for TLS, the Host header and records). A hostname override from the
+    /// network settings wins over it.
+    pub pin: Option<IpAddr>,
 }
 
 impl Endpoint {
     pub fn new(scheme: &str, host: &str, port: u16) -> Self {
-        Self { scheme: scheme.to_ascii_lowercase(), host: host.to_string(), port }
+        Self { scheme: scheme.to_ascii_lowercase(), host: host.to_string(), port, pin: None }
+    }
+
+    /// The same endpoint, connecting to `ip` (see [`Endpoint::pin`]).
+    pub fn with_pin(mut self, ip: Option<IpAddr>) -> Self {
+        self.pin = ip;
+        self
     }
 }
 
@@ -296,6 +307,8 @@ pub struct Sender {
     net: Network,
     connect_timeout: Duration,
     read_timeout: Duration,
+    /// The most of an HTTP/3 response body that is read (ADR-0021).
+    h3_max_body: usize,
     /// Connections kept for the proxy (see [`Sender::send_start_pooled`]).
     pool: std::sync::Arc<pool::Pool>,
 }
@@ -308,6 +321,7 @@ impl Sender {
             net: Network::default(),
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(60),
+            h3_max_body: h3send::MAX_BODY,
             pool: std::sync::Arc::default(),
         })
     }
@@ -330,6 +344,9 @@ impl Sender {
     /// The bytes to write for `request`: unchanged, except when plain HTTP
     /// goes through an HTTP proxy (absolute-form target, proxy login).
     fn wire_bytes<'a>(&self, ep: &Endpoint, request: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if pm_http::h3text::is_http3_request(request) {
+            bail!("parallel sends speak HTTP/1.1 and HTTP/2: HTTP/3 requests can't be sent that way");
+        }
         // Parallel sends speak HTTP/1.1: HTTP/2 text is downgraded for them.
         if pm_http::h2text::is_http2_request(request)
             && let Ok(r) = pm_http::h2text::h2_request(request)
@@ -343,6 +360,12 @@ impl Sender {
             }
             _ => Ok(std::borrow::Cow::Borrowed(request)),
         }
+    }
+
+    /// Limits how much of an HTTP/3 response body is read (default 64 MB, like HTTP/2).
+    pub fn with_h3_max_body(mut self, bytes: usize) -> Self {
+        self.h3_max_body = bytes;
+        self
     }
 
     pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Self {
@@ -365,6 +388,18 @@ impl Sender {
         Ok(self.connect_with(&Endpoint::new("tcp", host, port), check, false).await?.0)
     }
 
+    /// Like [`Sender::connect_tunnel`] for an endpoint with a pinned address (`ep.scheme` is not used for TLS).
+    pub async fn connect_tunnel_to(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        let tcp = Endpoint { scheme: "tcp".into(), ..ep.clone() };
+        Ok(self.connect_with(&tcp, check, false).await?.0)
+    }
+
+    /// A raw connection to an endpoint, with its pinned address and the upstream rules applied (TLS is done for
+    /// `https` endpoints, not for `tcp` ones). For tunnels in transparent mode and for tests.
+    pub async fn connect_with_endpoint(&self, ep: &Endpoint, check: Option<AddrCheck<'_>>) -> Result<Box<dyn Io>> {
+        self.connect(ep, check).await
+    }
+
     /// Like [`Sender::connect`]; with `h2`, offers HTTP/2 over TLS (or assumes
     /// it for plain HTTP). Returns whether HTTP/2 is in use.
     pub(crate) async fn connect_with(
@@ -373,9 +408,36 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         h2: bool,
     ) -> Result<(Box<dyn Io>, bool)> {
+        let alpn = h2.then(|| vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        let (io, negotiated) = self.connect_alpn(ep, check, alpn.as_deref()).await?;
+        // Plain HTTP assumes HTTP/2 when asked to; TLS goes by what the server agreed.
+        let is_h2 = if ep.scheme == "https" { negotiated.as_deref() == Some(b"h2") } else { h2 };
+        Ok((io, is_h2))
+    }
+
+    /// Like [`Sender::connect`] for a stream that is not HTTP: TLS (an `https` endpoint) offers exactly `alpn` (an
+    /// empty list offers none; `None` keeps the connector's default, `http/1.1`) and the protocol the server chose
+    /// is returned. The server name is the endpoint's host. A plain endpoint ignores `alpn`.
+    pub async fn connect_stream(
+        &self,
+        ep: &Endpoint,
+        alpn: &[Vec<u8>],
+        check: Option<AddrCheck<'_>>,
+    ) -> Result<(Box<dyn Io>, Option<Vec<u8>>)> {
+        self.connect_alpn(ep, check, Some(alpn)).await
+    }
+
+    /// Connects (and does TLS for `https` endpoints) offering `alpn` when it is given; returns the protocol the
+    /// server agreed.
+    async fn connect_alpn(
+        &self,
+        ep: &Endpoint,
+        check: Option<AddrCheck<'_>>,
+        alpn: Option<&[Vec<u8>]>,
+    ) -> Result<(Box<dyn Io>, Option<Vec<u8>>)> {
         let upstream = self.net.upstream_for(&ep.host);
         // A hostname override replaces DNS (for SOCKS5 too: the proxy gets the address).
-        let pinned = self.net.address_for(&ep.host);
+        let pinned = self.net.address_for(&ep.host).or(ep.pin);
         let remote_dns = pinned.is_none()
             && (upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Socks5 && u.remote_dns)
                 || upstream.as_ref().is_some_and(|u| u.kind == ProxyKind::Http));
@@ -469,19 +531,19 @@ impl Sender {
         if ep.scheme == "https" {
             let name = pm_tls::server_name(&ep.host)?;
             let mut tls = self.net.tls_for(&ep.host, self.verify).unwrap_or_else(|| self.tls.clone());
-            if h2 {
+            if let Some(alpn) = alpn {
                 let mut cfg = (**tls.config()).clone();
-                cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                cfg.alpn_protocols = alpn.to_vec();
                 tls = TlsConnector::from(std::sync::Arc::new(cfg));
             }
             let tls = tokio::time::timeout(self.connect_timeout, tls.connect(name, tcp))
                 .await
                 .context("TLS handshake timed out")?
                 .context("TLS handshake with server")?;
-            let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
-            Ok((Box::new(tls), is_h2))
+            let negotiated = tls.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+            Ok((Box::new(tls), negotiated))
         } else {
-            Ok((Box::new(tcp), h2))
+            Ok((Box::new(tcp), None))
         }
     }
 
@@ -510,8 +572,10 @@ impl Sender {
         method: &str,
         check: Option<AddrCheck<'_>>,
     ) -> Result<Response> {
-        if pm_http::h2text::is_http2_request(request) {
-            return self.send_h2(ep, request, method, check).await;
+        match pm_http::h3text::request_protocol(request) {
+            Some(pm_http::h3text::Multiplexed::Http3) => return self.send_h3(ep, request, check).await,
+            Some(pm_http::h3text::Multiplexed::Http2) => return self.send_h2(ep, request, method, check).await,
+            None => {}
         }
         let started = Instant::now();
         let wire = self.wire_bytes(ep, request)?;
@@ -535,7 +599,7 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         head_timeout: Duration,
     ) -> Result<ResponseStart> {
-        if pm_http::h2text::is_http2_request(request) {
+        if pm_http::h3text::is_multiplexed_request(request) {
             bail!("streaming sends speak HTTP/1.1");
         }
         let wire = self.wire_bytes(ep, request)?;
@@ -557,7 +621,7 @@ impl Sender {
             ep.host.to_ascii_lowercase(),
             ep.port,
             self.net.upstream_for(&ep.host),
-            self.net.address_for(&ep.host)
+            self.net.address_for(&ep.host).or(ep.pin)
         )
     }
 
@@ -573,7 +637,7 @@ impl Sender {
         check: Option<AddrCheck<'_>>,
         head_timeout: Duration,
     ) -> Result<ResponseStart> {
-        if pm_http::h2text::is_http2_request(request) || !retry_safe(method) {
+        if pm_http::h3text::is_multiplexed_request(request) || !retry_safe(method) {
             return self.send_start(ep, request, method, check, head_timeout).await;
         }
         let key = self.pool_key(ep);
@@ -617,6 +681,10 @@ impl Sender {
         requests: &[(Vec<u8>, String)],
         check: Option<AddrCheck<'_>>,
     ) -> Vec<Result<Response>> {
+        if let Some((r, _)) = requests.iter().find(|(r, _)| pm_http::h3text::is_http3_request(r)) {
+            let why = self.wire_bytes(ep, r).err().map(|e| e.to_string()).unwrap_or_default();
+            return requests.iter().map(|_| Err(anyhow!("{why}"))).collect();
+        }
         let wire: Vec<Vec<u8>> =
             requests.iter().map(|(r, _)| self.wire_bytes(ep, r).map(|w| w.into_owned()).unwrap_or_default()).collect();
         let mut conns = Vec::with_capacity(requests.len());

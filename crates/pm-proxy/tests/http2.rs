@@ -113,6 +113,17 @@ async fn h2_request(proxy: u16, port: u16, method: &str, path: &str, body: &'sta
     (status, String::from_utf8(out).unwrap())
 }
 
+async fn recorded_exchange(project: &std::path::Path) -> pm_store::Exchange {
+    for _ in 0..100 {
+        let s = Store::open(project).unwrap();
+        if let Some(e) = s.list_exchanges(1, None).unwrap().first() {
+            return s.get_exchange(e.id).unwrap().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("nothing recorded");
+}
+
 async fn recorded(project: &std::path::Path) -> (String, String) {
     for _ in 0..100 {
         let s = Store::open(project).unwrap();
@@ -146,6 +157,38 @@ async fn http2_end_to_end_with_rules() {
     assert!(req.starts_with(&format!("POST /echo HTTP/2\r\nhost: localhost:{backend}\r\n")), "{req}");
     assert!(req.contains("x-added: by-rule\r\n") && req.ends_with("\r\n\r\nhello"), "{req}");
     assert!(resp.starts_with("HTTP/2 201\r\n") && resp.ends_with("by-rule hello"), "{resp}");
+    let ex = recorded_exchange(&project).await;
+    let original = String::from_utf8(ex.request_original.expect("the request as received")).unwrap();
+    assert!(original.starts_with(&format!("POST /echo HTTP/2\r\nhost: localhost:{backend}\r\n")), "{original}");
+    assert!(!original.contains("x-added"), "{original}");
+    assert!(original.ends_with("\r\n\r\nhello"));
+    assert!(ex.response_delivered.is_none());
+    let by: Vec<_> = ex.changes.iter().map(|c| (c.phase.as_str(), c.by.as_str(), c.name.as_str())).collect();
+    assert_eq!(by, [("request", "rule", "add request header x-added")]);
+}
+
+#[tokio::test]
+async fn http2_response_rules_record_the_original_and_the_browser_gets_the_edit() {
+    let backend = h2_backend().await;
+    let rw = Arc::new(Rewriter::new());
+    rw.set_rules(vec![RewriteRule {
+        part: Part::ResponseBody,
+        pattern: "hello".into(),
+        replace: "HELLO!".into(),
+        in_scope_only: false,
+        comment: "shout".into(),
+        ..Default::default()
+    }])
+    .unwrap();
+    let (proxy, project) = start_proxy("h2resp", Some(rw)).await;
+    let (status, body) = h2_request(proxy, backend, "POST", "/echo", b"hello").await;
+    assert_eq!((status, body.as_str()), (201, "POST /echo  HELLO!"));
+    let ex = recorded_exchange(&project).await;
+    assert!(ex.request_original.is_none());
+    assert!(String::from_utf8(ex.response.unwrap()).unwrap().ends_with(" hello"), "what the server said");
+    assert!(String::from_utf8(ex.response_delivered.unwrap()).unwrap().ends_with("HELLO!"), "what the browser got");
+    let by: Vec<_> = ex.changes.iter().map(|c| (c.phase.as_str(), c.by.as_str(), c.name.as_str())).collect();
+    assert_eq!(by, [("response", "rule", "shout")]);
 }
 
 #[tokio::test]

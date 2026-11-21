@@ -84,6 +84,8 @@ struct RawTiers {
     human: Option<TierPolicy>,
     agent: Option<TierPolicy>,
     plugin: Option<TierPolicy>,
+    /// `proxymind ci` runs (actor kind `ci`).
+    ci: Option<TierPolicy>,
 }
 
 /// What an actor kind may do in each tier. Missing entries use the defaults
@@ -210,12 +212,13 @@ impl Roe {
             ActorKind::Human => self.tiers.human,
             ActorKind::Agent => self.tiers.agent,
             ActorKind::Plugin | ActorKind::Scanner => self.tiers.plugin,
+            ActorKind::Ci => self.tiers.ci,
         };
         configured.and_then(|p| p.get(tier)).unwrap_or_else(|| default_decision(actor, tier))
     }
 }
 
-/// Defaults from RFC 0001. Unknown or automated actors get the strictest set.
+/// Defaults from RFC 0001. Unknown or automated actors get the strictest set (`ci` is described below).
 pub fn default_decision(actor: ActorKind, tier: Tier) -> Decision {
     use Decision::*;
     match (actor, tier) {
@@ -225,6 +228,11 @@ pub fn default_decision(actor: ActorKind, tier: Tier) -> Decision {
         (ActorKind::Agent, Tier::ActiveSafe) => Allow,
         (ActorKind::Agent, Tier::ActiveIntrusive) => Approve,
         (ActorKind::Agent, Tier::Destructive) => Deny,
+        // A pipeline cannot be asked: reads and safe requests run, anything riskier is skipped unless the ROE's
+        // `tiers.ci` allows it (the default for destructive is a refusal).
+        (ActorKind::Ci, Tier::ActiveSafe) => Allow,
+        (ActorKind::Ci, Tier::ActiveIntrusive) => Approve,
+        (ActorKind::Ci, Tier::Destructive) => Deny,
         (ActorKind::Plugin | ActorKind::Scanner, Tier::ActiveSafe) => Approve,
         (ActorKind::Plugin | ActorKind::Scanner, _) => Deny,
     }

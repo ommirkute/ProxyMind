@@ -11,6 +11,7 @@ fn human() -> Actor {
 
 fn exchange(host: &str, path: &str, request: &str, response: &str) -> NewExchange {
     NewExchange {
+        client_addr: None,
         ts_ms: 1,
         duration_ms: None,
         source: "proxy".into(),
@@ -26,6 +27,7 @@ fn exchange(host: &str, path: &str, request: &str, response: &str) -> NewExchang
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

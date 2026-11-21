@@ -59,7 +59,8 @@
       "properties": {
         "human": { "$ref": "#/$defs/tierPolicy" },
         "agent": { "$ref": "#/$defs/tierPolicy" },
-        "plugin": { "$ref": "#/$defs/tierPolicy" }
+        "plugin": { "$ref": "#/$defs/tierPolicy" },
+        "ci": { "$ref": "#/$defs/tierPolicy" }
       }
     },
     "data": {

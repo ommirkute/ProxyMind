@@ -1,0 +1,85 @@
+# Scan a staging environment with `proxymind ci` and send the findings to GitHub code scanning.
+# Copy to .github/workflows/proxymind.yml. See docs/ci.md for the options, the exit codes and the baseline workflow.
+#
+# Set up once:
+#   - security/roe.yaml: the rules of engagement. It must include the staging URL in scope and let CI scan:
+#         tiers: { ci: { active_intrusive: allow } }
+#   - the repository variable STAGING_URL (for example https://staging.example.com/)
+#   - optional logins: security/identities.json with ${CI_ALICE_PASSWORD}-style references, and the secret(s)
+#   - security/proxymind-baseline.json: findings you already know about. Write it once with
+#         proxymind ci --roe security/roe.yaml --write-baseline security/proxymind-baseline.json
+#     and commit it. Only findings that are not in it fail the job.
+#
+# Exit codes: 0 = no new findings, 1 = new findings, 2 = the run could not finish (target down, login failed,
+# budget spent, rules skipped something): treat 2 as a failure, it never means "clean".
+name: ProxyMind scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"          # nightly, after the staging deploy
+  push:
+    branches: [main]
+
+# SARIF upload needs security-events; nothing else needs more than read.
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: proxymind-${{ github.ref }}
+  cancel-in-progress: false         # a scan is not something to cut off half way
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Pin the version, and check the download against the release's checksums.
+      PROXYMIND_VERSION: v0.2.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install ProxyMind
+        run: |
+          name="proxymind-${PROXYMIND_VERSION}-x86_64-unknown-linux-gnu"
+          base="https://github.com/ommirkute/ProxyMind/releases/download/${PROXYMIND_VERSION}"
+          curl -fsSL -O "$base/$name.tar.gz" -O "$base/SHA256SUMS"
+          sha256sum -c SHA256SUMS --ignore-missing
+          tar xzf "$name.tar.gz"
+          mv "$name/proxymind" ./proxymind
+
+      - name: Scan staging
+        env:
+          # Chromium for single-page apps and XSS proofs (without it XSS stays "suspected").
+          PROXYMIND_CHROMIUM: /usr/bin/google-chrome
+          CI_ALICE_PASSWORD: ${{ secrets.CI_ALICE_PASSWORD }}
+        run: |
+          ./proxymind ci \
+            --roe security/roe.yaml \
+            --target "${{ vars.STAGING_URL }}" \
+            --baseline security/proxymind-baseline.json \
+            --profile default \
+            --budget-minutes 30 --max-requests 20000 \
+            --identity-file security/identities.json --identity alice \   # drop these two lines to scan logged out
+            --sarif proxymind.sarif --junit proxymind.xml --json proxymind.json
+          # Add --insecure only for a staging host with a self-signed certificate.
+
+      # `if: always()`: a run that exits 1 or 2 still writes its files.
+      - name: Upload to code scanning
+        if: always() && hashFiles('proxymind.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3   # pin to a commit SHA in your repository
+        with:
+          sarif_file: proxymind.sarif
+          category: proxymind
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4             # pin to a commit SHA in your repository
+        with:
+          name: proxymind-reports
+          path: |
+            proxymind.sarif
+            proxymind.xml
+            proxymind.json
+          if-no-files-found: ignore

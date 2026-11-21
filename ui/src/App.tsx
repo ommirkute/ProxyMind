@@ -16,6 +16,8 @@ import Approvals from "./pages/Approvals";
 import Assistant from "./pages/Assistant";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
+import Integrations from "./pages/Integrations";
+import Trust from "./pages/Trust";
 import Network from "./pages/Network";
 import About, { type UpdateStatus } from "./pages/About";
 import Findings from "./pages/Findings";
@@ -35,6 +37,8 @@ import Organizer from "./pages/Organizer";
 import CustomChecks from "./pages/CustomChecks";
 import AiScan from "./pages/AiScan";
 import Evidence from "./pages/Evidence";
+import Streams from "./pages/Streams";
+import Workflows from "./pages/Workflows";
 
 interface Group {
   id: string;
@@ -67,18 +71,20 @@ const GROUPS: Group[] = [
     { id: "intercept", label: "Intercept" },
     { id: "history", label: "HTTP history" },
     { id: "wshistory", label: "WebSockets history" },
+    { id: "streams", label: "Streams" },
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
   { id: "aiscan", label: "AI scan", icon: "scan", section: "Testing", pages: [{ id: "aiscan", label: "AI scan" }] },
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
+  { id: "workflows", label: "Workflows", icon: "activity", section: "Testing", pages: [{ id: "workflows", label: "Workflows" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
   { id: "collaborator", label: "Collaborator", icon: "collab", section: "Testing", pages: [{ id: "collaborator", label: "Collaborator" }] },
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
   { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "checks", label: "Custom checks" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "about", label: "About & updates" }] },
+  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "integrations", label: "Integrations" }, { id: "trust", label: "Project trust" }, { id: "about", label: "About & updates" }] },
 ];
 
 const PAGES = GROUPS.flatMap((g) => g.pages);
@@ -163,6 +169,13 @@ export default function App() {
     return () => window.removeEventListener("pm-status-changed", load);
   }, []);
 
+  // While in safe mode, a trust given elsewhere (the CLI, another window) shows up as an audit record: look again.
+  const safe = status?.safe_mode ?? false;
+  const audits = counters?.audit_records;
+  useEffect(() => {
+    if (safe) window.dispatchEvent(new Event("pm-status-changed"));
+  }, [safe, audits]);
+
   // Live updates: one event stream feeds the nav counters here and the pages' refetches (see live.ts).
   const signedIn = status != null;
   useEffect(() => (signedIn ? connectLive(setCounters, setLive) : undefined), [signedIn]);
@@ -223,11 +236,15 @@ export default function App() {
     engagement: Engagement,
     setup: Setup,
     wshistory: WsHistory,
+    streams: Streams,
+    workflows: Workflows,
     sessions: Sessions,
     findings: Findings,
     evidence: Evidence,
     audit: Audit,
     network: Network,
+    integrations: Integrations,
+    trust: Trust,
     collaborator: Collaborator,
     engage: Engage,
     search: Search,
@@ -384,6 +401,18 @@ export default function App() {
             </div>
           </header>
           <main className="main">
+            {status?.safe_mode && (
+              <div className="safe-banner" role="alert" data-testid="safe-banner">
+                <Icon name="alert" size={15} />
+                <span>
+                  <b>Safe mode.</b> This project did not come from this installation, or its settings changed since you trusted
+                  it. Its listeners, schedules, triggers, rewrite and upstream rules are off, and agents cannot send.
+                </span>
+                <button className="btn sm primary" data-testid="safe-banner-review" onClick={() => nav.go("trust")}>
+                  Review and trust this project
+                </button>
+              </div>
+            )}
             <PageBoundary resetKey={route.page}>
               <PageView />
             </PageBoundary>

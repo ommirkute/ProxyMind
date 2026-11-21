@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AttackGraph } from "../AttackGraph";
-import { api, cweUrl, fmtDateTime, toast, type Finding, type FindingProve, type IdentityInfo, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
+import { api, cweUrl, fmtDateTime, toast, type Finding, type FindingProve, type IdentityInfo, type IssueLink, type IntegrationView, type IssueType, type ProofResult, type ReportTemplate, type Retest } from "../api";
 import { Chip, Empty, ErrorBox, ExchangeLink, Panel, useAction, useLoad, useNav } from "../components";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
@@ -165,6 +165,7 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         {!!d.duplicates && <span className="muted"> · {d.duplicates} duplicate report(s) merged in</span>}
       </div>
       {d.issue && <IssueCard issue={d.issue} />}
+      <TrackerIssues id={id} links={d.issue_links ?? []} onDone={() => { f.reload(); onChange(); }} />
       <div className="row" style={{ marginTop: 8 }}>
         <button className="btn" disabled={action.busy} onClick={retest} data-testid="retest">
           {action.busy ? "Retesting…" : "Retest"}
@@ -251,6 +252,45 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         <button className="btn" onClick={() => setStatus("suspected")} disabled={action.busy}>Back to suspected</button>
       </div>
     </Panel>
+  );
+}
+
+/** Issues created for a finding in Jira, GitHub or GitLab, and a way to create one. */
+function TrackerIssues({ id, links, onDone }: { id: number; links: IssueLink[]; onDone: () => void }) {
+  const integrations = useLoad(() => api.get<IntegrationView[]>("/integrations"), []);
+  const [name, setName] = useState("");
+  const action = useAction();
+  const trackers = (integrations.data ?? []).filter((i) => ["jira", "github", "gitlab"].includes(i.kind) && i.active);
+  const chosen = name || trackers[0]?.name || "";
+  const has = links.some((l) => l.integration === chosen);
+  const send = () =>
+    action.run(async () => {
+      const l = await api.post<IssueLink>(`/findings/${id}/issue`, { integration: chosen, update: has });
+      toast(`${has ? "Updated" : "Created"} ${l.key} in ${l.integration}`, "ok");
+      onDone();
+    });
+  return (
+    <div style={{ marginTop: 8 }} data-testid="tracker-issues">
+      {links.map((l) => (
+        <div key={l.integration} className="small" data-testid="issue-link">
+          Issue in {l.integration} ({l.kind}):{" "}
+          <a href={l.url} target="_blank" rel="noopener noreferrer">{l.key}</a>
+          <span className="muted"> · {fmtDateTime(l.updated_ms)}</span>
+        </div>
+      ))}
+      {trackers.length > 0 && (
+        <div className="row">
+          <select aria-label="Tracker" value={chosen} onChange={(e) => setName(e.target.value)}>
+            {trackers.map((t) => <option key={t.name} value={t.name}>{t.name} ({t.kind})</option>)}
+          </select>
+          <button className="btn" disabled={action.busy || !chosen} onClick={send} data-testid="create-issue">
+            {action.busy ? "Sending…" : has ? "Update issue in…" : "Create issue in…"}
+          </button>
+          <span className="small muted">Text and requests are redacted before they leave.</span>
+        </div>
+      )}
+      <ErrorBox error={action.error} />
+    </div>
   );
 }
 

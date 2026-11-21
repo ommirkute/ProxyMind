@@ -6,6 +6,9 @@
 //! (the interesting ones in pentesting) pass through untouched.
 
 pub mod h2text;
+pub mod h3text;
+pub mod protobuf;
+pub mod socks5;
 pub mod ws;
 
 use thiserror::Error;

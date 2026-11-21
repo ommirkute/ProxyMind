@@ -5,11 +5,12 @@
 // Uses the real `proxymind` binary (PROXYMIND, default ../target/debug/proxymind)
 // and Chromium (CHROMIUM, default: Playwright's bundled path).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
-import { X509Certificate } from "node:crypto";
+import http from "node:http";
+import { X509Certificate, createHmac } from "node:crypto";
 import { chromium } from "playwright-core";
 
 const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
@@ -19,6 +20,8 @@ process.env.PROXYMIND_BROWSER_HEADLESS ??= "1";
 // CI runners (non-root Ubuntu) can't use Chromium's sandbox for Playwright's build: the built-in
 // browser window would abort. The test runs in a throwaway machine, so run it without the sandbox.
 process.env.PROXYMIND_CHROMIUM_NO_SANDBOX ??= "1";
+// The machine's LAN address for phones: fixed, so the mobile section does not depend on the runner's network.
+process.env.PROXYMIND_LAN_ADDR ??= "192.0.2.10";
 const dir = mkdtempSync(join(tmpdir(), "pm-ui-e2e-"));
 const project = join(dir, "ui.pmproj");
 const children = [];
@@ -121,6 +124,68 @@ function rawTo(port, raw) {
     setTimeout(() => s.destroy(), 5000);
   });
 }
+/**
+ * A minimal SOCKS5 client (RFC 1928, login per RFC 1929) over node:net, no dependencies. Resolves with the connected
+ * socket, or rejects with `socks5 refused: ...` saying which step the server turned the client away at.
+ */
+function socks5Connect(proxyPort, host, port, login) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect(proxyPort, "127.0.0.1");
+    let buf = Buffer.alloc(0);
+    let stage = "greeting";
+    const fail = (why) => {
+      s.destroy();
+      reject(new Error(`socks5 refused: ${why}`));
+    };
+    const request = () => {
+      const name = Buffer.from(host);
+      stage = "reply";
+      s.write(Buffer.concat([Buffer.from([5, 1, 0, 3, name.length]), name, Buffer.from([port >> 8, port & 255])]));
+    };
+    s.on("connect", () => s.write(login ? Buffer.from([5, 2, 0, 2]) : Buffer.from([5, 1, 0])));
+    s.on("error", reject);
+    s.on("close", () => stage !== "done" && reject(new Error("socks5 refused: connection closed")));
+    s.on("data", function onData(d) {
+      buf = Buffer.concat([buf, d]);
+      if (stage === "greeting" && buf.length >= 2) {
+        const method = buf[1];
+        buf = buf.subarray(2);
+        if (method === 0xff) return fail("no acceptable method");
+        if (method === 2) {
+          const u = Buffer.from(login.username);
+          const p = Buffer.from(login.password);
+          stage = "login";
+          s.write(Buffer.concat([Buffer.from([1, u.length]), u, Buffer.from([p.length]), p]));
+        } else request();
+      }
+      if (stage === "login" && buf.length >= 2) {
+        const ok = buf[1] === 0;
+        buf = buf.subarray(2);
+        if (!ok) return fail("login rejected");
+        request();
+      }
+      if (stage === "reply" && buf.length >= 10) {
+        if (buf[1] !== 0) return fail(`reply code ${buf[1]}`);
+        stage = "done";
+        s.off("data", onData);
+        resolve(s);
+      }
+    });
+    setTimeout(() => stage !== "done" && fail("timeout"), 5000);
+  });
+}
+/** One raw request through a SOCKS5 server, returns the raw response. */
+async function viaSocks5(proxyPort, host, port, raw, login) {
+  const s = await socks5Connect(proxyPort, host, port, login);
+  return new Promise((resolve, reject) => {
+    let out = "";
+    s.on("data", (d) => (out += d));
+    s.on("end", () => resolve(out));
+    s.on("error", reject);
+    s.write(raw);
+    setTimeout(() => s.destroy(), 5000);
+  });
+}
 async function browseAs(proxy, shop, user, paths) {
   const body = JSON.stringify({ username: user, password: `${user}123` });
   const login = await viaProxy(proxy, shop, `POST /api/login HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
@@ -147,6 +212,28 @@ try {
   const browserPath = exe ?? chromium.executablePath();
   if (existsSync(browserPath)) process.env.PROXYMIND_CHROMIUM ??= browserPath;
   const [shop, proxy, ui] = [await freePort(), await freePort(), await freePort()];
+  // Receivers for the integrations section: a webhook, and a GitHub that creates issues. They record what they get.
+  const [hookPort, ghPort] = [await freePort(), await freePort()];
+  const hookGot = [];
+  const ghGot = [];
+  const receiver = (log, port, answer) =>
+    http
+      .createServer((req, res) => {
+        let body = "";
+        req.on("data", (d) => (body += d));
+        req.on("end", () => {
+          log.push({ method: req.method, url: req.url, headers: req.headers, body });
+          const [code, out] = answer(req);
+          res.writeHead(code, { "content-type": "application/json" });
+          res.end(out);
+        });
+      })
+      .listen(port, "127.0.0.1");
+  const receivers = [
+    receiver(hookGot, hookPort, () => [200, "{}"]),
+    receiver(ghGot, ghPort, (r) =>
+      r.method === "POST" ? [201, JSON.stringify({ number: 42, html_url: "https://github.com/acme/app/issues/42" })] : [200, JSON.stringify({ full_name: "acme/app" })]),
+  ];
   start(["demo-target", "--listen", `127.0.0.1:${shop}`]);
   writeFileSync(join(dir, "roe.yaml"), `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
   pm("roe", "use", join(dir, "roe.yaml"));
@@ -246,7 +333,7 @@ try {
     check(await page.getByRole("columnheader", { name: /Status/ }).getAttribute("aria-sort") === "ascending", "columns sort");
     await page.getByRole("columnheader", { name: /^#/ }).click();
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "Response" }).click();
+    await page.getByRole("tab", { name: "Response", exact: true }).click();
     await page.locator('[data-testid="response-view"]').getByRole("button", { name: "Hex" }).click();
     await page.locator('[data-testid="response-view"] pre', { hasText: "00000000  48 54 54 50" }).waitFor();
     check(true, "hex view shows the exact bytes");
@@ -322,6 +409,51 @@ try {
     check(await page.locator('[data-testid="authz-results"]').first().textContent().then((t) => t.includes("denied")), "anonymous is denied");
 
     await page.screenshot({ path: join(SHOTS, "3-authz.png") });
+  });
+
+  const HOOK_SECRET = "e2e-signing-secret-0123456789";
+  const GH_TOKEN = "ghp_e2eTokenValue0123456789abcdef";
+  await section("Integrations: set up a webhook and a GitHub repository", async () => {
+    await open("integrations");
+    await page.getByTestId("add-integration").click();
+    await page.getByLabel("Integration kind").selectOption("webhook");
+    await page.getByLabel("Integration name").fill("e2e-hook");
+    await page.getByLabel("Integration URL").fill(`http://127.0.0.1:${hookPort}/hook`);
+    await page.getByLabel("Integration signing secret").fill(HOOK_SECRET);
+    await page.getByLabel("Event Finding proven").check();
+    await page.getByTestId("save-integration").click();
+    await page.getByTestId("integration-e2e-hook").waitFor();
+    // Private destinations are off by default: the first test is refused, and nothing reaches the receiver.
+    await page.getByTestId("send-test-e2e-hook").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="integration-error"]')?.textContent?.includes("private or loopback"));
+    check(hookGot.length === 0, "a loopback destination is refused until it is allowed for that integration");
+    await page.getByRole("button", { name: "Edit" }).click();
+    await page.getByLabel("Allow private destinations").check();
+    await page.getByTestId("save-integration").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="integration-e2e-hook"]')?.textContent?.includes("private destinations allowed"));
+    await page.getByTestId("send-test-e2e-hook").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-hook"]')?.textContent?.includes("test"));
+    for (let i = 0; i < 50 && !hookGot.length; i++) await sleep(100);
+    check(hookGot.length === 1 && JSON.parse(hookGot[0].body).event === "test", "Send test posts a test event to the webhook");
+    const sig = "sha256=" + createHmac("sha256", HOOK_SECRET).update(hookGot[0].body).digest("hex");
+    check(hookGot[0].headers["x-proxymind-signature"] === sig, "the test event is signed with HMAC-SHA256 over the body");
+    check(!(await page.content()).includes(HOOK_SECRET), "the signing secret is never shown in the page");
+    check((await page.getByTestId("integration-e2e-hook").textContent()).includes("signing_secret: saved"), "the page says where the secret is kept");
+
+    await page.getByTestId("add-integration").click();
+    await page.getByLabel("Integration kind").selectOption("github");
+    await page.getByLabel("Integration name").fill("e2e-gh");
+    await page.getByLabel("Integration URL").fill(`http://127.0.0.1:${ghPort}`);
+    await page.getByLabel("Integration project").fill("acme/app");
+    await page.getByLabel("Integration token").fill(GH_TOKEN);
+    await page.getByLabel("Allow private destinations").check();
+    await page.getByTestId("save-integration").click();
+    await page.getByTestId("integration-e2e-gh").waitFor();
+    await page.getByTestId("send-test-e2e-gh").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-gh"]')?.textContent?.includes("test"));
+    check(ghGot.length === 1 && ghGot[0].url === "/repos/acme/app" && ghGot[0].headers.authorization === `Bearer ${GH_TOKEN}`, "the GitHub test reads the repository with the token");
+    check(!(await page.content()).includes(GH_TOKEN), "the token is never shown in the page");
+    await page.screenshot({ path: join(SHOTS, "integrations.png") });
   });
 
   await section("Findings and proof", async () => {
@@ -458,6 +590,43 @@ try {
     check(await rawBecomes('v.startsWith("GET /search?q=h2 HTTP/2\\n") && v.includes("host: other.test") && v.includes("cookie: a=1")'),
       "Inspector switches to HTTP/2 and edits :path and :authority");
     await page.getByLabel("Protocol").selectOption("HTTP/1.1");
+    // Inline transforms: select a value in the raw editor, preview Base64, apply, undo.
+    const rawEditor = page.getByLabel("Raw request");
+    await rawEditor.fill(`GET /search?q=boots&page=1 HTTP/1.1\nHost: shop\n\n`);
+    const selectRaw = (text) =>
+      rawEditor.evaluate((el, t) => { el.focus(); const i = el.value.indexOf(t); el.setSelectionRange(i, i + t.length); }, text);
+    await page.getByTestId("transform-open").click();
+    check(await page.getByTestId("transform-need-selection").isVisible(), "Transform without a selection explains that one is needed");
+    await page.getByTestId("transform-close").click();
+    await selectRaw("boots");
+    await page.getByRole("button", { name: "Transform", exact: true }).click();
+    check(await page.getByTestId("transform-before").textContent() === "boots", "Transform shows the selected text as the 'before'");
+    // The preview re-renders after each choice; wait for the expected text, not just the element (it stays mounted).
+    const afterBecomes = (text) =>
+      page
+        .waitForFunction((t) => document.querySelector('[data-testid="transform-after"]')?.textContent === t, text, { timeout: 5000 })
+        .then(() => true, () => false);
+    await page.getByLabel("Transform operation").selectOption("base64_encode");
+    check(await afterBecomes("Ym9vdHM="), "Transform previews the Base64 of the selection");
+    check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "the preview does not change the raw request");
+    await page.getByTestId("transform-apply").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM=&page=1 ")'), "Apply replaces the selection with the encoded value");
+    check(await rawEditor.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd)) === "Ym9vdHM=", "the applied result stays selected for chaining");
+    await page.getByLabel("Transform operation").selectOption("url_encode");
+    check(await afterBecomes("Ym9vdHM%3D"), "a second transform chains onto the result");
+    await page.getByTestId("transform-apply").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM%3D&page=1 ")'), "the chained transform is applied");
+    await page.getByTestId("transform-undo").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=Ym9vdHM=&page=1 ")'), "Undo restores the previous text");
+    await page.getByTestId("transform-undo").click();
+    check(await rawBecomes('v.startsWith("GET /search?q=boots&page=1 ")'), "a second Undo restores the original text");
+    check(await page.getByTestId("transform-undo").isDisabled(), "Undo is disabled when the stack is empty");
+    await page.getByLabel("Transform operation").selectOption("base64_decode");
+    // The preview is computed after the choice renders: wait for it like the other previews above.
+    const decodeError = await page.getByTestId("transform-error").waitFor({ timeout: 5000 }).then(() => true, () => false);
+    check(decodeError && await page.getByTestId("transform-apply").isDisabled(),
+      "an invalid decode shows an error in the preview and cannot be applied");
+    await page.getByTestId("transform-close").click();
     await page.getByRole("button", { name: "New tab" }).click();
     check((await page.locator(".rtab").count()) >= 3, "tabs can be added");
     await page.screenshot({ path: join(SHOTS, "5-replay.png") });
@@ -717,13 +886,40 @@ try {
     await page.getByLabel("Filter", { exact: true }).fill("rules-check");
     await sleep(500);
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "request" }).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
     const sent = await page
       .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "X-E2E: rewritten" })
       .first()
       .waitFor({ timeout: 5000 })
       .then(() => true, () => false);
     check(sent, "history shows the request as sent, with the added header");
+
+    // ADR-0020: the rules changed this exchange, so History marks it and keeps what was received next to it.
+    const row = page.locator('[data-testid^="row-"]').first();
+    check(await row.getByTestId("modified-mark").isVisible(), "history marks the rewritten row as edited");
+    check(await page.getByTestId("modified-note").isVisible(), "the exchange says it was changed in flight");
+    await page.getByTestId("tab-original_request").click();
+    const origReq = await page.getByTestId("original-request-view").locator("pre.raw").first().textContent();
+    check(origReq.includes("/api/products/search?q=rules-check") && !origReq.includes("X-E2E"), "the Original request tab has no added header (as the browser sent it)");
+    await page.getByRole("tab", { name: "Response", exact: true }).click();
+    const serverResp = await page.getByTestId("response-view").locator("pre.raw").first().textContent();
+    check(serverResp.includes("results") && !serverResp.includes("REWRITTEN"), "History's Response tab still shows what the server sent");
+    await page.getByTestId("tab-delivered_response").click();
+    const deliveredResp = await page.getByTestId("delivered-response-view").locator("pre.raw").first().textContent();
+    check(deliveredResp.includes("REWRITTEN") && !deliveredResp.includes("results"), "the Delivered response tab shows the rewritten copy the browser got");
+    await page.getByTestId("tab-changes").click();
+    const changesText = await page.getByTestId("changes-list").textContent();
+    check(changesText.includes("add request header X-E2E") && changesText.includes("response body matching results"), "the changes name both rules");
+    const added = await page.getByTestId("request-diff").locator('[data-op="added"]').allTextContents();
+    check(added.length === 1 && added[0].includes("X-E2E: rewritten"), "the diff shows the added header");
+    const removed = await page.getByTestId("response-diff").locator('[data-op="removed"]').allTextContents();
+    check(removed.some((l) => l.includes("results")), "the diff shows what the response rule replaced");
+    await page.screenshot({ path: join(SHOTS, "6d-original-and-diff.png") });
+    await page.getByLabel("Query", { exact: true }).fill("is:modified");
+    await page.getByTestId("apply-query").click();
+    await sleep(500);
+    check(await page.locator('[data-testid^="row-"]').count() >= 1 && (await page.locator('[data-testid="modified-mark"]').count()) === (await page.locator('[data-testid^="row-"]').count()), "is:modified lists only edited rows");
+    await page.getByTestId("clear-query").click();
   });
 
   await section("WebSocket (a real browser chats through the proxy)", async () => {
@@ -871,6 +1067,50 @@ try {
     await page.screenshot({ path: join(SHOTS, "6h-group.png") });
   });
 
+  await section("gRPC and Protobuf (view, edit in Replay)", async () => {
+    // A unary gRPC call through the proxy: one framed message, field 1 = "world" (ASCII only, so a JS string is safe).
+    const framed = "\x00\x00\x00\x00\x07\x0a\x05world";
+    await viaProxy(
+      proxy,
+      shop,
+      `POST /grpc/demo.Greeter/SayHello HTTP/1.1\r\nHost: shop\r\nContent-Type: application/grpc\r\nContent-Length: ${framed.length}\r\n\r\n${framed}`,
+    );
+    const gid = await recordedId("/grpc/demo.Greeter/SayHello");
+    check(gid != null, "the gRPC call is recorded");
+    await page.goto(link.replace(/\/auth.*/, `/#/history/${gid}`));
+    await page.getByTestId("response-view").waitFor();
+    // History: the response has a Protobuf view with the decoded fields and the status from the headers.
+    await page.getByTestId("response-view").getByRole("button", { name: "Protobuf" }).click();
+    const shownResponse = await page.getByTestId("protobuf-text").textContent();
+    check(shownResponse.includes('1: "Hello, world"') && shownResponse.includes("2: 5") && shownResponse.includes("grpc-status: 0"),
+      "History decodes a gRPC response in the Protobuf view");
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
+    await page.getByTestId("request-view").getByRole("button", { name: "Protobuf" }).click();
+    check(await page.getByTestId("protobuf-text").textContent().then((t) => t.includes("@message") && t.includes('1: "world"')),
+      "History decodes the gRPC request in the Protobuf view");
+    await page.screenshot({ path: join(SHOTS, "6i-protobuf-history.png") });
+
+    // Replay: the request opens with the head as text and the message as editable text.
+    await page.goto(link.replace(/\/auth.*/, `/#/replay/${gid}`));
+    const editor = page.getByTestId("protobuf-editor");
+    await editor.waitFor();
+    const original = await editor.inputValue();
+    check(original.includes("@message") && original.includes('1: "world"'), "Replay shows the gRPC request as Protobuf text");
+    // Unedited, the original bytes are sent: the server greets "world".
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="replay-result"]', { hasText: "200" }).waitFor();
+    await page.locator('[data-testid="replay-response"] button', { hasText: "Protobuf" }).click();
+    await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]', { hasText: "Hello, world" }).waitFor();
+    check(true, "an unedited gRPC request is replayed as it was");
+    // Edited: the text is encoded, re-framed, and Content-Length follows.
+    await editor.fill('@message\n1: "galaxy"\n');
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]', { hasText: "Hello, galaxy" }).waitFor({ timeout: 10000 });
+    check(await page.locator('[data-testid="replay-response"] [data-testid="protobuf-text"]').textContent().then((t) => t.includes("2: 6")),
+      "editing a field in Replay changes what the server answers (re-encoded and re-framed)");
+    await page.screenshot({ path: join(SHOTS, "6j-protobuf-replay.png") });
+  });
+
   await section("HTTP/2 (Chromium ↔ ProxyMind ↔ an HTTP/2 server)", async () => {
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-days", "1",
       "-keyout", join(dir, "h2.key"), "-out", join(dir, "h2.crt")], { stdio: "ignore" });
@@ -897,12 +1137,83 @@ try {
     await page.getByLabel("Filter", { exact: true }).fill("/h2-check");
     await sleep(500);
     await page.locator('[data-testid^="row-"]').first().click();
-    await page.getByRole("tab", { name: "request" }).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
     const h2text = await page
       .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "GET /h2-check HTTP/2" })
       .waitFor({ timeout: 5000 })
       .then(() => true, () => false);
     check(h2text, "History shows the request in HTTP/2 text form");
+  });
+
+  await section("HTTP/3 (Replay ↔ an in-process HTTP/3 server)", async () => {
+    // The test server is an example of pm-replay (quinn + h3 with a self-signed certificate). Build it if the
+    // binary is not there yet (CI builds it next to the proxymind binary).
+    const h3bin = join(BIN, "..", "examples", "h3_server");
+    if (!existsSync(h3bin)) {
+      execFileSync("cargo", ["build", "-p", "pm-replay", "--example", "h3_server"], { cwd: join(BIN, "..", "..", ".."), stdio: "ignore" });
+    }
+    const h3 = spawn(h3bin, ["127.0.0.1:0"], { stdio: ["ignore", "pipe", "inherit"] });
+    children.push(h3);
+    const h3port = await new Promise((resolve, reject) => {
+      let out = "";
+      h3.stdout.on("data", (d) => {
+        out += d;
+        const m = out.match(/h3 listening on 127\.0\.0\.1:(\d+)/);
+        if (m) resolve(Number(m[1]));
+      });
+      h3.on("exit", () => reject(new Error("the HTTP/3 test server stopped")));
+      setTimeout(() => reject(new Error("the HTTP/3 test server did not start")), 20000);
+    });
+    const putRoe = (text) =>
+      page.evaluate(async (text) => (await fetch("/api/v1/roe", { method: "PUT", headers: { "content-type": "application/json", "x-proxymind": "1" }, body: JSON.stringify({ text }) })).status, text);
+    const originalRoe = await page.evaluate(async () => (await (await fetch("/api/v1/roe")).json()).text);
+    try {
+      check((await putRoe(`version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/", "https://localhost:${h3port}/"]\n`)) === 200, "the HTTP/3 server is added to the scope");
+      await open("replay");
+      await page.getByLabel("New tab").click();
+      await page.getByLabel("Target").fill(`https://localhost:${h3port}`);
+      await page.getByLabel("Raw request").fill(`GET /h3-check?x=1 HTTP/1.1\nHost: localhost:${h3port}\naccept: */*\n\n`);
+      await page.getByLabel("Protocol").selectOption("HTTP/3");
+      const rawBecomes = (pred) =>
+        page
+          .waitForFunction(`(() => { const v = document.querySelector('[aria-label="Raw request"]')?.value ?? ""; return ${pred}; })()`, null, { timeout: 5000 })
+          .then(() => true, () => false);
+      check(await rawBecomes('v.startsWith("GET /h3-check?x=1 HTTP/3\\n") && v.includes("host: localhost:")'), "Replay's Protocol selector writes the request for HTTP/3");
+      check(await page.getByLabel("HTTP/3 pseudo-headers :path").inputValue() === "/h3-check?x=1", "the Inspector shows HTTP/3 pseudo-headers");
+      await page.getByTestId("send").click();
+      await page.locator('[data-testid="replay-result"]', { hasText: "201" }).waitFor({ timeout: 15000 });
+      const answer = await page.locator('[data-testid="replay-response"] pre.raw').first().textContent();
+      check(answer.startsWith("HTTP/3 201") && answer.includes("x-proto: h3") && answer.includes("x-sni: localhost") && answer.includes(`GET /h3-check?x=1 localhost:${h3port}`),
+        "a Replay request with HTTP/3 reaches the server over QUIC (the response is shown as HTTP/3 text, SNI is the host name)");
+      check(await page.locator('[data-testid="replay-result"]').getByText("offers HTTP/3").isVisible(), "Replay marks a response that advertises HTTP/3 (Alt-Svc)");
+      check(await page.getByTestId("send-http3").count() === 0, "no \"Send with HTTP/3\" offer when the request already uses it");
+
+      // History: the exchange is recorded with the HTTP/3 text form, and Alt-Svc is shown.
+      await open("history");
+      await page.getByLabel("Filter", { exact: true }).fill("/h3-check");
+      await sleep(500);
+      await page.locator('[data-testid^="row-"]').first().click();
+      await page.getByRole("tab", { name: "Request", exact: true }).click();
+      const h3text = await page
+        .locator('[data-testid="exchange-detail"] pre.raw', { hasText: "GET /h3-check?x=1 HTTP/3" })
+        .waitFor({ timeout: 5000 })
+        .then(() => true, () => false);
+      check(h3text, "History shows the request in HTTP/3 text form");
+      const detail = page.getByTestId("exchange-detail");
+      check((await detail.getByText("HTTP/3", { exact: true }).count()) > 0 && await detail.getByText("offers HTTP/3").isVisible(), "History labels the protocol and shows \"offers HTTP/3\"");
+      await page.getByTestId("replay-http3").click();
+      await page.locator(".rtab.active", { hasText: "#" }).waitFor();
+      check(await rawBecomes('v.startsWith("GET /h3-check?x=1 HTTP/3\\n")'), "\"Send with HTTP/3\" opens Replay with the request written for HTTP/3");
+      await page.screenshot({ path: join(SHOTS, "6k-http3.png") });
+
+      // The preset that removes the advertisement is offered on the Rules page.
+      await open("rules");
+      const titles = await page.getByTestId("rules-preset").locator("option").allTextContents();
+      check(titles.includes("Remove HTTP/3 advertisements (Alt-Svc h3)"), "the Rules page offers the \"Remove HTTP/3 advertisements\" preset");
+    } finally {
+      await putRoe(originalRoe);
+      h3.kill();
+    }
   });
 
   await section("Network: upstream proxy", async () => {
@@ -930,21 +1241,55 @@ try {
     });
     await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
     await open("network");
-    await page.getByTestId("upstream-toggle").check();
-    await page.getByLabel("Proxy host").fill("127.0.0.1");
-    await page.getByLabel("Proxy port").fill(String(upstream.address().port));
-    await page.getByLabel("Bypass list").fill("");
+    // One rule without a match covers every host.
+    await page.getByTestId("add-upstream-rule").click();
+    await page.getByLabel("Rule 1 via", { exact: true }).selectOption("http");
+    await page.getByLabel("Rule 1 proxy host").fill("127.0.0.1");
+    await page.getByLabel("Rule 1 proxy port").fill(String(upstream.address().port));
     await page.getByTestId("network-save").click();
     await page.waitForSelector("text=Saved. The proxy");
     await page.screenshot({ path: join(SHOTS, "6e-network.png") });
     const viaUpstream = await search("via-upstream");
     check(viaUpstream.startsWith("HTTP/1.1 200") && upstreamSeen.some((l) => l.includes("q=via-upstream")), "traffic goes through the upstream proxy");
-    await page.getByTestId("upstream-toggle").uncheck();
+    // Per-host rules: 127.0.0.1 goes direct, everything else through the proxy; the first match wins.
+    const resolve = async (host) => {
+      await page.getByLabel("Host to test").fill(host);
+      await page.getByTestId("resolve-go").click();
+      return (await page.getByTestId("resolve-result").textContent()).trim();
+    };
+    await page.getByTestId("add-upstream-rule").click();
+    await page.getByLabel("Rule 1 match").fill("127.0.0.1, *.lab.test");
+    await page.getByLabel("Rule 1 via", { exact: true }).selectOption("direct");
+    check((await page.getByTestId("upstream-rule").count()) === 2, "a rule is added before the catch-all rule");
+    let r = await resolve("a.lab.test");
+    check(r.startsWith("Rule 1 (matched *.lab.test): direct"), `the resolve tool names the matching rule (${r})`);
+    r = await resolve("elsewhere.example");
+    check(r.startsWith("Rule 2 (matches every host): via http://127.0.0.1:"), `other hosts fall to the last rule (${r})`);
+    await page.getByTestId("network-save").click();
+    await page.waitForSelector("text=Saved. The proxy");
+    r = await resolve("127.0.0.1");
+    check(r.startsWith("Rule 1 (matched 127.0.0.1): direct"), "the saved rules resolve the same way");
+    n = upstreamSeen.length;
+    const direct127 = await search("direct-by-rule");
+    check(direct127.startsWith("HTTP/1.1 200") && upstreamSeen.length === n, "a host with its own direct rule bypasses the upstream proxy");
+    // Order matters: moving the catch-all up makes it win (tried on the unsaved draft).
+    await page.getByLabel("Move rule 1 down").click();
+    r = await resolve("127.0.0.1");
+    check(r.startsWith("Rule 1 (matches every host): via http://127.0.0.1:"), "reordering changes which rule wins");
+    await page.getByLabel("Move rule 1 down").click();
+    // A catch-all that is not last is refused on save.
+    await page.getByLabel("Move rule 1 down").click();
+    await page.getByTestId("network-save").click();
+    await page.locator("text=must be the last").first().waitFor({ timeout: 5000 });
+    check(true, "a catch-all rule that is not last is refused with a reason");
+    await page.getByRole("button", { name: "Discard changes" }).click();
+    await page.getByLabel("Delete rule 1").click();
+    await page.getByLabel("Delete rule 1").click();
     await page.getByTestId("network-save").click();
     await page.waitForSelector("text=Saved. The proxy");
     n = upstreamSeen.length;
     await search("direct-again");
-    check(upstreamSeen.length === n, "turning it off connects directly again");
+    check(upstreamSeen.length === n, "deleting the rules connects directly again");
     upstream.close();
   });
 
@@ -1165,6 +1510,64 @@ try {
     }
   });
 
+  await section("Plugin hooks (API 2)", async () => {
+    let python = false;
+    try {
+      execFileSync("python3", ["--version"]);
+      python = true;
+    } catch {
+      console.log("  (python3 not found: skipping the hook plugin)");
+    }
+    if (!python) return;
+    const example = new URL("../../examples/plugins/sign-request", import.meta.url).pathname;
+    pm("plugin", "add", example);
+    await open("plugins");
+    await page.reload(); // the CLI changed the registry behind the page's back
+    await page.waitForSelector('[data-testid="plugin-permissions-sign-request"]');
+    check(await page.getByTestId("plugin-permissions-sign-request").textContent().then((t) => t.includes("hooks.request")), "the Plugins page lists the permissions a v2 plugin asks for");
+    check(await page.getByTestId("plugin-toggle-sign-request").isDisabled(), "a v2 plugin can't be turned on before its permissions are accepted");
+    check(await page.getByTestId("hook-enable-sign-request-request").isDisabled(), "its hook can't be turned on either");
+    await page.screenshot({ path: join(SHOTS, "6g-plugin-review.png"), fullPage: true });
+    await page.getByTestId("plugin-accept-sign-request").click();
+    await page.getByTestId("plugin-toggle-sign-request").getByText("On · turn off").waitFor();
+    await page.getByTestId("hook-enable-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("on", { exact: true }).waitFor();
+    check(true, "accepting the permissions and turning the hook on works from the Plugins page");
+
+    const body = '{"username":"hook","password":"e2e"}';
+    await viaProxy(proxy, shop, `POST /api/login?e2e=hook HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+    const hookId = await recordedId("e2e=hook");
+    const key = readFileSync(join(example, "signing.key"), "utf8").split("\n")[0].trim();
+    const signature = createHmac("sha256", key).update(body).digest("hex");
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("e2e=hook");
+    await sleep(500);
+    await page.getByTestId(`row-${hookId}`).click();
+    await page.getByRole("tab", { name: "Request", exact: true }).click();
+    const sentReq = await page.locator('[data-testid="exchange-detail"] pre.raw', { hasText: "X-Signature" }).first().textContent();
+    check(sentReq.includes(`X-Signature: ${signature}`), "History's request shows the header the hook added");
+    await page.getByTestId("tab-original_request").click();
+    const origHook = await page.getByTestId("original-request-view").locator("pre.raw").first().textContent();
+    check(!origHook.includes("X-Signature"), "the original request is kept without it");
+    await page.getByTestId("tab-changes").click();
+    const hookChanges = await page.getByTestId("changes-list").textContent();
+    check(hookChanges.includes("sign-request/request") && hookChanges.includes("added X-Signature"), "the Changes tab names the hook");
+    await page.screenshot({ path: join(SHOTS, "6h-hook-changes.png") });
+
+    // Pausing stops it (and resuming starts it again); turning it off leaves the other sections alone.
+    await open("plugins");
+    await page.getByTestId("hook-pause-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("paused", { exact: true }).waitFor();
+    await viaProxy(proxy, shop, `POST /api/login?e2e=hook-paused HTTP/1.1\r\nHost: shop\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+    const pausedId = await recordedId("e2e=hook-paused");
+    const pausedEx = await page.evaluate(async (id) => (await fetch(`/api/v1/exchanges/${id}`)).json(), pausedId);
+    check(!pausedEx.request.includes("X-Signature") && !(pausedEx.changes ?? []).some((c) => c.by === "hook"), "a paused hook leaves traffic alone");
+    await page.getByTestId("hook-pause-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("on", { exact: true }).waitFor();
+    await page.getByTestId("hook-enable-sign-request-request").click();
+    await page.getByTestId("hook-state-sign-request-request").getByText("off", { exact: true }).waitFor();
+  });
+
   await section("Custom checks", async () => {
     await viaProxy(proxy, shop, "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n");
     const productsId = await page.evaluate(async () => {
@@ -1282,6 +1685,255 @@ match:
     await page.getByTestId("listeners-save").click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
     check(await rawTo(extra, "GET / HTTP/1.1\r\n\r\n").then(() => false, () => true), "a removed listener stops");
+  });
+
+  await section("Capture modes: SOCKS5 and transparent listeners", async () => {
+    await open("setup");
+    // A SOCKS5 listener with a login.
+    const socks = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`127.0.0.1:${socks}`);
+    await page.getByLabel("Listener 1 type").selectOption("socks5");
+    await page.getByLabel("Listener 1 username").fill("scout");
+    await page.getByLabel("Listener 1 password").fill("s3cret");
+    await page.getByTestId("listeners-save").click();
+    await page.locator('[data-testid="listener-status"]', { hasText: "SOCKS5" }).waitFor({ timeout: 5000 });
+    check(true, "a SOCKS5 listener starts without a restart");
+    check((await page.getByLabel("Listener 1 password").inputValue()) === "********", "its password is shown masked");
+    const req = (q) => `GET /api/products/search?q=${q} HTTP/1.1\r\nHost: 127.0.0.1:${shop}\r\nConnection: close\r\n\r\n`;
+    const refused = await viaSocks5(socks, "127.0.0.1", shop, req("no-login")).then(() => "", (e) => e.message);
+    check(refused.includes("no acceptable method"), "a SOCKS5 client without a login is refused");
+    const wrong = await viaSocks5(socks, "127.0.0.1", shop, req("bad-login"), { username: "scout", password: "nope" }).then(() => "", (e) => e.message);
+    check(wrong.includes("login rejected"), "a wrong password is refused");
+    const ok = await viaSocks5(socks, "127.0.0.1", shop, req("via-socks5"), { username: "scout", password: "s3cret" });
+    check(ok.startsWith("HTTP/1.1 200"), "a SOCKS5 client with the login gets the response");
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("via-socks5");
+    await page.locator('[data-testid^="row-"]').first().waitFor({ timeout: 10000 });
+    check(true, "the request tunnelled through SOCKS5 shows in History");
+    await page.screenshot({ path: join(SHOTS, "7d2-socks5.png"), fullPage: true });
+    await open("setup");
+    await page.getByLabel("Delete listener 1").click();
+    await page.getByTestId("listeners-save").click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
+    check(await socks5Connect(socks, "127.0.0.1", shop).then((s) => (s.destroy(), false), () => true), "a removed SOCKS5 listener stops");
+
+    // Transparent mode: Linux only, greyed out elsewhere. Without iptables a client simply connects to the
+    // listener, which then behaves like an ordinary invisible client.
+    const linux = process.platform === "linux";
+    const tp = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`127.0.0.1:${tp}`);
+    const box = page.getByLabel("Listener 1 transparent");
+    check((await box.isEnabled()) === linux, linux ? "the transparent option is available on Linux" : "the transparent option is greyed out here");
+    if (!linux) {
+      check(await page.getByTestId("transparent-unsupported").isVisible(), "and the page says why");
+    } else {
+      await box.check();
+      await page.getByTestId("listeners-save").click();
+      await page.locator('[data-testid="listener-status"]', { hasText: "transparent" }).waitFor({ timeout: 5000 });
+      const plain = await rawTo(tp, `GET /api/products HTTP/1.1\r\nHost: 127.0.0.1:${shop}\r\nConnection: close\r\n\r\n`);
+      check(plain.startsWith("HTTP/1.1 200"), "a transparent listener serves a client that was not redirected");
+      await page.getByLabel("Delete listener 1").click();
+      await page.getByTestId("listeners-save").click();
+      await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
+    }
+    if (!linux) await page.getByLabel("Delete listener 1").click();
+  });
+
+  await section("Raw TCP streams (a non-HTTP protocol through CONNECT, Streams page, replay)", async () => {
+    // A line protocol where the server speaks first: greets, then answers each line in capitals.
+    const lineServer = net.createServer((c) => {
+      c.write("220 hello\r\n");
+      c.on("data", (d) => c.write(String(d).toUpperCase()));
+      c.on("error", () => {});
+    });
+    await new Promise((r) => lineServer.listen(0, "127.0.0.1", r));
+    const rawPort = lineServer.address().port;
+    const roeText = `version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/", "http://127.0.0.1:${rawPort}/"]\n`;
+    const putRoe = (text) =>
+      page.evaluate(async (text) => (await fetch("/api/v1/roe", { method: "PUT", headers: { "content-type": "application/json", "x-proxymind": "1" }, body: JSON.stringify({ text }) })).status, text);
+    const originalRoe = await page.evaluate(async () => (await (await fetch("/api/v1/roe")).json()).text);
+    check((await putRoe(roeText)) === 200, "the line server is added to the scope (replay checks scope)");
+    // CONNECT through the proxy, wait for the greeting, send a line, read the answer.
+    const talk = (line) =>
+      new Promise((resolve, reject) => {
+        const s = net.connect(proxy, "127.0.0.1", () => s.write(`CONNECT 127.0.0.1:${rawPort} HTTP/1.1\r\nHost: 127.0.0.1:${rawPort}\r\n\r\n`));
+        let out = "";
+        let sent = false;
+        s.on("data", (d) => {
+          out += d;
+          if (!sent && out.includes("220 hello\r\n")) {
+            sent = true;
+            s.write(line);
+          }
+          if (out.includes(line.toUpperCase())) {
+            s.end();
+            resolve(out);
+          }
+        });
+        s.on("error", reject);
+        setTimeout(() => (s.destroy(), reject(new Error(`no answer: ${out}`))), 8000);
+      });
+    await open("streams");
+    // With the page's timers frozen, only a server event can bring the new stream into the list.
+    await withFrozenTimers(async () => {
+      const out = await talk("ping the proxy\r\n");
+      check(out.includes("PING THE PROXY\r\n"), "the non-HTTP stream is relayed unchanged through CONNECT");
+      await page.locator('[data-testid="streams-list"] tr', { hasText: `127.0.0.1:${rawPort}` }).first().waitFor({ timeout: 8000 });
+    });
+    check(true, "the Streams page lists the stream without polling");
+    await page.locator('[data-testid="streams-list"] tr', { hasText: `127.0.0.1:${rawPort}` }).first().click();
+    const detail = page.getByTestId("stream-detail");
+    await detail.waitFor();
+    await page.waitForFunction(() => document.querySelector('[data-testid="stream-ended"]')?.textContent !== "open", null, { timeout: 8000 });
+    const chunks = detail.getByTestId("stream-chunk");
+    await chunks.nth(2).waitFor({ timeout: 8000 });
+    const dirs = await chunks.evaluateAll((els) => els.map((e) => e.getAttribute("data-from")));
+    check(dirs[0] === "server" && dirs.includes("client"), `chunks are in order with their directions (${dirs.join(", ")})`);
+    check((await chunks.first().textContent()).includes("220 hello"), "the text view shows the server's greeting");
+    await detail.getByRole("button", { name: "Hex", exact: true }).click();
+    check((await detail.getByTestId("stream-chunks").textContent()).includes("32 32 30 20 68 65 6c 6c 6f"), "the hex view shows the bytes");
+    await detail.getByRole("button", { name: "Text", exact: true }).click();
+    await page.getByLabel("Search in stream").fill("ping the");
+    check(await page.getByTestId("stream-matches").textContent().then((t) => t.startsWith("2 of ")), "search narrows the chunks of the stream");
+    await page.getByLabel("Search in stream").fill("");
+    await page.screenshot({ path: join(SHOTS, "7d3-streams.png"), fullPage: true });
+    // Replay with an edited chunk: a new connection, recorded as a new stream.
+    await detail.getByRole("button", { name: "Replay stream…" }).click();
+    await page.getByLabel("Chunk 1 to send").fill("edited and replayed\r\n");
+    await page.getByLabel("Listen for (ms)").fill("500");
+    await page.getByTestId("stream-replay-send").click();
+    const result = await page.getByTestId("stream-replay-result").textContent({ timeout: 10000 });
+    check(/Sent \d+ bytes, received \d+; recorded as stream #\d+/.test(result), `replay sends the edited chunk and records a new stream (${result.trim()})`);
+    await page.getByTestId("stream-replay-result").getByRole("link", { name: "Open it" }).click();
+    await page.locator('[data-testid="stream-chunks"]', { hasText: "EDITED AND REPLAYED" }).waitFor({ timeout: 8000 });
+    check(true, "the new stream shows the server's answer to the edited bytes");
+    // Out of scope: the gate refuses.
+    check((await putRoe(`version: 1\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`)) === 200, "the line server leaves the scope");
+    await page.getByRole("button", { name: "Replay stream…" }).click();
+    await page.getByTestId("stream-replay-send").click();
+    check(await page.getByTestId("stream-replay-denied").textContent({ timeout: 8000 }).then((t) => /scope/i.test(t)), "replay of an out-of-scope target is denied by the policy gate");
+    await putRoe(originalRoe);
+    lineServer.close();
+  });
+
+  await section("Mobile onboarding (setup page, QR code, devices)", async () => {
+    await open("setup");
+    // The main proxy listens on loopback only: a phone cannot reach it, and the page says so.
+    await page.getByTestId("mobile-unreachable").waitFor();
+    check((await page.getByTestId("mobile-qr").count()) === 0, "a loopback-only proxy gets no QR code, only how to fix it");
+    // Add a listener on every interface (as the page suggests).
+    const lan = await freePort();
+    await page.getByTestId("add-listener").click();
+    await page.getByLabel("Listener 1 address").fill(`0.0.0.0:${lan}`);
+    await page.getByTestId("listeners-save").click();
+    await page.locator('[data-testid="listener-status"]', { hasText: "listening" }).waitFor({ timeout: 5000 });
+    await page.reload();
+    await page.getByTestId("mobile-url").waitFor();
+    const url = (await page.getByTestId("mobile-url").textContent()).trim();
+    check(url === `http://${process.env.PROXYMIND_LAN_ADDR}:${lan}/`, `the page to open on the phone is shown (${url})`);
+    check((await page.getByTestId("mobile-proxy").textContent()) === `${process.env.PROXYMIND_LAN_ADDR}:${lan}`, "and the proxy address to type into the phone");
+    const qr = page.getByTestId("mobile-qr");
+    check(
+      (await qr.evaluate((i) => i.tagName === "IMG" && i.src.startsWith("data:image/svg+xml;base64,") && i.complete && i.naturalWidth > 0)) === true,
+      "the QR code is an image (an <img> with a data URL), not markup in the page",
+    );
+    check(await page.evaluate(() => !document.querySelector(".panel svg[viewBox]")), "the SVG is never inserted into the page itself");
+    check((await page.getByTestId("mobile-guide").getAttribute("href")).endsWith("docs/mobile.md"), "the setup page links the Android and iOS guide");
+    await page.screenshot({ path: join(SHOTS, "7e-mobile.png"), fullPage: true });
+
+    // The page a phone opens, fetched through the proxy by its reserved name, and straight from the listener.
+    const pem = await page.evaluate(async () => (await fetch("/api/v1/ca.pem")).text());
+    const fp = new X509Certificate(pem).fingerprint256;
+    const hit = await rawTo(proxy, "GET http://proxymind.setup/ HTTP/1.1\r\nHost: proxymind.setup\r\nConnection: close\r\n\r\n");
+    check(hit.startsWith("HTTP/1.1 200") && hit.includes('href="/ca.crt"') && hit.includes('href="/ca.pem"'), "http://proxymind.setup/ through the proxy shows the CA download links");
+    check(hit.includes(fp), "and the CA fingerprint the setup page shows");
+    check(!hit.includes("<script") && !/pm2_[0-9a-f]{20}/.test(hit), "with no scripts and nothing secret");
+    const direct = await rawTo(lan, `GET / HTTP/1.1\r\nHost: 127.0.0.1:${lan}\r\nConnection: close\r\n\r\n`);
+    check(direct.startsWith("HTTP/1.1 200") && direct.includes("ProxyMind setup"), "the listener's own address serves the same page (no proxy setting needed yet)");
+    const download = (path) =>
+      new Promise((resolve, reject) => {
+        const r = http.request({ host: "127.0.0.1", port: proxy, path: `http://proxymind.setup${path}`, headers: { Host: "proxymind.setup" } }, (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({ type: res.headers["content-type"], body: Buffer.concat(chunks) }));
+        });
+        r.on("error", reject).end();
+      });
+    const crt = await download("/ca.crt");
+    check(crt.type === "application/x-x509-ca-cert" && new X509Certificate(crt.body).fingerprint256 === fp, "/ca.crt is the CA in DER form, as a certificate download");
+    const pemDl = await download("/ca.pem");
+    check(pemDl.type === "application/x-pem-file" && pemDl.body.toString() === pem, "/ca.pem is the PEM file");
+    await sleep(500);
+    const local = await page.evaluate(async () => (await (await fetch("/api/v1/exchanges?host=proxymind&limit=5")).json()).exchanges.length);
+    check(local === 0, "none of that is recorded as target traffic");
+
+    // Devices: a second client address (127.0.0.2, where the OS allows it) shows up, can be named and filtered.
+    const from = (localAddress, raw) =>
+      new Promise((resolve, reject) => {
+        const sock = net.connect({ host: "127.0.0.1", port: proxy, localAddress }, () => sock.write(raw.replace(" /", ` http://127.0.0.1:${shop}/`)));
+        let out = "";
+        sock.on("data", (d) => (out += d));
+        sock.on("end", () => resolve(out));
+        sock.on("error", reject);
+        setTimeout(() => sock.destroy(), 5000);
+      });
+    const second = "127.0.0.2";
+    const reply = await from(second, "GET /api/products?from=second-device HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n").catch(() => "");
+    await viaProxy(proxy, shop, "GET /api/products?from=first-device HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    if (!reply.startsWith("HTTP/1.1 200")) {
+      console.log("  (this system cannot connect from 127.0.0.2: the second-device checks are skipped)");
+      check(true, "skipped: no second client address here");
+      return;
+    }
+    check((await recordedId("from=second-device")) !== null, "traffic from a second device is recorded");
+    await page.reload();
+    await page.getByTestId(`device-name-${second}`).waitFor();
+    check((await page.getByTestId("devices").textContent()).includes("127.0.0.1"), "the devices list shows both client addresses");
+    await page.getByTestId(`device-name-${second}`).fill("Pixel 8");
+    await page.getByTestId(`device-name-${second}`).press("Enter");
+    await page.waitForFunction(async () => (await (await fetch("/api/v1/devices")).json()).devices.some((d) => d.name === "Pixel 8"));
+    check(true, "a device can be given a name");
+
+    await open("history");
+    await page.getByLabel("Filter", { exact: true }).fill("from=");
+    await page.locator('[data-testid="client-cell"]', { hasText: "Pixel 8" }).first().waitFor();
+    const cells = await page.locator('[data-testid="client-cell"]').allTextContents();
+    check(cells.includes("Pixel 8") && cells.includes("127.0.0.1"), `History has a Client column with the device name or address (${cells.join(", ")})`);
+    await page.getByTestId("client-filter").selectOption(second);
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="client-cell"]').length === 1);
+    check((await page.locator('[data-testid^="row-"]').first().textContent()).includes("from=second-device"), "the device filter shows only that device's traffic");
+    await page.getByTestId("client-filter").selectOption("");
+    await page.getByLabel("Query", { exact: true }).fill('client:"Pixel 8"');
+    await page.getByLabel("Query", { exact: true }).press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="client-cell"]').length === 1);
+    check(true, "the query language has client: (by name)");
+    await page.getByLabel("Query", { exact: true }).fill("client:127.0.0.1 from=");
+    await page.getByLabel("Query", { exact: true }).press("Enter");
+    await sleep(600);
+    check((await page.locator('[data-testid="client-cell"]').allTextContents()).every((t) => t === "127.0.0.1"), "client: also takes an address");
+    await page.getByTestId("clear-query").click();
+    await page.getByLabel("Filter", { exact: true }).fill("");
+    await page.screenshot({ path: join(SHOTS, "7f-devices-history.png") });
+
+    // Record only one device: the other is still proxied but not saved.
+    await open("setup");
+    await page.getByTestId(`device-record-${second}`).check();
+    await page.waitForFunction(async (a) => (await (await fetch("/api/v1/history/recording")).json()).record_devices?.includes(a), second);
+    check((await page.getByTestId("record-devices-note").textContent()).includes("Only traffic from"), "choosing a device to record is explained");
+    const firstReply = await viaProxy(proxy, shop, "GET /api/products?x=not-recorded HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    await from(second, "GET /api/products?x=recorded HTTP/1.1\r\nHost: shop\r\nConnection: close\r\n\r\n");
+    check(firstReply.startsWith("HTTP/1.1 200"), "other devices are still proxied");
+    check((await recordedId("x=recorded")) !== null, "the chosen device's traffic is recorded");
+    check((await recordedId("x=not-recorded")) === null, "other devices' traffic is not");
+    await page.getByTestId(`device-record-${second}`).uncheck();
+    await page.waitForFunction(async () => ((await (await fetch("/api/v1/history/recording")).json()).record_devices ?? []).length === 0);
+
+    // Clean up the extra listener.
+    await page.getByLabel("Delete listener 1").click();
+    await page.getByTestId("listeners-save").click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
   });
 
   await section("Network: hostname overrides and TLS pass-through", async () => {
@@ -1410,6 +2062,186 @@ match:
     await page.screenshot({ path: join(SHOTS, "8-audit.png") });
   });
 
+  await section("Workflows (extract + send, run on an exchange, History, live runs, Fuzzer option)", async () => {
+    const api = (method, path, body) =>
+      page.evaluate(async ([method, path, body]) => {
+        const r = await fetch(`/api/v1${path}`, { method, headers: { "Content-Type": "application/json", "X-ProxyMind": "1" }, body: body === undefined ? undefined : JSON.stringify(body) });
+        return [r.status, await r.json()];
+      }, [method, path, body]);
+
+    // History's right-click menu opens the Workflows page with the exchange filled in.
+    await open("history");
+    await (await rowFor("/api/orders/1001", 0)).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Run workflow…" }).click();
+    await page.waitForFunction(() => window.location.hash.startsWith("#/workflows/"));
+    await page.getByTestId("workflows-page").waitFor();
+    // The row is alice's own request through the proxy (the oldest with this path), so its answer is her order.
+    const orderEx = Number(await page.getByLabel("Run on exchange").inputValue());
+    check(orderEx > 0, `Run workflow… from History fills in the exchange (#${orderEx})`);
+
+    // Build a two-step workflow: read the order's id from the response, send a request with it.
+    await page.getByTestId("wf-new").click();
+    await page.getByLabel("Workflow name").fill("e2e-order-id");
+    await page.getByLabel("Workflow description").fill("Read the order id, look it up as a product query");
+    await page.getByLabel("Step 1 type").selectOption("extract");
+    await page.getByLabel("Step 1 variable").fill("oid");
+    await page.getByLabel("Step 1 kind").selectOption("json");
+    await page.getByLabel("Step 1 expression").fill("/id");
+    await page.getByTestId("add-send").click();
+    await page.getByLabel("Step 2 request").fill("GET /api/products?order={{oid}} HTTP/1.1\nHost: shop\n\n");
+    await page.getByTestId("wf-save").click();
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).waitFor();
+    check(await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).textContent().then((t) => t.includes("extract → send")), "the saved workflow lists its steps");
+    await page.screenshot({ path: join(SHOTS, "7f-workflows.png"), fullPage: true });
+
+    // Run it on the exchange: the run shows both steps, the variable and the exchange it sent.
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-order-id" }).getByTestId("wf-run").click();
+    await page.getByTestId("run-detail").waitFor();
+    check(await page.getByTestId("run-status").first().textContent().then((t) => t.trim() === "ok"), "the run is ok");
+    check((await page.getByTestId("run-step").count()) === 2, "the run lists its two steps");
+    check(await page.getByTestId("run-variables").textContent().then((t) => t.includes("oid = 1001")), "the run shows the variable the extract set");
+    const sentLink = page.getByTestId("run-step").nth(1).locator("a");
+    const sentId = Number((await sentLink.textContent()).replace("#", ""));
+    check(sentId > orderEx, `the send step links the exchange it made (#${sentId})`);
+    await page.getByTestId("wf-run-row").first().waitFor();
+    await sentLink.click();
+    await page.waitForFunction((id) => window.location.hash === `#/history/${id}`, sentId);
+    const [st, ex] = await api("GET", `/exchanges/${sentId}`);
+    check(st === 200 && ex.summary.source === "workflow" && ex.summary.path === "/api/products?order=1001", "History has the request the workflow sent, as source workflow, with the variable filled in");
+
+    // ADR-0018: a run started elsewhere shows up in the run history with every page timer frozen.
+    await open("workflows");
+    // Count only once the run list has loaded (the run above is in it), or a late first load looks like a new run.
+    await page.getByTestId("wf-run-row").first().waitFor();
+    const before = await page.getByTestId("wf-run-row").count();
+    await withFrozenTimers(async () => {
+      await api("POST", "/workflows/e2e-order-id/run", { exchange_id: orderEx });
+      await page.waitForFunction((n) => document.querySelectorAll('[data-testid="wf-run-row"]').length > n, before, { timeout: 15000 });
+    });
+    check((await page.getByTestId("wf-run-row").count()) === before + 1, "a run started elsewhere appears in the run history without a page timer");
+    await page.getByTestId("wf-run-row").first().click();
+    check(await page.getByTestId("run-detail").textContent().then((t) => t.includes("sent, status 200")), "clicking a run shows its steps");
+
+    // A match that does not fit stops the run with the reason; the trigger needs a first match step.
+    await api("POST", "/workflows", { name: "e2e-only-posts", steps: [{ type: "match", method: "POST", message: "only POSTs" }, { type: "send", url: `http://127.0.0.1:${shop}`, raw: "GET / HTTP/1.1\r\nHost: x\r\n\r\n" }] });
+    await open("workflows");
+    await page.locator('[data-testid="wf-row"]', { hasText: "e2e-only-posts" }).getByTestId("wf-run").click();
+    await page.getByTestId("run-reason").waitFor();
+    check(await page.getByTestId("run-reason").textContent().then((t) => t.includes("only POSTs")), "a failed match stops the run and says why");
+    const trig = page.getByLabel("Run e2e-only-posts on new traffic");
+    check(await trig.isEnabled(), "a workflow with a first match step can run on new traffic");
+    check(await page.getByLabel("Run e2e-order-id on new traffic").isDisabled(), "one without cannot");
+    check((await api("PUT", "/workflows/e2e-order-id/trigger", { enabled: true }))[0] === 400, "the API refuses a trigger without a first match step");
+
+    // The Fuzzer can run a workflow on each result.
+    await api("POST", "/workflows", { name: "e2e-per-result", steps: [{ type: "assert", status: "200", message: "ok" }] });
+    await page.goto(link.replace(/\/auth.*/, "/#/fuzzer"));
+    await page.getByLabel("Target").fill(`http://127.0.0.1:${shop}`);
+    await page.getByLabel("Request").fill("GET /api/products?q=§a§ HTTP/1.1\nHost: shop\n\n");
+    await page.getByLabel("Payload type").selectOption("list");
+    await page.getByLabel("Payloads", { exact: true }).fill("a\nb");
+    await page.getByLabel("Workflow on each result").selectOption("e2e-per-result");
+    await page.getByTestId("fuzzer-run").click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="fuzzer-summary"]')?.textContent?.includes("· done ·"), null, { timeout: 30000 });
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="workflow-cell"]').length === 2);
+    check((await page.getByTestId("workflow-cell").allTextContents()).every((t) => t.startsWith("ok")), "each Fuzzer result shows what its workflow made of it");
+    await page.getByLabel("Workflow on each result").selectOption("");
+  });
+
+  await section("Integrations: delivery of a proven finding, and an issue on GitHub", async () => {
+    // The IDOR was proven earlier; the webhook subscribed to "finding proven" got it, redacted and signed.
+    for (let i = 0; i < 50 && !hookGot.some((g) => JSON.parse(g.body).event === "finding_proven"); i++) await sleep(100);
+    const proven = hookGot.find((g) => JSON.parse(g.body).event === "finding_proven");
+    check(!!proven, "the webhook got the finding_proven event");
+    const p = JSON.parse(proven.body);
+    check(p.v === 1 && p.data.finding.status === "proven" && p.data.finding.title === "Any user can read any order", "the payload is version 1 and describes the finding");
+    check(proven.headers["x-proxymind-signature"] === "sha256=" + createHmac("sha256", HOOK_SECRET).update(proven.body).digest("hex"), "the finding event is signed");
+    const leak = proven.body.match(/.{0,40}(session=|Authorization:|Bearer ).{0,40}/i);
+    check(!leak, `no cookie or token is in the payload${leak ? `: ${leak[0]}` : ""}`);
+    await open("integrations");
+    await page.waitForFunction(() => document.querySelector('[data-testid="deliveries-e2e-hook"]')?.textContent?.includes("finding_proven"));
+    check(true, "the delivery log lists the finding_proven delivery");
+
+    await open("findings");
+    await page.getByTestId("findings").getByText("Any user can read any order").click();
+    await page.getByTestId("create-issue").click();
+    await page.waitForSelector('[data-testid="issue-link"]');
+    check((await page.getByTestId("issue-link").textContent()).includes("#42"), "the finding shows the created issue's key");
+    check((await page.getByTestId("issue-link").locator("a").getAttribute("href")) === "https://github.com/acme/app/issues/42", "and links to it");
+    const created = ghGot.find((g) => g.method === "POST");
+    check(created?.url === "/repos/acme/app/issues" && created.headers.authorization === `Bearer ${GH_TOKEN}`, "GitHub got POST /repos/acme/app/issues with the token");
+    const issue = JSON.parse(created.body);
+    check(issue.title.includes("Any user can read any order") && issue.body.includes("### Reproduction") && !/(session=|Bearer |Authorization: )(?!\{\{secret:)/i.test(issue.body), "the issue has the reproduction and no raw credentials");
+    check((await page.getByTestId("create-issue").textContent()).includes("Update issue"), "sending again offers an update, not a duplicate");
+  });
+
+  await section("Safe mode: a project that came from somewhere else (banner, review page, confirm)", async () => {
+    // A project made under another home folder, with things a hostile file could carry: a rewrite rule, an upstream
+    // proxy rule and a schedule. Removing this install's record of it is what "it came from somewhere else" means.
+    const fdir = join(dir, "foreign");
+    mkdirSync(fdir);
+    const fproj = join(fdir, "foreign.pmproj");
+    const fhome = join(fdir, "home");
+    const fpm = (...a) => execFileSync(BIN, ["-p", fproj, "--home", fhome, ...a], { encoding: "utf8" });
+    writeFileSync(join(fdir, "roe.yaml"), `version: 1\nengagement:\n  name: "Their engagement"\nscope:\n  include: ["http://127.0.0.1:${shop}/"]\n`);
+    fpm("roe", "use", join(fdir, "roe.yaml"));
+    writeFileSync(join(fdir, "rules.json"), JSON.stringify([{ enabled: true, part: "request_header", match: "X-Evil: 1", replace: "X-Evil: 2", comment: "theirs" }]));
+    fpm("rules", "load", join(fdir, "rules.json"));
+    writeFileSync(join(fdir, "net.json"), JSON.stringify({ upstream_rules: [{ match: ["*"], via: "http://127.0.0.1:9" }] }));
+    fpm("network", "set", join(fdir, "net.json"));
+    fpm("schedule", "add", "--name", "their-nightly", "--url", `http://127.0.0.1:${shop}/`, "--hourly");
+    check(JSON.parse(fpm("project", "status", "--json")).status === "trusted", "a project this install made is trusted without a prompt");
+    rmSync(join(fhome, "project-trust.json"));
+    check(JSON.parse(fpm("project", "status", "--json")).safe_mode === true, "without this install's record the same file is in safe mode");
+
+    const [fui, fproxy] = [await freePort(), await freePort()];
+    let flink = "";
+    const fchild = spawn(BIN, ["-p", fproj, "--home", fhome, "ui", "--listen", `127.0.0.1:${fui}`, "--proxy", `127.0.0.1:${fproxy}`, "--as", "human:tester"], { stdio: ["pipe", "pipe", "pipe"] });
+    fchild.stdout.on("data", (d) => {
+      const m = String(d).match(/Open: (\S+)/);
+      if (m) flink = m[1];
+    });
+    children.push(fchild);
+    for (let i = 0; i < 80 && !flink; i++) await sleep(100);
+    if (!flink) throw new Error("the second proxymind ui did not print a login link");
+    const fpage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const fErrors = [];
+    fpage.on("pageerror", (e) => fErrors.push(String(e)));
+    try {
+      await fpage.goto(flink);
+      await fpage.waitForSelector('[data-testid="safe-banner"]');
+      check(true, "the banner says safe mode on the first page");
+      check((await fpage.getByTestId("safe-banner").textContent()).includes("Safe mode"), "and names it");
+      await fpage.evaluate(() => (window.location.hash = "#/overview"));
+      check(await fpage.getByTestId("safe-banner").isVisible(), "the banner is on other pages too");
+      const held = await fpage.evaluate(async () => (await (await fetch("/api/v1/project/trust")).json()).held_back.map((h) => h.kind));
+      check(["roe", "upstream", "rewrite_rule", "schedule"].every((k) => held.includes(k)), `the held-back list names the rules, upstream rule, rewrite rule and schedule (${held.join(", ")})`);
+      const refused = await fpage.evaluate(async () => {
+        const r = await fetch("/api/v1/project/trust", { method: "POST", headers: { "X-ProxyMind": "1", "Content-Type": "application/json" }, body: JSON.stringify({ digest: "0".repeat(64) }) });
+        return [r.status, (await r.json()).error];
+      });
+      check(refused[0] >= 400 && /changed since you reviewed/.test(refused[1]), "confirming a digest the person did not read is refused");
+
+      await fpage.getByTestId("safe-banner-review").click();
+      await fpage.waitForSelector('[data-testid="review-roe"]');
+      check((await fpage.getByTestId("review-roe").textContent()).includes("Their engagement"), "the review page shows the file's rules of engagement");
+      check((await fpage.getByTestId("review-upstream").textContent()).includes("127.0.0.1:9"), "the upstream proxy rule is listed");
+      check((await fpage.getByTestId("review-rewrite").textContent()).includes("X-Evil"), "the rewrite rule is listed");
+      check((await fpage.getByTestId("review-schedules").textContent()).includes("their-nightly"), "the schedule is listed");
+      check(await fpage.getByTestId("trust-confirm").isDisabled(), "the confirm button waits for the box to be ticked");
+      await fpage.getByRole("checkbox", { name: "I have read this" }).check();
+      await fpage.getByTestId("trust-confirm").click();
+      await fpage.waitForSelector('[data-testid="safe-banner"]', { state: "detached" });
+      check(true, "the banner is gone after confirming");
+      const after = await fpage.evaluate(async () => (await fetch("/api/v1/project/trust")).json());
+      check(after.status === "trusted" && after.trusted_by === "human:tester" && after.basis === "confirmed", "the project is trusted, by the person who confirmed");
+      check(existsSync(join(fhome, "project-trust.json")), "the record is in the home folder, not in the project");
+      check(fErrors.length === 0, `no page errors${fErrors.length ? ": " + fErrors.join(" | ") : ""}`);
+    } finally {
+      await fpage.close();
+    }
+  });
+
   // ADR-0018: no live page polls. The built bundle must not call setInterval at all. A polling setTimeout chain
   // cannot be told from a debounce in minified code, so it is checked two other ways: the sections above run with
   // the page's timers frozen, and the sources may call setTimeout only in the files below, each a one-shot (toast
@@ -1433,7 +2265,7 @@ match:
   await other.waitForSelector("text=Not signed in");
   check(true, "a browser without the token sees 'Not signed in'");
 
-  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns"));
+  const unexpected = consoleErrors.filter((e) => !e.includes("q=stauts%3A200") && !e.includes("/api/v1/recon/dns") && !(e.includes("400 (Bad Request)") && e.includes("/workflows/e2e-order-id/trigger")) && !(e.includes("400 (Bad Request)") && e.endsWith("/api/v1/network)")));
   check(unexpected.length === 0, `no console errors${unexpected.length ? ": " + unexpected.join(" | ") : ""}`);
   if (failedResponses.length) console.log(`  (failed requests during the run: ${failedResponses.join(" | ")})`);
   await browser.close();
@@ -1442,6 +2274,7 @@ match:
   failures++;
 } finally {
   for (const c of children) c.kill();
+  for (const r of typeof receivers === "undefined" ? [] : receivers) r.close();
 }
 console.log(failures ? `\n${failures} check(s) failed` : `\nAll UI checks passed. Screenshots: ${SHOTS}`);
 process.exit(failures ? 1 : 0);

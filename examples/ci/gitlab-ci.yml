@@ -1,0 +1,52 @@
+# Scan a staging environment with `proxymind ci` from GitLab CI. Include it or copy the job into .gitlab-ci.yml.
+# See docs/ci.md for the options, the exit codes and the baseline workflow.
+#
+# Set up once:
+#   - security/roe.yaml with the staging URL in scope and  tiers: { ci: { active_intrusive: allow } }
+#   - the CI/CD variable STAGING_URL, and (for logins) masked variables such as CI_ALICE_PASSWORD; without logins,
+#     drop the --identity-file and --identity lines below
+#   - security/proxymind-baseline.json, written once with
+#         proxymind ci --roe security/roe.yaml --write-baseline security/proxymind-baseline.json
+#
+# Exit codes: 0 = no new findings, 1 = new findings, 2 = the run could not finish (never "clean").
+# GitLab fails the job on any non-zero code.
+#
+# GitLab's security dashboards read GitLab's own report format, not SARIF, so the SARIF file is kept as a job
+# artifact (download it, or convert it); the JUnit file shows up in the pipeline's Tests tab.
+
+proxymind-scan:
+  stage: test
+  image: debian:stable-slim
+  timeout: 45 minutes
+  variables:
+    PROXYMIND_VERSION: "v0.2.0"
+    PROXYMIND_CHROMIUM: /usr/bin/chromium   # for single-page apps and XSS proofs
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl chromium
+    - name="proxymind-${PROXYMIND_VERSION}-x86_64-unknown-linux-gnu"
+    - base="https://github.com/ommirkute/ProxyMind/releases/download/${PROXYMIND_VERSION}"
+    - curl -fsSL -O "$base/$name.tar.gz" -O "$base/SHA256SUMS"
+    - sha256sum -c SHA256SUMS --ignore-missing
+    - tar xzf "$name.tar.gz" && mv "$name/proxymind" ./proxymind
+  script:
+    - >
+      ./proxymind ci
+      --roe security/roe.yaml
+      --target "$STAGING_URL"
+      --baseline security/proxymind-baseline.json
+      --profile default
+      --budget-minutes 30 --max-requests 20000
+      --identity-file security/identities.json --identity alice
+      --sarif proxymind.sarif --junit proxymind.xml --json proxymind.json
+  artifacts:
+    when: always            # the files are written even when the run exits 1 or 2
+    expire_in: 30 days
+    paths:
+      - proxymind.sarif
+      - proxymind.json
+    reports:
+      junit: proxymind.xml

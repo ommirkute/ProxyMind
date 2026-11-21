@@ -4,11 +4,18 @@
 //! zstd-compressed blobs keyed by their blake3 hash, so identical bodies
 //! (static files, repeated replays) are stored once.
 
+mod integrations;
+mod streams;
+mod workflow_runs;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
+pub use integrations::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+pub use streams::*;
+pub use workflow_runs::*;
 
 /// Schema migrations, applied in order. Never edit a released entry;
 /// add a new one instead.
@@ -368,6 +375,125 @@ CREATE TABLE text_index_truncated (id INTEGER PRIMARY KEY);
 ALTER TABLE text_index_state ADD COLUMN indexed_through INTEGER NOT NULL DEFAULT 0;
 UPDATE text_index_state SET indexed_through = (SELECT COALESCE(MAX(id), 0) FROM exchanges);
 "#,
+    r#"
+-- The client (peer) address of each proxied exchange: the IP only, no port. NULL for rows recorded before this
+-- column existed and for exchanges ProxyMind sent itself. Used to tell phones and tablets apart in history.
+ALTER TABLE exchanges ADD COLUMN client_addr TEXT;
+CREATE INDEX exchanges_client ON exchanges(client_addr);
+"#,
+    r#"
+-- Traffic that rules or the intercept editor changed keeps both ends. req_hash and resp_hash stay what the target
+-- saw and produced (the request as sent to the server, the response as the server sent it). Extras (blob hashes,
+-- stored and compressed like those; NULL when unchanged): req_orig_hash is the request as the client sent it,
+-- resp_deliv_hash the response as delivered to the client. changes is a JSON list of what changed them (NULL when
+-- nothing did).
+ALTER TABLE exchanges ADD COLUMN req_orig_hash BLOB REFERENCES blobs(hash);
+ALTER TABLE exchanges ADD COLUMN resp_deliv_hash BLOB REFERENCES blobs(hash);
+ALTER TABLE exchanges ADD COLUMN changes TEXT;
+"#,
+    r#"
+-- Raw TCP and TLS streams the proxy relayed (roadmap 2.6): one row per connection, its chunks in order. Chunk bytes
+-- are stored like bodies (zstd, deduplicated, in `blobs`; NULL when none were kept). `end_ms`, `ended` are NULL while
+-- the stream is open. `truncated` says the recording cap was reached: later bytes were relayed and counted only.
+CREATE TABLE streams (
+    id              INTEGER PRIMARY KEY,
+    start_ms        INTEGER NOT NULL,
+    end_ms          INTEGER,
+    host            TEXT NOT NULL,
+    port            INTEGER NOT NULL,
+    client_addr     TEXT,
+    tls             INTEGER NOT NULL,
+    sni             TEXT,
+    alpn            TEXT,
+    source          TEXT NOT NULL,
+    actor_id        TEXT NOT NULL,
+    bytes_to_server INTEGER NOT NULL DEFAULT 0,
+    bytes_to_client INTEGER NOT NULL DEFAULT 0,
+    chunk_count     INTEGER NOT NULL DEFAULT 0,
+    truncated       INTEGER NOT NULL DEFAULT 0,
+    ended           TEXT,
+    error           TEXT,
+    replay_of       INTEGER REFERENCES streams(id)
+);
+CREATE INDEX streams_host ON streams(host);
+CREATE INDEX streams_start ON streams(start_ms);
+CREATE INDEX streams_client ON streams(client_addr);
+CREATE TABLE stream_chunks (
+    id         INTEGER PRIMARY KEY,
+    stream_id  INTEGER NOT NULL REFERENCES streams(id),
+    ts_ms      INTEGER NOT NULL,
+    to_server  INTEGER NOT NULL,
+    len        INTEGER NOT NULL,
+    stored_len INTEGER NOT NULL,
+    data_hash  BLOB REFERENCES blobs(hash)
+);
+CREATE INDEX stream_chunks_stream ON stream_chunks(stream_id, id);
+"#,
+    r#"
+-- Workflow runs (roadmap 2.2): one row per run of a saved workflow (the definitions live in the `workflows` setting).
+-- `record` is the run as JSON (steps, variables, sent exchanges, assertions, where it paused); the other columns
+-- are what lists filter and sort on. Only the newest rows are kept (`Store::prune_workflow_runs`).
+CREATE TABLE workflow_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id    INTEGER NOT NULL,
+    workflow_name  TEXT NOT NULL,
+    actor          TEXT NOT NULL,
+    trigger        TEXT NOT NULL,
+    start_exchange INTEGER,
+    status         TEXT NOT NULL,
+    started_ms     INTEGER NOT NULL,
+    duration_ms    INTEGER,
+    approval_id    TEXT,
+    record         TEXT NOT NULL
+);
+CREATE INDEX workflow_runs_by_workflow ON workflow_runs(workflow_id, id DESC);
+CREATE INDEX workflow_runs_by_approval ON workflow_runs(approval_id) WHERE approval_id IS NOT NULL;
+"#,
+    r#"
+-- Integrations (roadmap 3.5). The configuration is the `integrations` setting (no secrets in it); a finding keeps the
+-- issues created for it in other systems (`issue_links`, a JSON list); every send to an integration leaves one row
+-- in `integration_deliveries` (never a body, a header or a secret: `detail` is a short note or the issue key).
+ALTER TABLE findings ADD COLUMN issue_links TEXT NOT NULL DEFAULT '';
+CREATE TABLE integration_deliveries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    integration TEXT NOT NULL,
+    ts_ms       INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    finding_id  INTEGER,
+    status      TEXT NOT NULL,
+    http_status INTEGER,
+    attempts    INTEGER NOT NULL,
+    host        TEXT NOT NULL,
+    detail      TEXT NOT NULL,
+    actor       TEXT NOT NULL
+);
+CREATE INDEX integration_deliveries_by_name ON integration_deliveries(integration, id DESC);
+"#,
+    r#"
+-- Audit record version 2 (ADR-0022 step 2): who and where, hashed into the record (see pm-policy::audit for the
+-- canonical serialization). Existing rows keep version 1 and their old hash; the new columns are NULL for them.
+-- `mac` is the HMAC-SHA256 of the record's hash under the server's audit key (server mode only).
+ALTER TABLE audit_log ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE audit_log ADD COLUMN principal_kind TEXT;
+ALTER TABLE audit_log ADD COLUMN user_id TEXT;
+ALTER TABLE audit_log ADD COLUMN token_id TEXT;
+ALTER TABLE audit_log ADD COLUMN project_id TEXT;
+ALTER TABLE audit_log ADD COLUMN session_id TEXT;
+ALTER TABLE audit_log ADD COLUMN client_addr TEXT;
+ALTER TABLE audit_log ADD COLUMN mac BLOB;
+-- Signed checkpoints of the audit chain (head hash, count, time; Ed25519). `body` is the checkpoint's JSON as
+-- exported. Append-only like the log, but a copy kept outside the file is what survives someone who can write it.
+CREATE TABLE audit_checkpoints (
+    seq   INTEGER PRIMARY KEY,
+    ts_ms INTEGER NOT NULL,
+    body  TEXT NOT NULL
+);
+CREATE TRIGGER audit_checkpoints_no_update BEFORE UPDATE ON audit_checkpoints
+BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
+CREATE TRIGGER audit_checkpoints_no_delete BEFORE DELETE ON audit_checkpoints
+BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -458,6 +584,10 @@ pub struct ApprovalRow {
 }
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
+///
+/// Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+/// `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+/// written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct AuditRecord {
     pub seq: i64,
@@ -471,6 +601,56 @@ pub struct AuditRecord {
     pub prev_hash: Vec<u8>,
     #[serde(serialize_with = "hex_bytes", deserialize_with = "from_hex")]
     pub hash: Vec<u8>,
+    /// Record version: 1 (original) or 2 (with context). Left out of JSON when 1.
+    #[serde(default = "version_one", skip_serializing_if = "is_version_one")]
+    pub version: u8,
+    /// How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_kind: Option<String>,
+    /// The stable account id (`u_...`) of the person; None in single-user mode. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// The id of the token used (never the secret). Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    /// The project's id (setting `project_id`). Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The first 8 bytes (hex) of the stored hash of the session id. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The client's IP address, when known. Version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_addr: Option<String>,
+    /// HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "opt_hex_bytes",
+        deserialize_with = "opt_from_hex"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub mac: Option<Vec<u8>>,
+}
+
+fn version_one() -> u8 {
+    1
+}
+
+fn is_version_one(v: &u8) -> bool {
+    *v == 1
+}
+
+fn opt_hex_bytes<S: serde::Serializer>(b: &Option<Vec<u8>>, s: S) -> std::result::Result<S::Ok, S::Error> {
+    match b {
+        Some(b) => hex_bytes(b, s),
+        None => s.serialize_none(),
+    }
+}
+
+fn opt_from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<u8>>, D::Error> {
+    let s: Option<String> = serde::Deserialize::deserialize(d)?;
+    s.map(|s| from_hex(serde::de::value::StrDeserializer::<D::Error>::new(&s))).transpose()
 }
 
 fn hex_bytes<S: serde::Serializer>(b: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -492,8 +672,23 @@ fn from_hex<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<u
         .collect()
 }
 
+/// One change made to an exchange's traffic in flight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct Change {
+    /// Which message changed: `request` or `response`.
+    pub phase: String,
+    /// What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+    /// hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+    /// only: the hook did not change the message.
+    pub by: String,
+    /// The rule (its comment, or its part and match) or a label for the editor.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// A finished (or failed) request/response pair to record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewExchange {
     pub ts_ms: i64,
     pub duration_ms: Option<i64>,
@@ -512,6 +707,17 @@ pub struct NewExchange {
     pub identity: Option<String>,
     /// Hypothesis this exchange was sent to test.
     pub hypothesis_id: Option<i64>,
+    /// The IP address (no port) of the client that sent it through the proxy; None for exchanges ProxyMind sent
+    /// itself.
+    pub client_addr: Option<String>,
+    /// The request as the client sent it, when a rule or the intercept editor changed it (`request` is then what
+    /// was sent to the server).
+    pub request_original: Option<Vec<u8>>,
+    /// The response as delivered to the client, when a rule or the intercept editor changed it (`response` stays
+    /// what the server sent).
+    pub response_delivered: Option<Vec<u8>>,
+    /// What changed the traffic; empty when nothing did.
+    pub changes: Vec<Change>,
 }
 
 /// A WebSocket message to record.
@@ -581,6 +787,23 @@ pub struct ExchangeSummary {
     pub highlight: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+    /// this was tracked and for ones ProxyMind sent itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_addr: Option<String>,
+    /// Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+    /// recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+    /// `changes` but doesn't make the row modified.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub modified: bool,
+}
+
+/// A client address seen in history (see [`Store::client_summary`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSeen {
+    pub addr: String,
+    pub exchanges: i64,
+    pub last_seen_ms: i64,
 }
 
 /// The columns the site map needs.
@@ -613,6 +836,11 @@ pub struct Exchange {
     pub summary: ExchangeSummary,
     pub request: Vec<u8>,
     pub response: Option<Vec<u8>>,
+    /// The request as the client sent it, when it was changed before it went to the server.
+    pub request_original: Option<Vec<u8>>,
+    /// The response as delivered to the client, when it was changed (`response` is the server's).
+    pub response_delivered: Option<Vec<u8>>,
+    pub changes: Vec<Change>,
 }
 
 /// Filters for searching history. All set fields must match.
@@ -635,6 +863,8 @@ pub struct HistoryFilter {
     pub hypothesis_id: Option<i64>,
     /// Exchanges sent with this identity's credentials (the exact identity name).
     pub identity: Option<String>,
+    /// Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    pub client: Option<String>,
     /// Only exchanges with an id greater than this (newer ones; for paging forward).
     pub after_id: Option<i64>,
     /// Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
@@ -656,7 +886,7 @@ pub struct HistoryFilter {
     /// Free text: the host, the path (with query) or the comment contains it (case-insensitive).
     pub text: Option<String>,
     /// A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    /// parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    /// parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     /// comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     /// E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     /// early (see `scanned` and `next_before_id` in the result).
@@ -664,6 +894,10 @@ pub struct HistoryFilter {
     /// Only these exchange ids (set by the service, never by clients).
     #[serde(skip)]
     pub ids: Option<Vec<i64>>,
+    /// Only exchanges from these client IPs: `client` with a device name resolved (set by the service, never by
+    /// clients). Without it, `client` itself is matched as an IP address.
+    #[serde(skip)]
+    pub clients: Option<Vec<String>>,
 }
 
 pub struct Store {
@@ -679,6 +913,8 @@ pub struct Store {
     committed: Option<Vec<CommittedExchange>>,
     /// Exchange ids that got WebSocket messages since `StoreHandle::write` last drained this (None = nobody observes).
     committed_ws: Option<Vec<i64>>,
+    /// Stream changes since `StoreHandle::write` last drained this (None = nobody observes).
+    committed_streams: Option<Vec<CommittedStream>>,
 }
 
 /// What a commit observer is told about a stored exchange: ids and short summary fields only, never bodies.
@@ -729,6 +965,23 @@ pub fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     o.open(path)
 }
 
+/// Project files this process created, by canonical path.
+static CREATED_HERE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn note_created(path: &Path) {
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(mut v) = CREATED_HERE.lock()
+        && !v.contains(&p)
+    {
+        v.push(p);
+    }
+}
+
+fn was_created_here(path: &Path) -> bool {
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    CREATED_HERE.lock().is_ok_and(|v| v.contains(&p))
+}
+
 impl Store {
     /// Rejects a sealed project (pm-vault): it must be unlocked first.
     fn reject_locked(path: &Path) -> Result<()> {
@@ -749,11 +1002,18 @@ impl Store {
         Self::reject_locked(path)?;
         // A project holds traffic and credentials: a new one is readable by
         // its owner only (SQLite gives the -wal and -shm files the same mode).
-        if !path.exists() {
-            let _ = create_private(path);
+        if !path.exists() && create_private(path).is_ok() {
+            note_created(path);
         }
         let conn = Connection::open(path).with_context(|| format!("opening project {}", path.display()))?;
         Self::init(conn)
+    }
+
+    /// Whether this process made the project file (it did not exist when `open` was first called on it here).
+    /// A file that arrived any other way (a download, a copy, a hand-over) is not "created here", and nothing
+    /// inside a file can change that: the answer lives in this process only. Used for threat model F-2 (safe open).
+    pub fn created_here(&self) -> bool {
+        self.path().is_some_and(|p| was_created_here(&p))
     }
 
     /// Opens an existing project file for reading only (a read-pool connection, ADR-0017). It does not set the
@@ -775,6 +1035,7 @@ impl Store {
             index_inline: false,
             committed: None,
             committed_ws: None,
+            committed_streams: None,
         })
     }
 
@@ -795,6 +1056,7 @@ impl Store {
             index_inline: false,
             committed: None,
             committed_ws: None,
+            committed_streams: None,
         })
     }
 
@@ -809,8 +1071,15 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let index_inline = conn.path().is_none_or(str::is_empty);
-        let mut store =
-            Self { conn, text_of: raw_text, extractor_set: false, index_inline, committed: None, committed_ws: None };
+        let mut store = Self {
+            conn,
+            text_of: raw_text,
+            extractor_set: false,
+            index_inline,
+            committed: None,
+            committed_ws: None,
+            committed_streams: None,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -1115,10 +1384,14 @@ impl Store {
     ) -> Result<i64> {
         let req_hash = Self::put_blob(tx, &ex.request)?;
         let resp_hash = ex.response.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let req_orig_hash = ex.request_original.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let resp_deliv_hash = ex.response_delivered.as_deref().map(|r| Self::put_blob(tx, r)).transpose()?;
+        let changes = if ex.changes.is_empty() { None } else { Some(serde_json::to_string(&ex.changes)?) };
         tx.execute(
             "INSERT INTO exchanges (ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path,
-                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                                    status, req_hash, resp_hash, req_len, resp_len, error, identity, hypothesis_id,
+                                    client_addr, req_orig_hash, resp_deliv_hash, changes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 ex.ts_ms,
                 ex.duration_ms,
@@ -1137,6 +1410,10 @@ impl Store {
                 ex.error,
                 ex.identity,
                 ex.hypothesis_id,
+                ex.client_addr,
+                req_orig_hash,
+                resp_deliv_hash,
+                changes,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -1153,7 +1430,8 @@ impl Store {
     }
 
     const SUMMARY_COLS: &'static str = "id, ts_ms, duration_ms, source, actor_id, scheme, host, port, method, path, \
-                                        status, req_len, resp_len, error, identity, hypothesis_id, tags, notes";
+                                        status, req_len, resp_len, error, identity, hypothesis_id, tags, notes, \
+                                        client_addr, (req_orig_hash IS NOT NULL OR resp_deliv_hash IS NOT NULL)";
 
     fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExchangeSummary> {
         Ok(ExchangeSummary {
@@ -1175,6 +1453,8 @@ impl Store {
             hypothesis_id: r.get(15)?,
             highlight: highlight_of(&r.get::<_, String>(16)?),
             comment: r.get::<_, Option<String>>(17)?.filter(|c| !c.is_empty()),
+            client_addr: r.get(18)?,
+            modified: r.get(19)?,
         })
     }
 
@@ -1186,6 +1466,18 @@ impl Store {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![host_contains, limit as i64], Self::summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The client addresses seen in history, with how many exchanges each sent and when the last one was recorded,
+    /// most recently seen first.
+    pub fn client_summary(&self) -> Result<Vec<ClientSeen>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT client_addr, count(*), max(ts_ms) FROM exchanges WHERE client_addr IS NOT NULL
+             GROUP BY client_addr ORDER BY max(ts_ms) DESC, client_addr",
+        )?;
+        let rows =
+            stmt.query_map([], |r| Ok(ClientSeen { addr: r.get(0)?, exchanges: r.get(1)?, last_seen_ms: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1229,6 +1521,11 @@ impl Store {
         }
         if let Some(v) = text(&f.identity) {
             add("identity = @", v);
+        }
+        if let Some(list) = &f.clients {
+            add("client_addr IN (SELECT value FROM json_each(@))", V::Text(serde_json::to_string(list)?));
+        } else if let Some(v) = text(&f.client) {
+            add("client_addr = @", v);
         }
         if let Some(v) = text(&f.text) {
             add("(instr(lower(host || ' ' || path || ' ' || coalesce(notes, '')), lower(@)) > 0)", v);
@@ -1337,32 +1634,61 @@ impl Store {
     }
 
     pub fn get_exchange(&self, id: i64) -> Result<Option<Exchange>> {
-        let sql = format!("SELECT {}, req_hash, resp_hash FROM exchanges WHERE id = ?1", Self::SUMMARY_COLS);
+        type Hashes = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<String>);
+        let sql = format!(
+            "SELECT {}, req_hash, resp_hash, req_orig_hash, resp_deliv_hash, changes FROM exchanges WHERE id = ?1",
+            Self::SUMMARY_COLS
+        );
         let row = self
             .conn
             .query_row(&sql, [id], |r| {
-                Ok((Self::summary_from_row(r)?, r.get::<_, Vec<u8>>(18)?, r.get::<_, Option<Vec<u8>>>(19)?))
+                let hashes: Hashes = (r.get(20)?, r.get(21)?, r.get(22)?, r.get(23)?, r.get(24)?);
+                Ok((Self::summary_from_row(r)?, hashes))
             })
             .optional()?;
-        let Some((summary, req_hash, resp_hash)) = row else {
+        let Some((summary, (req_hash, resp_hash, req_orig, resp_deliv, changes))) = row else {
             return Ok(None);
         };
         Ok(Some(Exchange {
             summary,
             request: self.get_blob(&req_hash)?,
             response: resp_hash.map(|h| self.get_blob(&h)).transpose()?,
+            request_original: req_orig.map(|h| self.get_blob(&h)).transpose()?,
+            response_delivered: resp_deliv.map(|h| self.get_blob(&h)).transpose()?,
+            changes: changes.map(|c| serde_json::from_str(&c)).transpose()?.unwrap_or_default(),
         }))
     }
 
     /// Appends an audit record. `rec.seq` must be one more than the last.
     pub fn append_audit(&mut self, rec: &AuditRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![rec.seq, rec.ts_ms, rec.actor, rec.action, rec.detail, rec.decision, rec.prev_hash, rec.hash],
+            "INSERT INTO audit_log (seq, ts_ms, actor, action, detail, decision, prev_hash, hash,
+                                    version, principal_kind, user_id, token_id, project_id, session_id, client_addr, mac)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                rec.seq,
+                rec.ts_ms,
+                rec.actor,
+                rec.action,
+                rec.detail,
+                rec.decision,
+                rec.prev_hash,
+                rec.hash,
+                rec.version,
+                rec.principal_kind,
+                rec.user_id,
+                rec.token_id,
+                rec.project_id,
+                rec.session_id,
+                rec.client_addr,
+                rec.mac
+            ],
         )?;
         Ok(())
     }
+
+    const AUDIT_COLUMNS: &'static str = "seq, ts_ms, actor, action, detail, decision, prev_hash, hash, version, \
+        principal_kind, user_id, token_id, project_id, session_id, client_addr, mac";
 
     fn audit_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
         Ok(AuditRecord {
@@ -1374,6 +1700,14 @@ impl Store {
             decision: r.get(5)?,
             prev_hash: r.get(6)?,
             hash: r.get(7)?,
+            version: r.get(8)?,
+            principal_kind: r.get(9)?,
+            user_id: r.get(10)?,
+            token_id: r.get(11)?,
+            project_id: r.get(12)?,
+            session_id: r.get(13)?,
+            client_addr: r.get(14)?,
+            mac: r.get(15)?,
         })
     }
 
@@ -1381,8 +1715,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash
-                 FROM audit_log ORDER BY seq DESC LIMIT 1",
+                &format!("SELECT {} FROM audit_log ORDER BY seq DESC LIMIT 1", Self::AUDIT_COLUMNS),
                 [],
                 Self::audit_from_row,
             )
@@ -1392,10 +1725,25 @@ impl Store {
     /// All audit records in order. Loads everything; fine for verification
     /// of logs up to a few million entries.
     pub fn audit_records(&self) -> Result<Vec<AuditRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT seq, ts_ms, actor, action, detail, decision, prev_hash, hash FROM audit_log ORDER BY seq",
-        )?;
+        let mut stmt = self.conn.prepare(&format!("SELECT {} FROM audit_log ORDER BY seq", Self::AUDIT_COLUMNS))?;
         let rows = stmt.query_map([], Self::audit_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Stores a signed audit checkpoint (its JSON, as exported). One per sequence number; a second for the same
+    /// number is ignored.
+    pub fn append_audit_checkpoint(&mut self, seq: i64, ts_ms: i64, body: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO audit_checkpoints (seq, ts_ms, body) VALUES (?1, ?2, ?3)",
+            params![seq, ts_ms, body],
+        )?;
+        Ok(())
+    }
+
+    /// Stored audit checkpoints, oldest first: `(seq, ts_ms, JSON)`.
+    pub fn audit_checkpoints(&self) -> Result<Vec<(i64, i64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT seq, ts_ms, body FROM audit_checkpoints ORDER BY seq")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1616,6 +1964,13 @@ impl Store {
         Ok(())
     }
 
+    /// Stores `value` under `key` unless the key already has one, and returns what is stored. One statement, so two
+    /// processes that both find the key missing end up agreeing (used for the project id).
+    pub fn init_setting(&mut self, key: &str, value: &str) -> Result<String> {
+        self.conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
+        Ok(self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))?)
+    }
+
     pub fn upsert_identity(&mut self, row: &IdentityRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO identities (name, role, data, created_by, status, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1699,6 +2054,12 @@ impl Store {
             params![r.id, r.data, r.enabled, r.next_run_ms],
         )?;
         Ok(r.id)
+    }
+
+    /// Changes the name a schedule is attributed to (`save_schedule` keeps the one it was inserted with).
+    pub fn set_schedule_owner(&mut self, id: i64, created_by: &str) -> Result<()> {
+        self.conn.execute("UPDATE scan_schedules SET created_by = ?2 WHERE id = ?1", params![id, created_by])?;
+        Ok(())
     }
 
     /// Moves a due schedule's next run from `due` to `next`, only if no one
@@ -1862,6 +2223,7 @@ impl Store {
                 "created_ms",
                 "updated_ms",
                 "explanation",
+                "issue_links",
             ],
             "oast_interactions" => &["token", "protocol", "remote", "method", "path", "raw", "ts_ms"],
             "oast_payloads" => &["token", "note", "actor", "created_ms"],
@@ -2085,6 +2447,7 @@ pub struct StoreHandle {
     readers: Option<Pool>,
     on_exchanges: std::sync::OnceLock<ExchangeObserver>,
     on_ws_messages: std::sync::OnceLock<WsObserver>,
+    on_streams: std::sync::OnceLock<StreamObserver>,
 }
 
 /// Read-only connections for one project file, opened lazily up to a cap.
@@ -2217,6 +2580,7 @@ impl StoreHandle {
             readers,
             on_exchanges: std::sync::OnceLock::new(),
             on_ws_messages: std::sync::OnceLock::new(),
+            on_streams: std::sync::OnceLock::new(),
         }
     }
 
@@ -2258,7 +2622,29 @@ impl StoreHandle {
                 observer(&batch);
             }
         }
+        if let Some(observer) = self.on_streams.get() {
+            let mut seen = std::collections::HashSet::new();
+            let batch: Vec<CommittedStream> = guard
+                .committed_streams
+                .as_mut()
+                .map(std::mem::take)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| seen.insert((c.id, c.what)))
+                .collect();
+            if !batch.is_empty() {
+                observer(&batch);
+            }
+        }
         out
+    }
+
+    /// Installs the stream observer, once (a second call is ignored and returns false). After every `write` in which
+    /// stream rows committed, `observer` gets what happened to each stream (started, chunks, ended), each once per
+    /// `write`, after `COMMIT` and under the write lock (same rules as [`StoreHandle::set_on_exchanges`]).
+    pub fn set_on_streams(&self, observer: StreamObserver) -> bool {
+        self.inner.lock().committed_streams.get_or_insert_with(Vec::new);
+        self.on_streams.set(observer).is_ok()
     }
 
     /// Installs the WebSocket observer, once (a second call is ignored and returns false). After every `write` in
@@ -2286,6 +2672,30 @@ impl StoreHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_file_this_process_made_is_created_here() {
+        let dir = std::env::temp_dir().join(format!("pm-store-created-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (made, copied) = (dir.join("made.pmproj"), dir.join("copied.pmproj"));
+        let mut s = Store::open(&made).unwrap();
+        s.set_setting("k", "v").unwrap();
+        assert!(s.created_here());
+        assert!(Store::open(&made).unwrap().created_here(), "reopening it in this process is still creating it");
+        s.snapshot_to(&copied).unwrap();
+        assert!(!Store::open(&copied).unwrap().created_here(), "a copy arrives from outside, whatever it contains");
+        assert!(!Store::open_in_memory().unwrap().created_here());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_setting_keeps_the_first_value() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.init_setting("id", "first").unwrap(), "first");
+        assert_eq!(s.init_setting("id", "second").unwrap(), "first");
+        assert_eq!(s.get_setting("id").unwrap().as_deref(), Some("first"));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -2371,6 +2781,180 @@ mod tests {
     }
 
     #[test]
+    fn client_addr_round_trips_filters_and_summarises() {
+        let mut s = Store::open_in_memory().unwrap();
+        let from = |path: &str, ts: i64, ip: Option<&str>| NewExchange {
+            ts_ms: ts,
+            client_addr: ip.map(str::to_string),
+            ..sample(path, b"x")
+        };
+        let ids = s
+            .insert_exchanges(&[
+                from("/a", 10, Some("192.168.1.23")),
+                from("/b", 20, Some("192.168.1.24")),
+                from("/c", 30, Some("192.168.1.23")),
+                from("/d", 40, None),
+            ])
+            .unwrap();
+        let one = s.insert_exchange(&from("/e", 50, Some("fe80::1"))).unwrap();
+        assert_eq!(s.get_exchange(ids[0]).unwrap().unwrap().summary.client_addr.as_deref(), Some("192.168.1.23"));
+        assert_eq!(s.get_exchange(ids[3]).unwrap().unwrap().summary.client_addr, None);
+        assert_eq!(s.get_exchange(one).unwrap().unwrap().summary.client_addr.as_deref(), Some("fe80::1"));
+        let paths =
+            |f: &HistoryFilter| -> Vec<String> { s.search_exchanges(f).unwrap().into_iter().map(|e| e.path).collect() };
+        let by = |c: &str| HistoryFilter { client: Some(c.into()), ..Default::default() };
+        assert_eq!(paths(&by("192.168.1.23")), ["/c", "/a"]);
+        assert_eq!(paths(&by("192.168.1.2")), Vec::<String>::new(), "exact, not a prefix");
+        let many = HistoryFilter {
+            clients: Some(vec!["192.168.1.24".into(), "fe80::1".into()]),
+            client: Some("ignored when `clients` is set".into()),
+            ..Default::default()
+        };
+        assert_eq!(paths(&many), ["/e", "/b"]);
+        let none = HistoryFilter { clients: Some(vec![]), ..Default::default() };
+        assert!(paths(&none).is_empty());
+        // Old rows (NULL) never show in the summary; the rest are counted, newest first.
+        assert_eq!(
+            s.client_summary().unwrap(),
+            [
+                ClientSeen { addr: "fe80::1".into(), exchanges: 1, last_seen_ms: 50 },
+                ClientSeen { addr: "192.168.1.23".into(), exchanges: 2, last_seen_ms: 30 },
+                ClientSeen { addr: "192.168.1.24".into(), exchanges: 1, last_seen_ms: 20 },
+            ]
+        );
+        // The summary serialises the address only when there is one.
+        let json = serde_json::to_value(s.get_exchange(ids[3]).unwrap().unwrap().summary).unwrap();
+        assert!(json.get("client_addr").is_none());
+        let json = serde_json::to_value(s.get_exchange(ids[0]).unwrap().unwrap().summary).unwrap();
+        assert_eq!(json["client_addr"], "192.168.1.23");
+    }
+
+    /// A project made before `client_addr` existed opens, keeps its rows (with no client) and takes new ones.
+    #[test]
+    fn client_addr_migration_upgrades_an_existing_project() {
+        let (dir, path) = temp_project("client-migration");
+        let old_id = {
+            let mut s = Store::open(&path).unwrap();
+            s.insert_exchange(&sample("/old", b"old")).unwrap()
+        };
+        {
+            // Put the file back as the previous release left it: no column, no index, one version lower.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                 ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
+                 ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
+                 ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
+                 ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                 ALTER TABLE exchanges DROP COLUMN changes;
+                 DROP INDEX exchanges_client; ALTER TABLE exchanges DROP COLUMN client_addr;
+                 DROP TABLE stream_chunks; DROP TABLE streams; DROP TABLE workflow_runs;
+                 ALTER TABLE findings DROP COLUMN issue_links; DROP TABLE integration_deliveries;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 6) as i64).unwrap();
+            let has: i64 = conn
+                .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(has, 0);
+        }
+        let mut s = Store::open(&path).unwrap();
+        let old = s.get_exchange(old_id).unwrap().unwrap();
+        assert_eq!((old.summary.path.as_str(), old.summary.client_addr.clone()), ("/old", None));
+        let new_id =
+            s.insert_exchange(&NewExchange { client_addr: Some("10.0.0.7".into()), ..sample("/new", b"n") }).unwrap();
+        assert_eq!(s.get_exchange(new_id).unwrap().unwrap().summary.client_addr.as_deref(), Some("10.0.0.7"));
+        assert_eq!(s.client_summary().unwrap().len(), 1);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project made before originals were kept opens, reads its rows with no originals and no changes, and stores
+    /// originals and changes for new rows.
+    #[test]
+    fn originals_migration_upgrades_an_existing_project() {
+        let (dir, path) = temp_project("originals-migration");
+        let old_id = {
+            let mut s = Store::open(&path).unwrap();
+            s.insert_exchange(&sample("/old", b"old")).unwrap()
+        };
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                 ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
+                 ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
+                 ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
+                 ALTER TABLE exchanges DROP COLUMN req_orig_hash; ALTER TABLE exchanges DROP COLUMN resp_deliv_hash;
+                 ALTER TABLE exchanges DROP COLUMN changes; DROP TABLE stream_chunks; DROP TABLE streams;
+                 DROP TABLE workflow_runs; ALTER TABLE findings DROP COLUMN issue_links;
+                 DROP TABLE integration_deliveries;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 5) as i64).unwrap();
+        }
+        let mut s = Store::open(&path).unwrap();
+        let old = s.get_exchange(old_id).unwrap().unwrap();
+        assert_eq!(old.summary.path, "/old");
+        assert!(!old.summary.modified);
+        assert!(old.request_original.is_none() && old.response_delivered.is_none() && old.changes.is_empty());
+        let new_id = s.insert_exchange(&changed("/new")).unwrap();
+        let new = s.get_exchange(new_id).unwrap().unwrap();
+        assert!(new.summary.modified);
+        assert_eq!(new.request_original.as_deref(), Some(&b"GET /new HTTP/1.1\r\n\r\n"[..]));
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn changed(path: &str) -> NewExchange {
+        NewExchange {
+            request_original: Some(format!("GET {path} HTTP/1.1\r\n\r\n").into_bytes()),
+            response_delivered: Some(b"HTTP/1.1 200 OK\r\n\r\npublic".to_vec()),
+            changes: vec![
+                Change { phase: "request".into(), by: "rule".into(), name: "add header".into(), note: None },
+                Change {
+                    phase: "response".into(),
+                    by: "intercept".into(),
+                    name: "intercept editor".into(),
+                    note: Some("edited by hand".into()),
+                },
+            ],
+            ..sample(path, b"HTTP/1.1 200 OK\r\n\r\nsecret")
+        }
+    }
+
+    #[test]
+    fn originals_and_changes_round_trip_through_single_and_batch_inserts() {
+        let mut s = Store::open_in_memory().unwrap();
+        let plain = s.insert_exchange(&sample("/plain", b"x")).unwrap();
+        let ids = s.insert_exchanges(&[changed("/a"), sample("/b", b"y")]).unwrap();
+        let one = s.insert_exchange(&changed("/c")).unwrap();
+        for id in [ids[0], one] {
+            let e = s.get_exchange(id).unwrap().unwrap();
+            assert!(e.summary.modified);
+            assert!(e.request_original.as_deref().unwrap().starts_with(b"GET /"));
+            assert_eq!(e.response_delivered.as_deref(), Some(&b"HTTP/1.1 200 OK\r\n\r\npublic"[..]));
+            assert!(e.response.as_deref().unwrap().ends_with(b"secret"), "response stays the server's bytes");
+            assert_eq!(e.changes.len(), 2);
+            assert_eq!(e.changes[1].by, "intercept");
+            assert_eq!(e.changes[1].note.as_deref(), Some("edited by hand"));
+        }
+        for id in [plain, ids[1]] {
+            let e = s.get_exchange(id).unwrap().unwrap();
+            assert!(!e.summary.modified && e.request_original.is_none() && e.changes.is_empty());
+        }
+        // Rows list as modified, and the flag is left out of the JSON when false.
+        let rows = s.search_exchanges(&HistoryFilter::default()).unwrap();
+        assert_eq!(rows.iter().filter(|r| r.modified).count(), 2);
+        let json = serde_json::to_value(rows.iter().find(|r| !r.modified).unwrap()).unwrap();
+        assert!(json.get("modified").is_none());
+        let json = serde_json::to_value(rows.iter().find(|r| r.modified).unwrap()).unwrap();
+        assert_eq!(json["modified"], true);
+    }
+
+    #[test]
     fn a_due_schedule_is_claimed_once() {
         let mut s = Store::open_in_memory().unwrap();
         let row =
@@ -2384,6 +2968,7 @@ mod tests {
 
     fn sample(path: &str, body: &[u8]) -> NewExchange {
         NewExchange {
+            client_addr: None,
             ts_ms: 1,
             duration_ms: Some(5),
             source: "proxy".into(),
@@ -2399,6 +2984,7 @@ mod tests {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         }
     }
 
@@ -2724,12 +3310,26 @@ mod tests {
             decision: "allow".into(),
             prev_hash: vec![0; 32],
             hash: vec![1; 32],
+            version: 2,
+            principal_kind: Some("local".into()),
+            user_id: Some("u_1".into()),
+            token_id: None,
+            project_id: Some("p".into()),
+            session_id: None,
+            client_addr: Some("127.0.0.1".into()),
+            mac: Some(vec![9; 32]),
         };
         s.append_audit(&rec).unwrap();
         assert_eq!(s.last_audit().unwrap(), Some(rec.clone()));
         assert!(s.append_audit(&rec).is_err(), "duplicate seq");
         assert!(s.conn.execute("UPDATE audit_log SET decision = 'deny'", []).is_err());
         assert!(s.conn.execute("DELETE FROM audit_log", []).is_err());
+        // Checkpoints are append-only too, and one per sequence number.
+        s.append_audit_checkpoint(1, 5, "{}").unwrap();
+        s.append_audit_checkpoint(1, 6, "{\"again\":1}").unwrap();
+        assert_eq!(s.audit_checkpoints().unwrap(), vec![(1, 5, "{}".to_string())]);
+        assert!(s.conn.execute("UPDATE audit_checkpoints SET body = ''", []).is_err());
+        assert!(s.conn.execute("DELETE FROM audit_checkpoints", []).is_err());
     }
 
     #[test]
@@ -2858,6 +3458,7 @@ mod tests {
             actor: Some("agent:x".into()),
             hypothesis_id: Some(3),
             identity: Some("alice".into()),
+            client: Some("192.168.1.23".into()),
             after_id: Some(10),
             before_id: Some(20),
             limit: Some(50),
@@ -2869,6 +3470,7 @@ mod tests {
             q: Some("status:>=500".into()),
             // Never on the wire in either direction.
             ids: Some(vec![1, 2]),
+            clients: Some(vec!["192.168.1.23".into()]),
         };
         assert_eq!(serde_json::to_string(&sample).unwrap(), EXPECTED_SAMPLE);
         assert_eq!(serde_json::to_string(&HistoryFilter::default()).unwrap(), EXPECTED_EMPTY);
@@ -2877,14 +3479,16 @@ mod tests {
         // `ids` is `#[serde(skip)]`: a client cannot set it.
         let err = serde_json::from_str::<HistoryFilter>(r#"{"ids":[1]}"#).err().unwrap().to_string();
         assert!(err.contains("unknown field `ids`"), "{err}");
+        assert!(serde_json::from_str::<HistoryFilter>(r#"{"clients":["x"]}"#).is_err());
         assert!(serde_json::from_str::<HistoryFilter>(r#"{"nope":1}"#).is_err());
         // ... and it stays out of the generated schema.
         let schema = serde_json::to_value(schemars::schema_for!(HistoryFilter)).unwrap();
         assert!(schema["properties"].get("ids").is_none());
+        assert!(schema["properties"].get("clients").is_none());
         assert_eq!(schema["additionalProperties"], false);
     }
 
-    const EXPECTED_SAMPLE: &str = r#"{"host":"a.test","path":"/api","method":"POST","status":200,"source":"replay","actor":"agent:x","hypothesis_id":3,"identity":"alice","after_id":10,"before_id":20,"limit":50,"status_class":"2,3","hide_ext":"png,css","annotated":true,"in_scope":false,"text":"t","q":"status:>=500"}"#;
-    const EXPECTED_EMPTY: &str = r#"{"host":null,"path":null,"method":null,"status":null,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":null,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
-    const EXPECTED_PARSED: &str = r#"{"host":"a","path":null,"method":null,"status":404,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"after_id":null,"before_id":null,"limit":5,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
+    const EXPECTED_SAMPLE: &str = r#"{"host":"a.test","path":"/api","method":"POST","status":200,"source":"replay","actor":"agent:x","hypothesis_id":3,"identity":"alice","client":"192.168.1.23","after_id":10,"before_id":20,"limit":50,"status_class":"2,3","hide_ext":"png,css","annotated":true,"in_scope":false,"text":"t","q":"status:>=500"}"#;
+    const EXPECTED_EMPTY: &str = r#"{"host":null,"path":null,"method":null,"status":null,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"client":null,"after_id":null,"before_id":null,"limit":null,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
+    const EXPECTED_PARSED: &str = r#"{"host":"a","path":null,"method":null,"status":404,"source":null,"actor":null,"hypothesis_id":null,"identity":null,"client":null,"after_id":null,"before_id":null,"limit":5,"status_class":null,"hide_ext":null,"annotated":null,"in_scope":null,"text":null,"q":null}"#;
 }

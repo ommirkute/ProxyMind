@@ -54,6 +54,9 @@ import type {
   SiteView,
   TargetAnalysis,
   TokenAnalyzerResult,
+  TrustView,
+  Workflow,
+  WorkflowRun,
   WsSearchResult,
 } from "./types.gen";
 
@@ -194,6 +197,16 @@ export class Client {
 
   status(): Promise<Json> {
     return this.get("/status");
+  }
+
+  /** Whether this installation trusts the project (`safe_mode` false) and what safe mode holds back. */
+  projectTrust(): Promise<TrustView> {
+    return this.get("/project/trust");
+  }
+
+  /** Trusts the project's current settings (people only). Pass the `digest` of the `projectTrust()` you reviewed. */
+  projectTrustConfirm(digest?: string): Promise<TrustView> {
+    return this.post("/project/trust", digest ? { digest } : {});
   }
 
   /** Recorded exchanges, newest first. Filters: host, path, method, status, source, limit, before_id… */
@@ -350,6 +363,34 @@ export class Client {
   /** DOM sources reaching sinks on a recorded page (rendered offline; sends nothing). */
   domTest(exchange_id: number, opts: { storage?: boolean; pollution?: boolean } = {}): Promise<DomTestResult> {
     return this.post("/dom/test", { exchange_id, ...opts });
+  }
+
+  /** Saved workflows (chains of match, extract, transform, send and assert steps). */
+  workflows(): Promise<Workflow[]> {
+    return this.get("/workflows");
+  }
+
+  /** Saves a new workflow (people only). */
+  workflowCreate(name: string, steps: Json[], description = ""): Promise<Workflow> {
+    return this.post("/workflows", { name, description, steps });
+  }
+
+  /**
+   * Runs a workflow (name or id), optionally on a recorded exchange. Every send goes through the policy gate. A send
+   * that needs approval pauses the run: the result has status "pending_approval" and pending.approval_id; once it is
+   * approved, call again with approval_id to continue from that step.
+   */
+  workflowRun(workflow: string | number, opts: { exchange_id?: number; approval_id?: string } = {}): Promise<WorkflowRun> {
+    return this.post(`/workflows/${encodeURIComponent(String(workflow))}/run`, strip(opts));
+  }
+
+  /** Recent workflow runs, newest first. */
+  workflowRuns(opts: { workflow?: string; limit?: number } = {}): Promise<WorkflowRun[]> {
+    return this.get("/workflows/runs", opts);
+  }
+
+  workflowRunGet(run_id: number): Promise<WorkflowRun> {
+    return this.get(`/workflows/runs/${run_id}`);
   }
 
   /** Saved custom checks (YAML scan checks). */

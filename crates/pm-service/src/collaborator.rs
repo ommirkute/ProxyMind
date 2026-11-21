@@ -11,10 +11,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use pm_core::now_ms;
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 const MAX_PAYLOADS: u64 = 10_000;
@@ -127,9 +128,11 @@ impl Service {
 
     /// Starts the SMTP listener in this process (once). People only: it opens a port.
     pub async fn collaborator_smtp(self: &Arc<Self>, actor: &Actor, listen: SocketAddr) -> Result<CollaboratorStatus> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can start the SMTP listener (it opens a port)".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::ListenersWrite,
+            Denial::message("only people can start the SMTP listener (it opens a port)"),
+        )?;
         if self.smtp_listening.get().is_some() {
             return Err(ServiceError::Invalid("the SMTP listener already runs in this process".into()));
         }
@@ -183,9 +186,11 @@ impl Service {
         listen: SocketAddr,
         public_url: Option<String>,
     ) -> Result<CollaboratorStatus> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can start the callback listener (it opens a port)".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::ListenersWrite,
+            Denial::message("only people can start the callback listener (it opens a port)"),
+        )?;
         if self.oast_listening.get().is_some() {
             return Err(ServiceError::Invalid("the callback listener already runs in this process".into()));
         }

@@ -28,6 +28,7 @@ fn rejects_unknown<T: DeserializeOwned>(body: &str) {
 fn replay_request() {
     let sample = ReplayRequest {
         raw: Some("GET / HTTP/1.1\r\nHost: a\r\n\r\n".into()),
+        body_b64: None,
         exchange_id: Some(7),
         url: Some("https://a".into()),
         identity: Some("alice".into()),
@@ -274,7 +275,7 @@ fn api_types_wire_format() {
     check::<ListenersBody>(
         &[(
             r#"{"listeners":[{"bind":"127.0.0.1:1"}]}"#,
-            r#"{"listeners":[{"bind":"127.0.0.1:1","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]}"#,
+            r#"{"listeners":[{"bind":"127.0.0.1:1","kind":"http","transparent":false,"username":"","password":"","enabled":true,"redirect_host":"","redirect_port":0,"force_tls":false}]}"#,
         )],
         &["{}", r#"{"listeners":[{"nope":1}]}"#],
     );
@@ -326,6 +327,9 @@ fn replay_result() {
                 notes: vec![],
             }),
         }),
+        request_original: None,
+        response_delivered: None,
+        changes: vec![],
         error: None,
         possible_prompt_injection: vec![],
         redacted: false,

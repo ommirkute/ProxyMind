@@ -202,6 +202,12 @@ class Arg(TypedDict):
     type: str
 
 
+class AssertionResult(TypedDict):
+    message: str
+    ok: bool
+    step: int
+
+
 class AssistantConfig(TypedDict, total=False):
     # Name of the environment variable holding the API key (the key itself
     # is never stored in the project). Empty: no key (local servers).
@@ -295,8 +301,25 @@ class AttackView(_AttackViewRequired, total=False):
     note: _t.Optional[str]
 
 
-class AuditRecord(TypedDict):
-    """One audit log entry. Hashing and verification live in `pm-policy`."""
+class AuditCheckpointStatus(TypedDict):
+    """How the checkpoints fared."""
+    # The newest checkpoint's signer.
+    fingerprint: _t.Optional[str]
+    # The newest checkpoint's record count and time.
+    latest_seq: _t.Optional[int]
+    latest_ts_ms: _t.Optional[int]
+    problems: _t.List[str]
+    # Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the
+    # signatures only prove the checkpoint was not altered, not who made it.
+    signer_pinned: bool
+    # `none` (no checkpoint to check), `ok` or `failed`.
+    status: str
+    # Checkpoints stored in the project, and checkpoints supplied from files.
+    stored: int
+    supplied: int
+
+
+class _AuditRecordRequired(TypedDict):
     action: str
     actor: str
     decision: str
@@ -306,6 +329,52 @@ class AuditRecord(TypedDict):
     prev_hash: _t.List[int]
     seq: int
     ts_ms: int
+
+
+class AuditRecord(_AuditRecordRequired, total=False):
+    """One audit log entry. Hashing and verification live in `pm-policy`.
+
+    Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+    `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+    written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
+    """
+    # The client's IP address, when known. Version 2.
+    client_addr: _t.Optional[str]
+    # HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.
+    mac: _t.Optional[str]
+    # How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.
+    principal_kind: _t.Optional[str]
+    # The project's id (setting `project_id`). Version 2.
+    project_id: _t.Optional[str]
+    # The first 8 bytes (hex) of the stored hash of the session id. Version 2.
+    session_id: _t.Optional[str]
+    # The id of the token used (never the secret). Version 2.
+    token_id: _t.Optional[str]
+    # The stable account id (`u_...`) of the person; None in single-user mode. Version 2.
+    user_id: _t.Optional[str]
+    # Record version: 1 (original) or 2 (with context). Left out of JSON when 1.
+    version: int
+
+
+class _AuditVerificationRequired(TypedDict):
+    checkpoints: "AuditCheckpointStatus"
+    # Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later).
+    head: str
+    # The chain, the key (when one applies) and the checkpoints all passed.
+    intact: bool
+    # `verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`.
+    key_check: str
+    # The key check in words.
+    key_note: str
+    keyed_records: int
+    records: int
+    v1_records: int
+    v2_records: int
+
+
+class AuditVerification(_AuditVerificationRequired, total=False):
+    """The result of checking the audit log."""
+    error: _t.Optional[str]
 
 
 class _AuthCheckRequired(TypedDict):
@@ -490,6 +559,22 @@ class CaptureBody(_CaptureBodyRequired, total=False):
     role: _t.Optional[str]
 
 
+class _ChangeRequired(TypedDict):
+    # What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+    # hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+    # only: the hook did not change the message.
+    by: str
+    # The rule (its comment, or its part and match) or a label for the editor.
+    name: str
+    # Which message changed: `request` or `response`.
+    phase: str
+
+
+class Change(_ChangeRequired, total=False):
+    """One change made to an exchange's traffic in flight."""
+    note: _t.Optional[str]
+
+
 class ChangesQuery(TypedDict):
     """Query of `GET /model/changes`."""
     # Snapshot id to compare the current model with.
@@ -515,6 +600,24 @@ class CheckYaml(TypedDict):
     """Body of `POST /scan/custom-checks`."""
     # The check, as YAML.
     yaml: str
+
+
+class _CheckpointRequired(TypedDict):
+    format: str
+    # Hex of the newest record's hash.
+    head: str
+    # Hex of the Ed25519 public key that signed it.
+    public_key: str
+    # How many records the log had (the newest one's sequence number).
+    seq: int
+    # Hex of the signature over [`Checkpoint::message`].
+    signature: str
+    ts_ms: int
+
+
+class Checkpoint(_CheckpointRequired, total=False):
+    # The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project.
+    project_id: _t.Optional[str]
 
 
 class Clickjacking(TypedDict):
@@ -844,6 +947,57 @@ class DecodeRequest(_DecodeRequestRequired, total=False):
     ops: _t.List[str]
 
 
+class DeliveriesQuery(TypedDict, total=False):
+    """Query of `GET /integrations/{name}/deliveries`."""
+    # How many (default 50, at most 200).
+    limit: _t.Optional[int]
+
+
+class DeliveryRow(TypedDict):
+    """One stored delivery."""
+    actor: str
+    attempts: int
+    detail: str
+    event: str
+    finding_id: _t.Optional[int]
+    host: str
+    http_status: _t.Optional[int]
+    id: int
+    integration: str
+    kind: str
+    status: str
+    ts_ms: int
+
+
+class DeviceNameBody(TypedDict):
+    """Body of `PUT /devices/{addr}`."""
+    # The name to show for this address (1 to 60 characters).
+    name: str
+
+
+class _DeviceViewRequired(TypedDict):
+    # The client's IP address (no port).
+    addr: str
+    # Exchanges recorded from it.
+    exchanges: int
+    # Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).
+    record_only: bool
+
+
+class DeviceView(_DeviceViewRequired, total=False):
+    """A client address seen in history, possibly with a name."""
+    # When the latest one was recorded (milliseconds since the epoch); absent if none is in history.
+    last_seen_ms: _t.Optional[int]
+    # The name a person gave it, e.g. `Pixel 8`.
+    name: _t.Optional[str]
+
+
+class DevicesView(TypedDict):
+    """Response of `GET /devices`."""
+    # Devices seen in history (most recent first), then named or selected ones not seen yet.
+    devices: _t.List["DeviceView"]
+
+
 class _DiscoverRequestRequired(TypedDict):
     # The folder to look in, e.g. https://app.example.com/ or …/api/
     url: str
@@ -922,6 +1076,40 @@ class DomTestResult(TypedDict):
     scripts: _t.List[_t.Tuple[str, bool]]
     url: str
 
+
+class EditSetHeader(TypedDict):
+    """Replace a header's value, or add the header."""
+    name: str
+    op: _t.Literal["set_header"]
+    value: str
+
+
+class EditRemoveHeader(TypedDict):
+    name: str
+    op: _t.Literal["remove_header"]
+
+
+class EditSetParam(TypedDict):
+    """Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it."""
+    name: str
+    op: _t.Literal["set_param"]
+    value: str
+
+
+class _EditReplaceTextRequired(TypedDict):
+    find: str
+    op: _t.Literal["replace_text"]
+    replace: str
+
+
+class EditReplaceText(_EditReplaceTextRequired, total=False):
+    """Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op."""
+    # `find` is a regular expression and `replace` may use `$1`.
+    regex: bool
+
+
+# A change to a request. `{{variable}}` works in the values.
+Edit = _t.Union["EditSetHeader", "EditRemoveHeader", "EditSetParam", "EditReplaceText"]
 
 class _EngageExchangeRequired(TypedDict):
     # The recorded exchange to work on.
@@ -1019,11 +1207,18 @@ class _ExchangeSummaryRequired(TypedDict):
 
 class ExchangeSummary(_ExchangeSummaryRequired, total=False):
     """One row of history, without the raw bytes."""
+    # The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+    # this was tracked and for ones ProxyMind sent itself.
+    client_addr: _t.Optional[str]
     comment: _t.Optional[str]
     # Row colour set by a person: red, orange, yellow, green, blue, purple, gray.
     highlight: _t.Optional[str]
     hypothesis_id: _t.Optional[int]
     identity: _t.Optional[str]
+    # Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+    # recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+    # `changes` but doesn't make the row modified.
+    modified: bool
 
 
 class _ExchangeViewRequired(TypedDict):
@@ -1038,11 +1233,19 @@ class _ExchangeViewRequired(TypedDict):
 
 
 class ExchangeView(_ExchangeViewRequired, total=False):
+    # What changed the traffic: which rules or edits.
+    changes: _t.List["Change"]
     duration_ms: _t.Optional[int]
     error: _t.Optional[str]
     # Phrases in target content that look like attempts to instruct a model.
     possible_prompt_injection: _t.List[str]
+    # The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is
+    # what was sent to the server). Same untrusted-content rules as `request`.
+    request_original: _t.Optional["MessageView"]
     response: _t.Optional["MessageView"]
+    # The response as delivered to the client, when rules or an edit changed it (`response` is what the server
+    # sent). Derived from target content, so wrapped as untrusted like `response`.
+    response_delivered: _t.Optional["MessageView"]
     status: _t.Optional[int]
 
 
@@ -1063,6 +1266,8 @@ class ExportRequest(TypedDict, total=False):
     # Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
     # previous result.
     before_id: _t.Optional[int]
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -1083,7 +1288,7 @@ class ExportRequest(TypedDict, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
@@ -1111,11 +1316,20 @@ class Extract(TypedDict, total=False):
 
 ExtractKind = _t.Literal["regex", "json", "header", "cookie"]
 
+# How an extraction reads its source.
+ExtractType = _t.Literal["regex", "json", "header", "cookie", "html_input"]
+
 class Extraction(TypedDict, total=False):
     expr: str
     kind: "ExtractKind"
     # Variable name: letters, digits and `_`.
     name: str
+
+
+class Failure(TypedDict):
+    """A recent failure of a hook."""
+    at_ms: int
+    reason: str
 
 
 class FindingProve(TypedDict):
@@ -1276,6 +1490,11 @@ class FuzzerRequest(_FuzzerRequestRequired, total=False):
     throttle_ms: _t.Optional[int]
     # Target as scheme://host[:port], when not using exchange_id.
     url: _t.Optional[str]
+    # A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a
+    # value or assert something about every response. The workflow's own sends are gated one by one as the actor
+    # who runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack
+    # approves this workflow's definition (it is part of what the approval covers).
+    workflow: _t.Optional[str]
 
 
 class _FuzzerResultDoneRequired(TypedDict):
@@ -1323,6 +1542,8 @@ class FuzzerRow(_FuzzerRowRequired, total=False):
     index: _t.Optional[int]
     matches: _t.List[str]
     status: _t.Optional[int]
+    # What the attack's workflow made of this result (`workflow` in the request).
+    workflow: _t.Optional["FuzzerWorkflow"]
 
 
 class FuzzerStartStarted(TypedDict):
@@ -1345,6 +1566,19 @@ class FuzzerStartDenied(TypedDict):
 
 # What starting a background attack did.
 FuzzerStart = _t.Union["FuzzerStartStarted", "FuzzerStartPendingApproval", "FuzzerStartDenied"]
+
+class _FuzzerWorkflowRequired(TypedDict):
+    run_id: int
+    status: "RunStatus"
+    # The run's variables (hidden or marked as target content for agents): what the workflow extracted from this
+    # result's response.
+    variables: _t.Dict[str, str]
+
+
+class FuzzerWorkflow(_FuzzerWorkflowRequired, total=False):
+    """What a fuzzer result got from the workflow attached to the attack."""
+    reason: _t.Optional[str]
+
 
 GraphEdge = TypedDict("GraphEdge", {
     "from": str,
@@ -1437,6 +1671,8 @@ class GraphQlOperation(_GraphQlOperationRequired, total=False):
 
 
 class GroupItem(TypedDict, total=False):
+    # Replace the request's body with these bytes (base64), as in `replay_send`.
+    body_b64: _t.Optional[str]
     # The recorded exchange to send.
     exchange_id: _t.Optional[int]
     # A label for the result (e.g. the Replay tab name).
@@ -1509,6 +1745,18 @@ class GroupResultDenied(TypedDict):
 
 GroupResult = _t.Union["GroupResultDone", "GroupResultPendingApproval", "GroupResultDenied"]
 
+class _HeaderInputRequired(TypedDict):
+    # The header's name.
+    name: str
+
+
+class HeaderInput(_HeaderInputRequired, total=False):
+    """A custom header of a webhook, as sent to `PUT /integrations/{name}`."""
+    # Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved
+    # value of a header with this name. Values are write-only: they are never returned.
+    value: _t.Optional[str]
+
+
 class Held(TypedDict):
     """A message waiting for a decision."""
     # False when the message isn't valid UTF-8: it can be forwarded or
@@ -1524,6 +1772,15 @@ class Held(TypedDict):
     # The message as text (lossy for non-UTF-8 bytes).
     raw: str
     scheme: str
+
+
+class HeldBack(TypedDict):
+    """One thing the project file would switch on."""
+    # `listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`
+    kind: str
+    what: str
+    # What safe mode does about it.
+    why: str
 
 
 class Hint(TypedDict):
@@ -1548,6 +1805,8 @@ class HistoryFilter(TypedDict, total=False):
     # Only exchanges with an id less than this (older ones). For paging back, pass `next_before_id` from the
     # previous result.
     before_id: _t.Optional[int]
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -1566,7 +1825,7 @@ class HistoryFilter(TypedDict, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
@@ -1580,6 +1839,48 @@ class HistoryFilter(TypedDict, total=False):
     status_class: _t.Optional[str]
     # Free text: the host, the path (with query) or the comment contains it (case-insensitive).
     text: _t.Optional[str]
+
+
+# What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).
+HookAction = _t.Literal["enable", "disable", "pause", "resume", "up", "down"]
+
+class _HookInfoRequired(TypedDict):
+    # Messages sent to it and changed by it since the proxy started it (this process).
+    calls: int
+    changed: int
+    # A person turned it on.
+    enabled: bool
+    # Latest failures, newest last.
+    failures: _t.List["Failure"]
+    kind: "HookKind"
+    matcher: "HookMatch"
+    on_error: "OnError"
+    # Place among the hooks of its kind, first to run = 1.
+    order: int
+    # `off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`).
+    state: str
+    timeout_ms: int
+
+
+class HookInfo(_HookInfoRequired, total=False):
+    """A traffic hook of a plugin, as set up and as running."""
+    blocked_reason: _t.Optional[str]
+    paused_reason: _t.Optional[str]
+
+
+# Request hook or response hook.
+HookKind = _t.Literal["request", "response"]
+
+class HookMatch(TypedDict):
+    """Which messages a hook sees. Empty lists match everything."""
+    # Media types of the message's own `Content-Type` (`application/json`, or `text/*`).
+    content_types: _t.List[str]
+    # Host patterns; `*` matches any run of characters (`*.example.com`).
+    hosts: _t.List[str]
+    # Request methods.
+    methods: _t.List[str]
+    # Path prefixes (`/api/`).
+    paths: _t.List[str]
 
 
 class HostOverride(TypedDict):
@@ -1649,6 +1950,109 @@ class ImportResult(TypedDict):
     skipped: _t.List[str]
 
 
+class IntegrationEnabledBody(TypedDict):
+    """Body of `PUT /integrations/{name}/enabled`."""
+    # Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send.
+    enabled: bool
+
+
+# What a notification integration can subscribe to.
+IntegrationEvent = _t.Literal["finding_proven", "finding_status_changed", "scan_finished", "ci_summary"]
+
+class _IntegrationInputRequired(TypedDict):
+    kind: "IntegrationKind"
+    # The integration's name; it must be the same as the name in the path.
+    name: str
+
+
+class IntegrationInput(_IntegrationInputRequired, total=False):
+    """Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only."""
+    # See `Integration.allow_private`.
+    allow_private: bool
+    # See `Integration.base_url`.
+    base_url: str
+    # See `Integration.email`.
+    email: str
+    # Turn it on (default true). Saving it here, as a person, is what enables it in this installation.
+    enabled: bool
+    # See `Integration.events`.
+    events: _t.List["IntegrationEvent"]
+    # Webhook: custom headers. Absent: keep the saved set; present: replace it.
+    headers: _t.Optional[_t.List["HeaderInput"]]
+    # See `Integration.issue_type`.
+    issue_type: str
+    # See `Integration.labels`.
+    labels: _t.List[str]
+    # See `Integration.project`.
+    project: str
+    # See `Integration.rate_per_minute` (0 or absent: the default).
+    rate_per_minute: int
+    # Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only.
+    signing_secret: _t.Optional[str]
+    # The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep
+    # the saved one; an empty string removes it.
+    token: _t.Optional[str]
+    # Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential).
+    webhook_url: _t.Optional[str]
+
+
+# What an integration talks to.
+IntegrationKind = _t.Literal["jira", "github", "gitlab", "slack", "webhook"]
+
+class _IntegrationViewRequired(TypedDict):
+    # It will send (enabled and trusted here, with every required secret present).
+    active: bool
+    # Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test
+    # server). Off by default so a project file cannot point an integration at an internal service. Link-local
+    # addresses (cloud metadata) are refused either way.
+    allow_private: bool
+    # Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to
+    # gitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default
+    # `https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).
+    base_url: str
+    # Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal
+    # access token (Bearer), as Jira Server and Data Center use.
+    email: str
+    # A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an
+    # integration that came with a project file stays off until a person enables it in this installation.
+    enabled: bool
+    # Slack and webhook: the events to send.
+    events: _t.List["IntegrationEvent"]
+    # Names of the webhook's custom headers (their values are secrets, kept like the others).
+    header_names: _t.List[str]
+    # Jira: the issue type's name (default `Bug`).
+    issue_type: str
+    kind: "IntegrationKind"
+    # Labels put on created issues (none by default: Jira refuses a label when its create screen has no label
+    # field, and GitHub creates missing labels only for people with push access).
+    labels: _t.List[str]
+    # Its name (letters, digits, `-`, `_`, `.`), unique in the project.
+    name: str
+    # Enabled in the file but not by a person in this installation (it came with the project, or what it points at
+    # changed since a person enabled it). It sends nothing until it is enabled here.
+    needs_review: bool
+    # What is missing for it to work, in words.
+    problems: _t.List[str]
+    # Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`.
+    project: str
+    # Most notifications per minute (1 to 60, default 20); more are skipped and logged.
+    rate_per_minute: int
+    # Per secret slot: where it comes from. Values are never returned.
+    secret_status: _t.Dict[str, "SecretStatus"]
+    # Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or
+    # `env:NAME`. Never the secret itself.
+    secrets: _t.Dict[str, str]
+    # Who saved it last and when.
+    updated_by: str
+    updated_ms: int
+
+
+class IntegrationView(_IntegrationViewRequired, total=False):
+    """An integration as the API shows it: its configuration, the state of its secrets, and how it is doing."""
+    # The last delivery, when it failed.
+    last_error: _t.Optional["LastError"]
+
+
 class InterceptSettings(TypedDict, total=False):
     # Hold traffic at all.
     enabled: bool
@@ -1674,6 +2078,22 @@ class InterceptState(TypedDict):
     attached: bool
     held: _t.List["Held"]
     settings: "InterceptSettings"
+
+
+class IssueLink(TypedDict):
+    """An issue created for a finding in another system."""
+    by: str
+    created_ms: int
+    # The provider's id for updates: the Jira key, the GitHub number, the GitLab iid.
+    id: str
+    # The integration that created it.
+    integration: str
+    # `PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab).
+    key: str
+    kind: "IntegrationKind"
+    updated_ms: int
+    # The issue's page.
+    url: str
 
 
 class _IssueTypeRequired(TypedDict):
@@ -1721,6 +2141,12 @@ Kind = _t.Literal["request", "response", "ws_to_server", "ws_to_client"]
 
 Lang = _t.Literal["python", "javascript", "powershell"]
 
+class LastError(TypedDict):
+    """The last delivery's failure, when the last delivery failed."""
+    message: str
+    ts_ms: int
+
+
 class LimitQuery(TypedDict, total=False):
     """Query of `GET /audit`."""
     # Most records to return (default 200, at most 5000).
@@ -1745,16 +2171,34 @@ class ListenerConfig(TypedDict, total=False):
     enabled: bool
     # With a redirect: connect to it with TLS even for plain-HTTP clients.
     force_tls: bool
+    # `http` (default) or `socks5`.
+    kind: "ListenerKind"
+    # `socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send
+    # that value back to keep the saved password. Max 255 bytes.
+    password: str
     # Send every request to this host instead of where the client asked
     # (empty: no redirect). The Host header is left as the client sent it.
     redirect_host: str
     # Port to send requests to with `redirect_host`.
     redirect_port: int
+    # `http` listeners only, Linux only: take connections that the operating system redirected here
+    # (iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a
+    # device without proxy settings works. See docs/capture.md.
+    transparent: bool
+    # `socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes.
+    username: str
 
+
+# What a listener speaks.
+ListenerKind = _t.Literal["http", "socks5"]
 
 class _ListenerStatusRequired(TypedDict):
     bind: str
+    # `http` or `socks5`.
+    kind: "ListenerKind"
     running: bool
+    # Redirected traffic is accepted (see `ListenerConfig::transparent`).
+    transparent: bool
 
 
 class ListenerStatus(_ListenerStatusRequired, total=False):
@@ -1769,11 +2213,14 @@ class ListenersBody(TypedDict):
 
 class ListenersView(TypedDict):
     """Extra proxy listeners and whether each is running in this process."""
+    # The saved listeners; SOCKS5 passwords show as `********`.
     listeners: _t.List["ListenerConfig"]
     # The proxy's main listener (from the command line), if this process runs one.
     primary: _t.Optional[str]
     # Empty when this process doesn't run the proxy.
     status: _t.List["ListenerStatus"]
+    # This build can take traffic the operating system redirected (`transparent` listeners): Linux only.
+    transparent_supported: bool
 
 
 class LoggedOut(TypedDict):
@@ -1940,6 +2387,33 @@ class MessageView(_MessageViewRequired, total=False):
     headers: _t.List[_t.Tuple[str, str]]
 
 
+class _MobileSetupRequired(TypedDict):
+    # Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+    # interface. False when the proxy listens only on loopback (a phone cannot reach that).
+    listener_reachable: bool
+    # The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.
+    listeners: _t.List[str]
+    # The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.
+    proxy_addresses: _t.List[str]
+    # Whether this process runs the proxy at all (false with `--no-proxy`).
+    proxy_running: bool
+    # The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.
+    setup_host_url: str
+    # Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+    # first. Empty when no listener is reachable or no LAN address was found.
+    urls: _t.List[str]
+
+
+class MobileSetup(_MobileSetupRequired, total=False):
+    """Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page."""
+    # SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.
+    ca_fingerprint: _t.Optional[str]
+    # SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.
+    qr_svg: _t.Optional[str]
+    # The URL the QR code holds.
+    qr_url: _t.Optional[str]
+
+
 # How payloads are placed in the positions.
 Mode = _t.Literal["one_at_a_time", "same_everywhere", "paired", "all_combinations"]
 
@@ -1974,8 +2448,12 @@ class NetConfig(TypedDict, total=False):
     # (`example.com`, `*.example.com`): for certificate pinning or noise.
     # Nothing inside such a tunnel is recorded.
     tls_passthrough: _t.List[str]
-    # Send traffic through this proxy (None: connect directly).
+    # The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that
+    # goes through the proxy, after one that sends the `bypass` hosts directly) and is never returned.
     upstream: _t.Optional["UpstreamProxy"]
+    # Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
+    # that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
+    upstream_rules: _t.List["UpstreamRule"]
 
 
 class NewAttackPath(TypedDict):
@@ -2039,6 +2517,9 @@ class NoiseMask(TypedDict):
     # Words that vary in text/HTML bodies.
     words: _t.List[str]
 
+
+# What the proxy does with a message when its hook fails.
+OnError = _t.Literal["pass", "drop"]
 
 class _OpChangeRequired(TypedDict):
     # `METHOD /template`
@@ -2242,6 +2723,21 @@ class PayloadSet(TypedDict, total=False):
     url_encode: bool
 
 
+class Pending(TypedDict):
+    """Where a run waits for an approval."""
+    approval_id: str
+    # The exchange that was current, and what the run had used up, so it continues exactly from here.
+    current_exchange: _t.Optional[int]
+    # The definition's digest when the run paused: a run does not continue on a workflow edited since.
+    digest: str
+    elapsed_ms: int
+    reasons: _t.List[str]
+    sends: int
+    # The send step (from 1) that needs the approval.
+    step: int
+    summary: str
+
+
 class PluginCheckIssue(TypedDict):
     # `<plugin>/<check>`.
     check: str
@@ -2289,15 +2785,30 @@ class PluginCheckResultDenied(TypedDict):
 
 PluginCheckResult = _t.Union["PluginCheckResultDone", "PluginCheckResultPendingApproval", "PluginCheckResultDenied"]
 
+class PluginHookSet(TypedDict):
+    """Body of `PUT /plugins/{name}/hooks/{kind}`."""
+    action: "HookAction"
+
+
 class _PluginInfoRequired(TypedDict):
+    # The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted.
+    accepted_permissions: _t.List[str]
+    # Plugin API version: 1 (no permissions) or 2.
+    api: int
     description: str
     dir: str
     enabled: bool
+    # Traffic hooks the plugin declares.
+    hooks: _t.List["HookInfo"]
     # "passive" and/or "active".
     kinds: _t.List[str]
     name: str
+    # The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them.
+    needs_review: bool
     # Panels the plugin adds: (id, title).
     panels: _t.List[_t.Tuple[str, str]]
+    # The permissions a v2 plugin declares.
+    permissions: _t.List[str]
     # Who signed it, as checked at install.
     signature: "Signature"
     version: str
@@ -2446,6 +2957,79 @@ class ProofResultDenied(TypedDict):
 
 ProofResult = _t.Union["ProofResultCompleted", "ProofResultPendingApproval", "ProofResultDenied"]
 
+class ProtobufDecodeRequest(TypedDict, total=False):
+    """Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+    Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+    """
+    # Add comments with other readings of numbers (zigzag, signed, float). Default true.
+    annotate: _t.Optional[bool]
+    # The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.
+    body_b64: _t.Optional[str]
+    # The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.
+    body_text: _t.Optional[str]
+    # The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+    # `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+    content_type: _t.Optional[str]
+    # Decode the body of this recorded exchange (its content type says how the body is framed).
+    exchange_id: _t.Optional[int]
+    # How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.
+    grpc_encoding: _t.Optional[str]
+    # How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    kind: _t.Optional[str]
+    # With `exchange_id`: the `request` or the `response` (default).
+    part: _t.Optional["ProtobufPart"]
+
+
+class _ProtobufDecodedRequired(TypedDict):
+    # Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+    # is edited (see `notes`).
+    exact: bool
+    # `grpc-message` from the trailers, when present.
+    grpc_message: _t.Optional[str]
+    # `grpc-status` from the trailers, when present.
+    grpc_status: _t.Optional[str]
+    # How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    kind: str
+    # Messages decoded (gRPC trailers not counted).
+    messages: int
+    # What could not be decoded or will not round-trip.
+    notes: _t.List[str]
+    # The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+    # is redacted and wrapped as untrusted target content.
+    text: str
+
+
+class ProtobufDecoded(_ProtobufDecodedRequired, total=False):
+    """Response of `POST /tools/protobuf/decode`."""
+    # Present for agents: how to treat `text`.
+    notice: _t.Optional[str]
+
+
+class _ProtobufEncodeRequestRequired(TypedDict):
+    # The text, as returned by the decode route (with edits).
+    text: str
+
+
+class ProtobufEncodeRequest(_ProtobufEncodeRequestRequired, total=False):
+    """Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent)."""
+    # How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+    # message uncompressed.
+    kind: _t.Optional[str]
+
+
+class ProtobufEncoded(TypedDict):
+    """Response of `POST /tools/protobuf/encode`."""
+    # The body bytes, base64.
+    body_b64: str
+    # The framing used.
+    kind: str
+    # Length of the body in bytes.
+    length: int
+
+
+# Which message of an exchange `POST /tools/protobuf/decode` reads.
+ProtobufPart = _t.Literal["request", "response"]
+
 class ProveSweep(TypedDict):
     """A run of [`Service::auto_prove`]."""
     attempted: int
@@ -2476,6 +3060,8 @@ RaceModeChoice = _t.Literal["last_byte", "auto", "single_packet"]
 class RaceRequest(TypedDict, total=False):
     # Run a previously approved request. All other fields must be identical.
     approval_id: _t.Optional[str]
+    # Replace the request's body with these bytes (base64), as in `replay_send`.
+    body_b64: _t.Optional[str]
     # How many copies to send at once (2 to 50, default 10).
     count: _t.Optional[int]
     # Recorded exchange to race (its target is used).
@@ -2581,6 +3167,9 @@ class RecordingSettings(TypedDict, total=False):
     # Keep only exchanges whose target is in the rules of engagement's
     # scope (everything else is still proxied, just not recorded).
     in_scope_only: bool
+    # Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other
+    # clients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.
+    record_devices: _t.List[str]
 
 
 class RecursiveGrep(TypedDict):
@@ -2643,6 +3232,9 @@ class ReplayRequest(TypedDict, total=False):
     """
     # Run a previously approved send. All other fields must be identical.
     approval_id: _t.Optional[str]
+    # Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+    # bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+    body_b64: _t.Optional[str]
     # Recorded exchange to base this on (its target is used).
     exchange_id: _t.Optional[int]
     # Update Content-Length to match the body (default true).
@@ -2656,7 +3248,8 @@ class ReplayRequest(TypedDict, total=False):
     max_tokens: _t.Optional[int]
     # Convert bare "\n" line endings in the head to "\r\n" (default true).
     normalize_newlines: _t.Optional[bool]
-    # Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+    # Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+    # `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
     # If omitted, the request of `exchange_id` is resent unchanged.
     raw: _t.Optional[str]
     # Target as scheme://host[:port], used when there is no `exchange_id`.
@@ -2774,6 +3367,15 @@ class RetestItem(_RetestItemRequired, total=False):
     findings: _t.List[int]
 
 
+class ReviewItem(TypedDict):
+    """One line of the review page."""
+    # A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as
+    # written in the file, never used as an identity.
+    claimed_by: _t.Optional[str]
+    detail: str
+    what: str
+
+
 class RoeBody(TypedDict):
     """Body of `PUT /roe` and `POST /roe/check`."""
     # The rules of engagement, as YAML.
@@ -2883,6 +3485,8 @@ class RulesBody(TypedDict):
 
 
 RunOn = _t.Literal["per_insertion_point", "per_request"]
+
+RunStatus = _t.Literal["running", "ok", "failed", "stopped", "denied", "pending_approval"]
 
 RunWhen = _t.Literal["always", "when_invalid"]
 
@@ -3075,6 +3679,8 @@ class SearchRequest(_SearchRequestRequired, total=False):
     before_id: _t.Optional[int]
     # Match letter case.
     case_sensitive: bool
+    # Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
     # File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
     # query; a leading dot is allowed and case is ignored.
     hide_ext: _t.Optional[str]
@@ -3100,7 +3706,7 @@ class SearchRequest(_SearchRequestRequired, total=False):
     # Path (including query) contains this text (case-insensitive).
     path: _t.Optional[str]
     # A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+    # parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
     # comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
     # E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
     # early (see `scanned` and `next_before_id` in the result).
@@ -3128,6 +3734,19 @@ class SearchResult(_SearchResultRequired, total=False):
     next_before_id: _t.Optional[int]
 
 
+class _SecretStatusRequired(TypedDict):
+    # `saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`.
+    source: str
+
+
+class SecretStatus(_SecretStatusRequired, total=False):
+    """Where one secret comes from, never the secret itself."""
+    # The last four characters of a long secret, e.g. `…a1b2`; absent for short ones.
+    hint: _t.Optional[str]
+    # For an environment reference: `env:NAME`.
+    reference: _t.Optional[str]
+
+
 class _SendBodyRequired(TypedDict):
     # The message. Must not be empty.
     text: str
@@ -3137,6 +3756,17 @@ class SendBody(_SendBodyRequired, total=False):
     """Body of `POST /assistant/send`."""
     # Continue this chat (default: start a new one).
     chat_id: _t.Optional[int]
+
+
+class _SendFindingBodyRequired(TypedDict):
+    # The Jira, GitHub or GitLab integration to create the issue in.
+    integration: str
+
+
+class SendFindingBody(_SendFindingBodyRequired, total=False):
+    """Body of `POST /findings/{id}/issue`."""
+    # When the finding already has an issue there: update it instead of refusing. Default false.
+    update: bool
 
 
 class _SentExampleRequired(TypedDict):
@@ -3167,7 +3797,7 @@ class SessionRule(TypedDict, total=False):
     run: "RunWhen"
     set: _t.List["SetValue"]
     # Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-    # discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    # discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
     # Older names (repeater, intruder, sequencer) still match.
     tools: _t.List[str]
     use_cookie_jar: bool
@@ -3192,6 +3822,9 @@ class SetValue(TypedDict, total=False):
 SetWhere = _t.Literal["header", "cookie", "param"]
 
 Severity = _t.Literal["info", "low", "medium", "high"]
+
+# Which message of the current exchange a test or extraction looks at.
+Side = _t.Literal["request", "response"]
 
 class SignatureUnsigned(TypedDict):
     state: _t.Literal["unsigned"]
@@ -3283,6 +3916,339 @@ class StatusQuery(TypedDict, total=False):
     """`?status=`: filter a list by status (`all` or empty means no filter where the route says so)."""
     # Only rows with this status.
     status: _t.Optional[str]
+
+
+class _StepMatchRequired(TypedDict):
+    type: _t.Literal["match"]
+
+
+class StepMatch(_StepMatchRequired, total=False):
+    """Stop the run (status `stopped`) unless the current exchange fits the condition."""
+    # Text the body must contain (decoded: de-chunked and decompressed).
+    body_contains: _t.Optional[str]
+    # A regular expression the body must match.
+    body_regex: _t.Optional[str]
+    # A header that must be present (by name).
+    header: _t.Optional[str]
+    # With `header`: text one of its values must contain (case-insensitive).
+    header_contains: _t.Optional[str]
+    # A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`.
+    hql: _t.Optional[str]
+    # What a failed `assert` says, or why a `match` stopped the run (default: what failed).
+    message: _t.Optional[str]
+    # Methods the request may have, separated by commas: `POST` or `GET,HEAD`.
+    method: _t.Optional[str]
+    # Pass when the tests do NOT all hold.
+    negate: bool
+    # Text the request path (with its query) must contain.
+    path_contains: _t.Optional[str]
+    # Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response).
+    side: _t.Optional["Side"]
+    # Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.
+    status: _t.Optional[str]
+    # A variable to test. Alone: it must be set and not empty.
+    var: _t.Optional[str]
+    # With `var`: text the value must contain.
+    var_contains: _t.Optional[str]
+    # With `var`: the exact value.
+    var_equals: _t.Optional[str]
+    # With `var`: a regular expression the value must match.
+    var_matches: _t.Optional[str]
+
+
+class _StepAssertRequired(TypedDict):
+    type: _t.Literal["assert"]
+
+
+class StepAssert(_StepAssertRequired, total=False):
+    """Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on."""
+    # Text the body must contain (decoded: de-chunked and decompressed).
+    body_contains: _t.Optional[str]
+    # A regular expression the body must match.
+    body_regex: _t.Optional[str]
+    # A header that must be present (by name).
+    header: _t.Optional[str]
+    # With `header`: text one of its values must contain (case-insensitive).
+    header_contains: _t.Optional[str]
+    # A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`.
+    hql: _t.Optional[str]
+    # What a failed `assert` says, or why a `match` stopped the run (default: what failed).
+    message: _t.Optional[str]
+    # Methods the request may have, separated by commas: `POST` or `GET,HEAD`.
+    method: _t.Optional[str]
+    # Pass when the tests do NOT all hold.
+    negate: bool
+    # Text the request path (with its query) must contain.
+    path_contains: _t.Optional[str]
+    # Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response).
+    side: _t.Optional["Side"]
+    # Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.
+    status: _t.Optional[str]
+    # A variable to test. Alone: it must be set and not empty.
+    var: _t.Optional[str]
+    # With `var`: text the value must contain.
+    var_contains: _t.Optional[str]
+    # With `var`: the exact value.
+    var_equals: _t.Optional[str]
+    # With `var`: a regular expression the value must match.
+    var_matches: _t.Optional[str]
+
+
+class _StepExtractRequired(TypedDict):
+    type: _t.Literal["extract"]
+
+
+class StepExtract(_StepExtractRequired, total=False):
+    """Read a value out of the current request or response into a variable."""
+    # The regular expression, JSON pointer, header name, cookie name or input name.
+    expr: str
+    # For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one.
+    group: _t.Optional[int]
+    kind: "ExtractType"
+    # The variable to set: letters, digits and `_`, not starting with a digit or `current_`.
+    name: str
+    # When nothing is found: leave the variable unset and go on (default: the run fails here).
+    optional: bool
+    # Read the request or the response (default response; `html_input` reads responses only).
+    side: _t.Optional["Side"]
+
+
+class _StepTransformRequired(TypedDict):
+    type: _t.Literal["transform"]
+
+
+class StepTransform(_StepTransformRequired, total=False):
+    """Set a variable from a template, then apply encodings, decodings or hashes to it."""
+    # The variable to set.
+    name: str
+    # Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,
+    # url_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,
+    # hex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,
+    # sha1, sha256. None: the variable is just the template.
+    ops: _t.List[str]
+    # The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`.
+    value: str
+
+
+class _StepSendRequired(TypedDict):
+    type: _t.Literal["send"]
+
+
+class StepSend(_StepSendRequired, total=False):
+    """Send a request through the policy gate; its response becomes the current exchange."""
+    # Changes made to the request after the template is filled in, in order.
+    edits: _t.List["Edit"]
+    # Update Content-Length to match the body (default true).
+    fix_content_length: _t.Optional[bool]
+    # Send with this test identity's credentials ("anonymous" for none).
+    identity: _t.Optional[str]
+    # A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current
+    # exchange's request.
+    raw: _t.Optional[str]
+    # Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a
+    # response cannot choose where the next request goes.
+    url: _t.Optional[str]
+
+
+# One step of a workflow.
+Step = _t.Union["StepMatch", "StepAssert", "StepExtract", "StepTransform", "StepSend"]
+
+class _StepRunRequired(TypedDict):
+    elapsed_ms: int
+    # `match`, `assert`, `extract`, `transform` or `send`.
+    kind: str
+    # What happened, without target content.
+    message: str
+    status: "StepStatus"
+    # Position in the workflow, from 1.
+    step: int
+
+
+class StepRun(_StepRunRequired, total=False):
+    """What one step did."""
+    # For a send: the recorded exchange (also when it failed on the wire).
+    exchange_id: _t.Optional[int]
+
+
+StepStatus = _t.Literal["ok", "failed", "stopped", "denied", "pending_approval"]
+
+class _StreamChunkPageRequired(TypedDict):
+    chunks: _t.List["StreamChunkView"]
+    stream_id: int
+    # Chunks stored for the stream.
+    total: int
+
+
+class StreamChunkPage(_StreamChunkPageRequired, total=False):
+    """A page of a stream's chunks, oldest first."""
+    # Pass as `after` to read the next page.
+    next_after_id: _t.Optional[int]
+    notice: _t.Optional[str]
+
+
+# One chunk of a stream as `actor` may see it.
+_StreamChunkViewRequired = TypedDict("_StreamChunkViewRequired", {
+    "from": str,
+    "id": int,
+    "kept": int,
+    "len": int,
+    "text": str,
+    "text_truncated": bool,
+    "ts_ms": int,
+})
+
+_StreamChunkViewOptional = TypedDict("_StreamChunkViewOptional", {
+    "data_b64": _t.Optional[str],
+    "possible_prompt_injection": _t.List[str],
+}, total=False)
+
+class StreamChunkView(_StreamChunkViewRequired, _StreamChunkViewOptional):
+    pass
+
+
+class StreamChunksQuery(TypedDict, total=False):
+    """Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`."""
+    # Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.
+    after: _t.Optional[int]
+    # Most chunks to return (default 100, at most 500).
+    limit: _t.Optional[int]
+
+
+class StreamDetail(TypedDict):
+    """One stream with its first chunks."""
+    chunks: "StreamChunkPage"
+    stream: "StreamRow"
+
+
+class StreamFilter(TypedDict, total=False):
+    """Filters of the stream list. Unknown keys are refused."""
+    # Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).
+    before_id: _t.Optional[int]
+    # Only streams from this client: an IP address, or a device name set on the Proxy setup page.
+    client: _t.Optional[str]
+    # Only targets whose host contains this text (case-insensitive).
+    host: _t.Optional[str]
+    # Most rows (default 50, max 500).
+    limit: _t.Optional[int]
+    # Only this target port.
+    port: _t.Optional[int]
+    # Only streams that started at or after this time (milliseconds since 1970).
+    since_ms: _t.Optional[int]
+    # With true: only TLS streams; with false: only plain ones.
+    tls: _t.Optional[bool]
+    # Only streams that started at or before this time (milliseconds since 1970).
+    until_ms: _t.Optional[int]
+
+
+class _StreamPageRequired(TypedDict):
+    streams: _t.List["StreamRow"]
+
+
+class StreamPage(_StreamPageRequired, total=False):
+    """Streams, newest first."""
+    # Pass as `before_id` for older streams.
+    next_before_id: _t.Optional[int]
+
+
+class _StreamReplayRequestRequired(TypedDict):
+    # The recorded stream to replay.
+    stream_id: int
+
+
+class StreamReplayRequest(_StreamReplayRequestRequired, total=False):
+    # From a previous pending_approval result: runs the approved send. All other fields must be identical.
+    approval_id: _t.Optional[str]
+    # Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB
+    # in all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.
+    chunks: _t.Optional[_t.List[str]]
+    # Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile.
+    delay_ms: _t.Optional[int]
+    # Characters of each chunk shown back (default 2000).
+    max_chars: _t.Optional[int]
+    # Stop reading after this many bytes from the server (default 1 MB, at most 16 MB).
+    max_response_bytes: _t.Optional[int]
+    # After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A
+    # server that spoke first in the original is waited for before the first chunk, for the same time.
+    read_ms: _t.Optional[int]
+    # Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`.
+    text_chunks: _t.Optional[_t.List[str]]
+
+
+class _StreamReplayResultDoneRequired(TypedDict):
+    chunks: "StreamChunkPage"
+    # `server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or
+    # `error`.
+    ended: str
+    received_bytes: int
+    sent_bytes: int
+    status: _t.Literal["done"]
+    stream_id: int
+
+
+class StreamReplayResultDone(_StreamReplayResultDoneRequired, total=False):
+    """The connection opened; everything sent and received is recorded as the new stream `stream_id`."""
+    note: _t.Optional[str]
+
+
+class StreamReplayResultFailed(TypedDict):
+    """The target could not be reached; the attempt is recorded as stream `stream_id`."""
+    error: str
+    status: _t.Literal["failed"]
+    stream_id: int
+
+
+class StreamReplayResultPendingApproval(TypedDict):
+    approval_id: str
+    reasons: _t.List[str]
+    status: _t.Literal["pending_approval"]
+    summary: str
+
+
+class StreamReplayResultDenied(TypedDict):
+    reasons: _t.List[str]
+    status: _t.Literal["denied"]
+
+
+StreamReplayResult = _t.Union[
+    "StreamReplayResultDone",
+    "StreamReplayResultFailed",
+    "StreamReplayResultPendingApproval",
+    "StreamReplayResultDenied",
+]
+
+class _StreamRowRequired(TypedDict):
+    actor_id: str
+    bytes_to_client: int
+    # Bytes sent towards the server and towards the client (all of them, also those past the recording cap).
+    bytes_to_server: int
+    # Chunks stored.
+    chunks: int
+    host: str
+    id: int
+    port: int
+    # `proxy` or `stream_replay`.
+    source: str
+    start_ms: int
+    # The chunks are the decrypted bytes of a TLS connection.
+    tls: bool
+    # The recording cap was reached: later bytes were relayed and counted but not kept.
+    truncated: bool
+
+
+class StreamRow(_StreamRowRequired, total=False):
+    """One stream, without its chunks."""
+    # The ALPN protocol agreed, when it was not HTTP.
+    alpn: _t.Optional[str]
+    # The client's IP address; absent for streams ProxyMind opened itself.
+    client_addr: _t.Optional[str]
+    # Absent while the stream is open.
+    end_ms: _t.Optional[int]
+    # How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open.
+    ended: _t.Optional[str]
+    error: _t.Optional[str]
+    # The stream this one replays.
+    replay_of: _t.Optional[int]
+    sni: _t.Optional[str]
 
 
 class TargetAnalysis(TypedDict):
@@ -3380,6 +4346,73 @@ class TriageItem(TypedDict):
     url: str
 
 
+class Trigger(TypedDict):
+    """The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step."""
+    # Off by default. Only a person turns it on; editing the steps turns it off again.
+    enabled: bool
+    # Who turned it on. Runs go through the gate as this person.
+    enabled_by: str
+    enabled_ms: int
+    # At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued.
+    max_per_minute: int
+    # Exchanges skipped because of the rate cap or because other runs were busy, since this process started.
+    skipped: int
+
+
+class TrustConfirmRequest(TypedDict, total=False):
+    """`POST /project/trust`."""
+    # The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the
+    # confirmation is refused. Omit to confirm whatever is there now (scripts).
+    digest: _t.Optional[str]
+
+
+class TrustReview(TypedDict):
+    """Everything the file would do, grouped, for the person who is deciding."""
+    assistant: _t.List["ReviewItem"]
+    listeners: _t.List["ReviewItem"]
+    network_other: _t.List["ReviewItem"]
+    rewrite_rules: _t.List["ReviewItem"]
+    roe_summary: _t.Any
+    roe_text: _t.Optional[str]
+    schedules: _t.List["ReviewItem"]
+    session: _t.List["ReviewItem"]
+    triggers: _t.List["ReviewItem"]
+    upstream_rules: _t.List["ReviewItem"]
+
+
+class TrustView(TypedDict):
+    """Whether the project in this installation is trusted, and if not, what is held back.
+
+    **Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command
+    line, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network
+    settings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic
+    goes direct and unmodified, never through an address the file names); match-and-replace rules; session rules
+    and macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file
+    names); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks
+    is the file's own).
+
+    **Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing
+    settings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,
+    `integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores
+    all of these settings anyway.
+    """
+    # `created`, `confirmed` or `edited`.
+    basis: _t.Optional[str]
+    # A record exists but the settings no longer match it: the file changed since.
+    changed_since_trust: bool
+    # The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read.
+    digest: str
+    held_back: _t.List["HeldBack"]
+    project_id: str
+    review: "TrustReview"
+    safe_mode: bool
+    # `trusted` or `safe_mode`.
+    status: str
+    trusted_at_ms: _t.Optional[int]
+    # Who vouched for the project and when, if anyone did.
+    trusted_by: _t.Optional[str]
+
+
 class _TurnRequired(TypedDict):
     chat_id: int
     # Messages added in this turn (user, assistant and tool results).
@@ -3437,6 +4470,47 @@ class UpstreamProxy(TypedDict, total=False):
     username: str
 
 
+class UpstreamResolution(TypedDict):
+    """Answer of `POST /network/upstream/resolve`: how a host would be reached."""
+    # Connected directly (the rule says `direct`, or no rule matched).
+    direct: bool
+    # The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).
+    pattern: _t.Optional[str]
+    # The rule lets the proxy resolve names.
+    remote_dns: bool
+    # The first rule that covers the host (0 is the first), or null when none does.
+    rule_index: _t.Optional[int]
+    # What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).
+    via: str
+
+
+class UpstreamResolveRequest(TypedDict, total=False):
+    """Body of `POST /network/upstream/resolve`."""
+    # The target host: a name or an IP address.
+    host: str
+    # Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.
+    rules: _t.Optional[_t.List["UpstreamRule"]]
+
+
+class UpstreamRule(TypedDict, total=False):
+    """One entry of the ordered upstream list: which targets it covers and how to reach them."""
+    # Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers
+    # `example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`
+    # or `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:
+    # covers everything, which only makes sense for the last rule.
+    match: _t.List[str]
+    password: str
+    # Let the proxy resolve target names ("socks5h" for SOCKS5; for HTTP proxies, CONNECT names the host).
+    # Off by default so the proxy is asked for the address ProxyMind resolved and checked against the denied
+    # networks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.
+    remote_dns: bool
+    # Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like
+    # other secrets, hidden when settings are shown (`********`) and never logged.
+    username: str
+    # `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.
+    via: str
+
+
 class Validity(TypedDict, total=False):
     """When a response means the session is gone. Empty: 401, 419, 440 or a
     redirect to a login page.
@@ -3484,6 +4558,87 @@ class WaybackReport(TypedDict):
     interesting: int
     # Captures on this host (before `limit` cut the list).
     total: int
+
+
+class Workflow(TypedDict):
+    """A saved workflow."""
+    description: str
+    # Assigned when the workflow is first saved.
+    id: int
+    # A unique name, 1 to 64 characters.
+    name: str
+    # Up to 50 steps, run in order. No loops.
+    steps: _t.List["Step"]
+    # Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on).
+    trigger: "Trigger"
+    # Who saved it last.
+    updated_by: str
+    updated_ms: int
+
+
+class WorkflowInput(TypedDict, total=False):
+    """What a person edits: a workflow without the fields the service manages."""
+    description: str
+    name: str
+    steps: _t.List["Step"]
+
+
+class _WorkflowRunRequired(TypedDict):
+    # Who ran it, e.g. `human:local` or `agent:claude`.
+    actor: str
+    assertions: _t.List["AssertionResult"]
+    duration_ms: int
+    # Every exchange the run sent, in order.
+    exchanges: _t.List[int]
+    id: int
+    sends: int
+    started_ms: int
+    status: "RunStatus"
+    # The steps that ran, in order.
+    steps: _t.List["StepRun"]
+    # How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`.
+    trigger: str
+    # Variables at the end of the run. For agents, values are hidden or marked as target content.
+    variables: _t.Dict[str, str]
+    workflow_id: int
+    workflow_name: str
+
+
+class WorkflowRun(_WorkflowRunRequired, total=False):
+    """One run of a workflow."""
+    pending: _t.Optional["Pending"]
+    # Why it did not finish `ok`.
+    reason: _t.Optional[str]
+    # The exchange it started on, if any.
+    start_exchange: _t.Optional[int]
+
+
+class WorkflowRunBody(TypedDict, total=False):
+    """Body of `POST /workflows/{id}/run`."""
+    # Continue a run that waits for this approval (give the same `exchange_id` as before).
+    approval_id: _t.Optional[str]
+    # Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+    exchange_id: _t.Optional[int]
+
+
+class WorkflowRunsQuery(TypedDict, total=False):
+    """Query of `GET /workflows/runs`."""
+    # How many runs (default 50, at most 200).
+    limit: _t.Optional[int]
+    # Only runs of this workflow (name or id).
+    workflow: _t.Optional[str]
+
+
+class _WorkflowTriggerBodyRequired(TypedDict):
+    # Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+    # can turn it on (audited), and editing the workflow's steps turns it off again.
+    enabled: bool
+
+
+class WorkflowTriggerBody(_WorkflowTriggerBodyRequired, total=False):
+    """Body of `PUT /workflows/{id}/trigger`."""
+    # At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.
+    max_per_minute: _t.Optional[int]
 
 
 # A message in the history across connections.

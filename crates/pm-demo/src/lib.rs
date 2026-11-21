@@ -29,6 +29,9 @@ pub struct Vuln {
     pub description: &'static str,
 }
 
+/// Path of the demo gRPC call (see `VulnShop::grpc_say_hello`); it is not part of [`GROUND_TRUTH`].
+pub const GRPC_HELLO_PATH: &str = "/grpc/demo.Greeter/SayHello";
+
 pub const GROUND_TRUTH: &[Vuln] = &[
     Vuln {
         id: "VS-1",
@@ -1004,6 +1007,11 @@ impl VulnShop {
         if wants_ws && req.method == "GET" && req.path == "/ws/support" {
             return self.support_socket(s, &req, buf[head_end..].to_vec()).await;
         }
+        if req.method == "POST" && req.path == GRPC_HELLO_PATH {
+            s.write_all(&self.grpc_say_hello(&req)).await?;
+            let _ = s.shutdown().await;
+            return Ok(());
+        }
         let resp = match self.legacy_front_end(&req).await {
             Some(r) => r,
             None => self.cached(&req).await,
@@ -1024,6 +1032,43 @@ impl VulnShop {
         s.write_all(out.as_bytes()).await?;
         let _ = s.shutdown().await;
         Ok(())
+    }
+
+    /// A tiny gRPC unary call over HTTP/1.1, for trying the Protobuf view and editor (not a planted bug): the
+    /// request is one framed message with the name in field 1; the reply is `1: "Hello, <name>"` and `2: <length of
+    /// the name>`, with `grpc-status` in the headers (a "trailers-only" reply, since HTTP/1.1 has no trailers).
+    fn grpc_say_hello(&self, req: &Request) -> Vec<u8> {
+        use pm_http::protobuf::{Field, Value, decode, encode, frame_message, parse_frames};
+        let name = parse_frames(&req.body)
+            .frames
+            .first()
+            .filter(|f| !f.compressed() && !f.is_trailers())
+            .and_then(|f| decode(&f.payload).ok())
+            .and_then(|fields| {
+                fields.into_iter().find_map(|f| match (f.number, f.value) {
+                    (1, Value::Text(t)) => Some(t),
+                    _ => None,
+                })
+            });
+        let (status, message, body) = match name {
+            Some(name) => {
+                let reply = encode(&[
+                    Field { number: 1, value: Value::Text(format!("Hello, {name}")) },
+                    Field { number: 2, value: Value::Varint(name.chars().count() as u64) },
+                ]);
+                ("0", "OK", frame_message(0, &reply))
+            }
+            None => ("3", "expected one uncompressed message with the name in field 1", Vec::new()),
+        };
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/grpc\r\ngrpc-status: {status}\r\ngrpc-message: {message}\r\n\
+             Content-Length: {}\r\nX-Request-Id: {}\r\nConnection: close\r\n\r\n",
+            body.len(),
+            self.counter.fetch_add(1, Ordering::Relaxed)
+        )
+        .into_bytes();
+        out.extend_from_slice(&body);
+        out
     }
 
     /// A WebSocket support chat for logged-in users: it greets you and
@@ -1983,6 +2028,33 @@ mod tests {
         let body = format!("{{\"username\":\"{user}\",\"password\":\"{user}123\"}}");
         let r = call(addr, format!("POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await;
         r.split("session=").nth(1).unwrap().split(';').next().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn grpc_greeter_echoes_the_name_in_a_framed_message() {
+        use pm_http::protobuf::{decode, frame_message, parse_frames};
+        let addr = VulnShop::start_local().await.unwrap();
+        let body = frame_message(0, &[0x0a, 5, b'w', b'o', b'r', b'l', b'd']);
+        let mut raw = format!(
+            "POST {GRPC_HELLO_PATH} HTTP/1.1\r\nContent-Type: application/grpc\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&body);
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(&raw).await.unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        let (head, reply) = pm_http::split_message(&out);
+        let head = String::from_utf8_lossy(head);
+        assert!(head.contains("Content-Type: application/grpc\r\n") && head.contains("grpc-status: 0"), "{head}");
+        let frames = parse_frames(reply);
+        assert_eq!(frames.frames.len(), 1);
+        let text = pm_http::protobuf::to_text(&decode(&frames.frames[0].payload).unwrap(), false);
+        assert_eq!(text, "1: \"Hello, world\"\n2: 5\n");
+        // No usable message: a status in the headers and no body.
+        let r = call(addr, format!("POST {GRPC_HELLO_PATH} HTTP/1.1\r\nContent-Length: 0\r\n\r\n")).await;
+        assert!(r.contains("grpc-status: 3"), "{r}");
     }
 
     #[tokio::test]

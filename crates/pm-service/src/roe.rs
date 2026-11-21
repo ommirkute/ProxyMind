@@ -9,6 +9,7 @@ use pm_policy::{Actor, ActorKind, Roe, Tier};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// Project setting holding the ROE YAML.
@@ -33,6 +34,7 @@ pub fn summarize(roe: &Roe) -> Value {
         ("agent", ActorKind::Agent),
         ("plugin", ActorKind::Plugin),
         ("scanner", ActorKind::Scanner),
+        ("ci", ActorKind::Ci),
     ];
     let tiers = [Tier::Read, Tier::Passive, Tier::ActiveSafe, Tier::ActiveIntrusive, Tier::Destructive];
     let permissions: serde_json::Map<String, Value> = kinds
@@ -81,16 +83,16 @@ impl Service {
 
     /// Replaces the rules. Humans only: agents work inside the rules and can never change them.
     pub fn roe_set(&self, actor: &Actor, text: &str) -> Result<RoeView> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change the rules of engagement".into()));
-        }
+        self.require_actor(actor, Perm::RoeWrite)?;
         if text.len() > 1024 * 1024 {
             return Err(ServiceError::Invalid("ROE larger than 1 MB".into()));
         }
         let roe = Roe::parse(text).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         let old = self.store.read(|db| db.get_setting(ROE_SETTING))?.unwrap_or_default();
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(ROE_SETTING, text))?;
         self.apply_roe(roe, text);
+        self.trust_after(actor, was_trusted);
         self.audit(
             &actor.id(),
             "roe_change",

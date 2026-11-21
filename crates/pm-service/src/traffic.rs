@@ -68,6 +68,7 @@ impl Service {
             for e in entries {
                 let error = e.response.is_none().then(|| "no response in the HAR file".to_string());
                 let row = NewExchange {
+                    client_addr: None,
                     ts_ms: e.ts_ms,
                     duration_ms: e.duration_ms,
                     source: "import".into(),
@@ -83,6 +84,7 @@ impl Service {
                     error,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 };
                 match store.insert_exchange(&row) {
                     Ok(id) => {

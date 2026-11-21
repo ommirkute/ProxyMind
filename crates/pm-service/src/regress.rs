@@ -11,11 +11,12 @@
 
 use std::time::Duration;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use pm_tools::regress::{self, RegressionTest, TestFinding, VulnerableIf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -288,9 +289,7 @@ impl Service {
     /// The tests as a ZIP: one JSON file per finding, a README and an example
     /// CI workflow. People only; audited.
     pub fn regression_zip(&self, actor: &Actor) -> Result<(Vec<u8>, RegressionExport)> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people export regression tests".into()));
-        }
+        self.require_actor_with(actor, Perm::ExportEvidence, Denial::message("only people export regression tests"))?;
         let export = self.regression_tests()?;
         let mut files: Vec<(String, Vec<u8>)> = export
             .tests

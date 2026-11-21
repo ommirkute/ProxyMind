@@ -37,6 +37,9 @@ pub struct GroupItem {
     pub exchange_id: Option<i64>,
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
+    /// Replace the request's body with these bytes (base64), as in `replay_send`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// A label for the result (e.g. the Replay tab name).
     pub name: Option<String>,
 }
@@ -109,6 +112,7 @@ impl Service {
         for (i, item) in req.requests.iter().enumerate() {
             let one = ReplayRequest {
                 raw: item.raw.clone(),
+                body_b64: item.body_b64.clone(),
                 exchange_id: item.exchange_id,
                 url: item.url.clone(),
                 hypothesis_id: req.hypothesis_id,
@@ -253,6 +257,7 @@ impl Service {
         for (i, r) in outcome.results.into_iter().enumerate() {
             let o = &outs[i];
             let mut record = NewExchange {
+                client_addr: None,
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 source: "replay".into(),
@@ -268,6 +273,7 @@ impl Service {
                 error: None,
                 identity: identity.map(str::to_string),
                 hypothesis_id: o.hypothesis_id,
+                ..Default::default()
             };
             let mut elapsed_ms = 0;
             match r {

@@ -20,11 +20,13 @@ const ZIP: &str = "application/zip";
 pub fn operations() -> Vec<Operation> {
     vec![
         op("get", "/status", "status", "Version, project, who you are, the engagement and its counters.")
-            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns) and `counters`."),
+            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns), `counters` and `safe_mode` (true while this installation does not trust the project)."),
         op("get", "/roe", "roe_get", "The rules of engagement as text and as parsed.").out::<RoeView>(),
         op("put", "/roe", "roe_put", "Replace the rules of engagement.").body::<RoeBody>().out::<RoeView>(),
         op("get", "/setup", "setup", "How to point a browser at the proxy: address, CA availability and fingerprint.")
             .json("Object with `proxy`, `ca_available`, `ca_sha256` and `browser_available`."),
+        op("get", "/setup/mobile", "setup_mobile", "How a phone or tablet reaches ProxyMind's setup page: URLs on the LAN, a QR code (SVG) of the first, and the CA fingerprint.")
+            .out::<MobileSetup>(),
         op("get", "/ca.pem", "ca_pem", "The proxy's CA certificate (PEM) as a download.")
             .download("application/x-pem-file", "The CA certificate."),
         op("post", "/browser/open", "browser_open", "Open the built-in browser through the proxy.")
@@ -36,7 +38,7 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/exchanges", "exchanges", "Search recorded exchanges, newest first.").query::<HistoryFilter>().out::<ExchangePage>(),
         op("get", "/exchanges/{id}", "exchange", "One exchange: summary, request and response text, and a model-safe view.")
             .query::<BytesQuery>()
-            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
+            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`. When rules or an edit in the intercept queue changed the traffic, `request` is what was sent to the server and `response` is what the server sent, as always; `request_original` is the request as the client sent it and `response_delivered` is the response as delivered to the client (text, cut by `max` like the others, with `*_truncated`; also `request_original_b64` / `response_delivered_b64` with `bytes=1`; each absent when unchanged). `changes` lists what changed them (`phase`, `by` rule, intercept or hook, `name`, optional `note`; empty when nothing did). `diffs` has one line diff per changed message (`phase`, `from_label`, `to_label`, `lines` in the shape of `/tools/compare`): the request from the client's to the one sent, the response from the server's to the delivered one. The `view` carries `request_original` and `response_delivered` too, redacted and marked untrusted for agents."),
         op("post", "/search", "search", "Search recorded traffic for text or a regular expression.")
             .body::<SearchRequest>().out::<SearchResult>(),
         op("post", "/search/ws", "search_ws", "Search recorded WebSocket messages.").body::<WsSearchRequest>().out::<WsSearchResult>(),
@@ -58,6 +60,14 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/tools/curl", "tools_curl", "Turn a cURL command into a raw request.").body::<CurlBody>().out::<CurlParsed>(),
         op("post", "/ws/replay", "ws_replay", "Replay a recorded WebSocket session with edited messages.")
             .body::<WsReplayRequest>().out::<WsReplayResult>(),
+        op("get", "/streams", "streams_list", "Raw TCP and TLS streams the proxy relayed and recorded, newest first.")
+            .query::<pm_service::pm_store::StreamFilter>().out::<StreamPage>(),
+        op("get", "/streams/{id}", "stream_get", "One recorded stream with its first chunks (base64 plus a text preview each).")
+            .query::<StreamChunksQuery>().out::<StreamDetail>(),
+        op("get", "/streams/{id}/chunks", "stream_chunks", "A page of one stream's chunks, oldest first.")
+            .query::<StreamChunksQuery>().out::<StreamChunkPage>(),
+        op("post", "/streams/{id}/replay", "stream_replay", "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream.")
+            .body::<StreamReplayRequest>().out::<StreamReplayResult>(),
         op("post", "/race", "race", "Send the same request several times at once.").body::<RaceRequest>().out::<RaceResult>(),
         op("post", "/replay/group", "replay_group", "Send a group of requests in order or in parallel.").body::<GroupRequest>().out::<GroupResult>(),
         op("post", "/fuzzer", "fuzzer", "Run a fuzzer attack and wait for the result.").body::<FuzzerRequest>().out::<FuzzerResult>(),
@@ -71,6 +81,10 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/discover", "discover", "Look for files and folders by trying words.").body::<DiscoverRequest>().out::<DiscoverResult>(),
         op("post", "/tools/decode", "tools_decode", "Encode or decode text locally.").body::<DecodeRequest>()
             .json("Object with `steps` (each decoding step) and `ops` (the available operations)."),
+        op("post", "/tools/protobuf/decode", "tools_protobuf_decode", "Decode a gRPC or Protobuf body into editable text, without a schema.")
+            .body::<ProtobufDecodeRequest>().out::<ProtobufDecoded>(),
+        op("post", "/tools/protobuf/encode", "tools_protobuf_encode", "Encode edited Protobuf text back into body bytes (framed for gRPC if asked).")
+            .body::<ProtobufEncodeRequest>().out::<ProtobufEncoded>(),
         op("post", "/tools/request-transform", "tools_request_transform", "Change the method or body encoding of a request text.")
             .body::<RequestTransform>().json("Object with `raw` (the rewritten request)."),
         op("post", "/tools/compare", "tools_compare", "Compare two recorded exchanges.").body::<CompareBody>()
@@ -155,6 +169,8 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/plugins", "plugins", "Installed plugins and their state.").out::<PluginsView>(),
         op("post", "/plugins/check", "plugin_check", "Run a plugin check on a recorded exchange.").body::<PluginCheckRequest>().out::<PluginCheckResult>(),
         op("put", "/plugins/{name}", "plugin_set", "Turn a plugin on or off.").body::<PluginSet>().out::<PluginsView>(),
+        op("post", "/plugins/{name}/accept", "plugin_accept", "A person accepts the permissions a version 2 plugin declares (and the plugin turns on).").out::<PluginsView>(),
+        op("put", "/plugins/{name}/hooks/{kind}", "plugin_hook_set", "Turn a plugin's request or response hook on or off, reorder it, pause or resume it.").body::<PluginHookSet>().out::<PluginsView>(),
         op("get", "/plugins/{name}/panels/{panel}", "plugin_panel", "The data of a plugin panel.").query::<PanelQuery>().out::<pm_service::pm_plugin::panel::PanelData>(),
         op("get", "/scan/profiles", "scan_profiles", "Scan profiles, built-in and saved.").out::<Vec<ScanProfile>>(),
         op("post", "/scan/profiles", "scan_profile_save", "Save a scan profile.").body::<ScanProfile>().out::<Vec<ScanProfile>>(),
@@ -185,8 +201,12 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/proofs/{id}", "proof", "A stored proof result.").json("The stored proof as an object."),
         op("post", "/proofs/{id}/rerun", "proof_rerun", "Run a stored proof again.").out::<ProofResult>(),
         op("get", "/audit", "audit", "The audit log, newest first.").query::<LimitQuery>().out::<Vec<pm_service::pm_store::AuditRecord>>(),
-        op("get", "/audit/verify", "audit_verify", "Check the audit log's hash chain.")
-            .json("Object with `intact` and either `records` (how many were checked) or `error`."),
+        op("get", "/audit/verify", "audit_verify", "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints.")
+            .out::<AuditVerification>(),
+        op("post", "/audit/checkpoint", "audit_checkpoint", "Write a signed checkpoint of the audit log (head hash, count, time); people only. Export it and keep it elsewhere.")
+            .out::<pm_service::pm_policy::checkpoint::Checkpoint>(),
+        op("get", "/audit/checkpoints", "audit_checkpoints", "The signed checkpoints stored in the project, oldest first.")
+            .out::<Vec<pm_service::pm_policy::checkpoint::Checkpoint>>(),
         op("get", "/report", "report", "Render the report; always a download.").query::<ReportQuery>()
             .download("text/markdown, text/html", "The rendered report; the content type follows `format`."),
         op("get", "/evidence/pack", "evidence_pack", "A signed evidence pack (ZIP); its fingerprint is in the `X-Evidence-Fingerprint` header.")
@@ -205,17 +225,41 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/intercept/{id}/drop", "intercept_drop", "Drop one held message.").json("Object with `dropped` (the id)."),
         op("get", "/match-replace", "rules_get", "Match-and-replace rules.").json("Object with `rules` (list of rules)."),
         op("put", "/match-replace", "rules_put", "Replace all match-and-replace rules.").body::<RulesBody>().json("Object with `rules` (the stored list)."),
-        op("get", "/network", "network_get", "Outgoing network settings (upstream proxy, client certificates, host overrides).").out::<pm_service::pm_replay::NetConfig>(),
+        op("get", "/network", "network_get", "Outgoing network settings (ordered upstream rules, client certificates, host overrides). Proxy passwords show as `********`.").out::<pm_service::pm_replay::NetConfig>(),
         op("put", "/network", "network_put", "Change the outgoing network settings.").body::<pm_service::pm_replay::NetConfig>().out::<pm_service::pm_replay::NetConfig>(),
+        op("post", "/network/upstream/resolve", "network_resolve", "Which upstream rule decides how a host is reached (saved rules, or a draft passed in `rules`). Sends nothing.")
+            .body::<UpstreamResolveRequest>().out::<UpstreamResolution>(),
         op("get", "/proxy/listeners", "listeners_get", "Proxy listeners and their state.").out::<ListenersView>(),
         op("put", "/proxy/listeners", "listeners_put", "Replace the proxy listeners.").body::<ListenersBody>().out::<ListenersView>(),
         op("get", "/history/recording", "recording_get", "What the proxy records.").out::<RecordingSettings>(),
         op("put", "/history/recording", "recording_put", "Change what the proxy records.").body::<RecordingSettings>().out::<RecordingSettings>(),
+        op("get", "/devices", "devices_get", "Client addresses (phones, tablets) seen in history, with their names and counts.").out::<DevicesView>(),
+        op("put", "/devices/{addr}", "device_put", "Give a client address a name, e.g. Pixel 8.").body::<DeviceNameBody>().out::<DeviceView>(),
+        op("delete", "/devices/{addr}", "device_delete", "Remove a device's name.").json("Object with `deleted` (the address)."),
         op("get", "/session", "session_get", "Session handling: cookie jar, macros and rules.").out::<SessionView>(),
         op("put", "/session", "session_put", "Change session handling.").body::<SessionConfig>().out::<SessionView>(),
         op("get", "/session/jar", "session_jar", "Cookies in the jar.").json("Object with `cookies` (list of cookies)."),
         op("delete", "/session/jar", "session_jar_clear", "Empty the cookie jar.").json("Object with `cleared`."),
         op("post", "/session/macros/{name}/run", "session_macro_run", "Run a session macro.").out::<MacroRun>(),
+        op("get", "/project/trust", "project_trust", "Whether this installation trusts the project file (`trusted` or `safe_mode`), what safe mode holds back and why, and everything the file would switch on (listeners, upstream and rewrite rules, schedules, triggers, session macros, the assistant URL, the rules of engagement) for a person to review. Anyone may read it.").out::<TrustView>(),
+        op("post", "/project/trust", "project_trust_confirm", "Trust the project's current settings in this installation: listeners start, schedules and triggers run (as the person confirming), rules and network settings apply. Pass the `digest` from the review to confirm exactly what was read. People only; audited, a refusal too.").body::<TrustConfirmRequest>().out::<TrustView>(),
+        op("get", "/integrations", "integrations_list", "Configured integrations (Jira, GitHub, GitLab, Slack, webhooks) with the state of their secrets, whether they came with a project file and need review, and the last error. Secrets are never returned. People only.").out::<Vec<IntegrationView>>(),
+        op("get", "/integrations/{name}", "integration_get", "One integration. People only.").id_is_string().out::<IntegrationView>(),
+        op("put", "/integrations/{name}", "integration_put", "Create or replace an integration; secrets (token, webhook_url, signing_secret, header values) are write-only and go to the user's private secrets file or an `env:NAME` reference, never the project. Saving it enabled here is what lets it send in this installation. People only; audited.").id_is_string().body::<IntegrationInput>().out::<IntegrationView>(),
+        op("delete", "/integrations/{name}", "integration_delete", "Delete an integration with its saved secrets, trust and delivery log. People only; audited.").id_is_string().json("Object with `deleted` (the name)."),
+        op("put", "/integrations/{name}/enabled", "integration_enabled", "Turn an integration on or off. Turning it on here, as a person, is what makes an integration that came with a project file send. People only; audited.").id_is_string().body::<IntegrationEnabledBody>().out::<IntegrationView>(),
+        op("post", "/integrations/{name}/test", "integration_test", "Test an integration: read the tracker's project, post a test message to Slack, or send a `test` event to a webhook. Recorded in the delivery log. People only.").id_is_string().out::<pm_service::pm_store::DeliveryRow>(),
+        op("get", "/integrations/{name}/deliveries", "integration_deliveries", "The last deliveries of an integration (status, HTTP status, attempts, host; never bodies or secrets), newest first. People only.").id_is_string().query::<DeliveriesQuery>().out::<Vec<pm_service::pm_store::DeliveryRow>>(),
+        op("post", "/findings/{id}/issue", "finding_issue", "Create (or with `update`, refresh) the finding's issue in a Jira, GitHub or GitLab integration, with redacted text and reproduction. The issue's key and URL are kept on the finding as `issue_links`. People only; audited.").body::<SendFindingBody>().out::<IssueLink>(),
+        op("get", "/workflows", "workflows_list", "Saved workflows (chains of match, extract, transform, send and assert steps).").out::<Vec<Workflow>>(),
+        op("post", "/workflows", "workflow_create", "Save a new workflow. People only; audited.").body::<WorkflowInput>().out::<Workflow>(),
+        op("get", "/workflows/runs", "workflow_runs", "Recent workflow runs, newest first.").query::<WorkflowRunsQuery>().out::<Vec<WorkflowRun>>(),
+        op("get", "/workflows/runs/{id}", "workflow_run_get", "One workflow run: its steps, variables, sent exchanges and assertions.").out::<WorkflowRun>(),
+        op("get", "/workflows/{id}", "workflow_get", "One workflow, by id or name.").id_is_string().out::<Workflow>(),
+        op("put", "/workflows/{id}", "workflow_update", "Replace a workflow's name, description and steps. Turns its trigger off when the steps change. People only; audited.").id_is_string().body::<WorkflowInput>().out::<Workflow>(),
+        op("delete", "/workflows/{id}", "workflow_delete", "Delete a workflow and its runs. People only; audited.").id_is_string().json("Object with `deleted` (the id or name given)."),
+        op("put", "/workflows/{id}/trigger", "workflow_trigger", "Turn the per-exchange trigger on or off, with its per-minute cap. People only; audited.").id_is_string().body::<WorkflowTriggerBody>().out::<Workflow>(),
+        op("post", "/workflows/{id}/run", "workflow_run", "Run a workflow on a recorded exchange, or continue a run that waits for an approval. Every send goes through the policy gate.").id_is_string().body::<WorkflowRunBody>().out::<WorkflowRun>(),
         op("get", "/assistant", "assistant_state", "Assistant settings, key status and recent chats.")
             .json("Object with `config`, `local`, `cloud_models_allowed`, `problem`, `acts_as`, `key` and `chats`."),
         op("put", "/assistant/config", "assistant_config", "Change the assistant's settings.").body::<AssistantConfig>().out::<AssistantConfig>(),

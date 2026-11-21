@@ -148,9 +148,22 @@ fn rustls_pemfile_certs(pem: &str) -> Vec<CertificateDer<'static>> {
 async fn requests_to_proxymind_itself_are_refused_not_looped() {
     let s = setup("loop").await;
     let mut c = TcpStream::connect(("127.0.0.1", s.proxy)).await.unwrap();
-    c.write_all(format!("GET /again HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", s.proxy).as_bytes()).await.unwrap();
+    // 0.0.0.0 is "this machine" to a connect(): it would loop back into the proxy.
+    c.write_all(format!("GET /again HTTP/1.1\r\nHost: 0.0.0.0:{}\r\n\r\n", s.proxy).as_bytes()).await.unwrap();
     let resp = read_all(c).await;
     assert!(resp.starts_with("HTTP/1.1 502") && resp.contains("request loop"), "{resp}");
+}
+
+/// The listener's own address is not forwarded either: ProxyMind answers with its setup page (see `setup_page.rs`).
+#[tokio::test]
+async fn requests_to_the_listeners_own_address_get_the_setup_page() {
+    let s = setup("own").await;
+    let mut c = TcpStream::connect(("127.0.0.1", s.proxy)).await.unwrap();
+    c.write_all(format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", s.proxy).as_bytes())
+        .await
+        .unwrap();
+    let resp = read_all(c).await;
+    assert!(resp.starts_with("HTTP/1.1 200") && resp.contains("ProxyMind setup"), "{resp}");
 }
 
 #[tokio::test]

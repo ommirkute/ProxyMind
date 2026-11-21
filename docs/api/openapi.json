@@ -692,6 +692,27 @@
         ],
         "type": "object"
       },
+      "AssertionResult": {
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "step": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "ok",
+          "message"
+        ],
+        "type": "object"
+      },
       "AssistantConfig": {
         "additionalProperties": false,
         "properties": {
@@ -997,14 +1018,84 @@
         ],
         "type": "object"
       },
+      "AuditCheckpointStatus": {
+        "description": "How the checkpoints fared.",
+        "properties": {
+          "fingerprint": {
+            "description": "The newest checkpoint's signer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest_seq": {
+            "description": "The newest checkpoint's record count and time.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latest_ts_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "signer_pinned": {
+            "description": "Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the\nsignatures only prove the checkpoint was not altered, not who made it.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "`none` (no checkpoint to check), `ok` or `failed`.",
+            "type": "string"
+          },
+          "stored": {
+            "description": "Checkpoints stored in the project, and checkpoints supplied from files.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "supplied": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "stored",
+          "supplied",
+          "latest_seq",
+          "latest_ts_ms",
+          "fingerprint",
+          "signer_pinned",
+          "problems"
+        ],
+        "type": "object"
+      },
       "AuditRecord": {
-        "description": "One audit log entry. Hashing and verification live in `pm-policy`.",
+        "description": "One audit log entry. Hashing and verification live in `pm-policy`.\n\nVersion 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to\n`client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was\nwritten by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).",
         "properties": {
           "action": {
             "type": "string"
           },
           "actor": {
             "type": "string"
+          },
+          "client_addr": {
+            "description": "The client's IP address, when known. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "decision": {
             "type": "string"
@@ -1022,6 +1113,13 @@
             },
             "type": "array"
           },
+          "mac": {
+            "description": "HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "prev_hash": {
             "items": {
               "format": "uint8",
@@ -1031,12 +1129,54 @@
             },
             "type": "array"
           },
+          "principal_kind": {
+            "description": "How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "description": "The project's id (setting `project_id`). Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "seq": {
             "format": "int64",
             "type": "integer"
           },
+          "session_id": {
+            "description": "The first 8 bytes (hex) of the stored hash of the session id. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_id": {
+            "description": "The id of the token used (never the secret). Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ts_ms": {
             "format": "int64",
+            "type": "integer"
+          },
+          "user_id": {
+            "description": "The stable account id (`u_...`) of the person; None in single-user mode. Version 2.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "Record version: 1 (original) or 2 (with context). Left out of JSON when 1.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -1049,6 +1189,68 @@
           "decision",
           "prev_hash",
           "hash"
+        ],
+        "type": "object"
+      },
+      "AuditVerification": {
+        "description": "The result of checking the audit log.",
+        "properties": {
+          "checkpoints": {
+            "$ref": "#/components/schemas/AuditCheckpointStatus"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "head": {
+            "description": "Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later).",
+            "type": "string"
+          },
+          "intact": {
+            "description": "The chain, the key (when one applies) and the checkpoints all passed.",
+            "type": "boolean"
+          },
+          "key_check": {
+            "description": "`verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`.",
+            "type": "string"
+          },
+          "key_note": {
+            "description": "The key check in words.",
+            "type": "string"
+          },
+          "keyed_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "v1_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "v2_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intact",
+          "records",
+          "v1_records",
+          "v2_records",
+          "keyed_records",
+          "head",
+          "key_check",
+          "key_note",
+          "checkpoints"
         ],
         "type": "object"
       },
@@ -1637,6 +1839,35 @@
         ],
         "type": "object"
       },
+      "Change": {
+        "description": "One change made to an exchange's traffic in flight.",
+        "properties": {
+          "by": {
+            "description": "What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin\nhook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note\nonly: the hook did not change the message.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The rule (its comment, or its part and match) or a label for the editor.",
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "description": "Which message changed: `request` or `response`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phase",
+          "by",
+          "name"
+        ],
+        "type": "object"
+      },
       "ChangesQuery": {
         "additionalProperties": false,
         "description": "Query of `GET /model/changes`.",
@@ -1712,6 +1943,50 @@
         },
         "required": [
           "yaml"
+        ],
+        "type": "object"
+      },
+      "Checkpoint": {
+        "properties": {
+          "format": {
+            "type": "string"
+          },
+          "head": {
+            "description": "Hex of the newest record's hash.",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key": {
+            "description": "Hex of the Ed25519 public key that signed it.",
+            "type": "string"
+          },
+          "seq": {
+            "description": "How many records the log had (the newest one's sequence number).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "signature": {
+            "description": "Hex of the signature over [`Checkpoint::message`].",
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "format",
+          "seq",
+          "head",
+          "ts_ms",
+          "public_key",
+          "signature"
         ],
         "type": "object"
       },
@@ -2778,6 +3053,162 @@
         ],
         "type": "object"
       },
+      "DeliveriesQuery": {
+        "additionalProperties": false,
+        "description": "Query of `GET /integrations/{name}/deliveries`.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "How many (default 50, at most 200).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DeliveryRow": {
+        "description": "One stored delivery.",
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "finding_id": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "http_status": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "integration": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "integration",
+          "ts_ms",
+          "kind",
+          "event",
+          "finding_id",
+          "status",
+          "http_status",
+          "attempts",
+          "host",
+          "detail",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "DeviceNameBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /devices/{addr}`.",
+        "properties": {
+          "name": {
+            "description": "The name to show for this address (1 to 60 characters).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeviceView": {
+        "description": "A client address seen in history, possibly with a name.",
+        "properties": {
+          "addr": {
+            "description": "The client's IP address (no port).",
+            "type": "string"
+          },
+          "exchanges": {
+            "description": "Exchanges recorded from it.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_seen_ms": {
+            "description": "When the latest one was recorded (milliseconds since the epoch); absent if none is in history.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The name a person gave it, e.g. `Pixel 8`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "record_only": {
+            "description": "Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "addr",
+          "exchanges",
+          "record_only"
+        ],
+        "type": "object"
+      },
+      "DevicesView": {
+        "description": "Response of `GET /devices`.",
+        "properties": {
+          "devices": {
+            "description": "Devices seen in history (most recent first), then named or selected ones not seen yet.",
+            "items": {
+              "$ref": "#/components/schemas/DeviceView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "type": "object"
+      },
       "DiscoverRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3047,6 +3478,99 @@
         ],
         "type": "object"
       },
+      "Edit": {
+        "description": "A change to a request. `{{variable}}` works in the values.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Replace a header's value, or add the header.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "set_header",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "remove_header",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "op": {
+                "const": "set_param",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "name",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op.",
+            "properties": {
+              "find": {
+                "type": "string"
+              },
+              "op": {
+                "const": "replace_text",
+                "type": "string"
+              },
+              "regex": {
+                "default": false,
+                "description": "`find` is a regular expression and `replace` may use `$1`.",
+                "type": "boolean"
+              },
+              "replace": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "find",
+              "replace"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "EngageExchange": {
         "additionalProperties": false,
         "description": "Body of `POST /engage/references`, `/engage/csrf` and `/engage/clickjacking`.",
@@ -3270,6 +3794,13 @@
           "actor_id": {
             "type": "string"
           },
+          "client_addr": {
+            "description": "The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before\nthis was tracked and for ones ProxyMind sent itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "comment": {
             "type": [
               "string",
@@ -3318,6 +3849,10 @@
           },
           "method": {
             "type": "string"
+          },
+          "modified": {
+            "description": "Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the\nrecorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in\n`changes` but doesn't make the row modified.",
+            "type": "boolean"
           },
           "path": {
             "type": "string"
@@ -3382,6 +3917,13 @@
           "actor": {
             "type": "string"
           },
+          "changes": {
+            "description": "What changed the traffic: which rules or edits.",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            },
+            "type": "array"
+          },
           "duration_ms": {
             "format": "int64",
             "type": [
@@ -3418,6 +3960,17 @@
           "request": {
             "$ref": "#/components/schemas/MessageView"
           },
+          "request_original": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is\nwhat was sent to the server). Same untrusted-content rules as `request`."
+          },
           "response": {
             "anyOf": [
               {
@@ -3427,6 +3980,17 @@
                 "type": "null"
               }
             ]
+          },
+          "response_delivered": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The response as delivered to the client, when rules or an edit changed it (`response` is what the server\nsent). Derived from target content, so wrapped as untrusted like `response`."
           },
           "source": {
             "type": "string"
@@ -3505,6 +4069,14 @@
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -3590,7 +4162,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -3686,6 +4258,36 @@
           }
         ]
       },
+      "ExtractType": {
+        "description": "How an extraction reads its source.",
+        "oneOf": [
+          {
+            "const": "regex",
+            "description": "A capture group of a regular expression over the head and the decoded body (`group`, default 1, else the whole\nmatch).",
+            "type": "string"
+          },
+          {
+            "const": "json",
+            "description": "A JSON pointer into the body, e.g. `/data/token`.",
+            "type": "string"
+          },
+          {
+            "const": "header",
+            "description": "A header's value.",
+            "type": "string"
+          },
+          {
+            "const": "cookie",
+            "description": "A cookie: from `Set-Cookie` in a response, from `Cookie` in a request.",
+            "type": "string"
+          },
+          {
+            "const": "html_input",
+            "description": "The `value` of an HTML `<input>` found by its `name` (or `id`), entities decoded: the hidden CSRF field.",
+            "type": "string"
+          }
+        ]
+      },
       "Extraction": {
         "additionalProperties": false,
         "properties": {
@@ -3703,6 +4305,23 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "Failure": {
+        "description": "A recent failure of a hook.",
+        "properties": {
+          "at_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at_ms",
+          "reason"
+        ],
         "type": "object"
       },
       "FindingProve": {
@@ -4191,6 +4810,14 @@
               "string",
               "null"
             ]
+          },
+          "workflow": {
+            "default": null,
+            "description": "A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a\nvalue or assert something about every response. The workflow's own sends are gated one by one as the actor\nwho runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack\napproves this workflow's definition (it is part of what the approval covers).",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4356,6 +4983,17 @@
               "integer",
               "null"
             ]
+          },
+          "workflow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FuzzerWorkflow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the attack's workflow made of this result (`workflow` in the request)."
           }
         },
         "required": [
@@ -4439,6 +5077,37 @@
             "type": "object"
           }
         ]
+      },
+      "FuzzerWorkflow": {
+        "description": "What a fuzzer result got from the workflow attached to the attack.",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The run's variables (hidden or marked as target content for agents): what the workflow extracted from this\nresult's response.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "variables"
+        ],
+        "type": "object"
       },
       "GraphEdge": {
         "properties": {
@@ -4717,6 +5386,13 @@
       "GroupItem": {
         "additionalProperties": false,
         "properties": {
+          "body_b64": {
+            "description": "Replace the request's body with these bytes (base64), as in `replay_send`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "exchange_id": {
             "default": null,
             "description": "The recorded exchange to send.",
@@ -4968,6 +5644,28 @@
           }
         ]
       },
+      "HeaderInput": {
+        "additionalProperties": false,
+        "description": "A custom header of a webhook, as sent to `PUT /integrations/{name}`.",
+        "properties": {
+          "name": {
+            "description": "The header's name.",
+            "type": "string"
+          },
+          "value": {
+            "default": null,
+            "description": "Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved\nvalue of a header with this name. Values are write-only: they are never returned.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "Held": {
         "description": "A message waiting for a decision.",
         "properties": {
@@ -5021,6 +5719,28 @@
           "raw",
           "editable",
           "held_ms"
+        ],
+        "type": "object"
+      },
+      "HeldBack": {
+        "description": "One thing the project file would switch on.",
+        "properties": {
+          "kind": {
+            "description": "`listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`",
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "why": {
+            "description": "What safe mode does about it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "what",
+          "why"
         ],
         "type": "object"
       },
@@ -5089,6 +5809,14 @@
             "format": "int64",
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -5162,7 +5890,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -5204,6 +5932,170 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "HookAction": {
+        "description": "What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).",
+        "oneOf": [
+          {
+            "const": "enable",
+            "description": "Turn the hook on (needs the plugin's permissions accepted and the plugin on).",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Turn the hook off.",
+            "type": "string"
+          },
+          {
+            "const": "pause",
+            "description": "Stop sending messages to it for now.",
+            "type": "string"
+          },
+          {
+            "const": "resume",
+            "description": "Start again after a pause (or after it paused itself) and forget its recent failures.",
+            "type": "string"
+          },
+          {
+            "const": "up",
+            "description": "Run earlier among the hooks of its kind.",
+            "type": "string"
+          },
+          {
+            "const": "down",
+            "description": "Run later among the hooks of its kind.",
+            "type": "string"
+          }
+        ]
+      },
+      "HookInfo": {
+        "description": "A traffic hook of a plugin, as set up and as running.",
+        "properties": {
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "calls": {
+            "description": "Messages sent to it and changed by it since the proxy started it (this process).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changed": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "A person turned it on.",
+            "type": "boolean"
+          },
+          "failures": {
+            "description": "Latest failures, newest last.",
+            "items": {
+              "$ref": "#/components/schemas/Failure"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HookKind"
+          },
+          "matcher": {
+            "$ref": "#/components/schemas/HookMatch"
+          },
+          "on_error": {
+            "$ref": "#/components/schemas/OnError"
+          },
+          "order": {
+            "description": "Place among the hooks of its kind, first to run = 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "paused_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "`off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`).",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "enabled",
+          "state",
+          "on_error",
+          "timeout_ms",
+          "matcher",
+          "order",
+          "calls",
+          "changed",
+          "failures"
+        ],
+        "type": "object"
+      },
+      "HookKind": {
+        "description": "Request hook or response hook.",
+        "enum": [
+          "request",
+          "response"
+        ],
+        "type": "string"
+      },
+      "HookMatch": {
+        "additionalProperties": false,
+        "description": "Which messages a hook sees. Empty lists match everything.",
+        "properties": {
+          "content_types": {
+            "default": [],
+            "description": "Media types of the message's own `Content-Type` (`application/json`, or `text/*`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hosts": {
+            "default": [],
+            "description": "Host patterns; `*` matches any run of characters (`*.example.com`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "methods": {
+            "default": [],
+            "description": "Request methods.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "paths": {
+            "default": [],
+            "description": "Path prefixes (`/api/`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts",
+          "paths",
+          "methods",
+          "content_types"
+        ],
         "type": "object"
       },
       "HostOverride": {
@@ -5436,6 +6328,329 @@
         ],
         "type": "object"
       },
+      "IntegrationEnabledBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /integrations/{name}/enabled`.",
+        "properties": {
+          "enabled": {
+            "description": "Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "IntegrationEvent": {
+        "description": "What a notification integration can subscribe to.",
+        "oneOf": [
+          {
+            "const": "finding_proven",
+            "description": "A proof run proved a finding.",
+            "type": "string"
+          },
+          {
+            "const": "finding_status_changed",
+            "description": "A finding's status changed to anything but `proven` (that has its own event).",
+            "type": "string"
+          },
+          {
+            "const": "scan_finished",
+            "description": "A scan task ended (done, failed or cancelled).",
+            "type": "string"
+          },
+          {
+            "const": "ci_summary",
+            "description": "A summary of the project's findings, sent when a scan task ends.",
+            "type": "string"
+          }
+        ]
+      },
+      "IntegrationInput": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only.",
+        "properties": {
+          "allow_private": {
+            "default": false,
+            "description": "See `Integration.allow_private`.",
+            "type": "boolean"
+          },
+          "base_url": {
+            "default": "",
+            "description": "See `Integration.base_url`.",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "description": "See `Integration.email`.",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "description": "Turn it on (default true). Saving it here, as a person, is what enables it in this installation.",
+            "type": "boolean"
+          },
+          "events": {
+            "default": [],
+            "description": "See `Integration.events`.",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationEvent"
+            },
+            "type": "array"
+          },
+          "headers": {
+            "default": null,
+            "description": "Webhook: custom headers. Absent: keep the saved set; present: replace it.",
+            "items": {
+              "$ref": "#/components/schemas/HeaderInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "issue_type": {
+            "default": "",
+            "description": "See `Integration.issue_type`.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind"
+          },
+          "labels": {
+            "default": [],
+            "description": "See `Integration.labels`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "The integration's name; it must be the same as the name in the path.",
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "description": "See `Integration.project`.",
+            "type": "string"
+          },
+          "rate_per_minute": {
+            "default": 0,
+            "description": "See `Integration.rate_per_minute` (0 or absent: the default).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "signing_secret": {
+            "default": null,
+            "description": "Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "default": null,
+            "description": "The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep\nthe saved one; an empty string removes it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "webhook_url": {
+            "default": null,
+            "description": "Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "IntegrationKind": {
+        "description": "What an integration talks to.",
+        "oneOf": [
+          {
+            "const": "jira",
+            "description": "Jira (Cloud, Server or Data Center), REST API v2: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "github",
+            "description": "GitHub or GitHub Enterprise Server: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "gitlab",
+            "description": "GitLab.com or self-managed GitLab: create issues.",
+            "type": "string"
+          },
+          {
+            "const": "slack",
+            "description": "A Slack incoming webhook (or a compatible one): notifications.",
+            "type": "string"
+          },
+          {
+            "const": "webhook",
+            "description": "Any HTTPS endpoint: notifications as signed JSON.",
+            "type": "string"
+          }
+        ]
+      },
+      "IntegrationView": {
+        "description": "An integration as the API shows it: its configuration, the state of its secrets, and how it is doing.",
+        "properties": {
+          "active": {
+            "description": "It will send (enabled and trusted here, with every required secret present).",
+            "type": "boolean"
+          },
+          "allow_private": {
+            "default": false,
+            "description": "Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test\nserver). Off by default so a project file cannot point an integration at an internal service. Link-local\naddresses (cloud metadata) are refused either way.",
+            "type": "boolean"
+          },
+          "base_url": {
+            "default": "",
+            "description": "Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to\ngitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default\n`https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "description": "Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal\naccess token (Bearer), as Jira Server and Data Center use.",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "description": "A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an\nintegration that came with a project file stays off until a person enables it in this installation.",
+            "type": "boolean"
+          },
+          "events": {
+            "default": [],
+            "description": "Slack and webhook: the events to send.",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationEvent"
+            },
+            "type": "array"
+          },
+          "header_names": {
+            "default": [],
+            "description": "Names of the webhook's custom headers (their values are secrets, kept like the others).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "issue_type": {
+            "default": "",
+            "description": "Jira: the issue type's name (default `Bug`).",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind",
+            "default": "webhook"
+          },
+          "labels": {
+            "default": [],
+            "description": "Labels put on created issues (none by default: Jira refuses a label when its create screen has no label\nfield, and GitHub creates missing labels only for people with push access).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last delivery, when it failed."
+          },
+          "name": {
+            "default": "",
+            "description": "Its name (letters, digits, `-`, `_`, `.`), unique in the project.",
+            "type": "string"
+          },
+          "needs_review": {
+            "description": "Enabled in the file but not by a person in this installation (it came with the project, or what it points at\nchanged since a person enabled it). It sends nothing until it is enabled here.",
+            "type": "boolean"
+          },
+          "problems": {
+            "description": "What is missing for it to work, in words.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "project": {
+            "default": "",
+            "description": "Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`.",
+            "type": "string"
+          },
+          "rate_per_minute": {
+            "default": 20,
+            "description": "Most notifications per minute (1 to 60, default 20); more are skipped and logged.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secret_status": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SecretStatus"
+            },
+            "description": "Per secret slot: where it comes from. Values are never returned.",
+            "type": "object"
+          },
+          "secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or\n`env:NAME`. Never the secret itself.",
+            "type": "object"
+          },
+          "updated_by": {
+            "default": "",
+            "description": "Who saved it last and when.",
+            "type": "string"
+          },
+          "updated_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "enabled",
+          "base_url",
+          "project",
+          "issue_type",
+          "email",
+          "labels",
+          "events",
+          "allow_private",
+          "rate_per_minute",
+          "secrets",
+          "header_names",
+          "updated_by",
+          "updated_ms",
+          "secret_status",
+          "needs_review",
+          "active",
+          "problems"
+        ],
+        "type": "object"
+      },
       "InterceptSettings": {
         "additionalProperties": false,
         "properties": {
@@ -5518,6 +6733,52 @@
           "attached",
           "settings",
           "held"
+        ],
+        "type": "object"
+      },
+      "IssueLink": {
+        "description": "An issue created for a finding in another system.",
+        "properties": {
+          "by": {
+            "type": "string"
+          },
+          "created_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The provider's id for updates: the Jira key, the GitHub number, the GitLab iid.",
+            "type": "string"
+          },
+          "integration": {
+            "description": "The integration that created it.",
+            "type": "string"
+          },
+          "key": {
+            "description": "`PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab).",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/IntegrationKind"
+          },
+          "updated_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "url": {
+            "description": "The issue's page.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "kind",
+          "key",
+          "url",
+          "id",
+          "created_ms",
+          "updated_ms",
+          "by"
         ],
         "type": "object"
       },
@@ -5658,6 +6919,23 @@
         ],
         "type": "string"
       },
+      "LastError": {
+        "description": "The last delivery's failure, when the last delivery failed.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ts_ms",
+          "message"
+        ],
+        "type": "object"
+      },
       "LimitQuery": {
         "description": "Query of `GET /audit`.",
         "properties": {
@@ -5712,6 +6990,16 @@
             "description": "With a redirect: connect to it with TLS even for plain-HTTP clients.",
             "type": "boolean"
           },
+          "kind": {
+            "$ref": "#/components/schemas/ListenerKind",
+            "default": "http",
+            "description": "`http` (default) or `socks5`."
+          },
+          "password": {
+            "default": "",
+            "description": "`socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send\nthat value back to keep the saved password. Max 255 bytes.",
+            "type": "string"
+          },
           "redirect_host": {
             "default": "",
             "description": "Send every request to this host instead of where the client asked\n(empty: no redirect). The Host header is left as the client sent it.",
@@ -5724,9 +7012,34 @@
             "maximum": 65535,
             "minimum": 0,
             "type": "integer"
+          },
+          "transparent": {
+            "default": false,
+            "description": "`http` listeners only, Linux only: take connections that the operating system redirected here\n(iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a\ndevice without proxy settings works. See docs/capture.md.",
+            "type": "boolean"
+          },
+          "username": {
+            "default": "",
+            "description": "`socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes.",
+            "type": "string"
           }
         },
         "type": "object"
+      },
+      "ListenerKind": {
+        "description": "What a listener speaks.",
+        "oneOf": [
+          {
+            "const": "http",
+            "description": "An HTTP proxy (also takes clients that don't know about the proxy: see `transparent`).",
+            "type": "string"
+          },
+          {
+            "const": "socks5",
+            "description": "A SOCKS5 server (CONNECT only, no UDP), with an optional username and password.",
+            "type": "string"
+          }
+        ]
       },
       "ListenerStatus": {
         "properties": {
@@ -5739,12 +7052,22 @@
               "null"
             ]
           },
+          "kind": {
+            "$ref": "#/components/schemas/ListenerKind",
+            "description": "`http` or `socks5`."
+          },
           "running": {
+            "type": "boolean"
+          },
+          "transparent": {
+            "description": "Redirected traffic is accepted (see `ListenerConfig::transparent`).",
             "type": "boolean"
           }
         },
         "required": [
           "bind",
+          "kind",
+          "transparent",
           "running"
         ],
         "type": "object"
@@ -5769,6 +7092,7 @@
         "description": "Extra proxy listeners and whether each is running in this process.",
         "properties": {
           "listeners": {
+            "description": "The saved listeners; SOCKS5 passwords show as `********`.",
             "items": {
               "$ref": "#/components/schemas/ListenerConfig"
             },
@@ -5787,12 +7111,17 @@
               "$ref": "#/components/schemas/ListenerStatus"
             },
             "type": "array"
+          },
+          "transparent_supported": {
+            "description": "This build can take traffic the operating system redirected (`transparent` listeners): Linux only.",
+            "type": "boolean"
           }
         },
         "required": [
           "primary",
           "listeners",
-          "status"
+          "status",
+          "transparent_supported"
         ],
         "type": "object"
       },
@@ -6349,6 +7678,74 @@
         ],
         "type": "object"
       },
+      "MobileSetup": {
+        "description": "Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page.",
+        "properties": {
+          "ca_fingerprint": {
+            "description": "SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listener_reachable": {
+            "description": "Whether some proxy listener can be reached from another device: it listens on a LAN address or on every\ninterface. False when the proxy listens only on loopback (a phone cannot reach that).",
+            "type": "boolean"
+          },
+          "listeners": {
+            "description": "The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "proxy_addresses": {
+            "description": "The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "proxy_running": {
+            "description": "Whether this process runs the proxy at all (false with `--no-proxy`).",
+            "type": "boolean"
+          },
+          "qr_svg": {
+            "description": "SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qr_url": {
+            "description": "The URL the QR code holds.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "setup_host_url": {
+            "description": "The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess\nfirst. Empty when no listener is reachable or no LAN address was found.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "proxy_running",
+          "listener_reachable",
+          "urls",
+          "proxy_addresses",
+          "setup_host_url",
+          "listeners"
+        ],
+        "type": "object"
+      },
       "Mode": {
         "description": "How payloads are placed in the positions.",
         "oneOf": [
@@ -6487,8 +7884,15 @@
                 "type": "null"
               }
             ],
-            "default": null,
-            "description": "Send traffic through this proxy (None: connect directly)."
+            "description": "The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that\ngoes through the proxy, after one that sends the `bypass` hosts directly) and is never returned."
+          },
+          "upstream_rules": {
+            "default": [],
+            "description": "Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host\nthat fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamRule"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -6696,6 +8100,21 @@
           "headers"
         ],
         "type": "object"
+      },
+      "OnError": {
+        "description": "What the proxy does with a message when its hook fails.",
+        "oneOf": [
+          {
+            "const": "pass",
+            "description": "Forward the original message (fail open). The default.",
+            "type": "string"
+          },
+          {
+            "const": "drop",
+            "description": "Drop the message: a request gets ProxyMind's 403, a response a 502 (fail closed).",
+            "type": "string"
+          }
+        ]
       },
       "OpChange": {
         "properties": {
@@ -7363,6 +8782,62 @@
         },
         "type": "object"
       },
+      "Pending": {
+        "description": "Where a run waits for an approval.",
+        "properties": {
+          "approval_id": {
+            "type": "string"
+          },
+          "current_exchange": {
+            "description": "The exchange that was current, and what the run had used up, so it continues exactly from here.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "The definition's digest when the run paused: a run does not continue on a workflow edited since.",
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sends": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "step": {
+            "description": "The send step (from 1) that needs the approval.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "approval_id",
+          "summary",
+          "reasons",
+          "current_exchange",
+          "sends",
+          "elapsed_ms",
+          "digest"
+        ],
+        "type": "object"
+      },
       "PluginCheckIssue": {
         "properties": {
           "check": {
@@ -7522,9 +8997,35 @@
           }
         ]
       },
+      "PluginHookSet": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /plugins/{name}/hooks/{kind}`.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/HookAction"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
       "PluginInfo": {
         "description": "An installed plugin, for lists.",
         "properties": {
+          "accepted_permissions": {
+            "description": "The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "api": {
+            "description": "Plugin API version: 1 (no permissions) or 2.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "description": {
             "type": "string"
           },
@@ -7533,6 +9034,13 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "hooks": {
+            "description": "Traffic hooks the plugin declares.",
+            "items": {
+              "$ref": "#/components/schemas/HookInfo"
+            },
+            "type": "array"
           },
           "kinds": {
             "description": "\"passive\" and/or \"active\".",
@@ -7553,6 +9061,10 @@
           "name": {
             "type": "string"
           },
+          "needs_review": {
+            "description": "The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them.",
+            "type": "boolean"
+          },
           "panels": {
             "description": "Panels the plugin adds: (id, title).",
             "items": {
@@ -7567,6 +9079,13 @@
                 }
               ],
               "type": "array"
+            },
+            "type": "array"
+          },
+          "permissions": {
+            "description": "The permissions a v2 plugin declares.",
+            "items": {
+              "type": "string"
             },
             "type": "array"
           },
@@ -7586,7 +9105,12 @@
           "enabled",
           "dir",
           "panels",
-          "signature"
+          "signature",
+          "api",
+          "permissions",
+          "accepted_permissions",
+          "needs_review",
+          "hooks"
         ],
         "type": "object"
       },
@@ -8031,6 +9555,205 @@
           }
         ]
       },
+      "ProtobufDecodeRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or\nProtobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.",
+        "properties": {
+          "annotate": {
+            "default": null,
+            "description": "Add comments with other readings of numbers (zigzag, signed, float). Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "body_b64": {
+            "default": null,
+            "description": "The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body_text": {
+            "default": null,
+            "description": "The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_type": {
+            "default": null,
+            "description": "The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,\n`application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Decode the body of this recorded exchange (its content type says how the body is framed).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grpc_encoding": {
+            "default": null,
+            "description": "How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "default": null,
+            "description": "How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "part": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProtobufPart"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "With `exchange_id`: the `request` or the `response` (default)."
+          }
+        },
+        "type": "object"
+      },
+      "ProtobufDecoded": {
+        "description": "Response of `POST /tools/protobuf/decode`.",
+        "properties": {
+          "exact": {
+            "description": "Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text\nis edited (see `notes`).",
+            "type": "boolean"
+          },
+          "grpc_message": {
+            "description": "`grpc-message` from the trailers, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grpc_status": {
+            "description": "`grpc-status` from the trailers, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.",
+            "type": "string"
+          },
+          "messages": {
+            "description": "Messages decoded (gRPC trailers not counted).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "notes": {
+            "description": "What could not be decoded or will not round-trip.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "notice": {
+            "description": "Present for agents: how to treat `text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it\nis redacted and wrapped as untrusted target content.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text",
+          "exact",
+          "messages",
+          "grpc_status",
+          "grpc_message",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "ProtobufEncodeRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent).",
+        "properties": {
+          "kind": {
+            "default": null,
+            "description": "How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every\nmessage uncompressed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "The text, as returned by the decode route (with edits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "ProtobufEncoded": {
+        "description": "Response of `POST /tools/protobuf/encode`.",
+        "properties": {
+          "body_b64": {
+            "description": "The body bytes, base64.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The framing used.",
+            "type": "string"
+          },
+          "length": {
+            "description": "Length of the body in bytes.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "body_b64",
+          "length"
+        ],
+        "type": "object"
+      },
+      "ProtobufPart": {
+        "description": "Which message of an exchange `POST /tools/protobuf/decode` reads.",
+        "oneOf": [
+          {
+            "const": "request",
+            "description": "The request.",
+            "type": "string"
+          },
+          {
+            "const": "response",
+            "description": "The response (the default).",
+            "type": "string"
+          }
+        ]
+      },
       "ProveSweep": {
         "description": "A run of [`Service::auto_prove`].",
         "properties": {
@@ -8162,6 +9885,13 @@
           "approval_id": {
             "default": null,
             "description": "Run a previously approved request. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body_b64": {
+            "description": "Replace the request's body with these bytes (base64), as in `replay_send`.",
             "type": [
               "string",
               "null"
@@ -8494,6 +10224,14 @@
             "default": false,
             "description": "Keep only exchanges whose target is in the rules of engagement's\nscope (everything else is still proxied, just not recorded).",
             "type": "boolean"
+          },
+          "record_devices": {
+            "default": [],
+            "description": "Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other\nclients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -8655,6 +10393,13 @@
               "null"
             ]
           },
+          "body_b64": {
+            "description": "Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these\nbytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "exchange_id": {
             "default": null,
             "description": "Recorded exchange to base this on (its target is used).",
@@ -8709,7 +10454,7 @@
           },
           "raw": {
             "default": null,
-            "description": "Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.\nIf omitted, the request of `exchange_id` is resent unchanged.",
+            "description": "Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for\n`:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.\nIf omitted, the request of `exchange_id` is resent unchanged.",
             "type": [
               "string",
               "null"
@@ -9081,6 +10826,30 @@
         ],
         "type": "object"
       },
+      "ReviewItem": {
+        "description": "One line of the review page.",
+        "properties": {
+          "claimed_by": {
+            "description": "A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as\nwritten in the file, never used as an identity.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "what",
+          "detail",
+          "claimed_by"
+        ],
+        "type": "object"
+      },
       "RoeBody": {
         "description": "Body of `PUT /roe` and `POST /roe/check`.",
         "properties": {
@@ -9361,6 +11130,41 @@
           {
             "const": "per_request",
             "description": "One changed copy of the request (see `request`).",
+            "type": "string"
+          }
+        ]
+      },
+      "RunStatus": {
+        "oneOf": [
+          {
+            "enum": [
+              "running"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "ok",
+            "description": "Every step ran and every assertion held.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "An assertion failed, a step could not run (nothing extracted, a send error) or a limit was reached.",
+            "type": "string"
+          },
+          {
+            "const": "stopped",
+            "description": "A `match` step did not fit: the exchange is not one this workflow is for.",
+            "type": "string"
+          },
+          {
+            "const": "denied",
+            "description": "The policy gate refused a send (scope, tier, actor).",
+            "type": "string"
+          },
+          {
+            "const": "pending_approval",
+            "description": "A send waits for a person's approval; run it again with `approval_id` to continue from that step.",
             "type": "string"
           }
         ]
@@ -10018,6 +11822,14 @@
             "description": "Match letter case.",
             "type": "boolean"
           },
+          "client": {
+            "default": null,
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hide_ext": {
             "default": null,
             "description": "File extensions to hide, comma-separated, e.g. \"png,jpg,css,js\". Matched against the path before any\nquery; a leading dot is allowed and case is ignored.",
@@ -10123,7 +11935,7 @@
           },
           "q": {
             "default": null,
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "type": [
               "string",
               "null"
@@ -10208,6 +12020,33 @@
         ],
         "type": "object"
       },
+      "SecretStatus": {
+        "description": "Where one secret comes from, never the secret itself.",
+        "properties": {
+          "hint": {
+            "description": "The last four characters of a long secret, e.g. `…a1b2`; absent for short ones.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "For an environment reference: `env:NAME`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "`saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
       "SendBody": {
         "description": "Body of `POST /assistant/send`.",
         "properties": {
@@ -10226,6 +12065,25 @@
         },
         "required": [
           "text"
+        ],
+        "type": "object"
+      },
+      "SendFindingBody": {
+        "additionalProperties": false,
+        "description": "Body of `POST /findings/{id}/issue`.",
+        "properties": {
+          "integration": {
+            "description": "The Jira, GitHub or GitLab integration to create the issue in.",
+            "type": "string"
+          },
+          "update": {
+            "default": false,
+            "description": "When the finding already has an issue there: update it instead of refusing. Default false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "integration"
         ],
         "type": "object"
       },
@@ -10327,7 +12185,7 @@
           },
           "tools": {
             "default": [],
-            "description": "Tools (exchange sources) covered: replay, fuzzer, scan, crawl,\ndiscover, token_analyzer, proof, authz, graphql, openapi. Empty: all.\nOlder names (repeater, intruder, sequencer) still match.",
+            "description": "Tools (exchange sources) covered: replay, fuzzer, scan, crawl,\ndiscover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.\nOlder names (repeater, intruder, sequencer) still match.",
             "items": {
               "type": "string"
             },
@@ -10418,6 +12276,14 @@
           "low",
           "medium",
           "high"
+        ],
+        "type": "string"
+      },
+      "Side": {
+        "description": "Which message of the current exchange a test or extraction looks at.",
+        "enum": [
+          "request",
+          "response"
         ],
         "type": "string"
       },
@@ -10685,6 +12551,1006 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "Step": {
+        "description": "One step of a workflow.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stop the run (status `stopped`) unless the current exchange fits the condition.",
+            "properties": {
+              "body_contains": {
+                "description": "Text the body must contain (decoded: de-chunked and decompressed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "body_regex": {
+                "description": "A regular expression the body must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "description": "A header that must be present (by name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header_contains": {
+                "description": "With `header`: text one of its values must contain (case-insensitive).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hql": {
+                "description": "A history query (HQL) the current exchange must match, e.g. `status:200 resp:\"token\"`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What a failed `assert` says, or why a `match` stopped the run (default: what failed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "description": "Methods the request may have, separated by commas: `POST` or `GET,HEAD`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "negate": {
+                "default": false,
+                "description": "Pass when the tests do NOT all hold.",
+                "type": "boolean"
+              },
+              "path_contains": {
+                "description": "Text the request path (with its query) must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response)."
+              },
+              "status": {
+                "description": "Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "match",
+                "type": "string"
+              },
+              "var": {
+                "description": "A variable to test. Alone: it must be set and not empty.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_contains": {
+                "description": "With `var`: text the value must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_equals": {
+                "description": "With `var`: the exact value.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_matches": {
+                "description": "With `var`: a regular expression the value must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on.",
+            "properties": {
+              "body_contains": {
+                "description": "Text the body must contain (decoded: de-chunked and decompressed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "body_regex": {
+                "description": "A regular expression the body must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header": {
+                "description": "A header that must be present (by name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "header_contains": {
+                "description": "With `header`: text one of its values must contain (case-insensitive).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hql": {
+                "description": "A history query (HQL) the current exchange must match, e.g. `status:200 resp:\"token\"`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "description": "What a failed `assert` says, or why a `match` stopped the run (default: what failed).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "method": {
+                "description": "Methods the request may have, separated by commas: `POST` or `GET,HEAD`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "negate": {
+                "default": false,
+                "description": "Pass when the tests do NOT all hold.",
+                "type": "boolean"
+              },
+              "path_contains": {
+                "description": "Text the request path (with its query) must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response)."
+              },
+              "status": {
+                "description": "Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "assert",
+                "type": "string"
+              },
+              "var": {
+                "description": "A variable to test. Alone: it must be set and not empty.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_contains": {
+                "description": "With `var`: text the value must contain.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_equals": {
+                "description": "With `var`: the exact value.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "var_matches": {
+                "description": "With `var`: a regular expression the value must match.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Read a value out of the current request or response into a variable.",
+            "properties": {
+              "expr": {
+                "default": "",
+                "description": "The regular expression, JSON pointer, header name, cookie name or input name.",
+                "type": "string"
+              },
+              "group": {
+                "description": "For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one.",
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/components/schemas/ExtractType",
+                "default": "regex"
+              },
+              "name": {
+                "default": "",
+                "description": "The variable to set: letters, digits and `_`, not starting with a digit or `current_`.",
+                "type": "string"
+              },
+              "optional": {
+                "default": false,
+                "description": "When nothing is found: leave the variable unset and go on (default: the run fails here).",
+                "type": "boolean"
+              },
+              "side": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Side"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Read the request or the response (default response; `html_input` reads responses only)."
+              },
+              "type": {
+                "const": "extract",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Set a variable from a template, then apply encodings, decodings or hashes to it.",
+            "properties": {
+              "name": {
+                "default": "",
+                "description": "The variable to set.",
+                "type": "string"
+              },
+              "ops": {
+                "default": [],
+                "description": "Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,\nurl_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,\nhex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,\nsha1, sha256. None: the variable is just the template.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "transform",
+                "type": "string"
+              },
+              "value": {
+                "default": "",
+                "description": "The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Send a request through the policy gate; its response becomes the current exchange.",
+            "properties": {
+              "edits": {
+                "default": [],
+                "description": "Changes made to the request after the template is filled in, in order.",
+                "items": {
+                  "$ref": "#/components/schemas/Edit"
+                },
+                "type": "array"
+              },
+              "fix_content_length": {
+                "description": "Update Content-Length to match the body (default true).",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "identity": {
+                "description": "Send with this test identity's credentials (\"anonymous\" for none).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "raw": {
+                "description": "A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current\nexchange's request.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "send",
+                "type": "string"
+              },
+              "url": {
+                "description": "Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a\nresponse cannot choose where the next request goes.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StepRun": {
+        "description": "What one step did.",
+        "properties": {
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exchange_id": {
+            "description": "For a send: the recorded exchange (also when it failed on the wire).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "`match`, `assert`, `extract`, `transform` or `send`.",
+            "type": "string"
+          },
+          "message": {
+            "description": "What happened, without target content.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "step": {
+            "description": "Position in the workflow, from 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step",
+          "kind",
+          "status",
+          "message",
+          "elapsed_ms"
+        ],
+        "type": "object"
+      },
+      "StepStatus": {
+        "enum": [
+          "ok",
+          "failed",
+          "stopped",
+          "denied",
+          "pending_approval"
+        ],
+        "type": "string"
+      },
+      "StreamChunkPage": {
+        "description": "A page of a stream's chunks, oldest first.",
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/components/schemas/StreamChunkView"
+            },
+            "type": "array"
+          },
+          "next_after_id": {
+            "description": "Pass as `after` to read the next page.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "notice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Chunks stored for the stream.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stream_id",
+          "total",
+          "chunks"
+        ],
+        "type": "object"
+      },
+      "StreamChunkView": {
+        "description": "One chunk of a stream as `actor` may see it.",
+        "properties": {
+          "data_b64": {
+            "description": "The stored bytes as base64. People only: agents get the redacted `text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "`client` (towards the server) or `server` (towards the client).",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kept": {
+            "description": "Bytes stored: fewer than `len` when the recording cap cut the chunk.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "len": {
+            "description": "Bytes on the wire.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "possible_prompt_injection": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "description": "A lossy text preview of the bytes (invalid UTF-8 becomes U+FFFD). Untrusted target content: for agents it is\nredacted and wrapped in `<untrusted_target_content>`.",
+            "type": "string"
+          },
+          "text_truncated": {
+            "description": "The preview is shorter than the stored bytes.",
+            "type": "boolean"
+          },
+          "ts_ms": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "ts_ms",
+          "from",
+          "len",
+          "kept",
+          "text",
+          "text_truncated"
+        ],
+        "type": "object"
+      },
+      "StreamChunksQuery": {
+        "description": "Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`.",
+        "properties": {
+          "after": {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StreamDetail": {
+        "description": "One stream with its first chunks.",
+        "properties": {
+          "chunks": {
+            "$ref": "#/components/schemas/StreamChunkPage"
+          },
+          "stream": {
+            "$ref": "#/components/schemas/StreamRow"
+          }
+        },
+        "required": [
+          "stream",
+          "chunks"
+        ],
+        "type": "object"
+      },
+      "StreamFilter": {
+        "additionalProperties": false,
+        "description": "Filters of the stream list. Unknown keys are refused.",
+        "properties": {
+          "before_id": {
+            "default": null,
+            "description": "Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "client": {
+            "default": null,
+            "description": "Only streams from this client: an IP address, or a device name set on the Proxy setup page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "default": null,
+            "description": "Only targets whose host contains this text (case-insensitive).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Most rows (default 50, max 500).",
+            "format": "uint",
+            "maximum": 500,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "port": {
+            "default": null,
+            "description": "Only this target port.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "since_ms": {
+            "default": null,
+            "description": "Only streams that started at or after this time (milliseconds since 1970).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tls": {
+            "default": null,
+            "description": "With true: only TLS streams; with false: only plain ones.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "until_ms": {
+            "default": null,
+            "description": "Only streams that started at or before this time (milliseconds since 1970).",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StreamPage": {
+        "description": "Streams, newest first.",
+        "properties": {
+          "next_before_id": {
+            "description": "Pass as `before_id` for older streams.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "streams": {
+            "items": {
+              "$ref": "#/components/schemas/StreamRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "streams"
+        ],
+        "type": "object"
+      },
+      "StreamReplayRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "From a previous pending_approval result: runs the approved send. All other fields must be identical.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chunks": {
+            "default": null,
+            "description": "Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB\nin all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "delay_ms": {
+            "default": null,
+            "description": "Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile.",
+            "format": "uint64",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "default": null,
+            "description": "Characters of each chunk shown back (default 2000).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_response_bytes": {
+            "default": null,
+            "description": "Stop reading after this many bytes from the server (default 1 MB, at most 16 MB).",
+            "format": "uint",
+            "maximum": 16777216,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "read_ms": {
+            "default": null,
+            "description": "After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A\nserver that spoke first in the original is waited for before the first chunk, for the same time.",
+            "format": "uint64",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "default": 0,
+            "description": "The recorded stream to replay.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "text_chunks": {
+            "default": null,
+            "description": "Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stream_id"
+        ],
+        "type": "object"
+      },
+      "StreamReplayResult": {
+        "oneOf": [
+          {
+            "description": "The connection opened; everything sent and received is recorded as the new stream `stream_id`.",
+            "properties": {
+              "chunks": {
+                "$ref": "#/components/schemas/StreamChunkPage"
+              },
+              "ended": {
+                "description": "`server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or\n`error`.",
+                "type": "string"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "received_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sent_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "status": {
+                "const": "done",
+                "type": "string"
+              },
+              "stream_id": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status",
+              "stream_id",
+              "ended",
+              "sent_bytes",
+              "received_bytes",
+              "chunks"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The target could not be reached; the attempt is recorded as stream `stream_id`.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "status": {
+                "const": "failed",
+                "type": "string"
+              },
+              "stream_id": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status",
+              "stream_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_id": {
+                "type": "string"
+              },
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "pending_approval",
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "approval_id",
+              "summary",
+              "reasons"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reasons": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "status": {
+                "const": "denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reasons"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StreamRow": {
+        "description": "One stream, without its chunks.",
+        "properties": {
+          "actor_id": {
+            "type": "string"
+          },
+          "alpn": {
+            "description": "The ALPN protocol agreed, when it was not HTTP.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes_to_client": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytes_to_server": {
+            "description": "Bytes sent towards the server and towards the client (all of them, also those past the recording cap).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chunks": {
+            "description": "Chunks stored.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "client_addr": {
+            "description": "The client's IP address; absent for streams ProxyMind opened itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "end_ms": {
+            "description": "Absent while the stream is open.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ended": {
+            "description": "How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "replay_of": {
+            "description": "The stream this one replays.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sni": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "`proxy` or `stream_replay`.",
+            "type": "string"
+          },
+          "start_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tls": {
+            "description": "The chunks are the decrypted bytes of a TLS connection.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "The recording cap was reached: later bytes were relayed and counted but not kept.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "start_ms",
+          "host",
+          "port",
+          "tls",
+          "source",
+          "actor_id",
+          "bytes_to_server",
+          "bytes_to_client",
+          "chunks",
+          "truncated"
+        ],
         "type": "object"
       },
       "TargetAnalysis": {
@@ -11026,6 +13892,203 @@
         ],
         "type": "object"
       },
+      "Trigger": {
+        "additionalProperties": false,
+        "description": "The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step.",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "description": "Off by default. Only a person turns it on; editing the steps turns it off again.",
+            "type": "boolean"
+          },
+          "enabled_by": {
+            "default": "",
+            "description": "Who turned it on. Runs go through the gate as this person.",
+            "type": "string"
+          },
+          "enabled_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_per_minute": {
+            "default": 6,
+            "description": "At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "description": "Exchanges skipped because of the rate cap or because other runs were busy, since this process started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "max_per_minute",
+          "enabled_by",
+          "enabled_ms",
+          "skipped"
+        ],
+        "type": "object"
+      },
+      "TrustConfirmRequest": {
+        "additionalProperties": false,
+        "description": "`POST /project/trust`.",
+        "properties": {
+          "digest": {
+            "default": null,
+            "description": "The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the\nconfirmation is refused. Omit to confirm whatever is there now (scripts).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TrustReview": {
+        "description": "Everything the file would do, grouped, for the person who is deciding.",
+        "properties": {
+          "assistant": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "listeners": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "network_other": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "rewrite_rules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "roe_summary": true,
+          "roe_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "session": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          },
+          "upstream_rules": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "roe_text",
+          "roe_summary",
+          "listeners",
+          "upstream_rules",
+          "network_other",
+          "rewrite_rules",
+          "schedules",
+          "triggers",
+          "session",
+          "assistant"
+        ],
+        "type": "object"
+      },
+      "TrustView": {
+        "description": "Whether the project in this installation is trusted, and if not, what is held back.\n\n**Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command\nline, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network\nsettings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic\ngoes direct and unmodified, never through an address the file names); match-and-replace rules; session rules\nand macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file\nnames); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks\nis the file's own).\n\n**Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing\nsettings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,\n`integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores\nall of these settings anyway.",
+        "properties": {
+          "basis": {
+            "description": "`created`, `confirmed` or `edited`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed_since_trust": {
+            "description": "A record exists but the settings no longer match it: the file changed since.",
+            "type": "boolean"
+          },
+          "digest": {
+            "description": "The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read.",
+            "type": "string"
+          },
+          "held_back": {
+            "items": {
+              "$ref": "#/components/schemas/HeldBack"
+            },
+            "type": "array"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "review": {
+            "$ref": "#/components/schemas/TrustReview"
+          },
+          "safe_mode": {
+            "type": "boolean"
+          },
+          "status": {
+            "description": "`trusted` or `safe_mode`.",
+            "type": "string"
+          },
+          "trusted_at_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trusted_by": {
+            "description": "Who vouched for the project and when, if anyone did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "safe_mode",
+          "project_id",
+          "digest",
+          "trusted_by",
+          "trusted_at_ms",
+          "basis",
+          "changed_since_trust",
+          "held_back",
+          "review"
+        ],
+        "type": "object"
+      },
       "Turn": {
         "description": "What one user message produced.",
         "properties": {
@@ -11162,6 +14225,104 @@
           "username": {
             "default": "",
             "description": "Optional login (Basic for HTTP proxies, username/password for SOCKS5).",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UpstreamResolution": {
+        "description": "Answer of `POST /network/upstream/resolve`: how a host would be reached.",
+        "properties": {
+          "direct": {
+            "description": "Connected directly (the rule says `direct`, or no rule matched).",
+            "type": "boolean"
+          },
+          "pattern": {
+            "description": "The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote_dns": {
+            "description": "The rule lets the proxy resolve names.",
+            "type": "boolean"
+          },
+          "rule_index": {
+            "description": "The first rule that covers the host (0 is the first), or null when none does.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "via": {
+            "description": "What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_index",
+          "pattern",
+          "direct",
+          "via",
+          "remote_dns"
+        ],
+        "type": "object"
+      },
+      "UpstreamResolveRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /network/upstream/resolve`.",
+        "properties": {
+          "host": {
+            "default": "",
+            "description": "The target host: a name or an IP address.",
+            "type": "string"
+          },
+          "rules": {
+            "default": null,
+            "description": "Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamRule"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpstreamRule": {
+        "additionalProperties": false,
+        "description": "One entry of the ordered upstream list: which targets it covers and how to reach them.",
+        "properties": {
+          "match": {
+            "default": [],
+            "description": "Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers\n`example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`\nor `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:\ncovers everything, which only makes sense for the last rule.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "password": {
+            "default": "",
+            "type": "string"
+          },
+          "remote_dns": {
+            "default": false,
+            "description": "Let the proxy resolve target names (\"socks5h\" for SOCKS5; for HTTP proxies, CONNECT names the host).\nOff by default so the proxy is asked for the address ProxyMind resolved and checked against the denied\nnetworks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.",
+            "type": "boolean"
+          },
+          "username": {
+            "default": "",
+            "description": "Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like\nother secrets, hidden when settings are shown (`********`) and never logged.",
+            "type": "string"
+          },
+          "via": {
+            "default": "",
+            "description": "`direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.",
             "type": "string"
           }
         },
@@ -11319,6 +14480,271 @@
           "total",
           "interesting",
           "captures"
+        ],
+        "type": "object"
+      },
+      "Workflow": {
+        "additionalProperties": false,
+        "description": "A saved workflow.",
+        "properties": {
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "id": {
+            "default": 0,
+            "description": "Assigned when the workflow is first saved.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "description": "A unique name, 1 to 64 characters.",
+            "type": "string"
+          },
+          "steps": {
+            "default": [],
+            "description": "Up to 50 steps, run in order. No loops.",
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/Trigger",
+            "default": {
+              "enabled": false,
+              "enabled_by": "",
+              "enabled_ms": 0,
+              "max_per_minute": 6,
+              "skipped": 0
+            },
+            "description": "Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on)."
+          },
+          "updated_by": {
+            "default": "",
+            "description": "Who saved it last.",
+            "type": "string"
+          },
+          "updated_ms": {
+            "default": 0,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "steps",
+          "trigger",
+          "updated_by",
+          "updated_ms"
+        ],
+        "type": "object"
+      },
+      "WorkflowInput": {
+        "additionalProperties": false,
+        "description": "What a person edits: a workflow without the fields the service manages.",
+        "properties": {
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "type": "string"
+          },
+          "steps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowRun": {
+        "description": "One run of a workflow.",
+        "properties": {
+          "actor": {
+            "description": "Who ran it, e.g. `human:local` or `agent:claude`.",
+            "type": "string"
+          },
+          "assertions": {
+            "items": {
+              "$ref": "#/components/schemas/AssertionResult"
+            },
+            "type": "array"
+          },
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exchanges": {
+            "description": "Every exchange the run sent, in order.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Pending"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "description": "Why it did not finish `ok`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sends": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_exchange": {
+            "description": "The exchange it started on, if any.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "started_ms": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "steps": {
+            "description": "The steps that ran, in order.",
+            "items": {
+              "$ref": "#/components/schemas/StepRun"
+            },
+            "type": "array"
+          },
+          "trigger": {
+            "description": "How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`.",
+            "type": "string"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variables at the end of the run. For agents, values are hidden or marked as target content.",
+            "type": "object"
+          },
+          "workflow_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "workflow_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "workflow_name",
+          "actor",
+          "trigger",
+          "status",
+          "started_ms",
+          "duration_ms",
+          "steps",
+          "variables",
+          "exchanges",
+          "assertions",
+          "sends"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunBody": {
+        "additionalProperties": false,
+        "description": "Body of `POST /workflows/{id}/run`.",
+        "properties": {
+          "approval_id": {
+            "default": null,
+            "description": "Continue a run that waits for this approval (give the same `exchange_id` as before).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_id": {
+            "default": null,
+            "description": "Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowRunsQuery": {
+        "additionalProperties": false,
+        "description": "Query of `GET /workflows/runs`.",
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "How many runs (default 50, at most 200).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workflow": {
+            "default": null,
+            "description": "Only runs of this workflow (name or id).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkflowTriggerBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /workflows/{id}/trigger`.",
+        "properties": {
+          "enabled": {
+            "description": "Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person\ncan turn it on (audited), and editing the workflow's steps turns it off again.",
+            "type": "boolean"
+          },
+          "max_per_minute": {
+            "default": null,
+            "description": "At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "enabled"
         ],
         "type": "object"
       },
@@ -12764,16 +16190,15 @@
         "summary": "The audit log, newest first."
       }
     },
-    "/api/v1/audit/verify": {
-      "get": {
-        "operationId": "audit_verify",
+    "/api/v1/audit/checkpoint": {
+      "post": {
+        "operationId": "audit_checkpoint",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `intact` and either `records` (how many were checked) or `error`.",
-                  "type": "object"
+                  "$ref": "#/components/schemas/Checkpoint"
                 }
               }
             },
@@ -12790,7 +16215,66 @@
             "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
           }
         },
-        "summary": "Check the audit log's hash chain."
+        "summary": "Write a signed checkpoint of the audit log (head hash, count, time); people only. Export it and keep it elsewhere."
+      }
+    },
+    "/api/v1/audit/checkpoints": {
+      "get": {
+        "operationId": "audit_checkpoints",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Checkpoint"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "The signed checkpoints stored in the project, oldest first."
+      }
+    },
+    "/api/v1/audit/verify": {
+      "get": {
+        "operationId": "audit_verify",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditVerification"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints."
       }
     },
     "/api/v1/authz/candidates": {
@@ -13425,6 +16909,119 @@
           }
         },
         "summary": "Crawl a site and record what it finds."
+      }
+    },
+    "/api/v1/devices": {
+      "get": {
+        "operationId": "devices_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicesView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Client addresses (phones, tablets) seen in history, with their names and counts."
+      }
+    },
+    "/api/v1/devices/{addr}": {
+      "delete": {
+        "operationId": "device_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the address).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Remove a device's name."
+      },
+      "put": {
+        "operationId": "device_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceNameBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Give a client address a name, e.g. Pixel 8."
       }
     },
     "/api/v1/discover": {
@@ -14085,6 +17682,19 @@
             }
           },
           {
+            "description": "Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page.",
+            "in": "query",
+            "name": "client",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "description": "Only exchanges with an id greater than this (newer ones; for paging forward).",
             "in": "query",
             "name": "after_id",
@@ -14194,7 +17804,7 @@
             }
           },
           {
-            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
+            "description": "A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,\nparentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client\ncomment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.\nE.g. status:>=500 -ext:js resp~\"(?i)sql\" respheader:set-cookie. Text terms read messages, so a page may stop\nearly (see `scanned` and `next_before_id` in the result).",
             "in": "query",
             "name": "q",
             "required": false,
@@ -14281,7 +17891,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`.",
+                  "description": "Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`. When rules or an edit in the intercept queue changed the traffic, `request` is what was sent to the server and `response` is what the server sent, as always; `request_original` is the request as the client sent it and `response_delivered` is the response as delivered to the client (text, cut by `max` like the others, with `*_truncated`; also `request_original_b64` / `response_delivered_b64` with `bytes=1`; each absent when unchanged). `changes` lists what changed them (`phase`, `by` rule, intercept or hook, `name`, optional `note`; empty when nothing did). `diffs` has one line diff per changed message (`phase`, `from_label`, `to_label`, `lines` in the shape of `/tools/compare`): the request from the client's to the one sent, the response from the server's to the delivered one. The `view` carries `request_original` and `response_delivered` too, redacted and marked untrusted for agents.",
                   "type": "object"
                 }
               }
@@ -14785,6 +18395,54 @@
           }
         },
         "summary": "Ask the assistant to explain a finding."
+      }
+    },
+    "/api/v1/findings/{id}/issue": {
+      "post": {
+        "operationId": "finding_issue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendFindingBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueLink"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Create (or with `update`, refresh) the finding's issue in a Jira, GitHub or GitLab integration, with redacted text and reproduction. The issue's key and URL are kept on the finding as `issue_links`. People only; audited."
       }
     },
     "/api/v1/findings/{id}/prove": {
@@ -15492,6 +19150,300 @@
         "summary": "Import a HAR document as recorded traffic."
       }
     },
+    "/api/v1/integrations": {
+      "get": {
+        "operationId": "integrations_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IntegrationView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Configured integrations (Jira, GitHub, GitLab, Slack, webhooks) with the state of their secrets, whether they came with a project file and need review, and the last error. Secrets are never returned. People only."
+      }
+    },
+    "/api/v1/integrations/{name}": {
+      "delete": {
+        "operationId": "integration_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the name).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Delete an integration with its saved secrets, trust and delivery log. People only; audited."
+      },
+      "get": {
+        "operationId": "integration_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One integration. People only."
+      },
+      "put": {
+        "operationId": "integration_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Create or replace an integration; secrets (token, webhook_url, signing_secret, header values) are write-only and go to the user's private secrets file or an `env:NAME` reference, never the project. Saving it enabled here is what lets it send in this installation. People only; audited."
+      }
+    },
+    "/api/v1/integrations/{name}/deliveries": {
+      "get": {
+        "operationId": "integration_deliveries",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How many (default 50, at most 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeliveryRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "The last deliveries of an integration (status, HTTP status, attempts, host; never bodies or secrets), newest first. People only."
+      }
+    },
+    "/api/v1/integrations/{name}/enabled": {
+      "put": {
+        "operationId": "integration_enabled",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationEnabledBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn an integration on or off. Turning it on here, as a person, is what makes an integration that came with a project file send. People only; audited."
+      }
+    },
+    "/api/v1/integrations/{name}/test": {
+      "post": {
+        "operationId": "integration_test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryRow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Test an integration: read the tracker's project, post a test message to Slack, or send a `test` event to a webhook. Recorded in the delivery log. People only."
+      }
+    },
     "/api/v1/intercept": {
       "get": {
         "operationId": "intercept_state",
@@ -16090,7 +20042,7 @@
             "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
           }
         },
-        "summary": "Outgoing network settings (upstream proxy, client certificates, host overrides)."
+        "summary": "Outgoing network settings (ordered upstream rules, client certificates, host overrides). Proxy passwords show as `********`."
       },
       "put": {
         "operationId": "network_put",
@@ -16127,6 +20079,44 @@
           }
         },
         "summary": "Change the outgoing network settings."
+      }
+    },
+    "/api/v1/network/upstream/resolve": {
+      "post": {
+        "operationId": "network_resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpstreamResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamResolution"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Which upstream rule decides how a host is reached (saved rules, or a draft passed in `rules`). Sends nothing."
       }
     },
     "/api/v1/openapi": {
@@ -16476,6 +20466,100 @@
         "summary": "Turn a plugin on or off."
       }
     },
+    "/api/v1/plugins/{name}/accept": {
+      "post": {
+        "operationId": "plugin_accept",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginsView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "A person accepts the permissions a version 2 plugin declares (and the plugin turns on)."
+      }
+    },
+    "/api/v1/plugins/{name}/hooks/{kind}": {
+      "put": {
+        "operationId": "plugin_hook_set",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginHookSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginsView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn a plugin's request or response hook on or off, reorder it, pause or resume it."
+      }
+    },
     "/api/v1/plugins/{name}/panels/{panel}": {
       "get": {
         "operationId": "plugin_panel",
@@ -16534,6 +20618,70 @@
           }
         },
         "summary": "The data of a plugin panel."
+      }
+    },
+    "/api/v1/project/trust": {
+      "get": {
+        "operationId": "project_trust",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Whether this installation trusts the project file (`trusted` or `safe_mode`), what safe mode holds back and why, and everything the file would switch on (listeners, upstream and rewrite rules, schedules, triggers, session macros, the assistant URL, the rules of engagement) for a person to review. Anyone may read it."
+      },
+      "post": {
+        "operationId": "project_trust_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrustConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Trust the project's current settings in this installation: listeners start, schedules and triggers run (as the person confirming), rules and network settings apply. Pass the `digest` from the review to confirm exactly what was read. People only; audited, a refusal too."
       }
     },
     "/api/v1/proofs": {
@@ -18269,6 +22417,34 @@
         "summary": "How to point a browser at the proxy: address, CA availability and fingerprint."
       }
     },
+    "/api/v1/setup/mobile": {
+      "get": {
+        "operationId": "setup_mobile",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSetup"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "How a phone or tablet reaches ProxyMind's setup page: URLs on the LAN, a QR code (SVG) of the first, and the CA fingerprint."
+      }
+    },
     "/api/v1/sitemap": {
       "get": {
         "operationId": "sitemap",
@@ -18405,7 +22581,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns) and `counters`.",
+                  "description": "Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns), `counters` and `safe_mode` (true while this installation does not trust the project).",
                   "type": "object"
                 }
               }
@@ -18424,6 +22600,327 @@
           }
         },
         "summary": "Version, project, who you are, the engagement and its counters."
+      }
+    },
+    "/api/v1/streams": {
+      "get": {
+        "operationId": "streams_list",
+        "parameters": [
+          {
+            "description": "Only targets whose host contains this text (case-insensitive).",
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only this target port.",
+            "in": "query",
+            "name": "port",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams from this client: an IP address, or a device name set on the Proxy setup page.",
+            "in": "query",
+            "name": "client",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams that started at or after this time (milliseconds since 1970).",
+            "in": "query",
+            "name": "since_ms",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams that started at or before this time (milliseconds since 1970).",
+            "in": "query",
+            "name": "until_ms",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "With true: only TLS streams; with false: only plain ones.",
+            "in": "query",
+            "name": "tls",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Only streams with an id less than this (older ones; for paging back, pass `next_before_id`).",
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most rows (default 50, max 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "maximum": 500,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Raw TCP and TLS streams the proxy relayed and recorded, newest first."
+      }
+    },
+    "/api/v1/streams/{id}": {
+      "get": {
+        "operationId": "stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamDetail"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One recorded stream with its first chunks (base64 plus a text preview each)."
+      }
+    },
+    "/api/v1/streams/{id}/chunks": {
+      "get": {
+        "operationId": "stream_chunks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Most chunks to return (default 100, at most 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamChunkPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "A page of one stream's chunks, oldest first."
+      }
+    },
+    "/api/v1/streams/{id}/replay": {
+      "post": {
+        "operationId": "stream_replay",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamReplayResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream."
       }
     },
     "/api/v1/tools/code": {
@@ -18579,6 +23076,82 @@
           }
         },
         "summary": "Encode or decode text locally."
+      }
+    },
+    "/api/v1/tools/protobuf/decode": {
+      "post": {
+        "operationId": "tools_protobuf_decode",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtobufDecodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtobufDecoded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Decode a gRPC or Protobuf body into editable text, without a schema."
+      }
+    },
+    "/api/v1/tools/protobuf/encode": {
+      "post": {
+        "operationId": "tools_protobuf_encode",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtobufEncodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtobufEncoded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Encode edited Protobuf text back into body bytes (framed for gRPC if asked)."
       }
     },
     "/api/v1/tools/request-transform": {
@@ -18922,6 +23495,389 @@
           }
         },
         "summary": "Check for a new version now."
+      }
+    },
+    "/api/v1/workflows": {
+      "get": {
+        "operationId": "workflows_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Workflow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Saved workflows (chains of match, extract, transform, send and assert steps)."
+      },
+      "post": {
+        "operationId": "workflow_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Save a new workflow. People only; audited."
+      }
+    },
+    "/api/v1/workflows/runs": {
+      "get": {
+        "operationId": "workflow_runs",
+        "parameters": [
+          {
+            "description": "Only runs of this workflow (name or id).",
+            "in": "query",
+            "name": "workflow",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "How many runs (default 50, at most 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": null,
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkflowRun"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Recent workflow runs, newest first."
+      }
+    },
+    "/api/v1/workflows/runs/{id}": {
+      "get": {
+        "operationId": "workflow_run_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRun"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One workflow run: its steps, variables, sent exchanges and assertions."
+      }
+    },
+    "/api/v1/workflows/{id}": {
+      "delete": {
+        "operationId": "workflow_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `deleted` (the id or name given).",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Delete a workflow and its runs. People only; audited."
+      },
+      "get": {
+        "operationId": "workflow_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "One workflow, by id or name."
+      },
+      "put": {
+        "operationId": "workflow_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Replace a workflow's name, description and steps. Turns its trigger off when the steps change. People only; audited."
+      }
+    },
+    "/api/v1/workflows/{id}/run": {
+      "post": {
+        "operationId": "workflow_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRun"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Run a workflow on a recorded exchange, or continue a run that waits for an approval. Every send goes through the policy gate."
+      }
+    },
+    "/api/v1/workflows/{id}/trigger": {
+      "put": {
+        "operationId": "workflow_trigger",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowTriggerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workflow"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Turn the per-exchange trigger on or off, with its per-minute cap. People only; audited."
       }
     },
     "/api/v1/ws/history": {

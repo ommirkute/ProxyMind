@@ -195,6 +195,7 @@ async fn resending_a_recorded_exchange_uses_its_target() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store
         .insert_exchange(&NewExchange {
+            client_addr: None,
             ts_ms: 0,
             duration_ms: None,
             source: "proxy".into(),
@@ -210,6 +211,7 @@ async fn resending_a_recorded_exchange_uses_its_target() {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
     let s = Service::new(store, Policy::new(Roe::parse(ROE).unwrap())).unwrap();

@@ -11,11 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::StreamExt;
 use pm_fuzz::{Extract, Grep, Mode, Observed, PayloadSet, Template};
-use pm_policy::{Actor, ActorKind, Tier};
+use pm_policy::{Actor, Tier};
 use pm_replay::Endpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Perm, Principal};
 use crate::events::{Event, Rate};
 use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
@@ -55,6 +56,11 @@ pub struct FuzzerRequest {
     pub hypothesis_id: Option<i64>,
     /// Run a previously approved request. All other fields must be identical.
     pub approval_id: Option<String>,
+    /// A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a
+    /// value or assert something about every response. The workflow's own sends are gated one by one as the actor
+    /// who runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack
+    /// approves this workflow's definition (it is part of what the approval covers).
+    pub workflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -77,6 +83,9 @@ pub struct FuzzerRow {
     pub reflected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the attack's workflow made of this result (`workflow` in the request).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<Box<crate::FuzzerWorkflow>>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -205,6 +214,8 @@ struct Prepared {
     throttle_ms: u64,
     /// Recursive grep: payloads come from each previous response.
     recursive: Option<Recursive>,
+    /// Run on each result.
+    workflow: Option<crate::Workflow>,
 }
 
 struct Recursive {
@@ -289,10 +300,19 @@ impl Service {
         let fix_cl = req.fix_content_length.unwrap_or(true);
         // The approval binds the whole attack, not just the baseline.
         let total = recursive_rule.as_ref().map_or(outs.len(), |r| r.count);
-        let extra = json!({
+        let workflow = req
+            .workflow
+            .as_deref()
+            .filter(|w| !w.trim().is_empty())
+            .map(|k| self.workflow_for_fuzzer(k))
+            .transpose()?;
+        let mut extra = json!({
             "fuzzer": { "template": req.raw, "mode": req.mode, "payload_sets": req.payload_sets,
                           "grep": req.grep, "requests": total }
         });
+        if let Some(w) = &workflow {
+            extra["fuzzer"]["workflow"] = json!({ "id": w.id, "name": w.name, "digest": w.digest() });
+        }
         match self.gate_send_with(
             actor,
             "fuzzer_run",
@@ -324,6 +344,7 @@ impl Service {
             concurrency: req.concurrency.unwrap_or(1).clamp(1, 20),
             throttle_ms: req.throttle_ms.unwrap_or(0).min(60_000),
             recursive: recursive_rule.map(|rule| Recursive { template, rule, re: recursive_re, endpoint, tier }),
+            workflow,
         }))
     }
 
@@ -402,7 +423,7 @@ impl Service {
             Ok(b) => {
                 // The baseline row is shown at once, so this update is not held back.
                 let mut st = a.state.lock();
-                st.baseline = Some(row(b, None, vec![None; p.positions], &p.grep, &p.extract));
+                st.baseline = Some(row(b, None, vec![None; p.positions], &p.grep, &p.extract, None));
                 self.fuzzer_event(a, &st, Rate::Always);
             }
             Err(e) => {
@@ -417,6 +438,7 @@ impl Service {
             self.fuzzer_recursive(actor, &p, r, a).await;
             return;
         }
+        let workflow = &p.workflow;
         let jobs = p.planned.into_iter().enumerate().map(|(i, (plan, out))| {
             let send = &send;
             async move {
@@ -430,16 +452,24 @@ impl Service {
                 if p.throttle_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(p.throttle_ms)).await;
                 }
-                Some((i, plan.payloads, send(out).await))
+                let sent = send(out).await;
+                // The workflow sees the result as its current exchange.
+                let wf = match (&sent, workflow) {
+                    (Ok(s), Some(w)) if s.error.is_none() => {
+                        Some(self.workflow_on_result(actor, w, s.exchange_id).await)
+                    }
+                    _ => None,
+                };
+                Some((i, plan.payloads, sent, wf))
             }
         });
         let mut stream = futures_util::stream::iter(jobs).buffer_unordered(p.concurrency);
         while let Some(r) = stream.next().await {
-            let Some((i, payloads, sent)) = r else { continue };
+            let Some((i, payloads, sent, wf)) = r else { continue };
             let mut st = a.state.lock();
             match sent {
                 Ok(s) => {
-                    st.rows.push(row(s, Some(i), payloads, &p.grep, &p.extract));
+                    st.rows.push(row(s, Some(i), payloads, &p.grep, &p.extract, wf));
                     let rate = Self::fuzzer_rate(&st, Rate::Limited);
                     self.fuzzer_event(a, &st, rate);
                 }
@@ -507,9 +537,13 @@ impl Service {
                 }
             };
             let next = r.rule.extract.find(r.re.as_ref(), &response_text(sent.response.as_deref()));
+            let wf = match &p.workflow {
+                Some(w) if sent.error.is_none() => Some(self.workflow_on_result(actor, w, sent.exchange_id).await),
+                _ => None,
+            };
             {
                 let mut st = a.state.lock();
-                st.rows.push(row(sent, Some(i), vec![Some(payload.clone())], &p.grep, &p.extract));
+                st.rows.push(row(sent, Some(i), vec![Some(payload.clone())], &p.grep, &p.extract, wf));
                 let rate = Self::fuzzer_rate(&st, Rate::Limited);
                 self.fuzzer_event(a, &st, rate);
             }
@@ -584,7 +618,7 @@ impl Service {
             .cloned()
             .ok_or_else(|| ServiceError::NotFound(format!("attack {id}")))?;
         // People see every attack; agents and plugins only their own.
-        if actor.kind != ActorKind::Human && a.actor != actor.id() {
+        if !Principal::from_actor(actor).allows(Perm::RunsReadAll) && a.actor != actor.id() {
             return Err(ServiceError::NotFound(format!("attack {id}")));
         }
         Ok(a)
@@ -641,11 +675,12 @@ impl Service {
 
     /// Recent attacks, newest first.
     pub fn fuzzer_list(&self, actor: &Actor) -> Vec<AttackSummary> {
+        let all = Principal::from_actor(actor).allows(Perm::RunsReadAll);
         self.attacks
             .lock()
             .iter()
             .rev()
-            .filter(|a| actor.kind == ActorKind::Human || a.actor == actor.id())
+            .filter(|a| all || a.actor == actor.id())
             .map(|a| {
                 let st = a.state.lock();
                 AttackSummary {
@@ -701,6 +736,7 @@ fn row(
     payloads: Vec<Option<String>>,
     grep: &Grep,
     extract: &[(Extract, Option<regex::Regex>)],
+    workflow: Option<crate::FuzzerWorkflow>,
 ) -> FuzzerRow {
     // Head and decoded body: extract rules may look at headers too.
     let text = response_text(sent.response.as_deref());
@@ -726,5 +762,6 @@ fn row(
         extracted,
         reflected,
         error: sent.error,
+        workflow: workflow.map(Box::new),
     }
 }

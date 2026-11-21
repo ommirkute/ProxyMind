@@ -68,8 +68,8 @@ export function qs(params: Record<string, string | number | boolean | undefined 
 // ---- types ----------------------------------------------------------------
 // Types that match the API contract come from api-types.gen.ts (cargo xtask contracts).
 
-import type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
-export type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, Approval };
+import type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, AuditVerification, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
+export type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, AuditVerification, BrowserOpened, Approval };
 
 // Hand-written types: narrower than the contract or shaped for the UI.
 
@@ -90,6 +90,8 @@ export interface Status {
   engagement: string | null;
   in_scope: string[];
   counters: Counters;
+  /** This installation does not trust the project file (threat model F-2): its settings are held back. */
+  safe_mode?: boolean;
 }
 
 export interface ExchangePage {
@@ -97,6 +99,18 @@ export interface ExchangePage {
   scanned?: number;
   exchanges: ExchangeSummary[];
   next_before_id?: number;
+}
+
+export interface DiffLine { op: "same" | "added" | "removed"; text: string }
+export interface LineDiff { lines: DiffLine[]; added: number; removed: number; truncated: boolean }
+
+/** One change rules or the intercept editor made to an exchange's traffic. */
+export interface TrafficChange {
+  phase: "request" | "response";
+  by: "rule" | "intercept" | "hook";
+  /** The rule (its comment, or part and match) or a label for the editor. */
+  name: string;
+  note?: string;
 }
 
 export interface ExchangeDetail {
@@ -111,6 +125,23 @@ export interface ExchangeDetail {
   /** Body as people read it: de-chunked, decompressed, markup kept (null when absent or binary). For Pretty/Render. */
   request_body?: string | null;
   response_body?: string | null;
+  /** gRPC / Protobuf message as editable text (one `@message` per gRPC message); absent for other traffic. */
+  request_protobuf?: string;
+  response_protobuf?: string;
+  /** When rules or the intercept editor changed the traffic: `request` is what went to the server and `response` is
+   *  what the server sent. `request_original` is the request as the browser sent it, `response_delivered` the response
+   *  as the browser received it. Each is absent when unchanged. */
+  request_original?: string;
+  response_delivered?: string;
+  request_original_truncated?: number;
+  response_delivered_truncated?: number;
+  request_original_b64?: string;
+  response_delivered_b64?: string;
+  /** What changed the traffic; empty when nothing did. */
+  changes: TrafficChange[];
+  /** One line diff per changed message: request from the browser's to the one sent, response from the server's to the
+   *  delivered one. */
+  diffs: { phase: "request" | "response"; from_label: string; to_label: string; lines: LineDiff }[];
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };
@@ -182,6 +213,8 @@ export interface Finding {
   issue?: IssueType;
   retest?: Retest | null;
   duplicates?: number;
+  /** Issues created for it in Jira, GitHub or GitLab. */
+  issue_links?: IssueLink[];
   /** Model-written explanation and fix (Markdown), if someone asked for one. */
   explanation?: string;
 }

@@ -1,0 +1,63 @@
+//! One error type. Variants that an unauthenticated caller can reach say as little as possible: a wrong password, an
+//! unknown or disabled user and a wrong second factor are all [`AccountError::InvalidCredentials`].
+
+use std::time::Duration;
+
+pub type Result<T, E = AccountError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccountError {
+    /// Wrong password or code, unknown user, disabled user: deliberately the same.
+    #[error("invalid credentials")]
+    InvalidCredentials,
+    /// Too many recent failures for this account or address. Not a lock: the delay grows and then expires.
+    #[error("too many attempts, try again in {} s", .retry_after.as_secs())]
+    Throttled { retry_after: Duration },
+    /// The pending sign-in token is unknown, expired, used up or of the wrong kind.
+    #[error("this sign-in step has expired or is not valid")]
+    InvalidPending,
+    /// A code was wrong where the caller is already authenticated (enrolment, confirmation).
+    #[error("invalid code")]
+    InvalidCode,
+    #[error("invalid or expired invite")]
+    InvalidInvite,
+    #[error("invalid or expired setup token")]
+    InvalidSetupToken,
+    #[error("an owner already exists")]
+    OwnerExists,
+    #[error("session is not valid")]
+    SessionInvalid,
+    #[error("password refused: {0}")]
+    WeakPassword(&'static str),
+    #[error("invalid username: {0}")]
+    InvalidUsername(&'static str),
+    #[error("that username is taken")]
+    UsernameTaken,
+    #[error("no such user")]
+    NoSuchUser,
+    /// The acting user may not do this (not a server admin, not an owner of the project).
+    #[error("not authorised")]
+    NotAuthorised,
+    #[error("this would leave the server without an active administrator")]
+    LastAdmin,
+    #[error("this account must keep a second factor")]
+    SecondFactorRequired,
+    #[error("a second factor is already enrolled; remove it first")]
+    AlreadyEnrolled,
+    #[error("no pending second-factor enrolment")]
+    NotEnrolling,
+    #[error("invalid argument: {0}")]
+    InvalidArgument(&'static str),
+    #[error("server key: {0}")]
+    ServerKey(String),
+    #[error("a stored secret could not be decrypted (wrong server key, or the record was moved)")]
+    Decrypt,
+    #[error("the account database was created by a newer ProxyMind (schema {0})")]
+    NewerSchema(i64),
+    #[error("storage error: {0}")]
+    Storage(#[from] rusqlite::Error),
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("internal error: {0}")]
+    Internal(String),
+}

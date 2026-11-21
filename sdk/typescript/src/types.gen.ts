@@ -185,6 +185,12 @@ export interface Arg {
   type: string;
 }
 
+export interface AssertionResult {
+  message: string;
+  ok: boolean;
+  step: number;
+}
+
 export interface AssistantConfig {
   /**
    * Name of the environment variable holding the API key (the key itself
@@ -280,17 +286,77 @@ export interface AttackView {
   total: number;
 }
 
-/** One audit log entry. Hashing and verification live in `pm-policy`. */
+/** How the checkpoints fared. */
+export interface AuditCheckpointStatus {
+  /** The newest checkpoint's signer. */
+  fingerprint: string | null;
+  /** The newest checkpoint's record count and time. */
+  latest_seq: number | null;
+  latest_ts_ms: number | null;
+  problems: string[];
+  /**
+   * Whether the signer was tied to a known key (the home or server key, or a fingerprint you gave). When false the
+   * signatures only prove the checkpoint was not altered, not who made it.
+   */
+  signer_pinned: boolean;
+  /** `none` (no checkpoint to check), `ok` or `failed`. */
+  status: string;
+  /** Checkpoints stored in the project, and checkpoints supplied from files. */
+  stored: number;
+  supplied: number;
+}
+
+/**
+ * One audit log entry. Hashing and verification live in `pm-policy`.
+ *
+ * Version 1 records cover only the first eight fields. Version 2 adds the context fields (`principal_kind` to
+ * `client_addr`), which are part of the hash, and an optional `mac` (not part of the hash) that proves the record was
+ * written by someone holding the audit key. JSON of a version 1 record is unchanged (the new fields are left out).
+ */
 export interface AuditRecord {
   action: string;
   actor: string;
+  /** The client's IP address, when known. Version 2. */
+  client_addr?: string | null;
   decision: string;
   /** JSON text describing the action. */
   detail: string;
   hash: number[];
+  /** HMAC-SHA256 of `hash` under the audit key (server mode). Not part of the hash. */
+  mac?: string | null;
   prev_hash: number[];
+  /** How the actor was identified: `local` (single-user mode), `session` or `token`. Version 2. */
+  principal_kind?: string | null;
+  /** The project's id (setting `project_id`). Version 2. */
+  project_id?: string | null;
   seq: number;
+  /** The first 8 bytes (hex) of the stored hash of the session id. Version 2. */
+  session_id?: string | null;
+  /** The id of the token used (never the secret). Version 2. */
+  token_id?: string | null;
   ts_ms: number;
+  /** The stable account id (`u_...`) of the person; None in single-user mode. Version 2. */
+  user_id?: string | null;
+  /** Record version: 1 (original) or 2 (with context). Left out of JSON when 1. */
+  version?: number;
+}
+
+/** The result of checking the audit log. */
+export interface AuditVerification {
+  checkpoints: AuditCheckpointStatus;
+  error?: string | null;
+  /** Hex of the newest record's hash (note it: `proxymind audit verify --anchor` checks it later). */
+  head: string;
+  /** The chain, the key (when one applies) and the checkpoints all passed. */
+  intact: boolean;
+  /** `verified`, `skipped` (records are keyed, no key was given), `not_keyed` or `failed`. */
+  key_check: string;
+  /** The key check in words. */
+  key_note: string;
+  keyed_records: number;
+  records: number;
+  v1_records: number;
+  v2_records: number;
 }
 
 /**
@@ -463,6 +529,21 @@ export interface CaptureBody {
   role?: string | null;
 }
 
+/** One change made to an exchange's traffic in flight. */
+export interface Change {
+  /**
+   * What changed it: `rule` (match and replace), `intercept` (edited in the intercept queue) or `hook` (a plugin
+   * hook; the name is `<plugin>/<kind>`). A hook entry whose note starts with `bypassed:` or `failed:` is a note
+   * only: the hook did not change the message.
+   */
+  by: string;
+  /** The rule (its comment, or its part and match) or a label for the editor. */
+  name: string;
+  note?: string | null;
+  /** Which message changed: `request` or `response`. */
+  phase: string;
+}
+
 /** Query of `GET /model/changes`. */
 export interface ChangesQuery {
   /** Snapshot id to compare the current model with. */
@@ -488,6 +569,21 @@ export interface Check {
 export interface CheckYaml {
   /** The check, as YAML. */
   yaml: string;
+}
+
+export interface Checkpoint {
+  format: string;
+  /** Hex of the newest record's hash. */
+  head: string;
+  /** The project the log belongs to (setting `project_id`), so a checkpoint cannot be moved to another project. */
+  project_id?: string | null;
+  /** Hex of the Ed25519 public key that signed it. */
+  public_key: string;
+  /** How many records the log had (the newest one's sequence number). */
+  seq: number;
+  /** Hex of the signature over [`Checkpoint::message`]. */
+  signature: string;
+  ts_ms: number;
 }
 
 export interface Clickjacking {
@@ -805,6 +901,54 @@ export interface DecodeRequest {
   ops?: string[];
 }
 
+/** Query of `GET /integrations/{name}/deliveries`. */
+export interface DeliveriesQuery {
+  /** How many (default 50, at most 200). */
+  limit?: number | null;
+}
+
+/** One stored delivery. */
+export interface DeliveryRow {
+  actor: string;
+  attempts: number;
+  detail: string;
+  event: string;
+  finding_id: number | null;
+  host: string;
+  http_status: number | null;
+  id: number;
+  integration: string;
+  kind: string;
+  status: string;
+  ts_ms: number;
+}
+
+/** Body of `PUT /devices/{addr}`. */
+export interface DeviceNameBody {
+  /** The name to show for this address (1 to 60 characters). */
+  name: string;
+}
+
+/** A client address seen in history, possibly with a name. */
+export interface DeviceView {
+  /** The client's IP address (no port). */
+  addr: string;
+  /** Exchanges recorded from it. */
+  exchanges: number;
+  /** When the latest one was recorded (milliseconds since the epoch); absent if none is in history. */
+  last_seen_ms?: number | null;
+  /** The name a person gave it, e.g. `Pixel 8`. */
+  name?: string | null;
+  /** Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`). */
+  record_only: boolean;
+}
+
+/** Response of `GET /devices`. */
+export interface DevicesView {
+  /** Devices seen in history (most recent first), then named or selected ones not seen yet. */
+  devices: DeviceView[];
+}
+
 export interface DiscoverRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
@@ -877,6 +1021,33 @@ export interface DomTestResult {
   url: string;
 }
 
+/** A change to a request. `{{variable}}` works in the values. */
+export type Edit =
+  /** Replace a header's value, or add the header. */
+  | {
+      name: string;
+      op: "set_header";
+      value: string;
+    }
+  | {
+      name: string;
+      op: "remove_header";
+    }
+  /** Set a query, URL-encoded form or top-level JSON parameter; added when the request does not have it. */
+  | {
+      name: string;
+      op: "set_param";
+      value: string;
+    }
+  /** Replace text anywhere in the request. Fails when nothing matches, so a typo is not a silent no-op. */
+  | {
+      find: string;
+      op: "replace_text";
+      /** `find` is a regular expression and `replace` may use `$1`. */
+      regex?: boolean;
+      replace: string;
+    };
+
 /** Body of `POST /engage/references`, `/engage/csrf` and `/engage/clickjacking`. */
 export interface EngageExchange {
   /** CSRF only: submit the form when the page loads. */
@@ -948,6 +1119,11 @@ export interface ExchangeQuery {
 /** One row of history, without the raw bytes. */
 export interface ExchangeSummary {
   actor_id: string;
+  /**
+   * The IP address of the device that sent it through the proxy (no port); absent for exchanges recorded before
+   * this was tracked and for ones ProxyMind sent itself.
+   */
+  client_addr?: string | null;
   comment?: string | null;
   duration_ms: number | null;
   error: string | null;
@@ -958,6 +1134,12 @@ export interface ExchangeSummary {
   id: number;
   identity?: string | null;
   method: string;
+  /**
+   * Rules, the intercept editor or a hook changed the request or response (the client's side is kept beside the
+   * recorded one); see [`Exchange::changes`]. Absent when not. A hook that was bypassed or failed leaves a note in
+   * `changes` but doesn't make the row modified.
+   */
+  modified?: boolean;
   path: string;
   port: number;
   req_len: number;
@@ -970,6 +1152,8 @@ export interface ExchangeSummary {
 
 export interface ExchangeView {
   actor: string;
+  /** What changed the traffic: which rules or edits. */
+  changes?: Change[];
   duration_ms?: number | null;
   error?: string | null;
   id: number;
@@ -979,7 +1163,17 @@ export interface ExchangeView {
   possible_prompt_injection?: string[];
   redacted: boolean;
   request: MessageView;
+  /**
+   * The request as the client sent it, when rules or an edit in the intercept queue changed it (`request` is
+   * what was sent to the server). Same untrusted-content rules as `request`.
+   */
+  request_original?: MessageView | null;
   response?: MessageView | null;
+  /**
+   * The response as delivered to the client, when rules or an edit changed it (`response` is what the server
+   * sent). Derived from target content, so wrapped as untrusted like `response`.
+   */
+  response_delivered?: MessageView | null;
   source: string;
   status?: number | null;
   url: string;
@@ -1004,6 +1198,8 @@ export interface ExportRequest {
    * previous result.
    */
   before_id?: number | null;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -1027,7 +1223,7 @@ export interface ExportRequest {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).
@@ -1067,11 +1263,33 @@ export type ExtractKind =
   /** A cookie the response sets. */
   | "cookie";
 
+/** How an extraction reads its source. */
+export type ExtractType =
+  /**
+   * A capture group of a regular expression over the head and the decoded body (`group`, default 1, else the whole
+   * match).
+   */
+  | "regex"
+  /** A JSON pointer into the body, e.g. `/data/token`. */
+  | "json"
+  /** A header's value. */
+  | "header"
+  /** A cookie: from `Set-Cookie` in a response, from `Cookie` in a request. */
+  | "cookie"
+  /** The `value` of an HTML `<input>` found by its `name` (or `id`), entities decoded: the hidden CSRF field. */
+  | "html_input";
+
 export interface Extraction {
   expr?: string;
   kind?: ExtractKind;
   /** Variable name: letters, digits and `_`. */
   name?: string;
+}
+
+/** A recent failure of a hook. */
+export interface Failure {
+  at_ms: number;
+  reason: string;
 }
 
 /** The result of trying to prove one finding. */
@@ -1218,6 +1436,13 @@ export interface FuzzerRequest {
   throttle_ms?: number | null;
   /** Target as scheme://host[:port], when not using exchange_id. */
   url?: string | null;
+  /**
+   * A workflow (name or id) to run on each result, with the result's exchange as the current one: to extract a
+   * value or assert something about every response. The workflow's own sends are gated one by one as the actor
+   * who runs the attack, so one that needs an approval shows `pending_approval` in the row. Approving the attack
+   * approves this workflow's definition (it is part of what the approval covers).
+   */
+  workflow?: string | null;
 }
 
 export type FuzzerResult =
@@ -1256,6 +1481,8 @@ export interface FuzzerRow {
   payloads: (string | null)[];
   reflected: boolean;
   status?: number | null;
+  /** What the attack's workflow made of this result (`workflow` in the request). */
+  workflow?: FuzzerWorkflow | null;
 }
 
 /** What starting a background attack did. */
@@ -1275,6 +1502,18 @@ export type FuzzerStart =
       reasons: string[];
       status: "denied";
     };
+
+/** What a fuzzer result got from the workflow attached to the attack. */
+export interface FuzzerWorkflow {
+  reason?: string | null;
+  run_id: number;
+  status: RunStatus;
+  /**
+   * The run's variables (hidden or marked as target content for agents): what the workflow extracted from this
+   * result's response.
+   */
+  variables: { [key: string]: string };
+}
 
 export interface GraphEdge {
   from: string;
@@ -1353,6 +1592,8 @@ export interface GraphQlOperation {
 }
 
 export interface GroupItem {
+  /** Replace the request's body with these bytes (base64), as in `replay_send`. */
+  body_b64?: string | null;
   /** The recorded exchange to send. */
   exchange_id?: number | null;
   /** A label for the result (e.g. the Replay tab name). */
@@ -1417,6 +1658,17 @@ export type GroupResult =
       status: "denied";
     };
 
+/** A custom header of a webhook, as sent to `PUT /integrations/{name}`. */
+export interface HeaderInput {
+  /** The header's name. */
+  name: string;
+  /**
+   * Its value, or `env:NAME` to read it from an environment variable when used. Leave it out to keep the saved
+   * value of a header with this name. Values are write-only: they are never returned.
+   */
+  value?: string | null;
+}
+
 /** A message waiting for a decision. */
 export interface Held {
   /**
@@ -1434,6 +1686,17 @@ export interface Held {
   /** The message as text (lossy for non-UTF-8 bytes). */
   raw: string;
   scheme: string;
+}
+
+/** One thing the project file would switch on. */
+export interface HeldBack {
+  /**
+   * `listener`, `upstream`, `network`, `rewrite_rule`, `schedule`, `workflow_trigger`, `session`, `assistant`, `roe`
+   */
+  kind: string;
+  what: string;
+  /** What safe mode does about it. */
+  why: string;
 }
 
 export interface Hint {
@@ -1460,6 +1723,8 @@ export interface HistoryFilter {
    * previous result.
    */
   before_id?: number | null;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -1481,7 +1746,7 @@ export interface HistoryFilter {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).
@@ -1498,6 +1763,57 @@ export interface HistoryFilter {
   status_class?: string | null;
   /** Free text: the host, the path (with query) or the comment contains it (case-insensitive). */
   text?: string | null;
+}
+
+/** What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`). */
+export type HookAction =
+  /** Turn the hook on (needs the plugin's permissions accepted and the plugin on). */
+  | "enable"
+  /** Turn the hook off. */
+  | "disable"
+  /** Stop sending messages to it for now. */
+  | "pause"
+  /** Start again after a pause (or after it paused itself) and forget its recent failures. */
+  | "resume"
+  /** Run earlier among the hooks of its kind. */
+  | "up"
+  /** Run later among the hooks of its kind. */
+  | "down";
+
+/** A traffic hook of a plugin, as set up and as running. */
+export interface HookInfo {
+  blocked_reason?: string | null;
+  /** Messages sent to it and changed by it since the proxy started it (this process). */
+  calls: number;
+  changed: number;
+  /** A person turned it on. */
+  enabled: boolean;
+  /** Latest failures, newest last. */
+  failures: Failure[];
+  kind: HookKind;
+  matcher: HookMatch;
+  on_error: OnError;
+  /** Place among the hooks of its kind, first to run = 1. */
+  order: number;
+  paused_reason?: string | null;
+  /** `off`, `on`, `paused` or `unavailable` (turned on, but not runnable: see `blocked_reason`). */
+  state: string;
+  timeout_ms: number;
+}
+
+/** Request hook or response hook. */
+export type HookKind = "request" | "response";
+
+/** Which messages a hook sees. Empty lists match everything. */
+export interface HookMatch {
+  /** Media types of the message's own `Content-Type` (`application/json`, or `text/*`). */
+  content_types: string[];
+  /** Host patterns; `*` matches any run of characters (`*.example.com`). */
+  hosts: string[];
+  /** Request methods. */
+  methods: string[];
+  /** Path prefixes (`/api/`). */
+  paths: string[];
 }
 
 export interface HostOverride {
@@ -1564,6 +1880,137 @@ export interface ImportResult {
   skipped: string[];
 }
 
+/** Body of `PUT /integrations/{name}/enabled`. */
+export interface IntegrationEnabledBody {
+  /** Turn it on or off. Turning it on here, as a person, is what makes an integration from a project file send. */
+  enabled: boolean;
+}
+
+/** What a notification integration can subscribe to. */
+export type IntegrationEvent =
+  /** A proof run proved a finding. */
+  | "finding_proven"
+  /** A finding's status changed to anything but `proven` (that has its own event). */
+  | "finding_status_changed"
+  /** A scan task ended (done, failed or cancelled). */
+  | "scan_finished"
+  /** A summary of the project's findings, sent when a scan task ends. */
+  | "ci_summary";
+
+/** Body of `PUT /integrations/{name}`: the configuration plus the secrets, which are write-only. */
+export interface IntegrationInput {
+  /** See `Integration.allow_private`. */
+  allow_private?: boolean;
+  /** See `Integration.base_url`. */
+  base_url?: string;
+  /** See `Integration.email`. */
+  email?: string;
+  /** Turn it on (default true). Saving it here, as a person, is what enables it in this installation. */
+  enabled?: boolean;
+  /** See `Integration.events`. */
+  events?: IntegrationEvent[];
+  /** Webhook: custom headers. Absent: keep the saved set; present: replace it. */
+  headers?: HeaderInput[] | null;
+  /** See `Integration.issue_type`. */
+  issue_type?: string;
+  kind: IntegrationKind;
+  /** See `Integration.labels`. */
+  labels?: string[];
+  /** The integration's name; it must be the same as the name in the path. */
+  name: string;
+  /** See `Integration.project`. */
+  project?: string;
+  /** See `Integration.rate_per_minute` (0 or absent: the default). */
+  rate_per_minute?: number;
+  /** Webhook: the HMAC-SHA256 signing secret, or `env:NAME`. Write-only. */
+  signing_secret?: string | null;
+  /**
+   * The API token or personal access token (Jira, GitHub, GitLab), or `env:NAME`. Write-only. Leave it out to keep
+   * the saved one; an empty string removes it.
+   */
+  token?: string | null;
+  /** Slack: the incoming webhook URL, or `env:NAME`. Write-only (the URL is the credential). */
+  webhook_url?: string | null;
+}
+
+/** What an integration talks to. */
+export type IntegrationKind =
+  /** Jira (Cloud, Server or Data Center), REST API v2: create issues. */
+  | "jira"
+  /** GitHub or GitHub Enterprise Server: create issues. */
+  | "github"
+  /** GitLab.com or self-managed GitLab: create issues. */
+  | "gitlab"
+  /** A Slack incoming webhook (or a compatible one): notifications. */
+  | "slack"
+  /** Any HTTPS endpoint: notifications as signed JSON. */
+  | "webhook";
+
+/** An integration as the API shows it: its configuration, the state of its secrets, and how it is doing. */
+export interface IntegrationView {
+  /** It will send (enabled and trusted here, with every required secret present). */
+  active: boolean;
+  /**
+   * Allow a destination that resolves to a private or loopback address (a Jira on the office network, a test
+   * server). Off by default so a project file cannot point an integration at an internal service. Link-local
+   * addresses (cloud metadata) are refused either way.
+   */
+  allow_private: boolean;
+  /**
+   * Jira and GitLab: the server (`https://example.atlassian.net`, `https://gitlab.example.com`; GitLab defaults to
+   * gitlab.com). GitHub: the API base, only for Enterprise (`https://ghe.example.com/api/v3`; default
+   * `https://api.github.com`). Webhook: the URL to post to. Slack: filled in from the webhook URL (its origin).
+   */
+  base_url: string;
+  /**
+   * Jira: the account's email. With an email the token is an API token (Basic auth); without one it is a personal
+   * access token (Bearer), as Jira Server and Data Center use.
+   */
+  email: string;
+  /**
+   * A person turned it on. Whether it can send also depends on `needs_review` (see `IntegrationView`): an
+   * integration that came with a project file stays off until a person enables it in this installation.
+   */
+  enabled: boolean;
+  /** Slack and webhook: the events to send. */
+  events: IntegrationEvent[];
+  /** Names of the webhook's custom headers (their values are secrets, kept like the others). */
+  header_names: string[];
+  /** Jira: the issue type's name (default `Bug`). */
+  issue_type: string;
+  kind: IntegrationKind;
+  /**
+   * Labels put on created issues (none by default: Jira refuses a label when its create screen has no label
+   * field, and GitHub creates missing labels only for people with push access).
+   */
+  labels: string[];
+  /** The last delivery, when it failed. */
+  last_error?: LastError | null;
+  /** Its name (letters, digits, `-`, `_`, `.`), unique in the project. */
+  name: string;
+  /**
+   * Enabled in the file but not by a person in this installation (it came with the project, or what it points at
+   * changed since a person enabled it). It sends nothing until it is enabled here.
+   */
+  needs_review: boolean;
+  /** What is missing for it to work, in words. */
+  problems: string[];
+  /** Jira: the project key (`SEC`). GitHub: `owner/repo`. GitLab: the numeric project id or `group/project`. */
+  project: string;
+  /** Most notifications per minute (1 to 60, default 20); more are skipped and logged. */
+  rate_per_minute: number;
+  /** Per secret slot: where it comes from. Values are never returned. */
+  secret_status: { [key: string]: SecretStatus };
+  /**
+   * Where each secret is kept: slot (`token`, `webhook_url`, `signing_secret`, `header:<Name>`) to `saved` or
+   * `env:NAME`. Never the secret itself.
+   */
+  secrets: { [key: string]: string };
+  /** Who saved it last and when. */
+  updated_by: string;
+  updated_ms: number;
+}
+
 export interface InterceptSettings {
   /** Hold traffic at all. */
   enabled?: boolean;
@@ -1591,6 +2038,22 @@ export interface InterceptState {
   attached: boolean;
   held: Held[];
   settings: InterceptSettings;
+}
+
+/** An issue created for a finding in another system. */
+export interface IssueLink {
+  by: string;
+  created_ms: number;
+  /** The provider's id for updates: the Jira key, the GitHub number, the GitLab iid. */
+  id: string;
+  /** The integration that created it. */
+  integration: string;
+  /** `PROJ-12` (Jira), `#34` (GitHub) or `#7` (GitLab). */
+  key: string;
+  kind: IntegrationKind;
+  updated_ms: number;
+  /** The issue's page. */
+  url: string;
 }
 
 export interface IssueType {
@@ -1638,6 +2101,12 @@ export type Kind =
 
 export type Lang = "python" | "javascript" | "powershell";
 
+/** The last delivery's failure, when the last delivery failed. */
+export interface LastError {
+  message: string;
+  ts_ms: number;
+}
+
 /** Query of `GET /audit`. */
 export interface LimitQuery {
   /** Most records to return (default 200, at most 5000). */
@@ -1659,6 +2128,13 @@ export interface ListenerConfig {
   enabled?: boolean;
   /** With a redirect: connect to it with TLS even for plain-HTTP clients. */
   force_tls?: boolean;
+  /** `http` (default) or `socks5`. */
+  kind?: ListenerKind;
+  /**
+   * `socks5` listeners: the password for `username`. Hidden as `********` when settings are shown; send
+   * that value back to keep the saved password. Max 255 bytes.
+   */
+  password?: string;
   /**
    * Send every request to this host instead of where the client asked
    * (empty: no redirect). The Host header is left as the client sent it.
@@ -1666,12 +2142,31 @@ export interface ListenerConfig {
   redirect_host?: string;
   /** Port to send requests to with `redirect_host`. */
   redirect_port?: number;
+  /**
+   * `http` listeners only, Linux only: take connections that the operating system redirected here
+   * (iptables or nftables `REDIRECT`/`TPROXY`) and send them to where each client was really going, so a
+   * device without proxy settings works. See docs/capture.md.
+   */
+  transparent?: boolean;
+  /** `socks5` listeners: ask clients for this username (empty: no login). Max 255 bytes. */
+  username?: string;
 }
+
+/** What a listener speaks. */
+export type ListenerKind =
+  /** An HTTP proxy (also takes clients that don't know about the proxy: see `transparent`). */
+  | "http"
+  /** A SOCKS5 server (CONNECT only, no UDP), with an optional username and password. */
+  | "socks5";
 
 export interface ListenerStatus {
   bind: string;
   error?: string | null;
+  /** `http` or `socks5`. */
+  kind: ListenerKind;
   running: boolean;
+  /** Redirected traffic is accepted (see `ListenerConfig::transparent`). */
+  transparent: boolean;
 }
 
 /** Body of `PUT /proxy/listeners`. */
@@ -1682,11 +2177,14 @@ export interface ListenersBody {
 
 /** Extra proxy listeners and whether each is running in this process. */
 export interface ListenersView {
+  /** The saved listeners; SOCKS5 passwords show as `********`. */
   listeners: ListenerConfig[];
   /** The proxy's main listener (from the command line), if this process runs one. */
   primary: string | null;
   /** Empty when this process doesn't run the proxy. */
   status: ListenerStatus[];
+  /** This build can take traffic the operating system redirected (`transparent` listeners): Linux only. */
+  transparent_supported: boolean;
 }
 
 /**
@@ -1845,6 +2343,34 @@ export interface MessageView {
   start_line: string;
 }
 
+/** Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page. */
+export interface MobileSetup {
+  /** SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows. */
+  ca_fingerprint?: string | null;
+  /**
+   * Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+   * interface. False when the proxy listens only on loopback (a phone cannot reach that).
+   */
+  listener_reachable: boolean;
+  /** The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone. */
+  listeners: string[];
+  /** The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL. */
+  proxy_addresses: string[];
+  /** Whether this process runs the proxy at all (false with `--no-proxy`). */
+  proxy_running: boolean;
+  /** SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL. */
+  qr_svg?: string | null;
+  /** The URL the QR code holds. */
+  qr_url?: string | null;
+  /** The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`. */
+  setup_host_url: string;
+  /**
+   * Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+   * first. Empty when no listener is reachable or no LAN address was found.
+   */
+  urls: string[];
+}
+
 /** How payloads are placed in the positions. */
 export type Mode =
   /** One position at a time, the others keep their original value. */
@@ -1893,8 +2419,16 @@ export interface NetConfig {
    * Nothing inside such a tunnel is recorded.
    */
   tls_passthrough?: string[];
-  /** Send traffic through this proxy (None: connect directly). */
+  /**
+   * The older single-upstream form. Still accepted on input: it becomes `upstream_rules` (one rule that
+   * goes through the proxy, after one that sends the `bypass` hosts directly) and is never returned.
+   */
   upstream?: UpstreamProxy | null;
+  /**
+   * Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
+   * that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
+   */
+  upstream_rules?: UpstreamRule[];
 }
 
 export interface NewAttackPath {
@@ -1952,6 +2486,13 @@ export interface NoiseMask {
   /** Words that vary in text/HTML bodies. */
   words: string[];
 }
+
+/** What the proxy does with a message when its hook fails. */
+export type OnError =
+  /** Forward the original message (fail open). The default. */
+  | "pass"
+  /** Drop the message: a request gets ProxyMind's 403, a response a 502 (fail closed). */
+  | "drop";
 
 export interface OpChange {
   /** "now sent with credentials" / "now sent without credentials" */
@@ -2150,6 +2691,21 @@ export interface PayloadSet {
   url_encode?: boolean;
 }
 
+/** Where a run waits for an approval. */
+export interface Pending {
+  approval_id: string;
+  /** The exchange that was current, and what the run had used up, so it continues exactly from here. */
+  current_exchange: number | null;
+  /** The definition's digest when the run paused: a run does not continue on a workflow edited since. */
+  digest: string;
+  elapsed_ms: number;
+  reasons: string[];
+  sends: number;
+  /** The send step (from 1) that needs the approval. */
+  step: number;
+  summary: string;
+}
+
 export interface PluginCheckIssue {
   /** `<plugin>/<check>`. */
   check: string;
@@ -2191,18 +2747,33 @@ export type PluginCheckResult =
       status: "denied";
     };
 
+/** Body of `PUT /plugins/{name}/hooks/{kind}`. */
+export interface PluginHookSet {
+  action: HookAction;
+}
+
 /** An installed plugin, for lists. */
 export interface PluginInfo {
+  /** The permissions a person accepted. A v2 plugin only gets what it declares and a person accepted. */
+  accepted_permissions: string[];
+  /** Plugin API version: 1 (no permissions) or 2. */
+  api: number;
   description: string;
   dir: string;
   enabled: boolean;
+  /** Traffic hooks the plugin declares. */
+  hooks: HookInfo[];
   /** "passive" and/or "active". */
   kinds: string[];
   /** Most requests one active check may send. */
   max_requests?: number | null;
   name: string;
+  /** The declared permissions differ from the accepted ones: the plugin stays off until a person accepts them. */
+  needs_review: boolean;
   /** Panels the plugin adds: (id, title). */
   panels: [string, string][];
+  /** The permissions a v2 plugin declares. */
+  permissions: string[];
   /** Who signed it, as checked at install. */
   signature: Signature;
   version: string;
@@ -2377,6 +2948,86 @@ export type ProofResult =
       status: "denied";
     };
 
+/**
+ * Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+ * Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+ */
+export interface ProtobufDecodeRequest {
+  /** Add comments with other readings of numbers (zigzag, signed, float). Default true. */
+  annotate?: boolean | null;
+  /** The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`. */
+  body_b64?: string | null;
+  /** The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`. */
+  body_text?: string | null;
+  /**
+   * The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+   * `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+   */
+  content_type?: string | null;
+  /** Decode the body of this recorded exchange (its content type says how the body is framed). */
+  exchange_id?: number | null;
+  /** How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`. */
+  grpc_encoding?: string | null;
+  /** How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`. */
+  kind?: string | null;
+  /** With `exchange_id`: the `request` or the `response` (default). */
+  part?: ProtobufPart | null;
+}
+
+/** Response of `POST /tools/protobuf/decode`. */
+export interface ProtobufDecoded {
+  /**
+   * Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+   * is edited (see `notes`).
+   */
+  exact: boolean;
+  /** `grpc-message` from the trailers, when present. */
+  grpc_message: string | null;
+  /** `grpc-status` from the trailers, when present. */
+  grpc_status: string | null;
+  /** How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`. */
+  kind: string;
+  /** Messages decoded (gRPC trailers not counted). */
+  messages: number;
+  /** What could not be decoded or will not round-trip. */
+  notes: string[];
+  /** Present for agents: how to treat `text`. */
+  notice?: string | null;
+  /**
+   * The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+   * is redacted and wrapped as untrusted target content.
+   */
+  text: string;
+}
+
+/** Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent). */
+export interface ProtobufEncodeRequest {
+  /**
+   * How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+   * message uncompressed.
+   */
+  kind?: string | null;
+  /** The text, as returned by the decode route (with edits). */
+  text: string;
+}
+
+/** Response of `POST /tools/protobuf/encode`. */
+export interface ProtobufEncoded {
+  /** The body bytes, base64. */
+  body_b64: string;
+  /** The framing used. */
+  kind: string;
+  /** Length of the body in bytes. */
+  length: number;
+}
+
+/** Which message of an exchange `POST /tools/protobuf/decode` reads. */
+export type ProtobufPart =
+  /** The request. */
+  | "request"
+  /** The response (the default). */
+  | "response";
+
 /** A run of [`Service::auto_prove`]. */
 export interface ProveSweep {
   attempted: number;
@@ -2417,6 +3068,8 @@ export type RaceModeChoice =
 export interface RaceRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
+  /** Replace the request's body with these bytes (base64), as in `replay_send`. */
+  body_b64?: string | null;
   /** How many copies to send at once (2 to 50, default 10). */
   count?: number | null;
   /** Recorded exchange to race (its target is used). */
@@ -2514,6 +3167,11 @@ export interface RecordingSettings {
    * scope (everything else is still proxied, just not recorded).
    */
   in_scope_only?: boolean;
+  /**
+   * Keep only traffic from these client IP addresses, e.g. one phone (empty: record every client). Other
+   * clients are still proxied, just not recorded. Combines with `in_scope_only`: both must hold.
+   */
+  record_devices?: string[];
 }
 
 /**
@@ -2583,6 +3241,11 @@ export interface RegressionTest {
 export interface ReplayRequest {
   /** Run a previously approved send. All other fields must be identical. */
   approval_id?: string | null;
+  /**
+   * Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+   * bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+   */
+  body_b64?: string | null;
   /** Recorded exchange to base this on (its target is used). */
   exchange_id?: number | null;
   /** Update Content-Length to match the body (default true). */
@@ -2599,7 +3262,8 @@ export interface ReplayRequest {
   /** Convert bare "\n" line endings in the head to "\r\n" (default true). */
   normalize_newlines?: boolean | null;
   /**
-   * Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+   * Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+   * `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
    * If omitted, the request of `exchange_id` is resent unchanged.
    */
   raw?: string | null;
@@ -2706,6 +3370,17 @@ export interface RetestItem {
   why: string;
 }
 
+/** One line of the review page. */
+export interface ReviewItem {
+  /**
+   * A name the file says is responsible (a schedule's `created_by`, a trigger's `enabled_by`). Shown as
+   * written in the file, never used as an identity.
+   */
+  claimed_by: string | null;
+  detail: string;
+  what: string;
+}
+
 /** Body of `PUT /roe` and `POST /roe/check`. */
 export interface RoeBody {
   /** The rules of engagement, as YAML. */
@@ -2797,6 +3472,19 @@ export type RunOn =
   | "per_insertion_point"
   /** One changed copy of the request (see `request`). */
   | "per_request";
+
+export type RunStatus =
+  | "running"
+  /** Every step ran and every assertion held. */
+  | "ok"
+  /** An assertion failed, a step could not run (nothing extracted, a send error) or a limit was reached. */
+  | "failed"
+  /** A `match` step did not fit: the exchange is not one this workflow is for. */
+  | "stopped"
+  /** The policy gate refused a send (scope, tier, actor). */
+  | "denied"
+  /** A send waits for a person's approval; run it again with `approval_id` to continue from that step. */
+  | "pending_approval";
 
 export type RunWhen =
   /** Before every request the rule covers (e.g. a fresh CSRF token). */
@@ -2996,6 +3684,8 @@ export interface SearchRequest {
   before_id?: number | null;
   /** Match letter case. */
   case_sensitive?: boolean;
+  /** Exchanges that came from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
   /**
    * File extensions to hide, comma-separated, e.g. "png,jpg,css,js". Matched against the path before any
    * query; a leading dot is allowed and case is ignored.
@@ -3035,7 +3725,7 @@ export interface SearchRequest {
   path?: string | null;
   /**
    * A history query (`pm_tools::hql`), applied by the service: field:value terms (all must match), OR, -term,
-   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity
+   * parentheses; field~regex. Fields: host path url method status ext len reqlen time id source actor identity client
    * comment highlight mime req resp any reqheader respheader param is. Numbers take >N <=N N..M, status 4xx.
    * E.g. status:>=500 -ext:js resp~"(?i)sql" respheader:set-cookie. Text terms read messages, so a page may stop
    * early (see `scanned` and `next_before_id` in the result).
@@ -3065,12 +3755,30 @@ export interface SearchResult {
   scanned: number;
 }
 
+/** Where one secret comes from, never the secret itself. */
+export interface SecretStatus {
+  /** The last four characters of a long secret, e.g. `…a1b2`; absent for short ones. */
+  hint?: string | null;
+  /** For an environment reference: `env:NAME`. */
+  reference?: string | null;
+  /** `saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`. */
+  source: string;
+}
+
 /** Body of `POST /assistant/send`. */
 export interface SendBody {
   /** Continue this chat (default: start a new one). */
   chat_id?: number | null;
   /** The message. Must not be empty. */
   text: string;
+}
+
+/** Body of `POST /findings/{id}/issue`. */
+export interface SendFindingBody {
+  /** The Jira, GitHub or GitLab integration to create the issue in. */
+  integration: string;
+  /** When the finding already has an issue there: update it instead of refusing. Default false. */
+  update?: boolean;
 }
 
 export interface SentExample {
@@ -3099,7 +3807,7 @@ export interface SessionRule {
   set?: SetValue[];
   /**
    * Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-   * discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+   * discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
    * Older names (repeater, intruder, sequencer) still match.
    */
   tools?: string[];
@@ -3129,6 +3837,9 @@ export type SetWhere =
   | "param";
 
 export type Severity = "info" | "low" | "medium" | "high";
+
+/** Which message of the current exchange a test or extraction looks at. */
+export type Side = "request" | "response";
 
 export type Signature =
   | {
@@ -3220,6 +3931,306 @@ export interface StatusQuery {
   status?: string | null;
 }
 
+/** One step of a workflow. */
+export type Step =
+  /** Stop the run (status `stopped`) unless the current exchange fits the condition. */
+  | {
+      /** Text the body must contain (decoded: de-chunked and decompressed). */
+      body_contains?: string | null;
+      /** A regular expression the body must match. */
+      body_regex?: string | null;
+      /** A header that must be present (by name). */
+      header?: string | null;
+      /** With `header`: text one of its values must contain (case-insensitive). */
+      header_contains?: string | null;
+      /** A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`. */
+      hql?: string | null;
+      /** What a failed `assert` says, or why a `match` stopped the run (default: what failed). */
+      message?: string | null;
+      /** Methods the request may have, separated by commas: `POST` or `GET,HEAD`. */
+      method?: string | null;
+      /** Pass when the tests do NOT all hold. */
+      negate?: boolean;
+      /** Text the request path (with its query) must contain. */
+      path_contains?: string | null;
+      /** Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response). */
+      side?: Side | null;
+      /** Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`. */
+      status?: string | null;
+      type: "match";
+      /** A variable to test. Alone: it must be set and not empty. */
+      var?: string | null;
+      /** With `var`: text the value must contain. */
+      var_contains?: string | null;
+      /** With `var`: the exact value. */
+      var_equals?: string | null;
+      /** With `var`: a regular expression the value must match. */
+      var_matches?: string | null;
+    }
+  /** Check the current exchange or a variable. A failed check marks the run `failed`; the run goes on. */
+  | {
+      /** Text the body must contain (decoded: de-chunked and decompressed). */
+      body_contains?: string | null;
+      /** A regular expression the body must match. */
+      body_regex?: string | null;
+      /** A header that must be present (by name). */
+      header?: string | null;
+      /** With `header`: text one of its values must contain (case-insensitive). */
+      header_contains?: string | null;
+      /** A history query (HQL) the current exchange must match, e.g. `status:200 resp:"token"`. */
+      hql?: string | null;
+      /** What a failed `assert` says, or why a `match` stopped the run (default: what failed). */
+      message?: string | null;
+      /** Methods the request may have, separated by commas: `POST` or `GET,HEAD`. */
+      method?: string | null;
+      /** Pass when the tests do NOT all hold. */
+      negate?: boolean;
+      /** Text the request path (with its query) must contain. */
+      path_contains?: string | null;
+      /** Whether `header`, `body_contains` and `body_regex` look at the request or the response (default response). */
+      side?: Side | null;
+      /** Statuses the response may have: `200`, `2xx`, `200..299`, or a comma-separated list such as `200,302,4xx`. */
+      status?: string | null;
+      type: "assert";
+      /** A variable to test. Alone: it must be set and not empty. */
+      var?: string | null;
+      /** With `var`: text the value must contain. */
+      var_contains?: string | null;
+      /** With `var`: the exact value. */
+      var_equals?: string | null;
+      /** With `var`: a regular expression the value must match. */
+      var_matches?: string | null;
+    }
+  /** Read a value out of the current request or response into a variable. */
+  | {
+      /** The regular expression, JSON pointer, header name, cookie name or input name. */
+      expr?: string;
+      /** For `regex`: which capture group (0 is the whole match). Default: group 1 if the pattern has one. */
+      group?: number | null;
+      kind?: ExtractType;
+      /** The variable to set: letters, digits and `_`, not starting with a digit or `current_`. */
+      name?: string;
+      /** When nothing is found: leave the variable unset and go on (default: the run fails here). */
+      optional?: boolean;
+      /** Read the request or the response (default response; `html_input` reads responses only). */
+      side?: Side | null;
+      type: "extract";
+    }
+  /** Set a variable from a template, then apply encodings, decodings or hashes to it. */
+  | {
+      /** The variable to set. */
+      name?: string;
+      /**
+       * Operations applied to it in order (the editor's inline transforms): url_encode, url_decode, url_encode_full,
+       * url_decode_full, base64_encode, base64_decode, base64url_encode, base64url_decode, html_encode, html_decode,
+       * hex_encode, hex_decode, unicode_encode, unicode_encode_all, unicode_decode, json_escape, json_unescape, md5,
+       * sha1, sha256. None: the variable is just the template.
+       */
+      ops?: string[];
+      type: "transform";
+      /** The starting text, with `{{variable}}` replaced: `{{token}}`, or `user:{{name}}`. */
+      value?: string;
+    }
+  /** Send a request through the policy gate; its response becomes the current exchange. */
+  | {
+      /** Changes made to the request after the template is filled in, in order. */
+      edits?: Edit[];
+      /** Update Content-Length to match the body (default true). */
+      fix_content_length?: boolean | null;
+      /** Send with this test identity's credentials ("anonymous" for none). */
+      identity?: string | null;
+      /**
+       * A whole request as text, with `{{variable}}` and `{{secret:NAME}}` placeholders. Default: the current
+       * exchange's request.
+       */
+      raw?: string | null;
+      type: "send";
+      /**
+       * Where to send, as scheme://host[:port]. Default: the current exchange's server. No variables here: a
+       * response cannot choose where the next request goes.
+       */
+      url?: string | null;
+    };
+
+/** What one step did. */
+export interface StepRun {
+  elapsed_ms: number;
+  /** For a send: the recorded exchange (also when it failed on the wire). */
+  exchange_id?: number | null;
+  /** `match`, `assert`, `extract`, `transform` or `send`. */
+  kind: string;
+  /** What happened, without target content. */
+  message: string;
+  status: StepStatus;
+  /** Position in the workflow, from 1. */
+  step: number;
+}
+
+export type StepStatus = "ok" | "failed" | "stopped" | "denied" | "pending_approval";
+
+/** A page of a stream's chunks, oldest first. */
+export interface StreamChunkPage {
+  chunks: StreamChunkView[];
+  /** Pass as `after` to read the next page. */
+  next_after_id?: number | null;
+  notice?: string | null;
+  stream_id: number;
+  /** Chunks stored for the stream. */
+  total: number;
+}
+
+/** One chunk of a stream as `actor` may see it. */
+export interface StreamChunkView {
+  /** The stored bytes as base64. People only: agents get the redacted `text`. */
+  data_b64?: string | null;
+  /** `client` (towards the server) or `server` (towards the client). */
+  from: string;
+  id: number;
+  /** Bytes stored: fewer than `len` when the recording cap cut the chunk. */
+  kept: number;
+  /** Bytes on the wire. */
+  len: number;
+  possible_prompt_injection?: string[];
+  /**
+   * A lossy text preview of the bytes (invalid UTF-8 becomes U+FFFD). Untrusted target content: for agents it is
+   * redacted and wrapped in `<untrusted_target_content>`.
+   */
+  text: string;
+  /** The preview is shorter than the stored bytes. */
+  text_truncated: boolean;
+  ts_ms: number;
+}
+
+/** Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`. */
+export interface StreamChunksQuery {
+  /** Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk. */
+  after?: number | null;
+  /** Most chunks to return (default 100, at most 500). */
+  limit?: number | null;
+}
+
+/** One stream with its first chunks. */
+export interface StreamDetail {
+  chunks: StreamChunkPage;
+  stream: StreamRow;
+}
+
+/** Filters of the stream list. Unknown keys are refused. */
+export interface StreamFilter {
+  /** Only streams with an id less than this (older ones; for paging back, pass `next_before_id`). */
+  before_id?: number | null;
+  /** Only streams from this client: an IP address, or a device name set on the Proxy setup page. */
+  client?: string | null;
+  /** Only targets whose host contains this text (case-insensitive). */
+  host?: string | null;
+  /** Most rows (default 50, max 500). */
+  limit?: number | null;
+  /** Only this target port. */
+  port?: number | null;
+  /** Only streams that started at or after this time (milliseconds since 1970). */
+  since_ms?: number | null;
+  /** With true: only TLS streams; with false: only plain ones. */
+  tls?: boolean | null;
+  /** Only streams that started at or before this time (milliseconds since 1970). */
+  until_ms?: number | null;
+}
+
+/** Streams, newest first. */
+export interface StreamPage {
+  /** Pass as `before_id` for older streams. */
+  next_before_id?: number | null;
+  streams: StreamRow[];
+}
+
+export interface StreamReplayRequest {
+  /** From a previous pending_approval result: runs the approved send. All other fields must be identical. */
+  approval_id?: string | null;
+  /**
+   * Replacement client-to-server chunks as base64, sent in order instead of the recorded ones (at most 1000, 16 MB
+   * in all). Default: the recorded chunks. May contain `{{secret:...}}` placeholders. Not with `text_chunks`.
+   */
+  chunks?: string[] | null;
+  /** Wait between chunks in milliseconds (default 0, at most 10000). The server's answers are recorded meanwhile. */
+  delay_ms?: number | null;
+  /** Characters of each chunk shown back (default 2000). */
+  max_chars?: number | null;
+  /** Stop reading after this many bytes from the server (default 1 MB, at most 16 MB). */
+  max_response_bytes?: number | null;
+  /**
+   * After the last chunk, how long to keep reading while the server stays silent (default 2000, at most 10000). A
+   * server that spoke first in the original is waited for before the first chunk, for the same time.
+   */
+  read_ms?: number | null;
+  /** The recorded stream to replay. */
+  stream_id: number;
+  /** Replacement chunks as text (UTF-8), for protocols that are text. Not with `chunks`. */
+  text_chunks?: string[] | null;
+}
+
+export type StreamReplayResult =
+  /** The connection opened; everything sent and received is recorded as the new stream `stream_id`. */
+  | {
+      chunks: StreamChunkPage;
+      /**
+       * `server_closed`, `client_closed` (ProxyMind stopped after the server went quiet), `timeout`, `limit` or
+       * `error`.
+       */
+      ended: string;
+      note?: string | null;
+      received_bytes: number;
+      sent_bytes: number;
+      status: "done";
+      stream_id: number;
+    }
+  /** The target could not be reached; the attempt is recorded as stream `stream_id`. */
+  | {
+      error: string;
+      status: "failed";
+      stream_id: number;
+    }
+  | {
+      approval_id: string;
+      reasons: string[];
+      status: "pending_approval";
+      summary: string;
+    }
+  | {
+      reasons: string[];
+      status: "denied";
+    };
+
+/** One stream, without its chunks. */
+export interface StreamRow {
+  actor_id: string;
+  /** The ALPN protocol agreed, when it was not HTTP. */
+  alpn?: string | null;
+  bytes_to_client: number;
+  /** Bytes sent towards the server and towards the client (all of them, also those past the recording cap). */
+  bytes_to_server: number;
+  /** Chunks stored. */
+  chunks: number;
+  /** The client's IP address; absent for streams ProxyMind opened itself. */
+  client_addr?: string | null;
+  /** Absent while the stream is open. */
+  end_ms?: number | null;
+  /** How it ended: `client_closed`, `server_closed`, `error`, `timeout` or `limit`; absent while open. */
+  ended?: string | null;
+  error?: string | null;
+  host: string;
+  id: number;
+  port: number;
+  /** The stream this one replays. */
+  replay_of?: number | null;
+  sni?: string | null;
+  /** `proxy` or `stream_replay`. */
+  source: string;
+  start_ms: number;
+  /** The chunks are the decrypted bytes of a TLS connection. */
+  tls: boolean;
+  /** The recording cap was reached: later bytes were relayed and counted but not kept. */
+  truncated: boolean;
+}
+
 export interface TargetAnalysis {
   content_types: { [key: string]: number };
   /** URLs that take input (with a query or a body), up to 300. */
@@ -3305,6 +4316,76 @@ export interface TriageItem {
   url: string;
 }
 
+/** The per-exchange trigger of a workflow: run it on each new proxied exchange that fits its first `match` step. */
+export interface Trigger {
+  /** Off by default. Only a person turns it on; editing the steps turns it off again. */
+  enabled: boolean;
+  /** Who turned it on. Runs go through the gate as this person. */
+  enabled_by: string;
+  enabled_ms: number;
+  /** At most this many automatic runs per minute (1 to 60, default 6); exchanges past it are skipped, not queued. */
+  max_per_minute: number;
+  /** Exchanges skipped because of the rate cap or because other runs were busy, since this process started. */
+  skipped: number;
+}
+
+/** `POST /project/trust`. */
+export interface TrustConfirmRequest {
+  /**
+   * The digest from `GET /project/trust` that the person reviewed. If the project has changed since, the
+   * confirmation is refused. Omit to confirm whatever is there now (scripts).
+   */
+  digest?: string | null;
+}
+
+/** Everything the file would do, grouped, for the person who is deciding. */
+export interface TrustReview {
+  assistant: ReviewItem[];
+  listeners: ReviewItem[];
+  network_other: ReviewItem[];
+  rewrite_rules: ReviewItem[];
+  roe_summary: unknown;
+  roe_text: string | null;
+  schedules: ReviewItem[];
+  session: ReviewItem[];
+  triggers: ReviewItem[];
+  upstream_rules: ReviewItem[];
+}
+
+/**
+ * Whether the project in this installation is trusted, and if not, what is held back.
+ *
+ * **Held back in safe mode** (until a person confirms): extra proxy listeners (the primary one, from the command
+ * line, still runs); scan schedules (they do not fire); workflow triggers (they do not run); the project's network
+ * settings as a whole (upstream proxy rules, client certificates, hostname overrides, TLS pass-through: traffic
+ * goes direct and unmodified, never through an address the file names); match-and-replace rules; session rules
+ * and macros; OAST settings; the assistant (no model call, so no key and no traffic leave for a URL the file
+ * names); and every action by an agent, plugin or the AI scan that would send traffic (the scope the gate checks
+ * is the file's own).
+ *
+ * **Not held back:** reading the project; a person's own actions (Replay, scans started by hand, editing
+ * settings, which stay in safe mode); the proxy's main listener; integrations (they have their own trust,
+ * `integration-trust.json`); plugins (installed per user, never from a project); `proxymind ci`, which ignores
+ * all of these settings anyway.
+ */
+export interface TrustView {
+  /** `created`, `confirmed` or `edited`. */
+  basis: string | null;
+  /** A record exists but the settings no longer match it: the file changed since. */
+  changed_since_trust: boolean;
+  /** The digest of the settings as they are now. Send it back when confirming, so a person confirms what they read. */
+  digest: string;
+  held_back: HeldBack[];
+  project_id: string;
+  review: TrustReview;
+  safe_mode: boolean;
+  /** `trusted` or `safe_mode`. */
+  status: string;
+  trusted_at_ms: number | null;
+  /** Who vouched for the project and when, if anyone did. */
+  trusted_by: string | null;
+}
+
 /** What one user message produced. */
 export interface Turn {
   chat_id: number;
@@ -3356,6 +4437,53 @@ export interface UpstreamProxy {
   remote_dns?: boolean;
   /** Optional login (Basic for HTTP proxies, username/password for SOCKS5). */
   username?: string;
+}
+
+/** Answer of `POST /network/upstream/resolve`: how a host would be reached. */
+export interface UpstreamResolution {
+  /** Connected directly (the rule says `direct`, or no rule matched). */
+  direct: boolean;
+  /** The match pattern that covered it (null for a rule with an empty `match` or when no rule matched). */
+  pattern: string | null;
+  /** The rule lets the proxy resolve names. */
+  remote_dns: boolean;
+  /** The first rule that covers the host (0 is the first), or null when none does. */
+  rule_index: number | null;
+  /** What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login). */
+  via: string;
+}
+
+/** Body of `POST /network/upstream/resolve`. */
+export interface UpstreamResolveRequest {
+  /** The target host: a name or an IP address. */
+  host?: string;
+  /** Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules. */
+  rules?: UpstreamRule[] | null;
+}
+
+/** One entry of the ordered upstream list: which targets it covers and how to reach them. */
+export interface UpstreamRule {
+  /**
+   * Which targets this rule covers: host names (`example.com` is exact, `*.example.com` also covers
+   * `example.com`, `*` and `?` work anywhere else, `*` is everything) and CIDR ranges such as `10.0.0.0/8`
+   * or `fd00::/8`. A range covers targets given as an IP address, not names that resolve into it. Empty:
+   * covers everything, which only makes sense for the last rule.
+   */
+  match?: string[];
+  password?: string;
+  /**
+   * Let the proxy resolve target names ("socks5h" for SOCKS5; for HTTP proxies, CONNECT names the host).
+   * Off by default so the proxy is asked for the address ProxyMind resolved and checked against the denied
+   * networks (protection against DNS rebinding). Plain HTTP through an HTTP proxy always goes by name.
+   */
+  remote_dns?: boolean;
+  /**
+   * Optional login for the proxy (Basic for HTTP, username/password for SOCKS5). Kept in the project like
+   * other secrets, hidden when settings are shown (`********`) and never logged.
+   */
+  username?: string;
+  /** `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`. */
+  via?: string;
 }
 
 /**
@@ -3412,6 +4540,85 @@ export interface WaybackReport {
   interesting: number;
   /** Captures on this host (before `limit` cut the list). */
   total: number;
+}
+
+/** A saved workflow. */
+export interface Workflow {
+  description: string;
+  /** Assigned when the workflow is first saved. */
+  id: number;
+  /** A unique name, 1 to 64 characters. */
+  name: string;
+  /** Up to 50 steps, run in order. No loops. */
+  steps: Step[];
+  /** Whether the workflow runs by itself on new proxied exchanges (off until a person turns it on). */
+  trigger: Trigger;
+  /** Who saved it last. */
+  updated_by: string;
+  updated_ms: number;
+}
+
+/** What a person edits: a workflow without the fields the service manages. */
+export interface WorkflowInput {
+  description?: string;
+  name?: string;
+  steps?: Step[];
+}
+
+/** One run of a workflow. */
+export interface WorkflowRun {
+  /** Who ran it, e.g. `human:local` or `agent:claude`. */
+  actor: string;
+  assertions: AssertionResult[];
+  duration_ms: number;
+  /** Every exchange the run sent, in order. */
+  exchanges: number[];
+  id: number;
+  pending?: Pending | null;
+  /** Why it did not finish `ok`. */
+  reason?: string | null;
+  sends: number;
+  /** The exchange it started on, if any. */
+  start_exchange?: number | null;
+  started_ms: number;
+  status: RunStatus;
+  /** The steps that ran, in order. */
+  steps: StepRun[];
+  /** How it started: `manual` (API, UI, CLI, MCP), `exchange` (the per-exchange trigger) or `fuzzer`. */
+  trigger: string;
+  /** Variables at the end of the run. For agents, values are hidden or marked as target content. */
+  variables: { [key: string]: string };
+  workflow_id: number;
+  workflow_name: string;
+}
+
+/** Body of `POST /workflows/{id}/run`. */
+export interface WorkflowRunBody {
+  /** Continue a run that waits for this approval (give the same `exchange_id` as before). */
+  approval_id?: string | null;
+  /**
+   * Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+   */
+  exchange_id?: number | null;
+}
+
+/** Query of `GET /workflows/runs`. */
+export interface WorkflowRunsQuery {
+  /** How many runs (default 50, at most 200). */
+  limit?: number | null;
+  /** Only runs of this workflow (name or id). */
+  workflow?: string | null;
+}
+
+/** Body of `PUT /workflows/{id}/trigger`. */
+export interface WorkflowTriggerBody {
+  /**
+   * Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+   * can turn it on (audited), and editing the workflow's steps turns it off again.
+   */
+  enabled: boolean;
+  /** At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued. */
+  max_per_minute?: number | null;
 }
 
 /** A message in the history across connections. */

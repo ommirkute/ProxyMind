@@ -70,6 +70,7 @@ fn exchange(i: usize) -> NewExchange {
     let status = [200u16, 200, 304, 404, 500, 302][i % 6];
     let body = format!("{{\"id\":{i},\"email\":\"user{}@shop.test\",\"pad\":\"{}\"}}", i % 997, "x".repeat(i % 3000));
     NewExchange {
+        client_addr: None,
         ts_ms: 1_700_000_000_000 + i as i64,
         duration_ms: Some((i % 900) as i64),
         source: if i.is_multiple_of(10) { "fuzzer".into() } else { "proxy".into() },
@@ -91,6 +92,7 @@ fn exchange(i: usize) -> NewExchange {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

@@ -21,6 +21,7 @@ pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }
 pm-replay = { version = "0.2.0", path = "../pm-replay" }
 pm-core = { version = "0.2.0", path = "../pm-core" }
+pm-plugin = { path = "../pm-plugin" }
 parking_lot = "0.12.5"
 serde = { version = "1.0.229", features = ["derive"] }
 regex = "1.13.1"
@@ -28,10 +29,16 @@ flate2 = "1.1.10"
 h2 = "0.4.20"
 http = "1.5.0"
 
+# Safe wrappers for SO_ORIGINAL_DST and IP_TRANSPARENT (transparent mode, Linux only); only the `net` feature.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.32.0", default-features = false, features = ["net"] }
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+serde_json = "1.0.154"
+pm-demo = { path = "../pm-demo" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }

@@ -3,6 +3,205 @@
 All notable changes to ProxyMind. Versions follow [semantic versioning](https://semver.org/); before 1.0, a minor
 version may change project files, APIs and the CLI.
 
+## Unreleased
+
+### Security
+
+- **The audit log records more context and can be checkpointed** (threat model F-6, ADR-0022 step 2). New audit
+  records (version 2) also carry who and where: the project, and, once accounts exist, the user, token, session and
+  client address; these are part of each record's hash, so changing any of them fails `proxymind audit verify`. Logs
+  from earlier versions still verify, and new records follow them in the same chain (the project file gets a schema
+  update, so an older ProxyMind will refuse to open it). `proxymind audit checkpoint -o FILE` writes a signed
+  checkpoint (record count, head hash, time) and `proxymind audit verify --checkpoint FILE` uses it to detect records
+  cut off the end or a log rewritten before it; `verify` now also reports version 1 and 2 counts, the key check and the
+  checkpoint status (also in the web UI's Audit log page and `GET /audit/verify`), and evidence packs include the
+  latest checkpoint when there is one. Honest limits: in single-user mode the checkpoint key lives in your home
+  folder, so code running as you can still sign a new one; keep the exported file somewhere it cannot write. A keyed
+  chain (HMAC under a key the file's writers do not hold) is built in for the project server and is off in single-user
+  mode.
+
+- **A project that came from somewhere else now opens in safe mode** (threat model F-2, ADR-0022 step 0). A project
+  file can carry extra proxy listeners (even on `0.0.0.0`), upstream proxy rules, match-and-replace rules, scheduled
+  scans, workflow triggers, session macros, a model server address and the rules of engagement that decide what counts
+  as in scope. Until now opening it started all of that. Now ProxyMind keeps a record in your home folder
+  (`project-trust.json`, never in the project) of which projects it trusts. A project this installation created is
+  trusted, and stays trusted when you change it yourself. Any other project, and any trusted project whose file is
+  changed by something else, opens in safe mode: extra listeners are not started, scheduled scans do not fire, workflow
+  triggers do not run, upstream proxy rules, client certificates and hostname overrides are not applied (traffic goes
+  direct), rewrite rules are not applied, session rules and macros are ignored, the assistant makes no call, and agents,
+  plugins and the AI scan cannot send anything (the scope the gate checks was written by the file's author). The web UI
+  shows a banner on every page with "Review and trust this project" and a review page that lists the rules of
+  engagement, listeners, upstream and rewrite rules, schedules and triggers before you confirm; `proxymind project
+  status` and `proxymind project trust` do the same in a terminal; the desktop app uses the same path. Only a person
+  can confirm (agents can read the status with the new MCP tool `project_trust_status`, 88 tools; an agent's attempt is
+  an audited denial). Scheduled scans and triggers then run as you, whatever name the file says created them.
+  **Projects you already have** ask for one confirmation the first time they open after this update (there is no
+  honest way to tell them from a download): run `proxymind project trust` or click the banner. New API:
+  `GET /project/trust`, `POST /project/trust`; `/status` has `safe_mode`.
+- **A saved model API key is bound to the server it was saved for.** A project file that points the assistant at another
+  address can no longer receive your key (or the traffic): the key, and an environment-variable key too, is sent only to
+  the server you confirmed by saving the key or the assistant settings. A key saved by an older version is bound the
+  next time you save the assistant settings (the error message says so).
+- **Documented: the policy gate does not contain an agent that can run commands as you** (threat model F-1).
+  `docs/agents.md` now says what the gate covers (agents that reach ProxyMind only through MCP) and what it does not
+  (an agent with a shell or file access can read the API token, edit the project and the audit table, and read the CA
+  key), with the two ways to run agents safely: without shell and file tools, or ProxyMind as a different user with
+  only the MCP pipe given to the agent.
+
+### Added
+
+- **Integrations** (roadmap 3.5, `docs/integrations.md`). Settings → Integrations, `/api/v1/integrations`,
+  `proxymind integration list|test|send-finding`. **Jira, GitHub, GitLab:** "Create issue in…" on a finding makes an
+  issue (title, severity, CWE/OWASP from the issue library, proof summary, reproduction requests, exchange ids, the
+  ProxyMind finding id) and keeps its key and URL on the finding (`issue_links`, migration 25); sending again is
+  refused unless you update the same issue. **Slack and webhooks:** notifications for finding proven, finding status
+  changed, scan finished and a findings summary, from the event bus, with a per-integration rate limit, bounded retries
+  with backoff and a delivery log with the last error. Webhook payloads are versioned (`"v": 1`) JSON, optionally signed
+  `X-ProxyMind-Signature: sha256=<hmac>`. **Safety:** everything sent is redacted like agent views; tokens are never in
+  the project file (a private file in the home folder, or `env:NAME`), never returned, logged or audited; requests use
+  ProxyMind's sender with TLS verification always on, no redirects, and refuse private, loopback and link-local
+  destinations unless allowed per integration (metadata addresses never); integrations that came with a project file
+  stay off until a person turns them on in this installation; only people configure or send, agents may list names
+  (new MCP tool `integration_list`, 87 tools).
+- **`proxymind ci`: scanning in a pipeline** (roadmap 3.7, `docs/ci.md`). One command checks a rules-of-engagement file
+  (required) and that the target is in scope, logs in the identities it is given (`--identity-file` with `${ENV_VAR}`
+  references, `--identity`), imports an API description (`--openapi`), discovers content, crawls, runs the active scanner
+  with a profile, proves what it can, and compares the findings with a **baseline** (`--baseline`, `--write-baseline`).
+  Findings are keyed by a stable fingerprint (`v1|issue|METHOD|normalised path|insertion point`, hashed; no ids or
+  times) so the same bug matches across runs, projects and pull-request environments; "fixed" findings are only
+  reported. Outputs: **SARIF 2.1.0** (`partialFingerprints` for GitHub code scanning, `baselineState` new, unchanged and
+  absent, an invocation that says whether the run finished), **JUnit** (a test case per finding and per step) and a
+  **JSON** summary, plus a short summary on stdout. **Exit codes:** 0 no new findings at or above `--fail-on` and
+  `--min-severity`; 1 new findings (wins over 2); 2 the run could not finish (ROE invalid or target out of scope,
+  target unreachable, login failed, budget spent, checks skipped by the rules unless `--allow-skipped`, nothing to
+  scan): never reported as clean, and the files are still written. Safety: CI acts as the new actor kind **`ci`**
+  (`ci:pipeline`) with its own ROE section `tiers.ci`: reads and safe GETs are allowed, scan probes need
+  `active_intrusive: allow`, destructive-tier checks are left out unless allowed, and **nothing is ever approved**:
+  what needs approval is skipped and reported. `--max-requests` and `--budget-minutes` are hard caps; the target's TLS
+  certificate is verified unless `--insecure` (printed); a fresh in-memory project is used unless `--project`, and even
+  then listeners, schedules and workflow triggers in the file are not started and its network settings, session rules
+  and OAST settings are ignored (threat model F-2); credentials from the environment are kept out of every output.
+  Examples for GitHub Actions and GitLab CI in `examples/ci/`. Adds `ActorKind::Ci` and `tiers.ci` to the ROE (and its
+  JSON schema), `pm_tools::ci` (fingerprints, baselines, outputs) and `proxymind roe show` lists CI's tiers.
+- **HTTP/3 (QUIC)** (roadmap 2.4, ADR-0021). Write `HTTP/3` in a request line (Replay's Protocol selector does it) and
+  the request is sent over QUIC with `quinn` and `h3` on the rustls build ProxyMind already uses. HTTP/3 is shown,
+  stored and edited as text like HTTP/2 (`HTTP/3` as the version, `host:` for `:authority`, pseudo-headers in the
+  Inspector), so rules, intercept, identities, search, the scanner, the Fuzzer, workflows, agents (`replay_send`) and
+  History work on it unchanged; the History detail shows the protocol. Nothing switches protocol by itself. The same
+  guards as every send apply: the policy gate, the resolved addresses are checked and the QUIC sockets connect to
+  exactly those addresses (DNS-rebinding protection), the server name is the host, `--verify-upstream` and client
+  certificates are honoured, timeouts and a 64 MB body limit. QUIC cannot pass through an HTTP or SOCKS5 proxy, so a
+  host that an upstream rule sends through one is **refused** for HTTP/3 with an explanation, never sent direct. History
+  and Replay show an **offers HTTP/3** chip when a response advertises `h3` in `Alt-Svc`, with **Send with HTTP/3**. A
+  new response preset, **Remove HTTP/3 advertisements (Alt-Svc h3)**, drops the `h3` alternatives (other `Alt-Svc`
+  values stay; off until a person adds it; History keeps the server's original response) so redirected clients don't
+  move to QUIC past the proxy. Not yet: a QUIC listener for clients in transparent mode (block UDP/443 instead,
+  `docs/capture.md`), HTTP/3 in race and parallel sends, a connection pool, WebSockets over HTTP/3. Adds 18 crates
+  (all MIT or Apache-2.0), fuzz target `http3_text`.
+- **Workflows: saved chains of steps** (roadmap 2.2). A workflow is a named chain of `match`, `extract`, `transform`,
+  `send` and `assert` steps that works on a current exchange: log in, read a token out of the answer, call an API with
+  it, assert on the result. `extract` reads a regex group, a JSON pointer, a header, a cookie or a hidden HTML input;
+  `transform` applies the editor's encodings, decodings and hashes (now also in `pm_tools::transform`, with test vectors
+  shared with the browser's tests) or fills a template; `send` builds a request from a template with `{{variables}}`,
+  or resends the current one with edits (set header or parameter, replace text). Every send goes through the same gate
+  as Replay (scope, risk tier from the payload, approvals, rate limits, identity, audit) and is recorded in history as
+  `workflow`; a send that needs approval pauses the run and continues from that step once approved, without sending
+  the earlier steps again. Runs are stored (the newest 200) with each step, the variables, the exchanges sent and the
+  assertion results, and update the page through a new `workflows` event topic. A workflow runs on demand (the
+  Workflows page, History's right-click **Run workflow…**, `proxymind workflow run`, `POST /workflows/{id}/run`, MCP
+  `workflow_run`), by itself on new proxied exchanges that fit its first `match` step (off by default, only a person turns
+  it on, editing the steps turns it off, runs off the proxy path from the event bus with a per-minute cap), and on each
+  result of a Fuzzer attack (**Workflow on each result**). Limits: 50 steps, 20 sends and 2 minutes per run, and no
+  loops. Agents can list, read and run workflows (templates and secret-looking values hidden) but not create, edit or
+  switch triggers. See `docs/workflows.md`. Needs a project migration (a new table; older ProxyMind versions cannot
+  open the project after).
+- **Raw TCP and TLS streams are recorded and can be replayed.** Protocols that are not HTTP (databases, mail, SSH,
+  a custom protocol), arriving through a CONNECT tunnel, SOCKS5 or a transparent listener, are still relayed byte for
+  byte, and now each connection is also stored as a **stream**: target, client, start and end, bytes each way, TLS or
+  plain, how it ended, and its chunks in order with direction and time (up to 16 MB per stream; after that the bytes are
+  relayed and counted only, and the stream is marked cut). A protocol inside TLS that is not HTTP is no longer an error:
+  after interception the decrypted bytes are recorded as a TLS stream, and ALPN values other than `h2` and `http/1.1`
+  are passed to the target. The same recording settings as for HTTP apply (only in-scope, only chosen devices); TLS
+  pass-through tunnels stay unrecorded. New **Streams** page (Proxy, next to WebSockets history) with a text and a hex
+  view, search inside a stream and live updates; **Replay stream** sends the client's chunks (edited if you like) to
+  the same target on a new connection and records what comes back. Replay is a send like any other: the target must be
+  in scope, agents need approval for sending bytes, and it is audited. API: `GET /streams`, `/streams/{id}`,
+  `/streams/{id}/chunks`, `POST /streams/{id}/replay`; MCP tools `stream_list`, `stream_get` and `stream_replay`; a
+  `streams` event topic. Needs a project migration (new tables; older ProxyMind versions cannot open the project after).
+- **SOCKS5, transparent mode and per-host upstream proxies.** A listener can now be a **SOCKS5 server** (Setup,
+  "3. Proxy listeners": type SOCKS5, optionally with a username and password). curl `--socks5-hostname`, browsers and
+  Android SOCKS apps can use it; their web traffic, including HTTPS and HTTP/2, is recorded and changed by your rules,
+  hooks and the intercept queue just like proxy traffic, and other protocols (SSH, databases) pass through untouched and
+  unrecorded. Only CONNECT is served: BIND and UDP are refused. On Linux an HTTP listener can be **transparent**: with
+  an iptables or nftables redirect, a device or program with no proxy settings is sent through ProxyMind to wherever it
+  was going (HTTPS by its server name, HTTP by its Host header); the option is greyed out on macOS and Windows, which
+  are not supported yet. The single upstream proxy became an ordered list of **upstream rules** (Settings, Network):
+  per host name, wildcard or CIDR range, go direct or through an HTTP or SOCKS5 proxy, each with its own login; the
+  first match wins and the page can tell you which rule a host would use. Older projects load unchanged. As before,
+  ProxyMind connects to the address it checked against the denied networks unless a rule lets the proxy resolve names.
+  New guide: [docs/capture.md](docs/capture.md) with the iptables and nftables commands, SOCKS5 client examples and
+  upstream chains.
+- **Plugins can change traffic in flight (plugin API 2).** A plugin that says `api: 2` in its manifest lists the
+  permissions it needs (`hooks.request`, `hooks.response`, `checks.passive`, `checks.active`, `panels`,
+  `history.read`) and may only use those. A new plugin, or an update that asks for different permissions, stays off
+  until you accept them on the Plugins page (or with `proxymind plugin accept`). A *request hook* or *response hook* is
+  a small program ProxyMind keeps running in the plugin sandbox; it sees each matching in-scope message (by host,
+  path, method and content type) after your match-and-replace rules and before the intercept queue, and may replace it,
+  or drop a request. What it returns is sent exactly as given. A hook that is slow, crashes or answers nonsense is
+  skipped and the original goes through (or is blocked, if the plugin asks for that); five failures in a minute pause
+  it until you resume it. The Plugins page turns hooks on and off, reorders them, pauses and resumes them and shows
+  recent failures, live. History keeps the browser's version beside what was sent, and the Changes tab names the
+  hook. Streamed (server-sent events), WebSocket and over-8 MB messages are not given to hooks. Includes the
+  `sign-request` example (adds an HMAC `X-Signature` header), Python and TypeScript helpers, and
+  [docs/plugins.md](docs/plugins.md). Existing plugins keep working unchanged.
+- **Set up a phone or tablet from a QR code.** The Proxy setup page has a new *Phone or tablet* section with the
+  address to open on the phone (built from this computer's network address and the proxy's port), a QR code for it, and
+  the proxy address to enter in the phone's Wi-Fi settings. The proxy itself serves that page, so it works before the
+  phone has any proxy setting: it offers the CA certificate as `.crt` and `.pem` downloads with its fingerprint and
+  short Android and iOS steps. Once the phone's proxy is set, `http://proxymind.setup/` shows the same page. These
+  requests are never forwarded or recorded. If the proxy only listens on this computer, the section says so and how to
+  add a listener on all interfaces. New guide: [docs/mobile.md](docs/mobile.md) (Android 14 and later, iOS, which apps
+  trust a user certificate).
+- **See and filter traffic per device.** History records which device (client address) each request came from, shows
+  it in a new *Client* column, and can filter by it, also in the query language (`client:192.168.1.23`,
+  `client:"Pixel 8"`). You can give an address a name on the Proxy setup page. *Record only* a chosen device or devices
+  to keep just their traffic in history (other devices are still proxied). Also in the API (`/setup/mobile`, `/devices`,
+  `client` on `/exchanges`, `record_devices` on `/history/recording`). Existing projects are upgraded on opening;
+  older rows simply have no client.
+- **Inline transforms in the Replay and Intercept editors.** Select text and URL-, Base64-, HTML-entity-, hex-,
+  Unicode-escape- or JSON-string-encode or decode it, or hash it (MD5, SHA-1, SHA-256), with a before-and-after
+  preview, chaining, an Undo list and Ctrl+Z (Ctrl+Shift+T or Alt+Shift+T opens the menu). Runs in the browser.
+- **gRPC and Protobuf traffic is readable and editable.** Requests and responses with a gRPC, gRPC-Web (also the
+  base64 text form) or Protobuf content type get a **Protobuf** view in HTTP history, Replay and the Fuzzer: one field
+  per line, nested messages indented, strings and numbers shown the way they most likely were meant (a number can
+  also be read as signed, zigzag, float or double in a comment). A gRPC call with several messages shows each one, and
+  gRPC-Web trailers or a `grpc-status` header show the call's status. No `.proto` file is needed; field names are
+  not part of the wire format, so fields show as numbers.
+- **Edit and replay a gRPC call.** Opening a gRPC request in Replay shows the head as text and the message as
+  editable Protobuf text. Sent unedited, the original bytes go out untouched; edited, the text is turned back into
+  Protobuf, framed again, and Content-Length is fixed (HTTP/2 requests get none added). Messages that were compressed
+  are sent uncompressed after an edit. Race and Send group carry the message too.
+- **A Protobuf tool in the API and for agents:** `POST /api/v1/tools/protobuf/decode` and `/encode`, an MCP tool
+  `protobuf_decode` (agents get the text as untrusted content, with secrets replaced), `request_protobuf` and
+  `response_protobuf` on `GET /api/v1/exchanges/{id}`, and `body_b64` on `replay_send`, `race_send` and `replay_group`
+  for bodies that are not text.
+- The demo shop has a small gRPC call (`/grpc/demo.Greeter/SayHello`) to try this on, and the decoder has a fuzz
+  target that runs nightly.
+- **History keeps both sides when a rule or an edit changed the traffic.** The record itself still shows what the
+  server saw and sent: the request as sent to the server and the response as the server sent it. When a
+  match-and-replace rule or an edit in the intercept queue changes a request, History also keeps the request as the
+  browser sent it; when it changes a response, it keeps the copy the browser received. It lists what changed them (the
+  rule's comment or a short description, or "intercept editor"). Edited rows show an *edited* mark in a new column;
+  the exchange has **Original request** and **Delivered response** views and a **Changes** view with a line-by-line
+  diff for each changed message. Find them with `is:modified` in the query bar. A rule that matches but leaves the
+  bytes as they were records nothing. What goes over the wire is unchanged; only the record is richer. Scans, passive
+  checks, proofs, reports and evidence keep reading the server's response, so a rule that removes a security header
+  for the browser does not make a check report it missing. Also in the API (`request_original`, `response_delivered`,
+  `changes` and `diffs` on `GET /api/v1/exchanges/{id}`, `modified` on history rows) and for agents, whose view of an
+  exchange shows them with secrets replaced and marked as untrusted content. Existing projects are upgraded on
+  opening; older rows simply have none of these. Evidence packs and reports still embed the server's response and the
+  request as sent.
+
 ## 0.2.0 (2026-11-15)
 
 First release since 0.1.0. Everything below ships in it; the version number did not change while it was prepared.

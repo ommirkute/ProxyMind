@@ -10,6 +10,7 @@ use pm_service::{NewFinding, Service};
 
 fn exchange(i: usize) -> NewExchange {
     NewExchange {
+        client_addr: None,
         ts_ms: i as i64,
         duration_ms: Some(1),
         source: "proxy".into(),
@@ -25,6 +26,7 @@ fn exchange(i: usize) -> NewExchange {
         error: None,
         identity: None,
         hypothesis_id: None,
+        ..Default::default()
     }
 }
 

@@ -2,10 +2,11 @@
 //! Four are built in; people can save their own (project setting
 //! `scan_profiles`). A task's own settings win over its profile's.
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, ScanTaskRequest, Service, ServiceError};
 
 /// Project setting that holds the saved (not built-in) profiles as JSON.
@@ -169,9 +170,7 @@ impl Service {
 
     /// Saves (adds or replaces) a profile. Humans only.
     pub fn scan_profile_save(&self, actor: &Actor, mut p: ScanProfile) -> Result<Vec<ScanProfile>> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change scan profiles".into()));
-        }
+        self.require_actor(actor, Perm::ScanConfigWrite)?;
         p.name = p.name.trim().to_string();
         p.builtin = false;
         p.validate().map_err(ServiceError::Invalid)?;
@@ -191,9 +190,7 @@ impl Service {
     }
 
     pub fn scan_profile_delete(&self, actor: &Actor, name: &str) -> Result<bool> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change scan profiles".into()));
-        }
+        self.require_actor(actor, Perm::ScanConfigWrite)?;
         let removed = self.store.write(|store| -> Result<bool> {
             let mut saved = load_saved(store)?;
             let before = saved.len();

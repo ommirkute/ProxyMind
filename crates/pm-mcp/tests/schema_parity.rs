@@ -6,21 +6,22 @@
 
 use std::collections::BTreeSet;
 
+use pm_service::api_types::ProtobufDecodeRequest;
 use pm_service::mcp_args::{
     ApprovalStatusArgs, AttackPathListArgs, AuthzResultsArgs, CollaboratorInteractionsArgs, CollaboratorPayloadArgs,
     CompareExchangesArgs, CoverageArgs, CsrfPocArgs, CurlParseArgs, ExchangeGetArgs, ExchangeIdArgs, ExchangeRefArgs,
     FindingIdArgs, FindingListArgs, HypothesisListArgs, IdentityCaptureArgs, IdentityNameArgs, IssueLibraryArgs,
     MemoryListArgs, MemorySaveArgs, ModelChangesArgs, NoArgs, OrganizerAddArgs, OrganizerListArgs, OrganizerUpdateArgs,
-    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, TaskIdArgs, TrafficTriageArgs,
-    WsMessagesArgs,
+    ProofGetArgs, ReconDnsArgs, ReconWaybackArgs, SiteMapArgs, SkillGetArgs, StreamGetArgs, TaskIdArgs,
+    TrafficTriageArgs, WorkflowRefArgs, WsMessagesArgs,
 };
-use pm_service::pm_store::HistoryFilter;
+use pm_service::pm_store::{HistoryFilter, StreamFilter};
 use pm_service::{
     ActiveScanRequest, AuthzCheckRequest, AuthzMatrixRequest, CrawlRequest, CustomScanRequest, DecodeRequest,
     DiscoverRequest, DomTestRequest, EngageFilter, FindingUpdate, FuzzerRequest, GraphQlImportRequest, GroupRequest,
     HypothesisUpdate, ImportRequest, ModelFilter, NewAttackPath, NewFinding, NewHypothesis, OpenApiImportRequest,
     PluginCheckRequest, ProofRequest, RaceRequest, ReplayRequest, ScanFilter, ScanTaskRequest, SearchRequest,
-    TokenAnalyzerRequest, WsReplayRequest, WsSearchRequest,
+    StreamReplayRequest, TokenAnalyzerRequest, WorkflowRunRequest, WsReplayRequest, WsSearchRequest,
 };
 use schemars::JsonSchema;
 use serde_json::Value;
@@ -65,6 +66,9 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("exchange_get", generated::<ExchangeGetArgs>()),
         ("exchange_raw_request", generated::<ExchangeIdArgs>()),
         ("ws_messages", generated::<WsMessagesArgs>()),
+        ("stream_list", generated::<StreamFilter>()),
+        ("stream_get", generated::<StreamGetArgs>()),
+        ("stream_replay", generated::<StreamReplayRequest>()),
         ("race_send", generated::<RaceRequest>()),
         ("replay_group", generated::<GroupRequest>()),
         ("fuzzer_run", generated::<FuzzerRequest>()),
@@ -77,6 +81,7 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("scan_active", generated::<ActiveScanRequest>()),
         ("openapi_import", generated::<OpenApiImportRequest>()),
         ("decode", generated::<DecodeRequest>()),
+        ("protobuf_decode", generated::<ProtobufDecodeRequest>()),
         ("graphql_import", generated::<GraphQlImportRequest>()),
         ("import_har", generated::<ImportRequest>()),
         ("curl_parse", generated::<CurlParseArgs>()),
@@ -122,6 +127,11 @@ fn tool_types() -> Vec<(&'static str, Value)> {
         ("finding_prove", generated::<FindingIdArgs>()),
         ("issue_library", generated::<IssueLibraryArgs>()),
         ("finding_list", generated::<FindingListArgs>()),
+        ("workflow_list", generated::<NoArgs>()),
+        ("integration_list", generated::<NoArgs>()),
+        ("project_trust_status", generated::<NoArgs>()),
+        ("workflow_get", generated::<WorkflowRefArgs>()),
+        ("workflow_run", generated::<WorkflowRunRequest>()),
         ("approval_status", generated::<ApprovalStatusArgs>()),
     ]
 }
@@ -173,7 +183,7 @@ fn generated_input_schemas_list_the_same_fields_as_the_rust_types() {
 #[test]
 fn no_tool_input_schema_needs_ref_resolution() {
     let tools = pm_mcp::tool_definitions();
-    assert_eq!(tools.len(), 79);
+    assert_eq!(tools.len(), 88);
     for t in &tools {
         if let Some(key) = contains_ref(&t["inputSchema"]) {
             panic!("{}: inputSchema contains `{key}`; subschemas must be inlined", t["name"]);
@@ -205,9 +215,18 @@ fn every_tool_has_a_generated_schema_that_is_checked_against_its_type() {
 #[test]
 fn tools_without_arguments_have_an_empty_object_schema() {
     let tools = pm_mcp::tool_definitions();
-    for name in
-        ["roe_get", "identity_list", "scan_profiles", "custom_checks", "skills_list", "plugin_list", "authz_candidates"]
-    {
+    for name in [
+        "roe_get",
+        "identity_list",
+        "scan_profiles",
+        "custom_checks",
+        "skills_list",
+        "plugin_list",
+        "authz_candidates",
+        "workflow_list",
+        "integration_list",
+        "project_trust_status",
+    ] {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();
         assert_eq!(
             t["inputSchema"],
@@ -226,6 +245,10 @@ fn arguments_the_hand_written_schemas_required_are_still_required() {
         ("exchange_get", &["id"]),
         ("exchange_raw_request", &["id"]),
         ("ws_messages", &["exchange_id"]),
+        ("stream_get", &["id"]),
+        ("stream_replay", &["stream_id"]),
+        ("workflow_get", &["workflow"]),
+        ("workflow_run", &["workflow"]),
         ("replay_group", &["requests"]),
         ("fuzzer_run", &["raw", "payload_sets"]),
         ("identity_capture", &["name", "exchange_id"]),

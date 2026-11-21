@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, fmtTime, originOf, qs, saveText, type ExchangeDetail, type ExchangePage, type ExchangeSummary, type WsPage } from "../api";
-import { Chip, ContextMenu, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
+import type { DevicesView } from "../api-types.gen";
+import { altSvcH3 } from "../altsvc";
+import { Chip, ContextMenu, DiffView, Empty, ErrorBox, HIGHLIGHTS, MessageView, StatusCode, copyText, useAction, useNav, usePref, type MenuItem } from "../components";
 import { useLiveEvent } from "../live";
 
 const ROW = 28;
@@ -20,6 +22,8 @@ interface Filters {
   hideList: string;
   inScope: boolean;
   annotated: boolean;
+  /** Only this device: an IP address or the name given on the Proxy setup page ("" = every device). */
+  client: string;
   /** Query language (see QueryHelp). */
   q: string;
 }
@@ -44,6 +48,7 @@ const QUERY_FIELDS: [string, string][] = [
   ["source", "proxy, replay, fuzzer…"],
   ["actor", "who sent it, e.g. agent:claude"],
   ["identity", "test identity used"],
+  ["client", "device that sent it: its IP address or the name you gave it"],
   ["comment", "your comment"],
   ["highlight", "highlight colour"],
   ["mime", "response Content-Type"],
@@ -53,7 +58,7 @@ const QUERY_FIELDS: [string, string][] = [
   ["reqheader", "request header name, or name=value"],
   ["respheader", "response header name, or name=value"],
   ["param", "query or form parameter name"],
-  ["is", "error, annotated, inscope, response, redirect"],
+  ["is", "error, annotated, inscope, response, redirect, modified"],
 ];
 
 function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
@@ -64,6 +69,7 @@ function QueryHelp({ onPick }: { onPick: (q: string) => void }) {
     "respheader:set-cookie -respheader:set-cookie=httponly",
     "len:>100000 time:>1000",
     "is:inscope -source:fuzzer comment:idor",
+    'client:"Pixel 8" status:>=400',
   ];
   return (
     <div className="query-help small" data-testid="query-help">
@@ -96,10 +102,11 @@ const INITIAL: Filters = {
   hideList: DEFAULT_HIDE,
   inScope: false,
   annotated: false,
+  client: "",
   q: "",
 };
 
-type SortKey = "id" | "host" | "method" | "path" | "status" | "resp_len" | "ext" | "duration_ms" | "source" | "comment";
+type SortKey = "id" | "host" | "method" | "path" | "status" | "modified" | "resp_len" | "ext" | "duration_ms" | "source" | "client_addr" | "comment";
 
 const extOf = (path: string) => {
   const p = path.split(/[?#]/)[0];
@@ -112,6 +119,18 @@ export default function History() {
   const { arg, counters, go } = useNav();
   const [filters, setFiltersRaw] = usePref<Filters>("pm.history.filters", INITIAL);
   const [rows, setRows] = useState<ExchangeSummary[]>([]);
+  // Devices (client addresses and the names given to them), for the Client column and filter.
+  const [devices, setDevices] = useState<DevicesView["devices"]>([]);
+  const names = useMemo(() => Object.fromEntries(devices.flatMap((d) => (d.name ? [[d.addr, d.name]] : []))), [devices]);
+  const loadDevices = () => api.get<DevicesView>("/devices").then((d) => setDevices(d.devices)).catch(() => {});
+  useEffect(() => {
+    loadDevices();
+  }, []);
+  // A device that sent its first request after the list was loaded.
+  const unknownClient = rows.some((r) => r.client_addr && !devices.some((d) => d.addr === r.client_addr));
+  useEffect(() => {
+    if (unknownClient) loadDevices();
+  }, [unknownClient, rows.length]);
   const [olderFrom, setOlderFrom] = useState<number | undefined>();
   const [scanned, setScanned] = useState<number | undefined>();
   const [qDraft, setQDraft] = useState(filters.q ?? "");
@@ -140,6 +159,7 @@ export default function History() {
       hide_ext: filters.hideExt ? filters.hideList : "",
       in_scope: filters.inScope || undefined,
       annotated: filters.annotated || undefined,
+      client: filters.client || undefined,
       q: filters.q || undefined,
     }),
     [filters],
@@ -207,12 +227,16 @@ export default function History() {
           return extOf(r.path);
         case "status":
           return r.status ?? 0;
+        case "modified":
+          return r.modified ? 1 : 0;
         case "resp_len":
           return r.resp_len ?? -1;
         case "duration_ms":
           return r.duration_ms ?? -1;
         case "comment":
           return r.comment ?? "";
+        case "client_addr":
+          return (r.client_addr && names[r.client_addr]) || r.client_addr || "";
         default:
           return r[sort.key] as string | number;
       }
@@ -225,7 +249,7 @@ export default function History() {
       return (sort.desc ? -c : c) || b.id - a.id;
     });
     return out;
-  }, [rows, sort]);
+  }, [rows, sort, names]);
 
   const annotate = (row: ExchangeSummary, highlight: string | null | undefined, comment: string | null | undefined) =>
     api
@@ -241,6 +265,7 @@ export default function History() {
     { label: "Active scan", onClick: () => go("issues", r.id) },
     { label: "Plugin check…", onClick: () => go("plugins", r.id) },
     { label: "Run custom checks…", onClick: () => go("checks", r.id) },
+    { label: "Run workflow…", onClick: () => go("workflows", r.id) },
     { label: "Authorization check…", onClick: () => go("authz", r.id) },
     {
       label: "Send to Organizer",
@@ -321,6 +346,7 @@ export default function History() {
         hide_ext: query.hide_ext || undefined,
         annotated: query.annotated,
         in_scope: query.in_scope,
+        client: query.client,
         q: query.q,
       })
       .then((har) => saveText("proxymind.har", JSON.stringify(har)))
@@ -346,6 +372,11 @@ export default function History() {
               {["proxy", "replay", "import", "crawl", "discover", "scan", "fuzzer", "authz", "proof", "login", "health"].map((m) => (
                 <option key={m}>{m}</option>
               ))}
+            </select>
+            <select aria-label="Device" data-testid="client-filter" value={filters.client ?? ""} onChange={(e) => setFilters({ client: e.target.value })} title="Only traffic from one device (name them on the Proxy setup page)">
+              <option value="">any device</option>
+              {devices.map((d) => <option key={d.addr} value={d.addr}>{d.name ? `${d.name} (${d.addr})` : d.addr}</option>)}
+              {filters.client && !devices.some((d) => d.addr === filters.client) && <option value={filters.client}>{filters.client}</option>}
             </select>
             <label className="btn" title="Add a HAR file (browser devtools export) to history; nothing is sent">
               Import HAR
@@ -416,6 +447,7 @@ export default function History() {
           {note && <div className="notice" data-testid="import-note">{note}</div>}
           <VirtualRows
             rows={sorted}
+            names={names}
             selected={selected}
             onSelect={(id) => go("history", id)}
             sort={sort}
@@ -445,15 +477,18 @@ const COLUMNS: { key: SortKey; label: string }[] = [
   { key: "method", label: "Method" },
   { key: "path", label: "URL" },
   { key: "status", label: "Status" },
+  { key: "modified", label: "Edited" },
   { key: "resp_len", label: "Length" },
   { key: "ext", label: "Ext" },
   { key: "duration_ms", label: "Time" },
   { key: "source", label: "Tool" },
+  { key: "client_addr", label: "Client" },
   { key: "comment", label: "Comment" },
 ];
 
 function VirtualRows({
   rows,
+  names,
   selected,
   onSelect,
   sort,
@@ -461,6 +496,8 @@ function VirtualRows({
   onMenu,
 }: {
   rows: ExchangeSummary[];
+  /** Device names by client address. */
+  names: Record<string, string>;
   selected?: number;
   onSelect: (id: number) => void;
   sort: { key: SortKey; desc: boolean };
@@ -509,17 +546,21 @@ function VirtualRows({
             style={{ top: (first + i) * ROW }}
             onClick={() => onSelect(r.id)}
             onContextMenu={(e) => onMenu(e, r)}
-            title={`${fmtTime(r.ts_ms)} · ${r.source} · ${r.actor_id}${r.identity ? ` as ${r.identity}` : ""}`}
+            title={`${fmtTime(r.ts_ms)} · ${r.source} · ${r.actor_id}${r.identity ? ` as ${r.identity}` : ""}${r.client_addr ? ` · from ${r.client_addr}` : ""}`}
           >
             <span className="muted">{r.id}</span>
             <span>{r.host}{r.port !== 80 && r.port !== 443 ? `:${r.port}` : ""}</span>
             <span>{r.method}</span>
             <span>{r.path}</span>
             <span><StatusCode status={r.status} error={r.error} /></span>
+            <span data-testid="modified-cell">
+              {r.modified && <span className="chip accent plain" data-testid="modified-mark" title="Rules or an edit in the intercept queue changed this exchange; History shows what the server saw and sent, with the browser's side beside it">edited</span>}
+            </span>
             <span className="muted">{fmtBytes(r.resp_len)}</span>
             <span className="muted">{extOf(r.path)}</span>
             <span className="muted">{r.duration_ms != null ? `${r.duration_ms} ms` : ""}</span>
             <span className="muted">{r.source}</span>
+            <span className="muted" data-testid="client-cell" title={r.client_addr ?? undefined}>{r.client_addr ? names[r.client_addr] ?? r.client_addr : ""}</span>
             <span data-testid="comment-cell">{r.comment ?? ""}</span>
           </div>
         ))}
@@ -532,7 +573,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   const { go } = useNav();
   const [ex, setEx] = useState<ExchangeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"request" | "response" | "summary" | "websocket">("response");
+  const [tab, setTab] = useState<"request" | "response" | "summary" | "websocket" | "original_request" | "delivered_response" | "changes">("response");
   const [capture, setCapture] = useState({ open: false, name: "", role: "user" });
   const action = useAction();
   const [note, setNote] = useState<string | null>(null);
@@ -559,6 +600,26 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
   // The list may have newer annotations (set from the right-click menu).
   const s = live ? { ...ex.summary, highlight: live.highlight, comment: live.comment } : ex.summary;
   const resp = ex.view.response?.body;
+  // The recorded response (the server's own, not a rule's copy) advertised HTTP/3 in Alt-Svc.
+  const offersH3 = altSvcH3(ex.response).length > 0;
+  // HTTP/2 and HTTP/3 messages are stored as text with that version on the request line (ADR-0009, ADR-0021).
+  const protocol = ex.request.match(/^[^\r\n]* (HTTP\/[23])(?:\.0)?\r?\n/i)?.[1]?.toUpperCase();
+  const changes = ex.changes ?? [];
+  // A hook that was bypassed or failed leaves a note but changed nothing.
+  const isNote = (c: { by: string; note?: string | null }) => c.by === "hook" && /^(bypassed|failed):/.test(c.note ?? "");
+  const realChanges = changes.filter((c) => !isNote(c));
+  const hookNotes = changes.filter(isNote);
+  const tabs = [
+    ...(s.status === 101 ? ["websocket"] : []),
+    "response",
+    "request",
+    ...(ex.request_original != null ? ["original_request"] : []),
+    ...(ex.response_delivered != null ? ["delivered_response"] : []),
+    ...(changes.length ? ["changes"] : []),
+    "summary",
+  ] as (typeof tab)[];
+  const tabLabel = (t: typeof tab) =>
+    t === "websocket" ? "WebSocket" : t === "original_request" ? "Original request" : t === "delivered_response" ? "Delivered response" : t[0].toUpperCase() + t.slice(1);
 
   const doCapture = () =>
     action.run(async () => {
@@ -575,7 +636,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
     });
 
   // Exact bytes for the hex view, fetched once when first asked for.
-  const loadBytes = (k: "request_b64" | "response_b64") => () =>
+  const loadBytes = (k: "request_b64" | "response_b64" | "request_original_b64" | "response_delivered_b64") => () =>
     api.get<ExchangeDetail>(`/exchanges/${id}?bytes=1${cap ? `&${cap}` : ""}`).then((d) => d[k] ?? null);
 
   const saveAnnotation = (highlight: string | null | undefined, comment: string | null | undefined) =>
@@ -600,7 +661,9 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <span>#{s.id}</span>
         <span>{s.source}</span>
         <span>{s.actor_id}</span>
+        {protocol && <Chip value={protocol} />}
         {s.identity && <Chip value={`as ${s.identity}`} />}
+        {offersH3 && <Chip value="offers HTTP/3" />}
         {s.duration_ms != null && <span>{s.duration_ms} ms</span>}
         {s.hypothesis_id && <span>hypothesis #{s.hypothesis_id}</span>}
       </div>
@@ -618,6 +681,11 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <button className="btn" onClick={() => go("replay", id)}>Send to Replay</button>
+        {offersH3 && (
+          <button className="btn" data-testid="replay-http3" title="Opens Replay with this request written for HTTP/3, at the address the response's Alt-Svc offered" onClick={() => go("replay", `h3:${id}`)}>
+            Send with HTTP/3
+          </button>
+        )}
         <button className="btn" onClick={() => go("fuzzer", id)}>Send to Fuzzer</button>
         <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
         <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
@@ -634,13 +702,25 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
       )}
       <ErrorBox error={action.error} />
       {note && <div className="notice">{note}</div>}
+      {hookNotes.length > 0 && (
+        <div className="notice small" data-testid="hook-note">
+          Plugin hook not applied: {hookNotes.map((c) => `${c.phase}: ${c.name} (${c.note})`).join("; ")}.{" "}
+          <button className="btn" onClick={() => setTab("changes")}>See changes</button>
+        </div>
+      )}
+      {realChanges.length > 0 && (
+        <div className="notice small" data-testid="modified-note">
+          Changed in flight ({realChanges.map((c) => `${c.phase}: ${c.name}`).join("; ")}). The record shows what the server saw and sent; the browser's side of each changed message is under Original request and Delivered response.{" "}
+          <button className="btn" onClick={() => setTab("changes")}>See changes</button>
+        </div>
+      )}
       {ex.view.possible_prompt_injection?.length ? (
         <div className="error">Possible prompt injection in the response: {ex.view.possible_prompt_injection.join(" · ")}</div>
       ) : null}
       <div className="tabs" role="tablist">
-        {([...(s.status === 101 ? ["websocket"] : []), "response", "request", "summary"] as const).map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t as typeof tab)}>
-            {t === "websocket" ? "WebSocket" : t[0].toUpperCase() + t.slice(1)}
+        {tabs.map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? "active" : ""}`} data-testid={`tab-${t}`} onClick={() => setTab(t)}>
+            {tabLabel(t)}
           </button>
         ))}
       </div>
@@ -651,18 +731,43 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         </>
       )}
       {tab === "request" && (
-        <MessageView text={ex.request} decodedBody={ex.request_body} loadB64={loadBytes("request_b64")} truncated={ex.request_truncated} onShowAll={() => setFull(true)} testid="request-view" />
+        <MessageView text={ex.request} decodedBody={ex.request_body} protobuf={ex.request_protobuf} loadB64={loadBytes("request_b64")} truncated={ex.request_truncated} onShowAll={() => setFull(true)} testid="request-view" />
       )}
       {tab === "response" && (
         <MessageView
           text={ex.response ?? s.error}
           decodedBody={ex.response ? ex.response_body : undefined}
+          protobuf={ex.response ? ex.response_protobuf : undefined}
           loadB64={ex.response ? loadBytes("response_b64") : undefined}
           truncated={ex.response_truncated}
           onShowAll={() => setFull(true)}
           empty="No response"
           testid="response-view"
         />
+      )}
+      {tab === "original_request" && ex.request_original != null && (
+        <MessageView text={ex.request_original} loadB64={loadBytes("request_original_b64")} truncated={ex.request_original_truncated} onShowAll={() => setFull(true)} testid="original-request-view" />
+      )}
+      {tab === "delivered_response" && ex.response_delivered != null && (
+        <MessageView text={ex.response_delivered} loadB64={loadBytes("response_delivered_b64")} truncated={ex.response_delivered_truncated} onShowAll={() => setFull(true)} testid="delivered-response-view" />
+      )}
+      {tab === "changes" && (
+        <div data-testid="changes-view">
+          <ul className="small" data-testid="changes-list">
+            {changes.map((c, i) => (
+              <li key={i}>
+                <Chip value={c.phase} /> <strong>{c.name}</strong>{" "}
+                <span className="muted">{c.by === "rule" ? "match-and-replace rule" : c.by === "intercept" ? "edited in the intercept queue" : "plugin hook"}{c.note ? `: ${c.note}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+          {(ex.diffs ?? []).map((d) => (
+            <div key={d.phase} data-testid={`${d.phase}-diff`}>
+              <h3>{d.phase === "request" ? "Request" : "Response"}: {d.from_label} → {d.to_label} (+{d.lines.added} −{d.lines.removed})</h3>
+              <DiffView d={d.lines} />
+            </div>
+          ))}
+        </div>
       )}
       {tab === "summary" && (
         <dl className="kv">

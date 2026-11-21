@@ -135,6 +135,8 @@ enum Command {
         #[arg(long = "as")]
         actor: Option<String>,
     },
+    /// Scan a staging URL in a pipeline: scope file, crawl, scan, prove, SARIF/JUnit/JSON, fail on new findings.
+    Ci(CiArgs),
     /// Proven findings as regression tests for CI: export them, or run them against a test environment.
     Regress {
         #[command(subcommand)]
@@ -167,6 +169,16 @@ enum Command {
     Recon {
         #[command(subcommand)]
         action: ReconAction,
+    },
+    /// Saved workflows: chains of match, extract, transform, send and assert steps (built in the UI's Workflows page).
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
+    /// Integrations: Jira, GitHub, GitLab, Slack and webhooks (set up on the Integrations page; tokens never go in the project).
+    Integration {
+        #[command(subcommand)]
+        action: IntegrationAction,
     },
     /// Testing playbooks for agents and people (also MCP prompts): list, or print one.
     Skills {
@@ -479,6 +491,9 @@ enum Command {
         /// Send with this identity's credentials
         #[arg(long)]
         identity: Option<String>,
+        /// Run this workflow (name or id) on each result
+        #[arg(long)]
+        workflow: Option<String>,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -552,6 +567,90 @@ enum Command {
         #[arg(long, short, default_value = "127.0.0.1:8899")]
         listen: SocketAddr,
     },
+}
+
+/// Exit codes of `proxymind ci`, shown by `--help`.
+const CI_HELP: &str = "\
+EXIT CODES:
+  0  The run finished and found no new finding at or above --fail-on and --min-severity.
+  1  The run found new findings that fail it (not in the baseline, severe enough, proven or, with
+     --fail-on suspected, also suspected). This wins over 2.
+  2  The run could not finish properly, so it says nothing about the target: the ROE is invalid or does not
+     allow the target, the target is unreachable, a login failed, the request or time budget ran out before
+     the scan finished, the rules of engagement skipped checks or operations (unless --allow-skipped), nothing
+     was found to scan, or an input or output file could not be read or written.
+
+CI acts as the actor ci:pipeline. Nobody can approve anything in a pipeline, so what the ROE leaves at
+\"approve\" for CI is skipped and reported, never granted. CI's section in the ROE is tiers.ci; without it CI
+may send safe (GET) requests only, so scanning needs `tiers: {ci: {active_intrusive: allow}}`.
+
+A fresh in-memory project is used unless --project is given. Even then, listeners, schedules and workflow
+triggers in the project file are not started, and its network settings, session rules and OAST settings are
+ignored. The target's TLS certificate is verified unless --insecure is given.
+
+Credentials: identity files may name environment variables as ${NAME}; the values never appear in output.
+See docs/ci.md.";
+
+#[derive(clap::Args)]
+#[command(after_long_help = CI_HELP)]
+struct CiArgs {
+    /// Rules of engagement (required): the scope, the time windows and what CI may do (tiers.ci).
+    #[arg(long, value_name = "ROE.YAML")]
+    roe: PathBuf,
+    /// The URL to test (must be in scope; default: the first scope entry without a wildcard).
+    #[arg(long)]
+    target: Option<String>,
+    /// Known findings (from --write-baseline): only findings not in it fail the run.
+    #[arg(long, value_name = "FILE")]
+    baseline: Option<PathBuf>,
+    /// Write this run's proven findings (with --baseline-suspected, also suspected ones) as a baseline.
+    #[arg(long, value_name = "FILE")]
+    write_baseline: Option<PathBuf>,
+    /// With --write-baseline: include suspected findings.
+    #[arg(long)]
+    baseline_suspected: bool,
+    /// Write SARIF 2.1.0 here (fingerprints and baseline states included).
+    #[arg(long, value_name = "FILE")]
+    sarif: Option<PathBuf>,
+    /// Write JUnit XML here: a test case per finding and per step of the run.
+    #[arg(long, value_name = "FILE")]
+    junit: Option<PathBuf>,
+    /// Write the JSON summary here.
+    #[arg(long, value_name = "FILE")]
+    json: Option<PathBuf>,
+    /// What a new finding must be to fail the run.
+    #[arg(long, value_parser = ["proven", "suspected", "none"], default_value = "proven")]
+    fail_on: String,
+    /// Ignore findings below this severity.
+    #[arg(long, value_parser = ["info", "low", "medium", "high", "critical"], default_value = "low")]
+    min_severity: String,
+    /// light, default, thorough, api-only (see `proxymind scan-profile list`).
+    #[arg(long, default_value = "default")]
+    profile: String,
+    /// Stop after this many minutes (a hard cap: the run then exits 2).
+    #[arg(long, value_name = "N")]
+    budget_minutes: Option<u64>,
+    /// Send at most this many requests to the target (a hard cap: the run then exits 2).
+    #[arg(long, value_name = "N")]
+    max_requests: Option<u64>,
+    /// Identity to log in and scan as; repeat for more (the first scans, all are used for access-control checks).
+    #[arg(long = "identity", value_name = "NAME")]
+    identities: Vec<String>,
+    /// JSON file defining identities (auth, health check, login recipe); ${ENV_VAR} in values is filled in.
+    #[arg(long = "identity-file", value_name = "FILE")]
+    identity_files: Vec<PathBuf>,
+    /// An OpenAPI or Swagger description to import (its GET examples are sent).
+    #[arg(long, value_name = "FILE")]
+    openapi: Option<PathBuf>,
+    /// Do not verify the target's TLS certificate (staging hosts with self-signed certificates).
+    #[arg(long)]
+    insecure: bool,
+    /// Crawl without a headless browser (links and forms only).
+    #[arg(long)]
+    no_browser: bool,
+    /// Accept a run where the rules skipped some checks, or nothing was found to scan (still reported).
+    #[arg(long)]
+    allow_skipped: bool,
 }
 
 #[derive(Subcommand)]
@@ -666,7 +765,10 @@ enum PluginAction {
     Trusted,
     /// Uninstall a plugin by name.
     Remove { name: String },
-    /// Turn a plugin on (installed plugins start on).
+    /// Accept the permissions a version 2 plugin declares (and turn it on). Needed after installing one, and
+    /// again when an update changes its permissions.
+    Accept { name: String },
+    /// Turn a plugin on (installed plugins start on; version 2 plugins need `accept` first).
     Enable { name: String },
     /// Turn a plugin off without uninstalling it.
     Disable { name: String },
@@ -703,6 +805,23 @@ enum ProjectAction {
         /// Output project (default: the file's name with .pmproj); never overwritten
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Show whether this installation trusts the project (-p) and what safe mode holds back.
+    Status {
+        /// Print the full review as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Review the project (-p) and trust it: its listeners, schedules, workflow triggers, upstream and rewrite
+    /// rules and rules of engagement then take effect, and run as you. A project made by this installation is
+    /// trusted already; one that came from somewhere else opens in safe mode until you do this.
+    Trust {
+        /// Do not ask; trust what is shown (for scripts that have already reviewed it)
+        #[arg(long)]
+        yes: bool,
+        /// Act as this person (default: human:$USER)
+        #[arg(long)]
+        actor: Option<String>,
     },
 }
 
@@ -1067,6 +1186,60 @@ enum ReconAction {
 }
 
 #[derive(Subcommand)]
+enum IntegrationAction {
+    /// The project's integrations: kind, whether each is on, what needs review, the last error.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check one integration (reads the tracker's project, posts a test message or a `test` event) and log it.
+    /// Exits 1 unless it worked.
+    Test {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create the finding's issue in a Jira, GitHub or GitLab integration (text and requests are redacted). A finding
+    /// that already has one there is refused unless --update.
+    SendFinding {
+        /// The finding's id.
+        finding: i64,
+        /// The integration's name.
+        integration: String,
+        /// Update the existing issue instead of refusing.
+        #[arg(long)]
+        update: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// The project's workflows: name, steps, whether the per-exchange trigger is on.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a workflow by name or id. Every send goes through the rules of engagement as you; a send that needs an
+    /// approval pauses the run (continue with --approval once it is approved). Exits 1 unless the run is ok.
+    Run {
+        /// The workflow's name or id.
+        workflow: String,
+        /// Start on this recorded exchange (needed unless the first step sends a request of its own).
+        #[arg(long)]
+        exchange: Option<i64>,
+        /// Continue a run that waits for this approval (give the same --exchange).
+        #[arg(long)]
+        approval: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum UpdateAction {
     /// Ask GitHub now whether a newer release is out (one GET of the public releases list).
     Check,
@@ -1178,6 +1351,29 @@ enum AuditAction {
         /// A head hash printed by an earlier verify (a prefix of 12+ hex digits).
         #[arg(long)]
         anchor: Option<String>,
+        /// A signed checkpoint file (from `audit checkpoint -o`) to check the log against; repeatable. Detects
+        /// records cut off the end and a log rewritten before the checkpoint.
+        #[arg(long)]
+        checkpoint: Vec<PathBuf>,
+        /// Only accept checkpoints signed by the key with this fingerprint (from `audit checkpoint`'s output).
+        #[arg(long)]
+        checkpoint_key: Option<String>,
+        /// File holding the audit key (64 hex digits, or raw bytes) of a keyed (server) log: checks every record's MAC.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Fail unless the log is keyed (use with --key-file for a server project).
+        #[arg(long)]
+        require_keyed: bool,
+    },
+    /// Write a signed checkpoint of the audit log (head hash, record count, time). Keep the file somewhere the
+    /// project file's writers cannot reach; `audit verify --checkpoint` then detects truncation and rewriting.
+    Checkpoint {
+        /// Write the checkpoint to this file (JSON); without it, print it.
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        /// Who is asking (people only).
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// List audit records, newest first.
     List {
@@ -1273,8 +1469,169 @@ fn print_scan_task(v: &pm_service::ScanTaskView) -> Result<()> {
     Ok(())
 }
 
+/// Identity definitions from JSON files (one object or a list per file), with `${NAME}` in string values filled in
+/// from the environment. Returns the identities and every credential value, so nothing prints them.
+fn load_identity_files(paths: &[PathBuf]) -> Result<(Vec<pm_service::pm_identity::Identity>, Vec<String>)> {
+    fn expand(v: &mut serde_json::Value, secrets: &mut Vec<String>) -> Result<(), String> {
+        match v {
+            serde_json::Value::String(s) => {
+                *s = pm_service::pm_tools::ci::expand_env(s, &|k| std::env::var(k).ok(), secrets)?;
+                Ok(())
+            }
+            serde_json::Value::Array(a) => a.iter_mut().try_for_each(|x| expand(x, secrets)),
+            serde_json::Value::Object(o) => o.values_mut().try_for_each(|x| expand(x, secrets)),
+            _ => Ok(()),
+        }
+    }
+    let (mut identities, mut secrets) = (Vec::new(), Vec::new());
+    for path in paths {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))?;
+        let items = match value {
+            serde_json::Value::Array(a) => a,
+            one => vec![one],
+        };
+        for mut item in items {
+            expand(&mut item, &mut secrets).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let ident: pm_service::pm_identity::Identity = serde_json::from_value(item).map_err(|e| {
+                // serde's messages can quote the offending value, which may be a credential.
+                let mut msg = e.to_string();
+                for secret in &secrets {
+                    msg = msg.replace(secret.as_str(), "[redacted]");
+                }
+                anyhow::anyhow!("{}: not a valid identity definition: {msg}", path.display())
+            })?;
+            for (_, v) in ident.auth.cookies.iter().chain(&ident.auth.headers) {
+                if !v.is_empty() {
+                    secrets.push(v.clone());
+                }
+            }
+            identities.push(ident);
+        }
+    }
+    Ok((identities, secrets))
+}
+
+/// `proxymind ci`. Returns the exit code (see `CI_HELP`); an `Err` is a run that could not start, which is exit 2 too.
+async fn run_ci(cli: &Cli, project_given: bool, a: &CiArgs) -> Result<i32> {
+    use pm_service::pm_tools::ci::{Baseline, FailOn, Gate};
+    let roe_text = std::fs::read_to_string(&a.roe).with_context(|| format!("reading {}", a.roe.display()))?;
+    let roe = Roe::parse(&roe_text).with_context(|| format!("the rules of engagement in {}", a.roe.display()))?;
+    let target = match &a.target {
+        Some(t) => t.clone(),
+        None => roe
+            .include
+            .iter()
+            .map(|p| p.text.clone())
+            .find(|t| !t.contains('*'))
+            .context("no --target given and the ROE's scope has no entry without a wildcard to use")?,
+    };
+    let baseline = match &a.baseline {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).with_context(|| {
+                format!("reading the baseline {} (create one with --write-baseline on a first run)", path.display())
+            })?;
+            let b = Baseline::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            Some((path.display().to_string(), b))
+        }
+        None => None,
+    };
+    let (identity_defs, secrets) = load_identity_files(&a.identity_files)?;
+    let openapi = match &a.openapi {
+        Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+        None => None,
+    };
+    let store = if project_given {
+        anyhow::ensure!(
+            !is_locked(&cli.project),
+            "{} is sealed; `proxymind project unlock` it first",
+            cli.project.display()
+        );
+        Store::open(&cli.project)?
+    } else {
+        Store::open_in_memory()?
+    };
+    let sender = pm_service::pm_replay::Sender::new(!a.insecure)?
+        .with_timeouts(std::time::Duration::from_secs(15), std::time::Duration::from_secs(60));
+    let service = Arc::new(Service::with_sender(store, Policy::new(roe), sender)?);
+
+    let tool = format!("ProxyMind {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("{tool}: CI run against {target} as ci:pipeline, profile {}", a.profile);
+    if a.insecure {
+        eprintln!("  WARNING: TLS verification is OFF (--insecure): the target's certificate is not checked");
+    } else {
+        eprintln!("  TLS verification of the target: on");
+    }
+    if project_given {
+        eprintln!(
+            "  project {}: listeners, schedules and workflow triggers in it are not started; its network settings, \
+             session rules and OAST settings are ignored",
+            cli.project.display()
+        );
+    } else {
+        eprintln!("  project: fresh and in memory, discarded afterwards");
+    }
+    let opts = pm_service::CiOptions {
+        target,
+        profile: a.profile.clone(),
+        actor_name: "pipeline".into(),
+        max_requests: a.max_requests,
+        budget_minutes: a.budget_minutes,
+        identity_defs,
+        use_identities: a.identities.clone(),
+        secrets,
+        openapi,
+        browser: !a.no_browser,
+        baseline,
+        gate: Gate {
+            fail_on: FailOn::parse(&a.fail_on).context("--fail-on is proven, suspected or none")?,
+            min_severity: a.min_severity.clone(),
+        },
+        allow_skipped: a.allow_skipped,
+        tls_verified: !a.insecure,
+        tool: tool.clone(),
+    };
+    let progress = |m: &str| eprintln!("  {m}");
+    let mut run = service.ci_run(&opts, &progress).await?;
+
+    if let Some(path) = &a.write_baseline {
+        if run.summary.complete {
+            let b = Baseline::from_findings(
+                &run.summary.findings,
+                a.baseline_suspected,
+                &run.summary.target,
+                &tool,
+                &jiff::Timestamp::now().to_string(),
+            );
+            std::fs::write(path, b.to_json()).with_context(|| format!("writing {}", path.display()))?;
+            run.summary.baseline_written = Some(path.display().to_string());
+        } else {
+            eprintln!("  baseline NOT written: the run did not finish, so it would record a partial picture");
+        }
+    }
+    if let Some(path) = &a.sarif {
+        std::fs::write(path, serde_json::to_string_pretty(&run.sarif)? + "\n")
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    if let Some(path) = &a.junit {
+        std::fs::write(path, run.summary.junit()).with_context(|| format!("writing {}", path.display()))?;
+    }
+    if let Some(path) = &a.json {
+        std::fs::write(path, run.summary.json()).with_context(|| format!("writing {}", path.display()))?;
+    }
+    out!("{}", run.summary.text().trim_end());
+    Ok(run.summary.exit_code)
+}
+
+/// The user's home folder for this run, set once at start (the trust records live there, F-2).
+static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
     let mut store = Store::open(project)?;
+    // Whether this installation trusted the project before `roe use` changes it: a person who changes the rules of
+    // a project they already trust keeps it trusted; a project that is not trusted stays in safe mode.
+    let was_trusted = HOME.get().is_some_and(|h| pm_service::project_trusted_in(&store, h));
     let text = match roe_file {
         Some(f) => {
             let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
@@ -1286,7 +1643,14 @@ fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -
             "this project has no rules of engagement yet; run `proxymind roe use <file>` (see examples/roe.yaml)",
         )?,
     };
-    Ok(Service::new(store, Policy::new(Roe::parse(&text)?))?)
+    let service = Service::new(store, Policy::new(Roe::parse(&text)?))?;
+    if let Some(h) = HOME.get() {
+        service.attach_trust_home(h.clone());
+    }
+    if roe_file.is_some() {
+        service.note_person_edit(&human_actor(None)?, was_trusted);
+    }
+    Ok(service)
 }
 
 fn human_actor(given: Option<&str>) -> Result<Actor> {
@@ -1299,7 +1663,10 @@ fn human_actor(given: Option<&str>) -> Result<Actor> {
         }
     };
     let actor = Actor::parse(&id)?;
-    anyhow::ensure!(actor.kind == ActorKind::Human, "only human:<name> actors can approve");
+    anyhow::ensure!(
+        pm_service::access::Principal::from_actor(&actor).allows(pm_service::access::Perm::ApprovalsDecide),
+        "only human:<name> actors can approve"
+    );
     Ok(actor)
 }
 
@@ -1368,8 +1735,29 @@ async fn run() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Ok(h) = home_dir(&cli) {
+        let _ = HOME.set(h);
+    }
+    // `proxymind ci` opens a project only when `--project` is on the command line (not from the environment).
+    let project_given = matches.value_source("project") == Some(clap::parser::ValueSource::CommandLine)
+        || matches
+            .subcommand()
+            .is_some_and(|(_, m)| m.value_source("project") == Some(clap::parser::ValueSource::CommandLine));
     match &cli.command {
+        Command::Ci(args) => {
+            let code = match run_ci(&cli, project_given, args).await {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    2
+                }
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::Proxy { listen, verify_upstream, no_http2 } => {
             let ca = Arc::new(CertAuthority::load_or_create(&home_dir(&cli)?)?);
             // With a Service for this project in this process, the recorder shares its write connection
@@ -1379,6 +1767,13 @@ async fn run() -> Result<()> {
                 Err(_) => {
                     eprintln!("No rules of engagement: in-scope-only match-and-replace rules are off.");
                     None
+                }
+            };
+            let gate = match &service {
+                Some(service) => service.trust_gate(),
+                None => {
+                    let mut store = Store::open(&cli.project)?;
+                    pm_service::trust_gate_for(&mut store, HOME.get().cloned())?
                 }
             };
             let (recorder, writer) = match &service {
@@ -1392,7 +1787,10 @@ async fn run() -> Result<()> {
             // In-scope-only rules need the rules of engagement; without
             // them only rules marked "any host" apply.
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
+            let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
             if let Some(service) = service {
+                attach_plugins(&cli, &service);
+                service.attach_hooks(plugin_hooks.clone());
                 service.attach_rewriter(rewriter.clone())?;
                 service.attach_recorder(&recorder)?;
                 pm_service::watch_roe(service);
@@ -1402,11 +1800,12 @@ async fn run() -> Result<()> {
                 rewrite: Some(rewriter.clone()),
                 network: Some(network.clone()),
                 http2: !*no_http2,
+                plugin_hooks: Some(plugin_hooks),
                 ..Default::default()
             };
             let proxy = Proxy::with_hooks(ca.clone(), recorder, *verify_upstream, hooks)?;
             let extra = pm_proxy::Listeners::new(proxy.clone(), Some(*listen));
-            pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra))?;
+            pm_service::watch_project(&cli.project, Some(rewriter), network, Some(extra), gate)?;
             let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding {listen}"))?;
             pm_proxy::listeners::warn_if_exposed(*listen);
             eprintln!("ProxyMind listening on http://{listen}");
@@ -1538,6 +1937,7 @@ async fn run() -> Result<()> {
             );
             out!("  Agents:     {}", tier_line(&roe, ActorKind::Agent));
             out!("  Humans:     {}", tier_line(&roe, ActorKind::Human));
+            out!("  CI runs:    {}", tier_line(&roe, ActorKind::Ci));
         }
         Command::Roe { action: RoeAction::Test { file, url, actor, method, tier } } => {
             let roe = Roe::load(file)?;
@@ -1880,6 +2280,124 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        Command::Integration { action } => {
+            let service = open_service(&cli.project, None)?;
+            attach_plugins(&cli, &service);
+            let me = human_actor(None)?;
+            match action {
+                IntegrationAction::List { json } => {
+                    let list = service.integration_list(&me)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&list)?);
+                    } else if list.is_empty() {
+                        out!("No integrations yet: set one up on the Integrations page.");
+                    }
+                    for v in list.iter().filter(|_| !*json) {
+                        let state = if v.needs_review {
+                            "needs review: enable it in this installation"
+                        } else if v.active {
+                            "on"
+                        } else {
+                            "off"
+                        };
+                        out!("{:<20} {:<8} {state}", v.config.name, v.config.kind.as_str());
+                        for p in &v.problems {
+                            out!("    {p}");
+                        }
+                        if let Some(e) = &v.last_error {
+                            out!("    last error: {}", e.message);
+                        }
+                    }
+                }
+                IntegrationAction::Test { name, json } => {
+                    let row = service.integration_test(&me, name).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&row)?);
+                    } else {
+                        out!(
+                            "{}: {} ({}, {} attempt(s)) {}",
+                            row.integration,
+                            row.status,
+                            row.host,
+                            row.attempts,
+                            row.detail
+                        );
+                    }
+                    if row.status != "ok" {
+                        std::process::exit(1);
+                    }
+                }
+                IntegrationAction::SendFinding { finding, integration, update, json } => {
+                    let body = pm_service::SendFindingBody { integration: integration.clone(), update: *update };
+                    let link = service.integration_send_finding(&me, *finding, body).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&link)?);
+                    } else {
+                        out!("finding #{finding} → {} {} {}", link.integration, link.key, link.url);
+                    }
+                }
+            }
+        }
+        Command::Workflow { action } => {
+            let service = open_service(&cli.project, None)?;
+            match action {
+                WorkflowAction::List { json } => {
+                    let list = service.workflow_list(&human_actor(None)?)?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&list)?);
+                    } else if list.is_empty() {
+                        out!("No workflows yet: create one on the Workflows page.");
+                    }
+                    for w in list.iter().filter(|_| !*json) {
+                        let kinds: Vec<&str> = w.steps.iter().map(|s| s.kind()).collect();
+                        let trig = if w.trigger.enabled { "  [runs on new traffic]" } else { "" };
+                        out!("#{:<3} {:<28} {}{trig}", w.id, w.name, kinds.join(" → "));
+                    }
+                }
+                WorkflowAction::Run { workflow, exchange, approval, json, actor } => {
+                    let me = human_actor(actor.as_deref())?;
+                    let req = pm_service::WorkflowRunRequest {
+                        workflow: workflow.clone(),
+                        exchange_id: *exchange,
+                        approval_id: approval.clone(),
+                    };
+                    let run = service.workflow_run(&me, req).await?;
+                    if *json {
+                        out!("{}", serde_json::to_string_pretty(&run)?);
+                    } else {
+                        out!("run #{} of {}: {}", run.id, run.workflow_name, run.status.as_str());
+                        for s in &run.steps {
+                            let ex = s.exchange_id.map(|e| format!("  → exchange #{e}")).unwrap_or_default();
+                            out!(
+                                "  {}. {:<9} {:<16} {}{ex}",
+                                s.step,
+                                s.kind,
+                                format!("{:?}", s.status).to_lowercase(),
+                                s.message
+                            );
+                        }
+                        for (k, v) in &run.variables {
+                            out!("  {k} = {v}");
+                        }
+                        if let Some(r) = &run.reason {
+                            out!("  {r}");
+                        }
+                        if let Some(p) = &run.pending {
+                            out!(
+                                "  Approve {} (proxymind approvals), then: proxymind workflow run {} --approval {}{}",
+                                p.approval_id,
+                                workflow,
+                                p.approval_id,
+                                exchange.map(|e| format!(" --exchange {e}")).unwrap_or_default()
+                            );
+                        }
+                    }
+                    if run.status != pm_service::RunStatus::Ok {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
         Command::Skills { name, focus } => {
             let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://example.invalid/\"]\n")?;
             let service = Service::new(Store::open_in_memory()?, Policy::new(roe))?;
@@ -2033,7 +2551,7 @@ async fn run() -> Result<()> {
             if let Some(addr) = oast_listen {
                 start_oast(&service, *addr, oast_public_url.clone()).await?;
             }
-            pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
+            pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
             pm_service::watch_roe(service.clone());
             eprintln!("ProxyMind MCP server for {} on project {}", actor.id(), cli.project.display());
             pm_mcp::McpServer::new(service, actor).serve_stdio().await?;
@@ -2061,16 +2579,25 @@ async fn run() -> Result<()> {
                 service.attach_intercept(queue.clone());
                 let rewriter = Arc::new(pm_proxy::Rewriter::new());
                 service.attach_rewriter(rewriter.clone())?;
+                let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
+                service.attach_hooks(plugin_hooks.clone());
                 let hooks = pm_proxy::Hooks {
                     rewrite: Some(rewriter.clone()),
                     intercept: Some(queue),
                     network: Some(service.network().clone()),
                     http2: !*no_http2,
+                    plugin_hooks: Some(plugin_hooks),
                 };
                 let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
                 let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
                 service.attach_listeners(extra.clone())?;
-                pm_service::watch_project(&cli.project, Some(rewriter), service.network().clone(), Some(extra))?;
+                pm_service::watch_project(
+                    &cli.project,
+                    Some(rewriter),
+                    service.network().clone(),
+                    Some(extra),
+                    service.trust_gate(),
+                )?;
                 let l =
                     tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
                 pm_proxy::listeners::warn_if_exposed(*proxy);
@@ -2088,11 +2615,15 @@ async fn run() -> Result<()> {
                     }
                 }
             } else {
-                pm_service::watch_project(&cli.project, None, service.network().clone(), None)?;
+                pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
             }
             pm_service::watch_roe(service.clone());
             // Scheduled scans start while the UI server runs.
             tokio::spawn(service.clone().run_scheduler());
+            // Workflows a person switched to "run on new traffic" react to exchanges the proxy records.
+            tokio::spawn(service.clone().run_workflow_triggers());
+            // Slack and webhook notifications a person enabled in this installation, from the event bus.
+            tokio::spawn(service.clone().run_integration_notifier());
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
                 .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
@@ -2314,6 +2845,38 @@ async fn run() -> Result<()> {
                 out!("{} issues (leads to test, not findings)", issues.len());
             }
         }
+        Command::Project { action: ProjectAction::Status { json } } => {
+            let view = open_service(&cli.project, None)?.trust_status()?;
+            if *json {
+                out!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                out!("{}", trust_text(&view, false));
+            }
+        }
+        Command::Project { action: ProjectAction::Trust { yes, actor } } => {
+            let service = open_service(&cli.project, None)?;
+            let view = service.trust_status()?;
+            if !view.safe_mode {
+                out!("{} is already trusted in this installation.", cli.project.display());
+                return Ok(());
+            }
+            out!("{}", trust_text(&view, true));
+            if !*yes {
+                use std::io::IsTerminal;
+                anyhow::ensure!(
+                    std::io::stdin().is_terminal(),
+                    "not a terminal: read the review above, then run again with --yes to trust the project"
+                );
+                eprint!("Trust this project and switch all of this on? [y/N] ");
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                anyhow::ensure!(answer.trim().eq_ignore_ascii_case("y"), "not trusted");
+            }
+            let req = pm_service::TrustConfirmRequest { digest: Some(view.digest.clone()) };
+            let done = service.trust_confirm(&human_actor(actor.as_deref())?, &req)?;
+            out!("✓ {} is trusted (by {})", cli.project.display(), done.trusted_by.unwrap_or_default());
+            out!("  Running `proxymind ui` or `proxymind proxy` on it picks this up within seconds.");
+        }
         Command::Project { action } => project_command(&cli.project, action)?,
         Command::Plugin { action } => {
             let home = home_dir(&cli)?;
@@ -2368,6 +2931,13 @@ async fn run() -> Result<()> {
                             )
                         }
                     }
+                    if p.manifest.is_v2() {
+                        out!(
+                            "  API 2: it asks for the permissions {}. It stays off until you accept them: `proxymind plugin accept {}` or the Plugins page.",
+                            p.manifest.declared_permissions().join(", "),
+                            p.manifest.name
+                        );
+                    }
                     if p.manifest.passive.is_some() {
                         out!("  Passive: runs with the passive scan (`proxymind scan`, the Issues page).");
                     }
@@ -2400,7 +2970,7 @@ async fn run() -> Result<()> {
                 }
                 PluginAction::Enable { name } | PluginAction::Disable { name } => {
                     let on = matches!(action, PluginAction::Enable { .. });
-                    anyhow::ensure!(reg.set_enabled(name, on), "no plugin named {name}");
+                    reg.set_enabled_checked(name, on)?;
                     reg.save()?;
                     out!("✓ {name} is {}", if on { "on" } else { "off" });
                 }
@@ -2444,6 +3014,15 @@ async fn run() -> Result<()> {
                             }
                         }
                     }
+                }
+                PluginAction::Accept { name } => {
+                    let service = open_service(&cli.project, None)?;
+                    service.attach_plugin_home(home.clone());
+                    let view = service.plugin_accept_permissions(&human_actor(None)?, name)?;
+                    if let Some(p) = view.plugins.iter().find(|p| p.name == *name) {
+                        out!("✓ accepted for {name}: {}; the plugin is on", p.accepted_permissions.join(", "));
+                    }
+                    out!("  Hooks stay off until you turn them on (the Plugins page, with `proxymind ui`).");
                 }
                 PluginAction::Remove { name } => {
                     anyhow::ensure!(reg.remove(name), "no plugin named {name}");
@@ -2795,6 +3374,7 @@ async fn run() -> Result<()> {
             url_encode,
             grep,
             identity,
+            workflow,
             json,
         } => {
             let service = open_service(&cli.project, None)?;
@@ -2829,6 +3409,7 @@ async fn run() -> Result<()> {
                         payload_sets: sets,
                         grep: grep.clone(),
                         identity: identity.clone(),
+                        workflow: workflow.clone(),
                         ..Default::default()
                     },
                 )
@@ -3551,11 +4132,35 @@ async fn run() -> Result<()> {
             eprintln!("Users: alice/alice123, bob/bob123, admin/admin123. Log in with POST /api/login.");
             pm_demo::VulnShop::new().serve(l).await;
         }
-        Command::Audit { action: AuditAction::Verify { anchor } } => {
+        Command::Audit {
+            action: AuditAction::Verify { anchor, checkpoint, checkpoint_key, key_file, require_keyed },
+        } => {
             let store = Store::open(&cli.project)?;
-            let n = pm_service::verify_audit(&store)?;
+            let mut checkpoints = Vec::new();
+            for f in checkpoint {
+                let text = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+                checkpoints.extend(pm_service::pm_policy::checkpoint::Checkpoint::parse_many(&text)?);
+            }
+            let key: Option<std::sync::Arc<dyn pm_service::pm_policy::audit::AuditKey>> = match key_file {
+                Some(f) => Some(std::sync::Arc::new(pm_service::pm_policy::audit::HmacKey::from_file_bytes(
+                    &std::fs::read(f).with_context(|| format!("reading {}", f.display()))?,
+                )?)),
+                None => None,
+            };
+            let trusted_signer = home_dir(&cli).ok().and_then(|h| pm_service::checkpoint_signer_public(&h));
+            let report = pm_service::verify_audit_report(
+                &store,
+                &pm_service::AuditVerifyOptions {
+                    key,
+                    require_keyed: *require_keyed,
+                    checkpoints,
+                    trusted_signer,
+                    pinned_fingerprint: checkpoint_key.clone(),
+                },
+            );
             let records = store.audit_records()?;
             let hex = |h: &[u8]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let n = report.records;
             if let Some(a) = anchor {
                 let a = a.trim().to_ascii_lowercase();
                 anyhow::ensure!(a.len() >= 12 && a.chars().all(|c| c.is_ascii_hexdigit()), "give 12+ hex digits");
@@ -3564,8 +4169,51 @@ async fn run() -> Result<()> {
                 };
                 out!("✓ anchor found at record {} of {n}", at + 1);
             }
-            let head = records.last().map(|r| hex(&r.hash)).unwrap_or_default();
-            out!("✓ audit log intact: {n} records, chain verified (head {})", &head[..head.len().min(24)]);
+            let head = &report.head[..report.head.len().min(24)];
+            out!(
+                "{} records: {} version 1, {} version 2 ({} keyed)",
+                report.records,
+                report.v1_records,
+                report.v2_records,
+                report.keyed_records
+            );
+            out!("  key check: {}: {}", report.key_check, report.key_note);
+            let c = &report.checkpoints;
+            match c.status.as_str() {
+                "none" => out!("  checkpoints: none (write one with `proxymind audit checkpoint -o FILE`)"),
+                st => {
+                    out!(
+                        "  checkpoints: {st} ({} stored, {} given; newest covers record {}, signer {}{})",
+                        c.stored,
+                        c.supplied,
+                        c.latest_seq.unwrap_or(0),
+                        c.fingerprint.clone().unwrap_or_default(),
+                        if c.signer_pinned { "" } else { ", signer not pinned: pass --checkpoint-key" }
+                    );
+                }
+            }
+            if let Some(e) = &report.error {
+                anyhow::bail!("audit log verification FAILED: {e}");
+            }
+            out!("✓ audit log intact: {n} records, chain verified (head {head})");
+        }
+        Command::Audit { action: AuditAction::Checkpoint { out: file, actor } } => {
+            let service = open_service(&cli.project, None)?;
+            attach_plugins(&cli, &service);
+            let cp = service.audit_checkpoint(&human_actor(actor.as_deref())?)?;
+            let text = serde_json::to_string_pretty(&cp)?;
+            match file {
+                Some(f) => {
+                    std::fs::write(f, text + "\n")?;
+                    out!("✓ checkpoint at record {} written to {}", cp.seq, f.display());
+                    out!("  signer {}; head {}", cp.fingerprint(), &cp.head[..24]);
+                    out!(
+                        "  Keep the file where whoever can write the project file cannot; check with `proxymind audit verify --checkpoint {}`.",
+                        f.display()
+                    );
+                }
+                None => out!("{text}"),
+            }
         }
         Command::Audit { action: AuditAction::List { limit, json } } => {
             let store = Store::open(&cli.project)?;
@@ -3634,6 +4282,61 @@ fn temp_beside(path: &std::path::Path, tag: &str) -> PathBuf {
     path.with_file_name(format!(".{name}.{tag}-{}-{}", std::process::id(), jiff::Timestamp::now().as_millisecond()))
 }
 
+/// A project's trust state for a terminal; `full` adds everything the file would switch on.
+fn trust_text(v: &pm_service::TrustView, full: bool) -> String {
+    let mut t = String::new();
+    if v.safe_mode {
+        t.push_str("SAFE MODE: this installation does not trust this project");
+        if v.changed_since_trust {
+            t.push_str(" (its settings changed since it was trusted)");
+        }
+        t.push_str(
+            ".
+Held back until you trust it:
+",
+        );
+        for h in &v.held_back {
+            t.push_str(&format!(
+                "  - {} ({})
+",
+                h.what, h.why
+            ));
+        }
+    } else {
+        t.push_str(&format!(
+            "Trusted ({} by {}). Nothing is held back.
+",
+            v.basis.as_deref().unwrap_or("?"),
+            v.trusted_by.as_deref().unwrap_or("?")
+        ));
+    }
+    if full {
+        let r = &v.review;
+        let mut section = |title: &str, items: &[pm_service::ReviewItem]| {
+            if items.is_empty() {
+                return;
+            }
+            t.push_str(&format!("{title}:\n"));
+            for i in items {
+                let by = i.claimed_by.as_deref().map(|b| format!(" [the file says: {b}]")).unwrap_or_default();
+                t.push_str(&format!("  - {}: {}{by}\n", i.what, i.detail));
+            }
+        };
+        section("Listeners", &r.listeners);
+        section("Upstream proxy rules", &r.upstream_rules);
+        section("Other network settings", &r.network_other);
+        section("Match-and-replace rules", &r.rewrite_rules);
+        section("Scan schedules", &r.schedules);
+        section("Workflow triggers", &r.triggers);
+        section("Session rules and macros", &r.session);
+        section("Assistant", &r.assistant);
+        if let Some(roe) = &r.roe_text {
+            t.push_str(&format!("Rules of engagement (written by whoever made the file):\n{roe}\n"));
+        }
+    }
+    t
+}
+
 fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<()> {
     match action {
         ProjectAction::Lock { out, remove } => {
@@ -3673,6 +4376,7 @@ fn project_command(project: &std::path::Path, action: &ProjectAction) -> Result<
                 );
             }
         }
+        ProjectAction::Status { .. } | ProjectAction::Trust { .. } => unreachable!("handled before"),
         ProjectAction::Unlock { file, out } => {
             anyhow::ensure!(is_locked(file), "{} is not a locked project", file.display());
             let out = out.clone().unwrap_or_else(|| file.with_extension("pmproj"));

@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind, Target};
+use pm_policy::{Actor, Target};
 use pm_proxy::intercept::{Decision, Held, Kind};
 use pm_proxy::{InterceptQueue, InterceptSettings, QueueChange};
 use serde::Serialize;
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Event, Result, Service, ServiceError};
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -46,13 +47,6 @@ impl Service {
         })
     }
 
-    fn human_only(actor: &Actor) -> Result<()> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can use the intercept queue".into()));
-        }
-        Ok(())
-    }
-
     pub fn intercept_state(&self) -> InterceptState {
         match self.intercept.get() {
             Some(q) => InterceptState { attached: true, settings: q.settings(), held: q.held() },
@@ -65,7 +59,7 @@ impl Service {
     }
 
     pub fn intercept_settings(&self, actor: &Actor, s: InterceptSettings) -> Result<InterceptState> {
-        Self::human_only(actor)?;
+        self.require_actor(actor, Perm::InterceptUse)?;
         self.queue()?.set_settings(s.clone());
         self.audit(&actor.id(), "intercept_settings", json!(s), "allow")?;
         Ok(self.intercept_state())
@@ -80,7 +74,7 @@ impl Service {
         raw: Option<String>,
         fix_content_length: bool,
     ) -> Result<()> {
-        Self::human_only(actor)?;
+        self.require_actor(actor, Perm::InterceptUse)?;
         let q = self.queue()?;
         let held = q.get(id).ok_or_else(|| ServiceError::NotFound(format!("intercepted message {id}")))?;
         let decision = match raw {
@@ -120,7 +114,7 @@ impl Service {
     }
 
     pub fn intercept_drop(&self, actor: &Actor, id: u64) -> Result<()> {
-        Self::human_only(actor)?;
+        self.require_actor(actor, Perm::InterceptUse)?;
         let q = self.queue()?;
         let held = q.get(id).ok_or_else(|| ServiceError::NotFound(format!("intercepted message {id}")))?;
         q.decide(id, Decision::Drop);
@@ -134,7 +128,7 @@ impl Service {
     }
 
     pub fn intercept_forward_all(&self, actor: &Actor) -> Result<usize> {
-        Self::human_only(actor)?;
+        self.require_actor(actor, Perm::InterceptUse)?;
         Ok(self.queue()?.forward_all())
     }
 }

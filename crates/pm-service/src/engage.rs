@@ -169,7 +169,7 @@ impl Service {
             let Some(ex) = self.store.read(|db| db.get_exchange(id))? else { continue };
             let response = ex.response.as_deref().and_then(|raw| {
                 let converted;
-                let raw = if pm_http::h2text::is_http2_response(raw) {
+                let raw = if pm_http::h3text::is_multiplexed_response(raw) {
                     converted = pm_http::h2text::to_http1_response(raw)?;
                     &converted[..]
                 } else {
@@ -477,7 +477,7 @@ impl Service {
             .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let s = &ex.summary;
-        if pm_http::h2text::is_http2_request(&ex.request) {
+        if pm_http::h3text::is_multiplexed_request(&ex.request) {
             return Err(ServiceError::Invalid(
                 "CSRF proofs are built from HTTP/1.1 requests; resend it as HTTP/1.1".into(),
             ));
@@ -498,7 +498,7 @@ impl Service {
         let resp =
             ex.response.ok_or_else(|| ServiceError::Invalid(format!("exchange {exchange_id} has no response")))?;
         let converted;
-        let raw = if pm_http::h2text::is_http2_response(&resp) {
+        let raw = if pm_http::h3text::is_multiplexed_response(&resp) {
             converted = pm_http::h2text::to_http1_response(&resp).unwrap_or_default();
             &converted[..]
         } else {

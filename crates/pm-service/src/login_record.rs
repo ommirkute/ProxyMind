@@ -14,10 +14,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use pm_identity::{AuthMaterial, HealthCheck, Identity, LoggedOut, LoginExtract, LoginRecipe, LoginStep};
-use pm_policy::{Actor, ActorKind, Target, Tier};
+use pm_policy::{Actor, Target, Tier};
 use serde::Serialize;
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::replay::parse_url_endpoint;
 use crate::{Authorization, Result, Service, ServiceError};
 
@@ -279,9 +280,11 @@ impl Service {
         from: i64,
         to: Option<i64>,
     ) -> Result<LoginRecording> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can record logins (they contain passwords)".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::IdentitiesWrite,
+            Denial::message("only humans can record logins (they contain passwords)"),
+        )?;
         if !pm_identity::valid_name(name) || name == pm_identity::ANONYMOUS {
             return Err(ServiceError::Invalid(format!("bad identity name {name:?}")));
         }

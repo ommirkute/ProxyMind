@@ -99,3 +99,24 @@ path = "fuzz_targets/graphql_schema.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "protobuf_decode"
+path = "fuzz_targets/protobuf_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "socks5_handshake"
+path = "fuzz_targets/socks5_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http3_text"
+path = "fuzz_targets/http3_text.rs"
+test = false
+doc = false
+bench = false

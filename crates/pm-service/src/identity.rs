@@ -1,11 +1,12 @@
 //! Test identities: capture from history, check, log in again, list.
 
 use pm_identity::{ANONYMOUS, Identity};
-use pm_policy::{Actor, ActorKind, Tier};
+use pm_policy::{Actor, Tier};
 use pm_store::IdentityRow;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::replay::parse_url_endpoint;
 use crate::{Authorization, Result, Service, ServiceError, now_ms};
 
@@ -84,9 +85,7 @@ impl Service {
     /// Creates or replaces an identity from a full definition. Humans only,
     /// because it handles real credentials.
     pub fn identity_set(&self, actor: &Actor, ident: Identity) -> Result<IdentityInfo> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can define identities with credentials".into()));
-        }
+        self.require_actor(actor, Perm::IdentitiesWrite)?;
         if !pm_identity::valid_name(&ident.name) || ident.name == ANONYMOUS {
             return Err(ServiceError::Invalid(format!("bad identity name {:?}", ident.name)));
         }
@@ -172,9 +171,11 @@ impl Service {
         exchange_id: i64,
         token_json_pointer: Option<String>,
     ) -> Result<IdentityInfo> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can set login recipes (they contain passwords)".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::IdentitiesWrite,
+            Denial::message("only humans can set login recipes (they contain passwords)"),
+        )?;
         let (url, raw, _) = self.exchange_url_and_raw(exchange_id)?;
         let mut ident = self.load_identity(name)?;
         ident.login = Some(pm_identity::LoginRecipe {
@@ -193,9 +194,7 @@ impl Service {
     }
 
     pub fn identity_delete(&self, actor: &Actor, name: &str) -> Result<bool> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can delete identities".into()));
-        }
+        self.require_actor_with(actor, Perm::IdentitiesWrite, Denial::message("only humans can delete identities"))?;
         let deleted = self.store.write(|db| db.delete_identity(name))?;
         self.audit(&actor.id(), "identity_delete", json!({ "name": name }), if deleted { "allow" } else { "noop" })?;
         Ok(deleted)
@@ -209,7 +208,11 @@ impl Service {
         let mut ident = self.load_identity(name)?;
         let recipe = ident.login.clone().ok_or_else(|| ServiceError::Invalid(format!("{name} has no login recipe")))?;
         let created_by = self.store.read(|db| db.get_identity(name))?.map(|r| r.created_by).unwrap_or_default();
-        let owner = Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        // A CI run logs in as the CI actor, never as the person who saved the identity in a project file.
+        let owner = match self.run_guard.lock().login_actor.clone() {
+            Some(a) => a,
+            None => Actor::parse(&created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?,
+        };
         let mut learned = Vec::new();
         // What this run has learned: cookies set by its steps (sent on to
         // later steps) and values read from responses.

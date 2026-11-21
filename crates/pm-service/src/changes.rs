@@ -8,10 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// The parts of an operation a snapshot keeps.
@@ -106,9 +107,7 @@ impl Service {
 
     /// Saves the current model under `name` (people only).
     pub fn model_snapshot_save(&self, actor: &Actor, name: &str) -> Result<SnapshotInfo> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people save model snapshots".into()));
-        }
+        self.require_actor(actor, Perm::ModelSnapshotsWrite)?;
         let name = name.trim();
         if name.is_empty() || name.len() > 100 {
             return Err(ServiceError::Invalid("give the snapshot a name (up to 100 characters)".into()));

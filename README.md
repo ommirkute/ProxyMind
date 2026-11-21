@@ -94,18 +94,19 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 
 ### 🔁 Proxy & history
 - HTTP/1.1, HTTP/2 and WebSockets, **byte-exact**: nothing is changed unless you ask
+- Send to targets over **HTTP/3** (QUIC), shown as text like HTTP/2; `Alt-Svc` h3 detection and a preset that removes it
 - Intercept requests, responses and WebSocket messages; edit, forward or drop
 - Match & replace rules, with presets (unhide fields, strip security headers…)
 - History with a query language: `status:>=400 -ext:png resp:"error"`
 - Site map, global search, highlights and comments
-- Transparent mode for apps that ignore proxy settings, extra listeners, upstream proxies (HTTP/SOCKS5) and client certificates
+- SOCKS5 listeners, transparent mode on Linux for apps that ignore proxy settings, extra listeners, per-host upstream proxies (HTTP/SOCKS5) and client certificates
 - HAR import/export, *Copy as cURL / Python / JS / PowerShell*
 
 </td>
 <td width="50%" valign="top">
 
 ### 🎯 Replay & Fuzzer
-- Replay tabs with an inspector, history, HTTP/2 pseudo-headers
+- Replay tabs with an inspector, history, HTTP/2 and HTTP/3 pseudo-headers
 - Send as any identity; send a group of tabs in sequence or **at the same moment**
 - Race conditions with the HTTP/2 **single-packet attack**
 - Fuzzer: marked positions, attack modes, payload lists, number ranges, processing rules, recursive grep, anomaly highlighting
@@ -156,6 +157,7 @@ The demo browses VulnShop as three users, replays requests as the others, **prov
 - **Signed evidence packs** the client verifies themselves (`proxymind evidence`, `proxymind verify`)
 - **Authorization matrix**: every endpoint as every role, as one grid; IDOR, missing function-level checks and missing login flagged and proven automatically
 - **What changed since the last test**: model snapshots and a diff that points the retest at new and changed endpoints
+- **Scanning in CI**: `proxymind ci` crawls, scans and proves against a staging URL under a scope file, compares with a baseline of known findings and fails a pipeline on new ones (SARIF for GitHub code scanning, JUnit, JSON; [docs/ci.md](docs/ci.md))
 - **Findings as CI regression tests**: every proven finding exports as a test developers run against staging until it's fixed (`proxymind regress run`, JUnit output)
 - Issue library with CWE/OWASP mapping and fix advice
 - Reports in **HTML, Markdown, JSON and SARIF**; executive, technical, compliance or your own template
@@ -235,7 +237,7 @@ VulnShop's remaining five are on pages nothing links to or describes, or need a 
 
 ## 🧩 Extend it
 
-- **Plugins**: any program that speaks JSON lines. Passive checks, active checks and UI panels, run sandboxed, optionally signed (Ed25519). [Examples](examples/plugins) · [ADR-0014](docs/adr/0014-plugins.md)
+- **Plugins**: any program that speaks JSON lines. Passive checks, active checks and UI panels, run sandboxed, optionally signed (Ed25519). [Examples](examples/plugins) · [Writing plugins](docs/plugins.md) · [ADR-0014](docs/adr/0014-plugins.md)
 - **Custom checks**: declarative YAML scanner checks, edited in the UI.
 - **SDKs**: dependency-free REST clients for **Python** (`sdk/python`) and **TypeScript** (`sdk/typescript`), Apache-2.0.
 - **REST API** with live events: everything the UI does, you can script.
@@ -257,7 +259,7 @@ Other ways to run it:
 
 - **Docker**: `docker build -t proxymind .` ([running it](docs/releasing.md#container-image); includes Chromium for XSS proofs)
 - **Desktop app**: `desktop/` wraps the same UI in a Tauri window with a tray icon ([ADR-0012](docs/adr/0012-desktop-shell.md))
-- **Headless / CI**: every feature is also a CLI command (`proxymind --help`) with `--json` output
+- **Headless / CI**: every feature is also a CLI command (`proxymind --help`) with `--json` output; `proxymind ci` is the one-command pipeline scan ([docs/ci.md](docs/ci.md), examples for [GitHub Actions](examples/ci/github-actions.yml) and [GitLab CI](examples/ci/gitlab-ci.yml))
 
 <details>
 <summary><b>Architecture</b></summary>
@@ -266,12 +268,12 @@ One service layer that every client uses (UI, REST API, MCP, CLI), and every act
 
 ```
 crates/
-  pm-http      raw HTTP/1.x parsing, HTTP/2 text form (no I/O, fuzzed)
+  pm-http      raw HTTP/1.x parsing, HTTP/2 and HTTP/3 text forms (no I/O, fuzzed)
   pm-tls       CA and per-host certificates, upstream TLS
   pm-proxy     proxy, intercept, match/replace, WebSockets
   pm-store     SQLite project file and compressed blob store
   pm-policy    scope, rules of engagement, approvals, rate limits, audit chain
-  pm-replay    send engine (incl. single-packet parallel sends)
+  pm-replay    send engine (HTTP/1.1, HTTP/2, HTTP/3 over QUIC, single-packet parallel sends)
   pm-identity  multi-identity sessions, recorded logins, re-login
   pm-model     live app model: operations, objects, ownership
   pm-diff      semantic diff with learned noise masks
@@ -286,6 +288,7 @@ crates/
   pm-ledger    hypotheses and coverage
   pm-plugin    plugins: protocols, sandbox, signatures
   pm-vault     sealed (encrypted) project files
+  pm-accounts  accounts, sessions and second factors for the project server (not wired in yet)
   pm-ai        model views, redaction, untrusted-content tagging
   pm-service   the one service layer
   pm-api       REST API and live events; serves the web UI
@@ -309,6 +312,8 @@ fuzz/          fuzz targets for the parsers
 | | |
 |---|---|
 | [docs/agents.md](docs/agents.md) | Connecting AI agents (MCP) |
+| [docs/capture.md](docs/capture.md) | SOCKS5 listeners, transparent mode with iptables/nftables, upstream chains with per-host rules |
+| [docs/mobile.md](docs/mobile.md) | Testing from an Android or iOS device: CA setup page and QR code, per-device history |
 | [docs/plan.md](docs/plan.md) | Roadmap and status |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 | [docs/scanner-matrix.md](docs/scanner-matrix.md) | Scanner coverage, check by check |

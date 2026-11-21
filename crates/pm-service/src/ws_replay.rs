@@ -188,9 +188,9 @@ impl Service {
             )));
         }
         let raw = req.raw.as_ref().map_or_else(|| ex.request.clone(), |r| r.as_bytes().to_vec());
-        if pm_http::h2text::is_http2_request(&raw) {
+        if pm_http::h3text::is_multiplexed_request(&raw) {
             return Err(ServiceError::Invalid(
-                "WebSockets over HTTP/2 aren't supported; write HTTP/1.1 in the request line".into(),
+                "WebSockets over HTTP/2 or HTTP/3 aren't supported; write HTTP/1.1 in the request line".into(),
             ));
         }
         let ep = Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
@@ -247,6 +247,7 @@ impl Service {
         let started = Instant::now();
         let result = self.sender.send(&out.endpoint, &wire, "GET", Some(&check)).await;
         let mut record = NewExchange {
+            client_addr: None,
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: "ws_replay".into(),
@@ -262,6 +263,7 @@ impl Service {
             error: None,
             identity: identity.map(str::to_string),
             hypothesis_id: out.hypothesis_id,
+            ..Default::default()
         };
         let resp = match result {
             Ok(r) => r,

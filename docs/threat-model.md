@@ -1,0 +1,283 @@
+# Threat model
+
+Written 2026-11-17 for roadmap Phase 3 ("starts with an ADR on identity and a written threat model"). It covers
+ProxyMind as it is today (single user, one project per process, everything on the tester's machine) and what Phase 3
+(users, roles, a networked project server, integrations, a hosted callback server) changes. It goes with
+[ADR-0022](adr/0022-identity-and-access.md), which is **Accepted** (2026-11-21) and decides how identity and authorization work.
+
+How this was made: by reading the code and the ADRs, not by running attacks. Where a claim depends on a code path, the
+file is cited. Anything marked **Gap** is something the code does not do today. The findings in section 8 are not
+fixed by this document (F-1 and F-2 were dealt with on 2026-11-21, see section 8). Update this file when a boundary or a control changes; the Phase 3 gate (a security review of
+login and authorization, no open high-severity findings) is measured against it.
+
+## 1. What ProxyMind is, for this purpose
+
+An intercepting proxy for authorized security testing. It sits between a browser or device and a target, records
+traffic (byte-exact, ADR-0002), and lets people, AI agents (MCP, the built-in assistant) and plugins act on that traffic
+through one service layer and a policy gate (ADR-0005). It is a tool whose job is to hold other people's credentials and
+to send hostile-looking requests, so the usual question "who may reach it" matters more than for most software.
+
+Processes: `proxymind ui` (proxy, REST API and UI, scheduler, workflow triggers), `proxymind proxy`, `proxymind mcp`
+(one stdio server per agent, same project file), the desktop app (the same stack in one process, ADR-0012),
+`proxymind oast-server`. They share a project (a SQLite file, ADR-0004) and a home directory (`~/.proxymind`).
+
+## 2. Assets
+
+| # | Asset | Where it lives | Why it matters |
+| --- | --- | --- | --- |
+| A1 | Captured target traffic: cookies, tokens, passwords, personal data of the client's users | Project file (`blobs`, `exchanges`, `streams`); identities hold cookies and auth headers | The client's confidentiality duty; a leak is a reportable incident |
+| A2 | The CA private key | `~/.proxymind/proxymind-ca.key` (mode 0600, `pm-tls`); the certificate is in phones' and browsers' trust stores | Whoever holds it can impersonate any HTTPS site to every device that trusts the CA. Valid 10 years, no name constraints |
+| A3 | The API token | `~/.proxymind/api-token` (0600), printed in the `/auth?token=` URL, kept as the `pm_token` cookie | Today it is the whole human: change the rules of engagement, approve actions, start listeners |
+| A4 | Model API keys | Environment variables, or `~/.proxymind/model-keys.json` (0600, plain JSON) | Money, and access to the user's model account |
+| A5 | Project files and sealed projects | `*.pmproj` (created 0600), `*.pmlock` (Argon2id + ChaCha20-Poly1305, ADR-0013) | Hand-over copies, backups, laptops |
+| A6 | Audit log integrity | `audit` table; blake3 hash chain (`pm-policy/src/audit.rs`) | The proof that agents stayed inside the rules of engagement |
+| A7 | Rules of engagement (scope, tiers, windows, data rules) | Project setting `roe` | The legal boundary of the work; widening it is the way to hurt third parties |
+| A8 | The user's machine and network position | Local services, LAN, cloud metadata, other projects | ProxyMind is a pivot: it connects to hosts on the user's behalf |
+| A9 | Third parties' systems | Targets, and anyone a hostile file makes ProxyMind scan | Harm done from the user's IP address |
+| A10 | Secrets in settings | Upstream proxy passwords, SOCKS5 listener logins (project settings, plain text; masked as `********` in the API and audit log), client certificate paths | Reused credentials |
+| A11 | Plugins' trust | `~/.proxymind/plugins.json`, `trusted-keys.json` | Plugins run as the user (ADR-0014) |
+| A12 | (Phase 3) User accounts, sessions, OIDC client secret, integration tokens (Jira, GitHub, Slack, webhooks), per-project callback tokens, the project server's TLS key | `pm-accounts` exists since 2026-11-21 (ADR-0022 step 3: `server.db`, `server.key`, hashes, TOTP secrets, sessions); not reachable from any network yet (step 4) | New high-value secrets in one place |
+
+## 3. Trust boundaries
+
+```
+ target / web page ──(B1)── proxy listener ─┐
+ phone / LAN client ─(B1)── (HTTP, SOCKS5,  │
+                             transparent)   ├── pm-service ── pm-policy ── project file (B7) ── home dir (B8)
+ browser (UI) ───────(B2)── pm-api ─────────┤        │
+ agent / SDK / CI ───(B3)── MCP stdio, REST ┤        ├──(B5)── plugin processes, hook workers
+ built-in assistant ─(B4)── model provider  ┘        ├──(B9)── targets, update check, OAST listeners
+ desktop shell ──────(B6)── webview + IPC            └──(B10)─ Phase 3: project server, OIDC, integrations
+```
+
+| Id | Boundary | Trust assumption today |
+| --- | --- | --- |
+| B1 | Browser or device to a proxy listener (HTTP, SOCKS5, transparent), and the setup page | Anyone who can connect is a client. Only SOCKS5 can ask for a login. Loopback by default |
+| B2 | Browser to the UI and REST API on localhost | The token holder is the human. Host must be localhost; mutating requests need `X-ProxyMind: 1` (`pm-api/src/lib.rs`) |
+| B3 | Agents (MCP stdio, REST SDK, the built-in assistant) to `pm-service` | MCP: the actor comes from `--actor`, there is no credential. REST: always the human. The gate is the control |
+| B4 | Target content to a model; traffic to a model provider | Target content is untrusted (`<untrusted_target_content>`); secrets are redacted by pattern before a model sees them |
+| B5 | Plugins and hook workers to the user's machine and to raw traffic | Per user, signed or not, sandboxed on Linux only (ADR-0015, 0016, 0020) |
+| B6 | Desktop webview to the in-process API and Tauri IPC | The webview loads `http://127.0.0.1:<random>/auth?token=…`; IPC commands are for local app pages only (`desktop/src/main.rs`, no `capabilities`) |
+| B7 | A project file to the process that opens it | **The file is trusted as if the user wrote it** (this is the biggest gap today, F-2) |
+| B8 | Other OS users and other processes of the same user to `~/.proxymind` and the project file | Other users: blocked by file modes. The same user: no boundary at all |
+| B9 | ProxyMind to the network: targets, model servers, GitHub release check, OAST listeners facing the Internet | Targets go through the gate and a DNS check; model URLs and listeners are chosen by the user |
+| B10 | Phase 3: clients to a project server; server to an OIDC provider; server to Jira, GitHub, Slack; Internet to the hosted callback server | Does not exist yet; section 7 |
+
+## 4. Actors and attackers
+
+| Actor | Capability assumed | Relevant boundaries |
+| --- | --- | --- |
+| Malicious target or page (including a page the tester browses through the proxy) | Controls every byte of a response; can try XSS in the UI, prompt injection, parser attacks, header and path tricks, redirects to internal hosts, a hostile TLS server | B1, B4, B9, parsers in `pm-http`, UI rendering |
+| Prompt-injected agent (MCP or assistant) | Acts with the agent's tools; tries to widen scope, leak secrets, send traffic out of scope, approve itself | B3, B4 |
+| Agent with a shell or file access as the same OS user | Can read `api-token`, open the project file, edit the audit table | B3, B8 (F-1) |
+| Malicious plugin | Runs code as the user, sees raw traffic, may be signed by a key the user trusted | B5 |
+| Hostile project file author | Wrote a project the victim opens (a client, a colleague, a download) | B7 |
+| Other local user on a shared machine | Can connect to loopback ports, cannot read 0600 files | B1, B2, B8 |
+| LAN attacker | Reaches any listener bound beyond loopback; can serve a rogue Wi-Fi proxy page | B1, B9 |
+| Web page in the tester's browser | Can send requests to `127.0.0.1` ports, rebind DNS names | B1, B2 |
+| (Phase 3) Teammate with a lower role | Valid session, tries to exceed their role, read other projects, rewrite scope | B10 |
+| (Phase 3) Holder of a stolen session or token | Cookie, API key or agent token copied from a laptop, a log or a CI variable | B10 |
+| (Phase 3) Compromised or malicious OIDC provider | Issues tokens for any subject, or for a subject it should not | B10 |
+| (Phase 3) Internet client of the callback server | Sends arbitrary DNS, HTTP and SMTP; guesses tokens; floods | B10 |
+
+Out of scope: an attacker who already runs as the user and does not care about ProxyMind's own boundaries (they can
+read the project anyway), physical access to an unlocked machine, supply-chain compromise of dependencies (tracked by
+`cargo deny`, SBOMs and attestations, `docs/releasing.md`), and the user deliberately testing something they are not
+allowed to test (the ROE and audit log record, they do not prevent that).
+
+Severity scale used below: **High**: leads to credential or traffic theft, or to ProxyMind attacking a third party,
+with little more than the attacker's position described. **Medium**: needs an unusual setup or a user step, or has
+limited impact. **Low**: hardening, or the impact is already within what the actor can do.
+
+## 5. Threats by boundary (STRIDE)
+
+Each row: the threat, what exists today (file or ADR), what is left, and the severity of what is left. Letters:
+S spoofing, T tampering, R repudiation, I information disclosure, D denial of service, E elevation of privilege.
+Rows marked **Gap** have an entry in section 8.
+
+### B1. Browser or device to a proxy listener
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B1.1 | S, E | Anyone who can reach a non-loopback listener uses the proxy (open proxy): browses as the tester, reaches services on the tester's machine and network (loopback ports, cloud metadata), and fills the project with their traffic | `warn_if_exposed` prints a warning (`pm-proxy/src/listeners.rs`); loopback by default; SOCKS5 can require a login (RFC 1929, plain text); a request to the listener's own address is refused (`SelfAddr`, loop guard) | **Gap.** HTTP and transparent listeners have no client authentication and no client allow-list. The warning is the only control. The mobile guide tells users to bind `0.0.0.0` (`docs/mobile.md`). Traffic through the proxy is not subject to the ROE (it is the tester's own browsing), so it reaches denied networks too | High when exposed (F-4) |
+| B1.2 | I | A LAN client reads the setup page and the CA certificate | The page holds only public data, no scripts, strict CSP, never recorded (`setup_page.rs`) | Tells a scanner that ProxyMind is here; the certificate is public by design | Low |
+| B1.3 | T | A network attacker between the tester and the proxy on an exposed listener changes or reads traffic (plain HTTP proxy protocol) | None beyond "use a trusted network" | Credentials in recorded traffic cross the LAN in the clear when the device speaks HTTP to the proxy; SOCKS5 password is plain text | Medium |
+| B1.4 | T | A malicious server breaks the parser (smuggling, desync, oversized frames) to corrupt recording or crash the proxy | Own parser with byte-exact tests, fuzz targets in the nightly matrix (ADR-0002, roadmap Phase 2 gate), limits and timeouts | Memory-safe language, no `unsafe`; logic bugs remain possible | Low |
+| B1.5 | D | A client opens many connections or huge bodies to exhaust memory or the recorder queue | Handshake time limits (SOCKS5 10 s), body and stream caps (16 MB per stream), the 4,096-record recorder queue; overflow is counted, not blocked | No per-client connection limit; on an exposed listener a client can fill the project file | Medium |
+| B1.6 | I | TLS interception exposes the user's own other browsing if the CA is trusted system-wide | The CA is per install; the built-in browser has its own profile | See A2 and F-8: one 10-year CA with no name constraints is trusted by every device it was installed on | Medium |
+| B1.7 | T | The proxy's own upstream TLS is not verified by default (`--verify-upstream` is off), so a network attacker next to the tester can read or alter traffic to the target | Deliberate: pentest targets often have bad certificates; the setting exists | The default favours compatibility over integrity; the UI should say so where it is set | Low |
+
+### B2. UI and REST API on localhost
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B2.1 | S | Another local user or process calls the API | Token (256 bits, OS randomness, `pm2_` prefix, constant-time compare) required on `/api/*`; file mode 0600; binds to loopback unless `--bind-any` (`pm-api/src/lib.rs`, `pm-cli`) | Any process of the same OS user can read the file (see B8). The token is not tied to a process or a client | Medium |
+| B2.2 | S, E | The token is the whole human: `human:$USER` for every request (`AppState.actor`). It can edit the ROE, approve approvals, start listeners, set keys. The REST SDK and any script given the token act as the human, not as an agent | None | **Gap.** No scopes, no per-client tokens, no expiry, no revocation except deleting the file and restarting. An agent given the token (or able to read the file) steps outside the agent tiers (F-1, F-3) | High for agents with file access, Medium otherwise |
+| B2.3 | S | The cookie `pm_token` is the token itself: 30 days, no `Secure`, no rotation, never revoked server side (`routes.rs: auth`) | `HttpOnly`, `SameSite=Strict` | **Gap.** A copied cookie is a permanent credential. No `Secure` flag is acceptable on loopback HTTP but not once the server leaves loopback | Medium (High on a network, F-3) |
+| B2.4 | S | The token travels in a URL (`/auth?token=…`): terminal output, the desktop webview's URL, browser history | `Referrer-Policy: no-referrer`; the page redirects to `/` after setting the cookie | Appears in shell scrollback and screen shares | Low |
+| B2.5 | E | CSRF from a web page against the localhost API | `SameSite=Strict`; mutating requests need `X-ProxyMind: 1` (not sendable cross-origin without a preflight); no CORS headers are served, so preflights fail | `SameSite` treats all `localhost` ports as one site, so another web app on `localhost:3000` is same-site: it can send credentialed GETs. Read-only GETs are harmless only if no GET route changes state (not audited here, F-11). Responses stay unreadable (no CORS) | Low |
+| B2.6 | S, I | DNS rebinding: a page rebinds `evil.example` to `127.0.0.1` and reads the API | `Host` must be `localhost`, `127.0.0.1` or `::1`, else 403 (tested: `127.0.0.1.evil.com`, `localhost.evil.com`); the token is still required | Sound as long as the check stays first in the middleware. `--bind-any` behind a reverse proxy that rewrites `Host` would weaken it | Low |
+| B2.7 | T, I | XSS in the UI from target content (the UI renders hostile responses, headers, finding text) | React escaping; CSP `default-src 'self'` (but `style-src 'unsafe-inline'`), `X-Frame-Options: DENY`, `nosniff`; plugin panels are data rendered as text (ADR-0016); the script-free setup page | A UI XSS would hold the token cookie's power (HttpOnly stops theft, not use). The Render view and body previews need review each time they change | Medium |
+| B2.8 | I | Secrets in API responses (listener passwords, keys) | Passwords are masked as `********`; keys are never returned (`model_key_status` shows the last four characters) | Upstream and listener passwords sit in project settings in plain text (F-9) | Low |
+| B2.9 | E | `--bind-any` in a container exposes the API on a network | Documented for containers, "publish the port on 127.0.0.1 only"; the `Host` check still blocks non-local `Host` values | A user can publish it wider; the only barrier is the token | Medium |
+| B2.10 | D | A client floods the API or SSE streams | The event bus bounds queues (ADR-0018); heavy actions have caps | No request rate limit on the API | Low |
+| B2.11 | R | Actions by "the human" cannot be told apart: everything is `human:$USER` | Audit log records actor and action | Two people sharing a machine, or a script and a person, look the same | Low today, High in Phase 3 |
+
+### B3. Agents: MCP, REST SDK, the built-in assistant
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B3.1 | S | An MCP client claims any `--actor` name, including another agent's or a `plugin:` name; the identity is not authenticated | `--actor` must not be `human:`; actor names are validated (`Actor::parse`); audit records the claimed id | The launcher of `proxymind mcp` chooses the identity; with an unauthenticated stdio pipe that is all there is | Low (one launcher per agent today) |
+| B3.2 | E | A prompt-injected agent widens its powers: edits the ROE, approves its own request, switches workflow triggers, starts listeners, sets keys | About 53 checks of the form `actor.kind != Human` in `pm-service` (ROE, approvals, rules, listeners, keys, workflows, plugins, identities, schedules); `decide_approval` refuses non-humans and audits the refusal; approvals bind actor, action and parameter hash and are single use (`approvals.rs`); agents see only their own runs | Authorization is scattered, not deny-by-default: a new service method that forgets the check is open to agents. There is no central table to review (F-7) | Medium |
+| B3.3 | E | An agent that also has a shell, file access or a browser as the same OS user skips MCP: reads `api-token` and calls REST as the human, edits the project's SQLite file (ROE, approvals, audit), or reads the CA key | ADR-0005 assumes the agent is confined to MCP tools. The 0600 modes only separate users, not processes | The policy gate does not hold against an agent that can run commands as the same user. Claude Code and similar agents usually can. **Documented 2026-11-21** (`docs/agents.md`, "What the policy gate does and doesn't contain"; ADR-0005). Code mitigations come with 3.1 to 3.3 (F-1) | High until Phase 3 (documented) |
+| B3.4 | E | An agent sends traffic out of scope, to denied networks, or at a higher tier than allowed | Scope is bypass-resistant (`scope.rs`), denied networks and a DNS rebinding check right before connecting (`check_resolved`), tiers by actor kind, payload-aware classification (`payload.rs`), rate limits, ROE windows | Strong. The gate sees the final bytes; approvals bind them | Low |
+| B3.5 | I | Secrets leave through the model: cookies and tokens in traffic reach a cloud model | Redaction by pattern before a model sees traffic (`pm-ai/src/redact.rs`, `redact_before_llm` on by default); cloud models are allowed by default since 2026-11-15 (ADR-0010 amendment); `data.allow_cloud_models: false` restricts to local; every model call is audited with host, model and byte count | Redaction is a list of names and shapes (`password`, `token`, JWT, cookie header…). A secret in an unnamed JSON field, a URL path or a body is sent. Personal data is not redacted at all. With cloud models on by default this is a standing leak path (F-6) | Medium |
+| B3.6 | I, E | Placeholders (`{{secret:cookie_session_1}}`) are replaced at send time in any request, not only toward the host the secret came from (`Redactor::unredact`, used in `replay.rs`, `race.rs`, `group.rs`, `identity.rs`…). An injected agent can send host A's cookie to in-scope host B, which may be attacker-influenced | Both hosts must be in scope; the send is gated | Cross-host leak inside scope. In Phase 3 the redactor is per process, so placeholders would also be shared between users unless it becomes per user (F-5) | Medium |
+| B3.7 | T | Prompt injection through target content makes an agent act | `<untrusted_target_content>` tagging with delimiter escaping, injection phrase scan, the instructions told to the agent, and the gate, which does not care what the agent was told (`pm-ai`, `pm-mcp` instructions) | Models can still be steered inside what the gate allows (in-scope actions); proofs and approvals bound the damage | Medium |
+| B3.8 | R | An agent denies an action or the log is rewritten | Hash-chained audit log, database triggers refuse update and delete, `proxymind audit verify` (also with a head hash printed earlier) | Single-user mode: the chain is unkeyed, so a process that can write the file recomputes it, and removing the newest records is detected only with a saved head hash or an exported signed checkpoint (`proxymind audit checkpoint`; its key is readable by the same user, F-6). Server mode (step 2, key supplied by the server): keyed chain and signed checkpoints close this | Medium |
+| B3.9 | D | An agent loops or burns budget | `max_steps`, AI scan budgets (calls, minutes, dollars), rate limits, concurrency caps | Fine | Low |
+| B3.10 | E | A scheduled scan or workflow trigger acts later, under a person's name, without that person present | Both are people-only to create, audited, run through the gate; triggers are off by default and cleared when steps change | They store `created_by` / `enabled_by` as plain text in the project. **Fixed 2026-11-21 (F-2):** a project this installation does not trust runs neither, and once a person trusts it they run as that person, never as the name in the file | Low |
+
+### B4. Target content and model providers
+
+Covered in B3.5 to B3.7 for the agent side. Two more rows for the provider side:
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B4.1 | I | The model API key is sent to whatever `base_url` the project's assistant settings name (`AssistantConfig.base_url`, `api_key_env`; a project setting, `pm-service/src/assistant.rs`) | Settings are changed by people only and audited; the key's name must look like `NAME_LIKE_THIS`; private and loopback URLs count as local. **Fixed 2026-11-21 (F-2, F-9):** a saved key is bound to the server (`scheme://host:port`) it was saved for, and an environment-variable key follows the same rule: it is sent only to the server a person confirmed, by saving the key or the assistant settings in this installation (`<home>/model-key-hosts.json`, written only by people, never from the project). A project file that points `base_url` elsewhere gets an error that says so and no key (`Service::model_key_for`; the assistant, model lists and explanations all use it). A project this installation does not trust makes no model call at all (safe mode) | A person who saves the settings of a hostile project without reading the address confirms it. Keys saved by older versions are bound only when a person next saves the assistant settings (the error says so) | Low |
+| B4.2 | I | A local-model URL is treated as safe because it is private, but it can be any host on the LAN | `is_local_url` is for the cloud-data rule only | The traffic goes to whoever runs that host, over plain HTTP if the URL says so | Low |
+
+### B5. Plugins and hook workers
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B5.1 | E, I | A plugin runs code as the user and sees raw traffic, credentials included | Installed per user, never per project, so a project cannot bring code (ADR-0014); cleared environment; timeouts and output caps; Ed25519 signatures, `--require-signed`, file hashes checked before every run (ADR-0016); declared permissions in `api: 2` manifests enforced in `pm-service` and re-accepted when they change (ADR-0020) | A signed plugin from a key the user trusted is still trusted code. Signatures say who, not what | Medium |
+| B5.2 | E, I | Network and process isolation exists on Linux only (`unshare --user --net`, `prlimit`) | `sandbox::status()` tells the user what applies; the UI and CLI show it | **Gap on macOS, Windows and containers without user namespaces:** a plugin or hook worker can open connections and read the user's files, so it can exfiltrate raw traffic and tokens (F-10). No WASM runtime (ADR-0016, 0020) | Medium (High with an untrusted plugin on those systems) |
+| B5.3 | T | A hook changes live traffic in ways the user did not intend, or hides an attack | Hooks are people-only to enable and audited; the original bytes are kept beside what was sent; failure is fail-open with a pause after 5 failures; out-of-scope traffic never reaches hooks | A malicious hook on in-scope traffic can alter what the tester sees and sends | Medium |
+| B5.4 | S | A plugin acts as an agent through MCP (`proxymind mcp --actor plugin:<name>`); the name is self-chosen | Stricter default tiers for `plugin:` actors (ADR-0014) | Same as B3.1 | Low |
+| B5.5 | E | A plugin tampered with after install | Install records file hashes and refuses a changed plugin (ADR-0016); new files such as caches are not checked | Only files present at install are covered | Low |
+
+### B6. Desktop shell
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B6.1 | E | The webview shows a hostile page (target content, an XSS) that calls Tauri IPC commands (`open_project`, project picker) | IPC is for local app pages only; the main window is a remote `http://127.0.0.1` origin and no capability grants it IPC (`desktop/tauri.conf.json` has none; ADR-0012); the app CSP is restrictive | Depends on Tauri's default of denying remote origins; a capability added later by mistake would open it. `withGlobalTauri: true` exposes the API to any page that does get IPC | Low |
+| B6.2 | S | Another local process finds the random loopback port and connects | Token needed; `Host` check | Same as B2.1 | Medium |
+| B6.3 | T | `open_project` opens a project from disk, which then applies that file's settings (B7.1) | It checks that the file parses and has a ROE. **Fixed 2026-11-21 (F-2):** the app opens it through the same service path as `proxymind ui`; a project this installation did not create opens in safe mode, with a banner and a review page | A new project made in the app is recorded as trusted in the home folder before the app restarts on it | Low |
+| B6.4 | E | Updates: auto-update is not built yet (roadmap 4.2). The release check calls GitHub only when the user turns it on | Off by default, audited (`update.rs`) | Phase 4 adds a signed update channel that needs its own model | Low |
+
+### B7. Project files
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B7.1 | E, T | A project file received from someone else carries active configuration that takes effect when it is opened: the ROE (and with it the scope the gate enforces), extra proxy listeners (can bind `0.0.0.0`), upstream proxy rules (traffic through the file author's proxy) and `client_certs` paths, match-and-replace rules, scan **schedules**, workflow **triggers**, session rules and macros, the assistant's `base_url` (B4.1), device names | Plugins are per user (ADR-0014); a locked `.pmlock` has to be unlocked deliberately; the gate still applies to every send. **Fixed 2026-11-21 (F-2, ADR-0022 step 0): safe open.** Trust is kept in the home folder (`project-trust.json`: project id to a digest of the security-relevant settings, who vouched, when), never in the file. A project this installation did not create, or whose settings changed since it was trusted, is in safe mode: extra listeners not started, schedules do not fire, triggers do not run, the network settings as a whole (upstream rules, client certificates, hostname overrides, TLS pass-through) and the rewrite rules are not applied, session rules and macros and OAST settings are ignored, the assistant makes no call, and agents, plugins and the AI scan cannot send (the file's ROE is the author's). A person reads the review (UI page, `proxymind project trust`) and confirms; the schedules and triggers then run as that person, whatever `created_by` / `enabled_by` say | A person who confirms without reading, or edits a hostile project's settings by hand while it is in safe mode (they stay held back; only confirming releases them). Projects that existed before the change ask for one confirmation. Identity recipes (logins) in a hostile file still run when a person or a trusted run uses that identity, as before | Low |
+| B7.2 | I | Another OS user reads a project | New projects are created 0600 (`pm-store::create_private`); WAL and shm files inherit it; sealing and snapshots use `create_private` | Fine on Unix. On Windows the home directory's ACLs apply | Low |
+| B7.3 | I | A project is copied, backed up or synced while plaintext | `proxymind project lock` seals it (Argon2id 64 MiB, 3 passes, ChaCha20-Poly1305, 12-character minimum, authenticated header, no partial output; ADR-0013) | While unlocked it is plaintext; `--remove` is a normal delete; transparent encryption is roadmap 4.3 | Medium |
+| B7.4 | T | The audit table is edited with SQLite tools | Triggers refuse update and delete; the hash chain detects edits and reordering | See B3.8: the chain is recomputable by a writer of the file | Medium |
+| B7.5 | I | Exports (HAR, evidence packs, reports, SARIF) carry raw credentials to places the user does not control | Evidence files are written 0600; redaction options exist for reports (not re-audited here) | Review each exporter when integrations (3.5) start to push findings into Jira, GitHub and Slack | Medium (Phase 3) |
+| B7.6 | I | (3.5, mitigated 2026-11-17) Integrations push finding text, proof summaries and reproduction requests to Jira, GitHub, GitLab, Slack and webhooks | Every string goes through the redactor (cookies, tokens, passwords, JWTs, known secret values, the integration's own secrets); requests are cut to a few lines, no response bodies; event payloads carry fields only; Markdown mentions, GitLab quick actions, Slack markup are defanged; only people send; agents can only list names (`docs/integrations.md`) | The redactor is pattern based (F-6): a secret in an unnamed field or a URL path still goes out; a person can read the reproduction first only in the tracker | Low |
+| B7.6 | S | Two processes share one project (the UI and an MCP server); anything with the file can act as a "human" by editing rows | One host, one OS user | Same as B3.3 | See B3.3 |
+
+### B8. Home directory secrets and the CA
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B8.1 | I | The CA key is stolen (backup, malware, an agent with file access) | 0600; per install; the web setup page serves only the certificate | Ten-year validity, no rotation command, no name constraints (an intercepting CA must sign any name). Stolen key plus network position means HTTPS impersonation for every device that trusts it (F-8) | Medium |
+| B8.2 | I | Model keys in `model-keys.json` and the API token are readable by anything running as the user | 0600; keys never returned by the API or shown to agents; an environment variable wins | Plain text, no OS keychain (the roadmap's 3.5 wants "secrets in the OS keychain or environment") (F-9) | Low |
+| B8.3 | E | `~/.proxymind` itself is created with the default mode (0755 on most systems) | Files inside are 0600 | Directory listing and names are visible to other users | Low |
+
+### B9. Outbound connections and listeners
+
+| Id | STRIDE | Threat | Existing mitigation | Residual risk | Severity |
+| --- | --- | --- | --- | --- | --- |
+| B9.1 | E | SSRF through features that fetch URLs: replay, race, fuzzer, crawl, scans, workflow sends, stream replay, OpenAPI import from an exchange, browser | All of them are sends through `gate_send_with`: scope, tier, `deny_networks`, DNS result check, rate limit; HTTP/3 connects only to addresses the policy saw; upstream rules for HTTP/3 are refused rather than sent direct | Strong for target traffic. Model calls and the update check are not target sends and are not gated; integrations (3.5) are not either, but have their own destination guard (below) | Low now; see B10.5 |
+| B9.2 | E | Targets redirect or resolve to internal hosts | DNS rebinding check right before every connect (`check_resolved`); each send is gated on its final target | Not re-verified here: that every redirect hop a tool follows is gated again (review item in F-11) | Low |
+| B9.3 | D, I | The OAST listeners (HTTP, DNS, SMTP) face the Internet when run as a callback server: floods, junk tokens, database growth, SMTP abuse | Bounded SMTP (20 recipients, 64 KB, 30 s per session); tokens are random; interactions need a known token to be useful | No per-source rate limit, no cap on stored interactions, a token is a bearer secret in a URL path; fine for a lab, not for a shared service (see B10.6) | Medium |
+| B9.4 | I | Browser proofs render recorded responses in headless Chromium | Offline: every request blocked, the response's CSP applies, own profile, no network (ADR-0011) | A Chromium bug is Chromium's | Low |
+
+## 6. What is already strong
+
+Worth keeping, because Phase 3 must not weaken it: byte-exact traffic, one service layer and one gate for every send,
+bypass-resistant scope with DNS checks, single-use approvals that bind the exact bytes and the actor, people-only
+actions (about 53 explicit checks), hash-chained audit with database-level immutability, sealed projects with
+authenticated headers, per-user plugins with signatures and integrity checks, a Host check and CSRF header on the
+localhost API, 0600 on every secret file the code creates, and tokens from OS randomness.
+
+## 7. Phase 3 changes the model
+
+Today the security story is "one person, one machine, loopback". Phase 3 removes each of those words. The first four
+sections of this document describe the single-user baseline; this section lists what each work package adds and the
+control it needs. ADR-0022 decides the first three rows.
+
+| Work package | What it adds | New assets and attackers | Controls required before the gate |
+| --- | --- | --- | --- |
+| 3.1 Identity | Accounts, sessions, OIDC | A12 secrets; stolen sessions; a compromised OIDC provider; credential stuffing | Passkeys first, Argon2id for passwords, TOTP fallback, OIDC with PKCE and strict `iss`/`aud`/`nonce`/`exp` checks; cookie and CSRF design; per-IP and per-account throttling; session list and revoke; audit of login events; no user enumeration | **Status 2026-11-21 (step 3, `crates/pm-accounts`, no HTTP yet):** done in the crate and tested: Argon2id passwords (64 MiB, 3 passes, upgraded at login), a dummy verification for unknown, disabled and malformed handles with identical errors, per-account (keyed by an HMAC of the claimed handle) and per-address throttling with exponential back-off and no permanent lock, TOTP with ±1 step and replay refusal, encrypted at rest and bound to the user id, recovery codes (HMAC at rest, single use), server-side sessions stored as HMAC with idle 8 h and absolute 7 d, rotation, revoke one or all, invite-only accounts, the one-time setup token and `reset_owner`, a chained security log (never a secret). Open: cookies, CSRF, `allowed_hosts`, TLS and the setup page (step 4), passkeys (7), OIDC (8), signed checkpoints for the security log, the fresh-login check for sensitive actions. Residual risks: whoever knows the password of an account that has no second factor yet can enrol one first (invited users must enrol right after accepting); a password typed into the handle field that looks like a handle is written to the security log with the failure (the log is for operators and owner-only); a stolen `server.key` with `server.db` exposes TOTP secrets; the address throttle is weak behind a proxy that hides addresses |
+| 3.2 Roles | Owner, tester, viewer; authorization on every action | Teammate with a lower role (E); an agent acting for a user | One `authorize(actor, action, project)` in `pm-service`, deny by default, a table checked by a test that fails when a service method has no entry; agents never exceed their owner's role; owners alone change ROE, roles, tokens; self-approval rules |
+| 3.3 Project server | One server, many projects, a network listener, TLS | B10.1: network attackers, other projects' data, a shared process (one project's heavy query starves others), a shared proxy listener and CA key | TLS whenever not on loopback; per-project stores and per-project ROE; the CA private key and proxy listeners stay with the tester's machine (the server stores traffic, it does not intercept); project ids never used as authorization; path and tenant checks on every route; the `Host` check replaced by an allowed-origins list; resource limits per project |
+| 3.4 Shared work | Comments, assignment, presence | Stored XSS from a teammate's comment; spoofed authorship; presence leaks | Comments are plain text, rendered escaped; author is the session user, never a request field; events filtered by project membership and role (as intercept events are filtered for non-humans today, `events.rs`) |
+| 3.5 Integrations | Jira, GitHub, GitLab, Slack, webhooks, SARIF/JUnit | Long-lived third-party tokens; outbound requests not behind the gate (SSRF); exfiltration of findings and evidence by a lower role or a prompt-injected agent; webhook receivers that are attacker-controlled | Tokens in the OS keychain or an environment variable on the server, never in the project file, never in audit detail, never returned by the API; outbound integration URLs checked against an allow-list and a deny-list of private ranges with a DNS check, like `check_resolved`; integrations configured by owners only; payloads built from finding fields with secrets redacted; signed webhooks (HMAC) with replay protection; audit of every push | **Status 2026-11-17:** tokens are in a 0600 file in the home folder bound to the server they were saved for, or `env:NAME`; never in the project file, audit, logs or API responses (the OS keychain was evaluated and not used, see `docs/integrations.md`); outbound requests use the sender with TLS always verified, no redirects, a private/loopback refusal with a per-integration allow, link-local never, plain http only to allowed private addresses, all audited; payloads redacted; webhooks signed with HMAC-SHA256 and carry an id and a timestamp inside the signed body; integrations from a project file stay off until a person enables them here (F-2); configuration is people-only (owner-only once roles exist in 3.2). Open: owner-only role check (3.2), keychain backend, allow-list of destination hosts per integration.
+| 3.6 Hosted callback server | An Internet-facing DNS, HTTP, SMTP service with per-project tokens | Strangers' traffic into the store; token guessing; abuse as a relay or reflection source; data from many projects in one service | Per-project tokens (random, 128 bits or more, hashed at rest), no cross-project reads, rate limits and storage caps per token and per source, SMTP that only accepts and never relays, DNS that answers only the delegated zone, no open recursion, a separate process and user from the project server, interactions delivered to the project server over an authenticated channel |
+| 3.7 CI mode | `proxymind ci` with a token in a pipeline | A CI token in logs or a fork's pull request | Machine tokens: scoped to one project and the `tester` role at most, short-lived by default, shown once, revocable; a scope file, not an ROE edit, as input; never usable to change roles |
+
+Cross-cutting changes:
+
+- **The `Actor` stays, with a user behind it.** `human:alice` becomes a session of user `u_…` with a role; `agent:x`
+  and `plugin:x` become credentials owned by a user; the policy gate keeps deciding by `ActorKind`, and the service adds
+  the role check in front.
+- **The single trust anchor moves.** Today "can read `api-token`" means "is the human". On the project server nobody is
+  trusted because of where they run; every request carries a credential that maps to one user, one role and one
+  project.
+- **Project files stop being only local.** A server-hosted project is created by an owner, so B7.1 must be fixed
+  (a project's active configuration needs a person's confirmation on the machine that runs it) before projects are
+  shared or imported at all.
+- **The audit log needs a keyed or anchored chain.** With several people, "who changed the ROE" is a dispute, not a
+  curiosity (F-6).
+- **Single-user mode stays the default.** Everything in sections 5 and 8 that is fixed for the single user is fixed
+  for the server too; the server adds, it does not replace.
+
+## 8. Findings to fix
+
+Not fixed by this change. IDs are referenced from the sections above. "Before gate" means before the Phase 3 gate can
+be met (no open high-severity findings).
+
+| Id | Severity | Finding | Evidence | Suggested fix | When |
+| --- | --- | --- | --- | --- | --- |
+| F-1 | High | **The policy gate does not hold against an agent that can run commands or read files as the same OS user.** It can read `~/.proxymind/api-token` and call REST as the human (change the ROE, approve its own request), edit the project's SQLite file, recompute the audit chain, read the CA key. ADR-0005 and `docs/agents.md` did not say the guarantee needs the agent confined to MCP | `pm-api/src/lib.rs` (`AppState.actor` fixed human), `load_or_create_token`, `pm-policy/src/audit.rs` | Document it now in `docs/agents.md` and ADR-0005's consequences (run agents without a shell, or run ProxyMind under another OS user and give agents only the MCP stdio pipe). Phase 3: per-agent scoped tokens (ADR-0022), the server holds the project and the ROE, the audit chain is keyed with a key the agent's user cannot read | **documented (2026-11-21); code mitigations in 3.1–3.3.** `docs/agents.md` has a section "What the policy gate does and doesn't contain" and ADR-0005's consequences say it. The residual risk is accepted by documentation until 3.1 to 3.3 ship |
+| F-2 | High | **A project file is active content.** Opening a project applied its listeners (can bind beyond loopback), upstream rules and credentials, rewrite rules, enabled scan schedules and workflow triggers (run under the stored `created_by` / `enabled_by` string), and its ROE (so the scope the gate enforces is the author's) | `network.rs` (`sync_listeners`, `sync_network`), `scan_schedule.rs` (`schedule_tick`, `fire` parsed `created_by`), `workflow_service.rs` (trigger loop, `enabled_by`), `desktop/src/main.rs` | A project not created by this install opens in a "safe mode": schedules, triggers and extra listeners off, upstream and rewrite rules pending, the ROE displayed and confirmed once, a banner. `created_by` and `enabled_by` are not trusted | **Fixed 2026-11-21** (ADR-0022 step 0; `crates/pm-service/src/trust.rs`, test `crates/pm-service/tests/safe_open.rs`, e2e "Safe mode"). Trust: `<home>/project-trust.json` maps the project id (setting `project_id`) to a SHA-256 digest of the ROE, network settings, listeners, rewrite rules, session handling, assistant settings, schedules and enabled workflow triggers (run state and identity strings left out). Trusted when this process created the file (recorded when the home is attached), or a person confirmed the digest they read (`POST /project/trust`, `proxymind project trust`), or a person edited the project through this install while it was trusted. Any other change to the file puts the whole project back in safe mode. Held back in safe mode, and what is not, are listed in the `TrustView` documentation. Schedules and triggers run as the person who vouched for the project. Integrations (3.5) have their own trust (same design). `proxymind ci --project` ignores these settings, as before |
+| F-3 | Medium (High once networked) | **API credential design**: the cookie is the token itself, 30 days, no `Secure`, never rotated or revoked; one token for everything; token in a URL | `pm-api/src/routes.rs` (`auth`), `lib.rs` (`token_ok`) | Server-side sessions with random ids, rotation on privilege change, short idle and absolute lifetimes, `Secure` when served over TLS, a revoke list; keep the install token only as a bootstrap exchange (ADR-0022) | 3.1. **Session design built in `pm-accounts` 2026-11-21** (ADR-0022 step 3): random 256-bit ids stored as HMAC only, idle and absolute expiry, rotation, revocation, no JWT. The cookie flags, `Secure`/`__Host-` names and the install-token exchange are step 4; until then the API is unchanged and F-3 stays open |
+| F-4 | Medium (High if exposed) | **Unauthenticated exposed proxy listeners**: HTTP and transparent listeners have no login and no client allow-list; a warning is the only control; traffic through them is not subject to deny-networks | `pm-proxy/src/listeners.rs` (`warn_if_exposed`), `capture.rs` | Optional client allow-list (CIDRs) and `Proxy-Authorization` for HTTP listeners; for exposed listeners default-deny proxying to loopback, link-local and metadata addresses unless the user lists them; show exposure in the status bar; the mobile page offers a CIDR-restricted bind | Before gate for the allow-list; the rest 3.3 |
+| F-5 | Medium | **Placeholders are not bound to a host** (and the redactor is per process): host A's secret can be sent to host B inside scope; shared across users in Phase 3 | `pm-ai/src/redact.rs`, `Redactor::unredact` call sites | Store the host (and identity) each placeholder came from; refuse to unredact toward another host unless the person approved; one redactor per user and project in 3.2 | 3.2 |
+| F-6 | Medium | **Audit chain is unkeyed and unanchored**: whoever can write the file can rebuild it; deleting the newest records is invisible without a saved head hash. **Redaction is pattern-based** and cloud models are on by default, so unnamed secrets and personal data can reach a provider | `pm-policy/src/audit.rs`; `pm-ai/src/redact.rs`; ADR-0010 amendment | Add a keyed MAC (key held by the server or the keychain) and periodic signed checkpoints that can be exported or posted to an integration; print and store the head hash after each session; add a "model data" preview and a stricter redaction mode (all response bodies as shapes only) as an ROE option | Keyed chain before gate (3.2); redaction options any time. **Audit half mitigated 2026-11-21 (ADR-0022 step 2):** version 2 records add user, token, project, session and address to the hash; a keyed chain (HMAC-SHA256 under a key the writer of the file does not hold, no downgrade) and signed Ed25519 checkpoints (head, count, time) detect a rebuilt chain, tail truncation and a rewrite before a checkpoint (`pm-policy/src/{audit,checkpoint}.rs`, `crates/pm-service/tests/audit_v2.rs`). **Remains:** (a) in single-user mode the chain is not keyed and the checkpoint key (`<home>/audit-checkpoint-key.pk8`) is readable by the same OS user, so code running as you (F-1) can rebuild the chain and sign a new checkpoint; only an exported checkpoint or head hash kept where that code cannot write it, or a checkpoint taken before the compromise, protects the older records; (b) a checkpoint stored in the project file can be deleted by whoever writes the file, so the protection is the exported copy; (c) records after the newest checkpoint are not covered, and nothing takes checkpoints automatically in single-user mode; (d) the server key exists since step 3 (`pm-accounts::ServerKey`, `KeyPurpose::AuditChain`; `pm-service` still has to hand the derived key to `set_audit_security`) and the server's checkpoint schedule comes with step 4; (e) the redaction half is unchanged |
+| F-7 | Medium | **Authorization is scattered**: about 53 `actor.kind != Human` checks, no central deny-by-default table; Phase 3 needs roles on top | `grep ActorKind::Human crates/pm-service/src` | A central `authorize` (ADR-0022) with an action registry and a test that every public service method that reads or changes project data is listed | 3.2. **Central table in `pm-service::access` since 2026-11-21** (ADR-0022 step 1; `docs/access.md`, source-scan test); roles are enforced in 3.2 |
+| F-8 | Medium | **CA key lifetime**: 10-year CA, no rotation command, one CA for every project and every device | `pm-tls/src/lib.rs` (`ca_params`) | `proxymind ca rotate` and an expiry reminder; shorter default validity (for example 2 years) with a visible expiry in the UI; per-project CA as an option; document removing the CA from phones | Not gating |
+| F-9 | Low | **Plain-text secrets** in project settings (upstream proxy and SOCKS5 passwords) and `model-keys.json`; model key not bound to a host (B4.1) | `network.rs`, `assistant.rs` | Keep secrets in the OS keychain or the environment (roadmap 3.5 already says so), reference them by name from settings; bind a saved model key to the provider host it was saved for; refuse to send it elsewhere | 3.5. **Model key host binding done 2026-11-21** (B4.1, together with F-2). **Integrations (3.5) done 2026-11-17:** integration secrets are outside the project file (private file or `env:NAME`) and bound to their server; the upstream proxy passwords and `model-keys.json` being plain text are still open. |
+| F-10 | Medium | **Plugin and hook isolation is Linux-only**; elsewhere a plugin can use the network and read files | ADR-0015, ADR-0020 | Say it loudly where a plugin is enabled on macOS and Windows (block `--require-signed`-less plugins there by default); evaluate sandbox-exec (macOS), AppContainer or job objects (Windows), or a WASM runtime for hooks (ADR-0016 left it open) | Not gating if documented; gating if a plugin registry (4.4) ships |
+| F-11 | Low | **Review items** found while reading, not shown to be bugs: confirm no `GET` route changes state (CSRF relies on it); `style-src 'unsafe-inline'` in the UI CSP; no API rate limit; `~/.proxymind` mode; token printed in a URL; every redirect hop followed by a tool is gated again | `pm-api/src/lib.rs`, `routes.rs` | Add a test that walks the route table and fails when a GET handler writes; drop `unsafe-inline` if the UI allows; create the home directory 0700 | Hardening |
+| F-12 | Low | **Upstream TLS is unverified by default** | `pm-cli` (`--verify-upstream`) | Keep for compatibility, but show "upstream certificates are not verified" in the UI near the setting and in `proxymind proxy` output | Not gating |
+
+`proxymind ci` (roadmap 3.7) is not exposed to F-2: it uses a fresh in-memory project unless `--project` is given, and then it never starts the file's listeners, schedules or workflow triggers, ignores its network settings, session rules and OAST settings while it runs, runs identity logins as the CI actor, and does not write the ROE it was given into the file (`docs/ci.md`, "Safety"). Interactive opening of a project (UI, desktop, `proxymind proxy`) is covered by the safe open above (2026-11-21). CI's upstream TLS is verified by default (F-12) unless `--insecure`.
+
+F-1 and F-2 were the two to resolve for the gate: F-1 changed what ProxyMind promises (documented 2026-11-21), F-2 changed
+what opening a file does (safe open, 2026-11-21). Both were cheap compared with the identity work and both get more
+serious the moment projects are shared.
+
+## 9. Review checklist for the Phase 3 gate
+
+The gate's "security review of login and authorization" must at least confirm, with tests where it can:
+
+1. Every service method that reads or changes project data appears in the authorization table; an unlisted method fails
+   a test.
+2. A viewer cannot change anything; a tester cannot change the ROE, roles, tokens, integrations or listeners; an agent
+   never has more than its owner; owner-only actions are audited with the user id.
+3. No route is reachable without a session or token except the login pages, health and static assets; the `Host`
+   or allowed-origin check, the CSRF defence and the cookie flags have tests.
+4. Login: throttling, no user enumeration, passkey and TOTP paths, account recovery, OIDC `iss`, `aud`, `nonce`, `exp`
+   and PKCE checks, and a session fixation and rotation test.
+5. Tokens (agent, CI, callback) are random, shown once, stored hashed, scoped, expiring and revocable; a revoked token
+   fails immediately.
+6. Secrets (integration tokens, OIDC client secret, TLS key) are never in the project file, audit detail, logs, API
+   responses or exports.
+7. Project isolation: no request can read another project's rows, blobs, events or audit entries.
+8. F-1 and F-2 are fixed or documented as accepted by the owner; no open high-severity finding in this file.
+9. TLS is on for every non-loopback listener of the project server and the callback server, and the pinning or
+   certificate flow in ADR-0022 works.

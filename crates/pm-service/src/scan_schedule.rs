@@ -10,10 +10,11 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, ScanTaskRequest, ScanTaskView, Service, ServiceError};
 
 const MINUTE: i64 = 60_000;
@@ -108,14 +109,7 @@ pub struct ScanSchedule {
     pub last_error: Option<String>,
 }
 
-fn humans_only(actor: &Actor) -> Result<()> {
-    if actor.kind != ActorKind::Human {
-        return Err(ServiceError::Invalid("only humans can change scan schedules (they run unattended)".into()));
-    }
-    Ok(())
-}
-
-fn from_row(row: pm_store::ScheduleRow) -> Option<ScanSchedule> {
+pub(crate) fn from_row(row: pm_store::ScheduleRow) -> Option<ScanSchedule> {
     let mut s: ScanSchedule = serde_json::from_str(&row.data).ok()?;
     s.id = row.id;
     s.created_by = row.created_by;
@@ -149,7 +143,8 @@ impl Service {
 
     /// Adds a schedule (id 0) or changes one. It will run as `actor`.
     pub fn schedule_save(&self, actor: &Actor, mut s: ScanSchedule) -> Result<ScanSchedule> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
+        let was_trusted = self.trust_before();
         s.name = s.name.trim().to_string();
         if s.name.is_empty() || s.name.len() > 80 {
             return Err(ServiceError::Invalid("a schedule needs a name (up to 80 characters)".into()));
@@ -177,29 +172,32 @@ impl Service {
         s.next_run_ms = next_run_after(&s.every, pm_core::now_ms());
         s.id = self.schedule_write(&s)?;
         self.audit(&actor.id(), "scan_schedule_save", json!(s), "allow")?;
+        self.trust_after(actor, was_trusted);
         Ok(s)
     }
 
     pub fn schedule_delete(&self, actor: &Actor, id: i64) -> Result<bool> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
+        let was_trusted = self.trust_before();
         let deleted = self.store.write(|db| db.delete_schedule(id))?;
         self.audit(&actor.id(), "scan_schedule_delete", json!({ "id": id }), if deleted { "allow" } else { "noop" })?;
+        self.trust_after(actor, was_trusted);
         Ok(deleted)
     }
 
     /// Starts a schedule's scan now (its regular times don't change).
     pub fn schedule_run_now(self: &Arc<Self>, actor: &Actor, id: i64) -> Result<ScanTaskView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
         let mut s = self.schedule_get(id)?;
-        let v = self.fire(&mut s, pm_core::now_ms())?;
+        // A person pressed the button: the run is theirs, whoever the file says saved the schedule.
+        let v = self.fire(&mut s, pm_core::now_ms(), actor)?;
         self.schedule_write(&s)?;
         Ok(v)
     }
 
-    fn fire(self: &Arc<Self>, s: &mut ScanSchedule, now_ms: i64) -> Result<ScanTaskView> {
-        let owner = Actor::parse(&s.created_by).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+    fn fire(self: &Arc<Self>, s: &mut ScanSchedule, now_ms: i64, owner: &Actor) -> Result<ScanTaskView> {
         s.last_run_ms = Some(now_ms);
-        let r = self.scan_task_start_from(&owner, s.request.clone(), Some(s.id));
+        let r = self.scan_task_start_from(owner, s.request.clone(), Some(s.id));
         match &r {
             Ok(v) => {
                 s.last_task = Some(v.task_id.clone());
@@ -220,6 +218,10 @@ impl Service {
     /// ids of the tasks started.
     pub fn schedule_tick(self: &Arc<Self>, now_ms: i64) -> Result<Vec<String>> {
         let mut started = Vec::new();
+        // Safe mode: a schedule that came with the file does not fire until a person has confirmed the project.
+        if self.safe_mode() {
+            return Ok(started);
+        }
         for mut s in self.schedule_list()? {
             if !s.enabled || s.next_run_ms > now_ms {
                 continue;
@@ -231,8 +233,16 @@ impl Service {
             s.next_run_ms = next;
             if s.last_task.as_deref().is_some_and(|t| self.scan_task_running(t)) {
                 s.last_error = Some("skipped a run: the previous one was still going".into());
-            } else if let Ok(v) = self.fire(&mut s, now_ms) {
-                started.push(v.task_id);
+            } else {
+                // Who runs it: the person who trusted the project here, never the name stored in the file.
+                match self.run_as(&s.created_by) {
+                    Ok(owner) => {
+                        if let Ok(v) = self.fire(&mut s, now_ms, &owner) {
+                            started.push(v.task_id);
+                        }
+                    }
+                    Err(e) => s.last_error = Some(e.to_string()),
+                }
             }
             self.schedule_write(&s)?;
         }

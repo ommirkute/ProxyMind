@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import TransformMenu from "../TransformMenu";
 import { api, originOf, toast, type ExchangeDetail, type IdentityInfo, type ReplayResult } from "../api";
-import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, copyText, useAction, useLoad, useNav } from "../components";
+import { altSvcH3, altTarget } from "../altsvc";
+import { Chip, ErrorBox, ExchangeLink, MessageView, StatusCode, b64ToBytes, bytesToB64, copyText, useAction, useLoad, useNav } from "../components";
 import {
   cookies,
   decodeComponent,
@@ -16,6 +18,7 @@ import {
   setQueryParam,
   setAuthority,
   setRequestLine,
+  isMultiplexed,
   toProtocol,
 } from "../http";
 
@@ -32,10 +35,94 @@ type RaceResult =
   | { status: "pending_approval"; approval_id: string; summary: string; reasons: string[] }
   | { status: "denied"; reasons: string[] };
 
+/**
+ * A gRPC or Protobuf body being edited as text. The raw editor holds only the head: the body's bytes are not text.
+ * `body` is the original body (base64; null for none), `orig` the text it decoded to. Unedited (`text === orig`),
+ * the original bytes are sent; edited, the text is encoded through the API when sending.
+ */
+interface ProtoBody {
+  body: string | null;
+  text: string;
+  orig: string;
+  /** Decoding then encoding gives the original bytes. */
+  exact: boolean;
+  /** Notes from the decoder (what will not round-trip). */
+  notes?: string[];
+}
+
+const PROTO_KINDS: Record<string, string> = {
+  "application/grpc": "grpc",
+  "application/grpc+proto": "grpc",
+  "application/grpc-web": "grpc-web",
+  "application/grpc-web+proto": "grpc-web",
+  "application/grpc-web-text": "grpc-web-text",
+  "application/grpc-web-text+proto": "grpc-web-text",
+  "application/x-protobuf": "protobuf",
+  "application/protobuf": "protobuf",
+  "application/vnd.google.protobuf": "protobuf",
+};
+
+const headOf = (raw: string) => {
+  const m = raw.search(/\r?\n\r?\n/);
+  return m < 0 ? raw : raw.slice(0, m);
+};
+
+/** `grpc`, `grpc-web`, `grpc-web-text` or `protobuf` when the request's Content-Type says so, else null. */
+function protoKind(raw: string): string | null {
+  const ct = headOf(raw).match(/^content-type:[ \t]*([^;\r\n]*)/im)?.[1]?.trim().toLowerCase();
+  return (ct && PROTO_KINDS[ct]) || null;
+}
+
+/** Chunked or content-encoded bodies are not the message itself: they stay in the raw editor. */
+const plainBody = (raw: string) => !/^(transfer-encoding|content-encoding):/im.test(headOf(raw));
+
+/** The body to send for a tab with a Protobuf message: the original bytes, or the edited text encoded. */
+async function protoBodyOf(raw: string, pb: ProtoBody | undefined): Promise<string | undefined> {
+  const kind = protoKind(raw);
+  if (!pb || !kind || !plainBody(raw)) return undefined;
+  if (pb.text === pb.orig) return pb.body ?? undefined;
+  return (await api.post<{ body_b64: string }>("/tools/protobuf/encode", { text: pb.text, kind })).body_b64;
+}
+
+/** HTTP/2 requests carry no Content-Length of their own: do not add one when sending a Protobuf body. */
+const fixClFor = (raw: string, fixCl: boolean, hasBody: boolean) =>
+  fixCl && !(hasBody && /^[^\n]*\sHTTP\/2(\.0)?\s*$/.test(raw.split("\n", 1)[0].trimEnd()) && !/^content-length:/im.test(headOf(raw)));
+
+/** Splits recorded request bytes into the head text and the body bytes. */
+function splitHead(b: Uint8Array): { head: string; body: Uint8Array } {
+  let end = b.length;
+  for (let i = 0; i < b.length; i++) {
+    if (b[i] === 10 && b[i + 1] === 10) { end = i + 2; break; }
+    if (b[i] === 13 && b[i + 1] === 10 && b[i + 2] === 13 && b[i + 3] === 10) { end = i + 4; break; }
+  }
+  return { head: new TextDecoder().decode(b.subarray(0, end)), body: b.subarray(end) };
+}
+
+/** A recorded request as a Replay tab: for gRPC/Protobuf, the head as text and the body as an editable message. */
+async function tabFromExchange(arg: string, ex: ExchangeDetail): Promise<Partial<RTab>> {
+  const base = { name: `#${arg}`, url: originOf(ex.summary) };
+  const plain = { ...base, raw: ex.request.replace(/\r\n/g, "\n") };
+  if (ex.request_protobuf == null || !plainBody(ex.request)) return plain;
+  const full = await api.get<ExchangeDetail>(`/exchanges/${arg}?bytes=1`);
+  if (!full.request_b64 || full.request_truncated) return plain;
+  const { head, body } = splitHead(b64ToBytes(full.request_b64));
+  const kind = protoKind(head);
+  if (!kind) return plain;
+  const bodyB64 = bytesToB64(body);
+  try {
+    const d = await api.post<{ text: string; exact: boolean; notes: string[] }>("/tools/protobuf/decode", { body_b64: bodyB64, kind, annotate: false });
+    return { ...base, raw: head.replace(/\r\n/g, "\n"), pb: { body: bodyB64, text: d.text, orig: d.text, exact: d.exact, notes: d.notes } };
+  } catch {
+    return plain;
+  }
+}
+
 /** One send in a tab's history. */
 interface Step {
   url: string;
   raw: string;
+  /** The Protobuf message sent with it (left out when it is large). */
+  pb?: ProtoBody;
   exchange_id?: number;
   status?: number | null;
   elapsed_ms?: number;
@@ -49,6 +136,8 @@ interface RTab {
   name: string;
   url: string;
   raw: string;
+  /** A gRPC / Protobuf body edited as text; `raw` then holds only the head. */
+  pb?: ProtoBody;
   identity: string;
   fixCl: boolean;
   autoFollow: boolean;
@@ -96,6 +185,7 @@ export default function Replay() {
   const [raceMode, setRaceMode] = useState<"auto" | "single_packet" | "last_byte">("auto");
   const [groupOpen, setGroupOpen] = useState(false);
   const caret = useRef<[number, number] | null>(null);
+  const rawEditor = useRef<HTMLTextAreaElement>(null);
   const ids = useLoad(() => api.get<IdentityInfo[]>("/identities"), []);
   const action = useAction();
   const loaded = useRef(false);
@@ -139,9 +229,13 @@ export default function Replay() {
     if (!state) return;
     if (arg) {
       window.history.replaceState(null, "", "#/replay");
+      // "h3:<id>": the recorded request written for HTTP/3, at the alternative its response advertised (Alt-Svc).
+      const asH3 = String(arg).startsWith("h3:");
+      const id = asH3 ? String(arg).slice(3) : String(arg);
       api
-        .get<ExchangeDetail>(`/exchanges/${arg}`)
-        .then((ex) => addTab({ name: `#${arg}`, url: originOf(ex.summary), raw: ex.request.replace(/\r\n/g, "\n") }))
+        .get<ExchangeDetail>(`/exchanges/${id}`)
+        .then((ex) => tabFromExchange(id, ex).then((t) => (asH3 ? withHttp3(t, ex.response) : t)))
+        .then((t) => addTab(t))
         .catch((e) => action.setError(e.message));
       return;
     }
@@ -179,12 +273,14 @@ export default function Replay() {
     setT({ approval: undefined, raceApproval: undefined });
   };
 
-  const sendOnce = async (url: string, raw: string, approval?: string): Promise<{ r: ReplayResult; d?: ExchangeDetail }> => {
+  const sendOnce = async (url: string, raw: string, approval?: string, pb?: ProtoBody): Promise<{ r: ReplayResult; d?: ExchangeDetail }> => {
+    const body_b64 = await protoBodyOf(raw, pb);
     const r = await api.post<ReplayResult>("/replay", {
       url,
       raw,
+      body_b64,
       identity: tab.identity || undefined,
-      fix_content_length: tab.fixCl,
+      fix_content_length: fixClFor(raw, tab.fixCl, body_b64 != null),
       approval_id: approval,
     });
     if (r.status === "sent" || r.status === "failed") {
@@ -195,19 +291,22 @@ export default function Replay() {
     return { r };
   };
 
-  const record = (url: string, raw: string, r: ReplayResult, d?: ExchangeDetail): Step | undefined =>
-    r.status === "sent"
-      ? { url, raw, exchange_id: r.exchange_id, status: d?.summary.status, elapsed_ms: r.elapsed_ms, notes: r.notes }
+  const record = (url: string, raw: string, r: ReplayResult, d?: ExchangeDetail, pb?: ProtoBody): Step | undefined => {
+    // A big body is not kept in every step: the project's saved state has a size limit.
+    const kept = pb && protoKind(raw) && (pb.body?.length ?? 0) + pb.text.length + pb.orig.length < 64_000 ? { pb } : {};
+    return r.status === "sent"
+      ? { url, raw, ...kept, exchange_id: r.exchange_id, status: d?.summary.status, elapsed_ms: r.elapsed_ms, notes: r.notes }
       : r.status === "failed"
-        ? { url, raw, exchange_id: r.exchange_id, error: r.error }
+        ? { url, raw, ...kept, exchange_id: r.exchange_id, error: r.error }
         : undefined;
+  };
 
   const send = (url = tab.url, raw = tab.raw) =>
     action.run(async () => {
-      let { r, d } = await sendOnce(url, raw, t.approval);
+      let { r, d } = await sendOnce(url, raw, t.approval, tab.pb);
       setT({ outcome: r, approval: r.status === "pending_approval" ? r.approval_id : undefined, race: undefined });
       const steps: Step[] = [];
-      const first = record(url, raw, r, d);
+      const first = record(url, raw, r, d, tab.pb);
       if (first) steps.push(first);
       // Same-origin redirects, when asked, up to 5 hops.
       for (let hop = 0; tab.autoFollow && d && hop < 5; hop++) {
@@ -228,6 +327,13 @@ export default function Replay() {
       }
     });
 
+  /** Switches this tab to HTTP/3 at the host and port the response's Alt-Svc offered, and sends it. */
+  const sendHttp3 = (response: string | null | undefined) => {
+    const t3 = withHttp3({ url: tab.url, raw: tab.raw }, response);
+    update({ url: t3.url, raw: t3.raw });
+    send(t3.url, t3.raw);
+  };
+
   const follow = () => {
     const d = step?.exchange_id != null ? details[step.exchange_id] : undefined;
     const next = step && d ? followTarget(step.url, step.raw, d.response) : null;
@@ -236,13 +342,15 @@ export default function Replay() {
 
   const runRace = () =>
     action.run(async () => {
+      const body_b64 = await protoBodyOf(tab.raw, tab.pb);
       const r = await api.post<RaceResult>("/race", {
         url: tab.url,
         raw: tab.raw,
+        body_b64,
         count: raceCount,
         mode: raceMode,
         identity: tab.identity || undefined,
-        fix_content_length: tab.fixCl,
+        fix_content_length: fixClFor(tab.raw, tab.fixCl, body_b64 != null),
         approval_id: t.raceApproval || undefined,
       });
       setT({ race: r, raceApproval: r.status === "pending_approval" ? r.approval_id : undefined, outcome: undefined });
@@ -259,7 +367,7 @@ export default function Replay() {
   const move = (by: number) => {
     const pos = Math.max(0, Math.min(tab.history.length - 1, (tab.pos < 0 ? tab.history.length : tab.pos) + by));
     const s = tab.history[pos];
-    if (s) update({ pos, url: s.url, raw: s.raw });
+    if (s) update({ pos, url: s.url, raw: s.raw, pb: s.pb });
   };
 
   const closeTab = (id: string) =>
@@ -270,8 +378,12 @@ export default function Replay() {
       return { tabs, active: s.active === id ? tabs[Math.max(0, s.tabs.findIndex((x) => x.id === id) - 1)].id : s.active };
     });
 
+  const pbKind = protoKind(tab.raw);
+  const pbBlocked = !plainBody(tab.raw);
+  const pbEdited = !!tab.pb && tab.pb.text !== tab.pb.orig;
   const detail = step?.exchange_id != null ? details[step.exchange_id] : undefined;
   const redirect = redirectOf(detail?.response);
+  const offersH3 = altSvcH3(detail?.response).length > 0;
   const onKey = (e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
@@ -296,7 +408,7 @@ export default function Replay() {
           </div>
         ))}
         <button className="rtab add" aria-label="New tab" onClick={() => addTab({})}>+</button>
-        <button className="rtab add" title="Duplicate this tab" onClick={() => addTab({ name: `${tab.name} copy`, url: tab.url, raw: tab.raw, identity: tab.identity })}>⧉</button>
+        <button className="rtab add" title="Duplicate this tab" onClick={() => addTab({ name: `${tab.name} copy`, url: tab.url, raw: tab.raw, pb: tab.pb, identity: tab.identity })}>⧉</button>
       </div>
 
       <div className="row replay-bar">
@@ -379,7 +491,30 @@ export default function Replay() {
       <div className={`replay-grid ${inspector ? "" : "no-inspector"}`}>
         <section className="pane">
           <h3 className="pane-title">Request</h3>
-          <textarea aria-label="Raw request" className="editor" value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
+          <TransformMenu target={rawEditor} resetKey={tab.id} />
+          <textarea ref={rawEditor} aria-label="Raw request" className={`editor ${pbKind ? "editor-head" : ""}`} value={tab.raw} onChange={(e) => editRaw(e.target.value)} onKeyDown={onKey} onSelect={(e) => { caret.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd]; }} spellCheck={false} />
+          {pbKind && (
+            <div className="pbedit" data-testid="protobuf-panel">
+              <div className="row small">
+                <strong>Protobuf message</strong>
+                <span className="muted">{pbKind}</span>
+                {pbEdited ? <span className="notice small">edited: re-encoded when sent</span> : <span className="muted">unedited: sent byte for byte</span>}
+                <button className="btn" disabled={!pbEdited} onClick={() => update({ pb: tab.pb && { ...tab.pb, text: tab.pb.orig }, pos: -1 })}>Revert</button>
+              </div>
+              {pbBlocked && <div className="notice small">Chunked or content-encoded bodies are not edited as Protobuf here; edit the raw request, or remove that header.</div>}
+              {tab.pb?.notes?.map((n) => <div key={n} className="notice small">{n}</div>)}
+              <textarea
+                aria-label="Protobuf message"
+                data-testid="protobuf-editor"
+                className="editor editor-pb"
+                disabled={pbBlocked}
+                placeholder={'one field per line: 1: 150, 2: "text", 3 {  }, 4: 0x0a0b, 5: 1.5f32\ngRPC: start each message with @message'}
+                value={tab.pb?.text ?? ""}
+                onChange={(e) => update({ pb: { body: tab.pb?.body ?? null, orig: tab.pb?.orig ?? "", exact: tab.pb?.exact ?? true, notes: tab.pb?.notes, text: e.target.value }, pos: -1 })}
+                spellCheck={false}
+              />
+            </div>
+          )}
           <div className="row small race-bar">
             <strong>Race</strong>
             <label>
@@ -414,11 +549,18 @@ export default function Replay() {
                 {detail?.summary.resp_len != null && <span className="muted">{detail.summary.resp_len} bytes</span>}
                 {step.exchange_id != null && <span className="muted">recorded as <ExchangeLink id={step.exchange_id} /></span>}
                 {step.notes?.map((n) => <Chip key={n} value={n} />)}
+                {offersH3 && <Chip value="offers HTTP/3" />}
+                {offersH3 && !isMultiplexed(parseRequest(step.raw).version) && (
+                  <button className="btn" onClick={() => sendHttp3(detail?.response)} disabled={action.busy} data-testid="send-http3" title="The response advertised HTTP/3 (Alt-Svc). Sends this request again over QUIC.">
+                    Send with HTTP/3
+                  </button>
+                )}
                 {redirect && <button className="btn" onClick={follow} disabled={action.busy} data-testid="follow-redirect">Follow redirect → {redirect}</button>}
               </div>
               <MessageView
                 text={detail?.response ?? (step.error ? null : undefined) ?? null}
                 decodedBody={detail?.response_body}
+                protobuf={detail?.response_protobuf}
                 loadB64={step.exchange_id != null ? () => api.get<ExchangeDetail>(`/exchanges/${step.exchange_id}?bytes=1`).then((d) => d.response_b64) : undefined}
                 empty={step.error ? "No response" : "Loading…"}
                 testid="replay-response"
@@ -432,6 +574,16 @@ export default function Replay() {
       </div>
     </div>
   );
+}
+
+/** A request tab written for HTTP/3, at the target the response's Alt-Svc offered when there is one. */
+function withHttp3<T extends { url?: string; raw?: string }>(t: T, response: string | null | undefined): T {
+  const alt = altSvcH3(response)[0];
+  return {
+    ...t,
+    ...(t.raw != null ? { raw: toProtocol(t.raw, "HTTP/3") } : {}),
+    ...(alt && t.url ? { url: altTarget(t.url, alt) } : {}),
+  };
 }
 
 /** The request to send next when a response redirects, or null. */
@@ -466,7 +618,9 @@ function Field({ value, label, set }: { value: string; label: string; set: (v: s
 /** Parameters, cookies and headers of the request, editable in place. */
 function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string) => void; url: string }) {
   const p = parseRequest(raw);
-  const h2 = /^HTTP\/2(\.0)?$/i.test(p.version);
+  const h2 = isMultiplexed(p.version); // HTTP/2 and HTTP/3 are edited the same way (pseudo-headers)
+  const h3 = /^HTTP\/3/i.test(p.version);
+  const proto = h3 ? "HTTP/3" : h2 ? "HTTP/2" : "HTTP/1.1";
   const host = p.headers.find((h) => h.name.toLowerCase() === "host")?.value ?? "";
   const q = queryParams(p);
   const form = formParams(p);
@@ -495,13 +649,14 @@ function Inspector({ raw, onChange, url }: { raw: string; onChange: (raw: string
     <section className="pane inspector" aria-label="Inspector">
       <h3 className="pane-title">Inspector</h3>
       <div className="row small" style={{ marginBottom: 6 }}>
-        <select aria-label="Protocol" value={h2 ? "HTTP/2" : "HTTP/1.1"} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/2" | "HTTP/1.1"))}>
+        <select aria-label="Protocol" value={proto} onChange={(e) => onChange(toProtocol(raw, e.target.value as "HTTP/3" | "HTTP/2" | "HTTP/1.1"))}>
           <option value="HTTP/1.1">HTTP/1.1</option>
           <option value="HTTP/2">HTTP/2</option>
+          <option value="HTTP/3">HTTP/3 (QUIC)</option>
         </select>
         <span className="mono">{p.method} {p.target.split("?")[0]}</span>
       </div>
-      {section(h2 ? "HTTP/2 pseudo-headers" : "Request line", [
+      {section(h2 ? `${proto} pseudo-headers` : "Request line", [
         { name: h2 ? ":method" : "method", value: p.method, set: (v: string) => onChange(setRequestLine(raw, { method: v })) },
         { name: h2 ? ":path" : "path", value: p.target, set: (v: string) => onChange(setRequestLine(raw, { target: v })) },
         ...(h2 ? [{ name: ":authority", value: host, set: (v: string) => onChange(setAuthority(raw, v)) }] : []),
@@ -577,8 +732,9 @@ function GroupPanel({ tabs, current, goApprovals }: { tabs: RTab[]; current: RTa
   };
   const send = () =>
     action.run(async () => {
+      const requests = await Promise.all(chosen.map(async (t) => ({ url: t.url, raw: t.raw, body_b64: await protoBodyOf(t.raw, t.pb), name: t.name })));
       const r = await api.post<GroupResult>("/replay/group", {
-        requests: chosen.map((t) => ({ url: t.url, raw: t.raw, name: t.name })),
+        requests,
         mode,
         stop_on_error: stop,
         identity: current.identity || undefined,

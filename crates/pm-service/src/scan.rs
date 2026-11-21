@@ -66,12 +66,12 @@ impl Service {
         let mut groups: BTreeMap<(String, String, String, String), ScanIssue> = BTreeMap::new();
         let mut lines: Vec<pm_plugin::ExchangeLine> = Vec::new();
         let mut where_of: std::collections::HashMap<i64, (String, String)> = std::collections::HashMap::new();
-        let plugins = self.enabled_plugins();
+        let plugins = self.passive_plugins();
         for s in summaries {
             let Some(ex) = self.store.read(|db| db.get_exchange(s.id))? else { continue };
             let Some(resp) = ex.response.as_deref() else { continue };
             let converted;
-            let resp = if pm_http::h2text::is_http2_response(resp) {
+            let resp = if pm_http::h3text::is_multiplexed_response(resp) {
                 match pm_http::h2text::to_http1_response(resp) {
                     Some(r) => {
                         converted = r;
@@ -381,7 +381,7 @@ fn adv_issue(
 fn seen_of(resp: Option<&[u8]>) -> pm_scan::active::Seen {
     let Some(r) = resp else { return Default::default() };
     let converted;
-    let r = if pm_http::h2text::is_http2_response(r) {
+    let r = if pm_http::h3text::is_multiplexed_response(r) {
         match pm_http::h2text::to_http1_response(r) {
             Some(c) => {
                 converted = c;
@@ -667,8 +667,8 @@ impl Service {
         // Out-of-band probes, when an OAST listener is configured.
         // One lock at a time: in one struct literal both guards would live
         // to the end of the statement and deadlock.
-        let url = self.store.read(|db| db.get_setting(crate::proof::OAST_SETTING))?;
-        let domain = self.store.read(|db| db.get_setting(crate::proof::OAST_DNS_SETTING))?;
+        let url = self.setting_unless_isolated(crate::proof::OAST_SETTING)?;
+        let domain = self.setting_unless_isolated(crate::proof::OAST_DNS_SETTING)?;
         let callback = pm_scan::oob::Callback { url, domain };
         let oob = pm_scan::oob::probes(&raw, &req.checks, &callback, &id_segments, limit, pm_oast::new_token);
         if !callback.is_set() && pm_scan::oob::CHECKS.iter().any(|c| want(c)) {
