@@ -1,10 +1,11 @@
 //! Human approvals, stored in the project so every process shares them.
 
 use pm_core::now_ms;
-use pm_policy::{ActionRequest, Actor, ActorKind, Decision, Target, Tier};
+use pm_policy::{ActionRequest, Actor, Decision, Target, Tier};
 use pm_store::ApprovalRow;
 use serde_json::{Value, json};
 
+use crate::access::{Perm, Principal};
 use crate::{Authorization, Event, Result, Service, ServiceError};
 
 /// An unguessable id (OS randomness, mixed with time and a counter in case
@@ -55,8 +56,8 @@ impl Service {
 
     /// A human approves or denies a pending action. Audited, including refusals.
     pub fn decide_approval(&self, id: &str, approver: &Actor, approve: bool) -> Result<ApprovalRow> {
-        let outcome = if approver.kind != ActorKind::Human {
-            Err("only humans can approve actions".to_string())
+        let outcome = if !Principal::from_actor(approver).allows(Perm::ApprovalsDecide) {
+            Err(Perm::ApprovalsDecide.spec().denial.to_string())
         } else {
             let to = if approve { "approved" } else { "denied" };
             match self.store.write(|db| db.transition_approval(id, "pending", to, Some(&approver.id()), None, now_ms()))

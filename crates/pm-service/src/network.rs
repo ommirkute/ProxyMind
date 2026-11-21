@@ -3,13 +3,14 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use pm_proxy::{ListenerConfig, ListenerStatus, Listeners};
 use pm_replay::{NetConfig, Network};
 use pm_store::Store;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::api_types::{UpstreamResolution, UpstreamResolveRequest};
 use crate::{Result, Service, ServiceError};
 
@@ -103,9 +104,7 @@ impl Service {
     /// Replaces the settings. Humans only. A password of `********` keeps the saved one (of the upstream rule with
     /// the same `via` and username), so a masked value can be sent back unchanged.
     pub fn network_set(&self, actor: &Actor, cfg: NetConfig) -> Result<NetConfig> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change network settings".into()));
-        }
+        self.require_actor(actor, Perm::NetworkWrite)?;
         let saved = self.store.read(load_network)?;
         let mut cfg = cfg;
         // The older single `upstream` keeps its masked password whatever else changed (as it always did).
@@ -289,9 +288,7 @@ impl Service {
     /// Replaces the extra listeners. Humans only: a listener on a public
     /// interface lets other machines use the proxy.
     pub fn listeners_set(&self, actor: &Actor, mut list: Vec<ListenerConfig>) -> Result<ListenersView> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change proxy listeners".into()));
-        }
+        self.require_actor(actor, Perm::ListenersWrite)?;
         // A masked password keeps the one saved for the same address.
         let saved = self.store.read(load_listeners)?;
         for l in list.iter_mut().filter(|l| l.password == pm_proxy::listeners::MASKED_PASSWORD) {
@@ -358,9 +355,7 @@ impl Service {
 
     /// Changes what the proxy records. Humans only.
     pub fn recording_set(&self, actor: &Actor, s: RecordingSettings) -> Result<RecordingSettings> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change what is recorded".into()));
-        }
+        self.require_actor_with(actor, Perm::NetworkWrite, Denial::message("only humans can change what is recorded"))?;
         if s.record_devices.len() > MAX_RECORD_DEVICES {
             return Err(ServiceError::Invalid(format!("at most {MAX_RECORD_DEVICES} devices")));
         }

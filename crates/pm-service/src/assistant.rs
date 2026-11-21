@@ -2,10 +2,11 @@
 //! itself lives in `pm-assistant`, above the MCP tools it uses.
 
 use pm_core::now_ms;
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 pub const ASSISTANT_SETTING: &str = "assistant";
@@ -148,9 +149,7 @@ impl Service {
 
     /// Humans only; audited.
     pub fn assistant_config_set(&self, actor: &Actor, cfg: AssistantConfig) -> Result<AssistantConfig> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change the assistant settings".into()));
-        }
+        self.require_actor(actor, Perm::AssistantConfigWrite)?;
         let url = url::Url::parse(&cfg.base_url).map_err(|e| ServiceError::Invalid(format!("base URL: {e}")))?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err(ServiceError::Invalid("the base URL must be http(s)".into()));
@@ -186,9 +185,7 @@ impl Service {
     /// environment variable of the same name still wins. People only; the
     /// audit log records that it changed, not the value.
     pub fn model_key_set(&self, actor: &Actor, name: &str, key: &str) -> Result<KeyStatus> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can set model API keys".into()));
-        }
+        self.require_actor(actor, Perm::ModelKeysWrite)?;
         valid_key_name(name)?;
         let key = key.trim();
         if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -206,9 +203,7 @@ impl Service {
 
     /// Removes a saved key. People only.
     pub fn model_key_remove(&self, actor: &Actor, name: &str) -> Result<KeyStatus> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can remove model API keys".into()));
-        }
+        self.require_actor_with(actor, Perm::ModelKeysWrite, Denial::message("only people can remove model API keys"))?;
         let mut keys = self.model_keys()?;
         if keys.remove(name).is_some() {
             self.save_model_keys(&keys)?;

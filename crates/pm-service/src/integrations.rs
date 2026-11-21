@@ -25,13 +25,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use pm_core::now_ms;
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use ring::digest;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use url::Url;
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 /// The project setting holding the integrations' configuration (no secrets).
@@ -567,14 +568,6 @@ fn write_private(path: &std::path::Path, text: &str) -> Result<()> {
 // ---- the service ---------------------------------------------------------------------------------------------
 
 impl Service {
-    fn integration_people_only(&self, actor: &Actor, action: &str, detail: Value) -> Result<()> {
-        if actor.kind == ActorKind::Human {
-            return Ok(());
-        }
-        self.audit(&actor.id(), action, detail, "deny")?;
-        invalid(format!("only people can {}", action.trim_start_matches("integration_").replace('_', " ")))
-    }
-
     /// A random id for this project, kept in the project file; secrets and trust are filed under it.
     pub(crate) fn project_id(&self) -> Result<String> {
         self.store
@@ -778,16 +771,16 @@ impl Service {
 
     /// Every integration with its state. People only (agents use [`Service::integration_names`]).
     pub fn integration_list(&self, actor: &Actor) -> Result<Vec<IntegrationView>> {
-        if actor.kind != ActorKind::Human {
-            return invalid("only people can read integration settings (agents can list names with integration_list)");
-        }
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsRead,
+            Denial::message("only people can read integration settings (agents can list names with integration_list)"),
+        )?;
         Ok(self.integrations_load()?.into_iter().map(|i| self.view(i)).collect())
     }
 
     pub fn integration_get(&self, actor: &Actor, name: &str) -> Result<IntegrationView> {
-        if actor.kind != ActorKind::Human {
-            return invalid("only people can read integration settings");
-        }
+        self.require_actor(actor, Perm::IntegrationsRead)?;
         Ok(self.view(self.integration_find(name)?))
     }
 
@@ -804,7 +797,11 @@ impl Service {
     /// Saving it enabled, here, is what makes it send in this installation; saving it changed turns that off until
     /// it is saved or enabled again by a person.
     pub fn integration_set(&self, actor: &Actor, name: &str, input: IntegrationInput) -> Result<IntegrationView> {
-        self.integration_people_only(actor, "integration_set", json!({ "name": name }))?;
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsWrite,
+            Denial::message("only people can set").and_audit("integration_set", json!({ "name": name })),
+        )?;
         if input.name != name {
             return invalid("the name in the body and in the path must be the same");
         }
@@ -994,7 +991,11 @@ impl Service {
     /// Turns an integration on or off. Turning one on here, as a person, trusts its current configuration in this
     /// installation: the way an integration that came with a project file starts to send.
     pub fn integration_enable(&self, actor: &Actor, name: &str, enabled: bool) -> Result<IntegrationView> {
-        self.integration_people_only(actor, "integration_enable", json!({ "name": name }))?;
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsWrite,
+            Denial::message("only people can enable").and_audit("integration_enable", json!({ "name": name })),
+        )?;
         let mut list = self.integrations_load()?;
         let Some(i) = list.iter_mut().find(|i| i.name == name) else {
             return Err(ServiceError::NotFound(format!("integration {name}")));
@@ -1018,7 +1019,11 @@ impl Service {
 
     /// Deletes an integration, its saved secrets, its trust and its delivery log. People only; audited.
     pub fn integration_delete(&self, actor: &Actor, name: &str) -> Result<()> {
-        self.integration_people_only(actor, "integration_delete", json!({ "name": name }))?;
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsWrite,
+            Denial::message("only people can delete").and_audit("integration_delete", json!({ "name": name })),
+        )?;
         let mut list = self.integrations_load()?;
         let before = list.len();
         list.retain(|i| i.name != name);
@@ -1049,9 +1054,11 @@ impl Service {
         name: &str,
         limit: usize,
     ) -> Result<Vec<pm_store::DeliveryRow>> {
-        if actor.kind != ActorKind::Human {
-            return invalid("only people can read the delivery log");
-        }
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsRead,
+            Denial::message("only people can read the delivery log"),
+        )?;
         self.integration_find(name)?;
         Ok(self.store.read(|db| db.list_deliveries(Some(name), limit.clamp(1, 200)))?)
     }

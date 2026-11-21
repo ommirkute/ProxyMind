@@ -19,11 +19,12 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use pm_replay::net::host_matches;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::replay::{Outgoing, Sent, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
 
@@ -600,24 +601,15 @@ fn load(store: &pm_store::Store) -> Result<SessionConfig> {
     }
 }
 
-fn humans_only(actor: &Actor) -> Result<()> {
-    if actor.kind != ActorKind::Human {
-        return Err(ServiceError::Invalid(
-            "only humans can see or change session handling (macros hold passwords)".into(),
-        ));
-    }
-    Ok(())
-}
-
 impl Service {
     pub fn session_get(&self, actor: &Actor) -> Result<SessionView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         let config = self.store.read(load)?;
         Ok(SessionView { config, variables: self.session.lock().vars.clone() })
     }
 
     pub fn session_set(&self, actor: &Actor, mut cfg: SessionConfig) -> Result<SessionView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         cfg.validate().map_err(ServiceError::Invalid)?;
         cfg.saved_by = actor.id();
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
@@ -630,14 +622,14 @@ impl Service {
 
     /// The cookie jar, brought up to date with history.
     pub fn session_jar(&self, actor: &Actor) -> Result<Vec<JarCookie>> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         self.refresh_jar()?;
         Ok(self.session.lock().jar.cookies.clone())
     }
 
     /// Empties the jar; it fills again from responses recorded from now on.
     pub fn session_jar_clear(&self, actor: &Actor) -> Result<()> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         self.refresh_jar()?;
         self.session.lock().jar.cookies.clear();
         self.audit(&actor.id(), "session_jar_clear", json!({}), "allow")?;
@@ -646,7 +638,7 @@ impl Service {
 
     /// Runs a macro now (to test it). Humans only.
     pub async fn session_macro_run(&self, actor: &Actor, name: &str) -> Result<MacroRun> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         let cfg = self.store.read(load)?;
         let m = cfg
             .macros

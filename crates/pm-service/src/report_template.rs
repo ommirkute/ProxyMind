@@ -9,10 +9,11 @@
 //! template can't loop forever.
 
 use minijinja::{AutoEscape, Environment, context};
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::report::{CSS, Report, ReportOptions};
 use crate::{Result, Service, ServiceError};
 
@@ -283,9 +284,7 @@ impl Service {
 
     /// Saves (adds or replaces) a template after checking it renders. Humans only.
     pub fn report_template_save(&self, actor: &Actor, mut t: ReportTemplate) -> Result<Vec<ReportTemplate>> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change report templates".into()));
-        }
+        self.require_actor(actor, Perm::ReportTemplatesWrite)?;
         t.name = t.name.trim().to_string();
         t.builtin = false;
         let n = &t.name;
@@ -318,9 +317,7 @@ impl Service {
     }
 
     pub fn report_template_delete(&self, actor: &Actor, name: &str) -> Result<bool> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change report templates".into()));
-        }
+        self.require_actor(actor, Perm::ReportTemplatesWrite)?;
         let removed = self.store.write(|store| -> Result<bool> {
             let mut saved = load_saved(store)?;
             let before = saved.len();

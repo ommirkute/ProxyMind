@@ -342,10 +342,22 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    `crates/pm-service/tests/safe_open.rs`, `crates/pm-assistant/tests/assistant.rs`, e2e "Safe mode". Step 1 may now
    assume that a project it reads came from this install or was confirmed by a person; in server mode (3.3) the trust
    record moves into the server's own database, keyed by the same project id.
-1. **The access module over the existing checks.** Add `pm-service::access` (`Perm`, `Principal`, `require`); replace the
+1. **The access module over the existing checks. Done 2026-11-21** (see the note below this step). Add `pm-service::access` (`Perm`, `Principal`, `require`); replace the
    53 `actor.kind != Human` checks with `Perm` entries marked `people_only`; single-user mode is the implicit owner.
    Test: the whole existing suite unchanged; the source-scan test; a table of every `people_only` action committed in
    `docs/`.
+
+   *Done 2026-11-21.* `crates/pm-service/src/access.rs` holds `Perm` (32 entries, each with its roles and a
+   `people_only` flag, in one `match`), `Principal` (an `Actor` plus a `Role`; `Principal::from_actor` maps a person
+   to `owner` and every other actor to `tester`, so single-user behaviour is unchanged) and `Service::require` /
+   `require_actor` (deny by default; a refusal is the `Invalid` error the old check returned, and is audited only where
+   the old check audited). The scattered `actor.kind` checks and the `people_only` / `humans_only` helpers in
+   `pm-service`, `pm-assistant` and `pm-cli` now go through it; uses of the actor's kind that are redaction or
+   presentation stay, in an explicit allow-list with reasons. `docs/access.md` is the table, generated and kept in sync
+   by `crates/pm-service/tests/access.rs`, which also holds the source-scan test (no authorization on the actor's kind
+   outside `access.rs`) and the test that every `Perm` is used. Not yet done from the Authorization section: a `require`
+   at the top of every public method (the scan that enforces it, and the matrix test, come with step 6, when roles
+   become real), and the `Principal` fields `user_id`, `project`, `token_id`, `session_id`.
 2. **Audit v2.** Migration adding the nullable columns; record version 2 with user, token, project, session and address;
    `verify` handles v1 and v2; keyed chain and signed checkpoints for server mode behind a feature of the service. Test:
    old logs verify; truncating the tail is detected with a checkpoint; a v2 record with a changed `user_id` fails.

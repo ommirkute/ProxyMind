@@ -15,6 +15,7 @@ use pm_policy::{Actor, ActorKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::access::{Perm, Principal};
 use crate::{
     ActiveFinding, ActiveScanRequest, ActiveScanResult, CrawlRequest, CrawlResult, Result, Service, ServiceError,
 };
@@ -571,7 +572,7 @@ impl Service {
             .cloned()
             .ok_or_else(|| ServiceError::NotFound(format!("scan task {id}")))?;
         // People see every task; agents and plugins only their own.
-        if actor.kind != ActorKind::Human && t.actor != actor.id() {
+        if !Principal::from_actor(actor).allows(Perm::RunsReadAll) && t.actor != actor.id() {
             return Err(ServiceError::NotFound(format!("scan task {id}")));
         }
         Ok(t)
@@ -645,11 +646,12 @@ impl Service {
 
     /// Recent tasks, newest first (issues left out; see `scan_task_status`).
     pub fn scan_task_list(&self, actor: &Actor) -> Vec<ScanTaskView> {
+        let all = Principal::from_actor(actor).allows(Perm::RunsReadAll);
         self.scan_tasks
             .lock()
             .iter()
             .rev()
-            .filter(|t| actor.kind == ActorKind::Human || t.actor == actor.id())
+            .filter(|t| all || t.actor == actor.id())
             .map(|t| {
                 let mut v = t.view.lock().clone();
                 v.issues.clear();

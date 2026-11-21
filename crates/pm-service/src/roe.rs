@@ -9,6 +9,7 @@ use pm_policy::{Actor, ActorKind, Roe, Tier};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// Project setting holding the ROE YAML.
@@ -82,9 +83,7 @@ impl Service {
 
     /// Replaces the rules. Humans only: agents work inside the rules and can never change them.
     pub fn roe_set(&self, actor: &Actor, text: &str) -> Result<RoeView> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change the rules of engagement".into()));
-        }
+        self.require_actor(actor, Perm::RoeWrite)?;
         if text.len() > 1024 * 1024 {
             return Err(ServiceError::Invalid("ROE larger than 1 MB".into()));
         }

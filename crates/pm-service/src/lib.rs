@@ -4,6 +4,7 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
+pub mod access;
 mod ai_scan;
 pub mod api_types;
 mod approvals;

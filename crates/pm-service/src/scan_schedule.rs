@@ -10,10 +10,11 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, ScanTaskRequest, ScanTaskView, Service, ServiceError};
 
 const MINUTE: i64 = 60_000;
@@ -108,13 +109,6 @@ pub struct ScanSchedule {
     pub last_error: Option<String>,
 }
 
-fn humans_only(actor: &Actor) -> Result<()> {
-    if actor.kind != ActorKind::Human {
-        return Err(ServiceError::Invalid("only humans can change scan schedules (they run unattended)".into()));
-    }
-    Ok(())
-}
-
 pub(crate) fn from_row(row: pm_store::ScheduleRow) -> Option<ScanSchedule> {
     let mut s: ScanSchedule = serde_json::from_str(&row.data).ok()?;
     s.id = row.id;
@@ -149,7 +143,7 @@ impl Service {
 
     /// Adds a schedule (id 0) or changes one. It will run as `actor`.
     pub fn schedule_save(&self, actor: &Actor, mut s: ScanSchedule) -> Result<ScanSchedule> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
         let was_trusted = self.trust_before();
         s.name = s.name.trim().to_string();
         if s.name.is_empty() || s.name.len() > 80 {
@@ -183,7 +177,7 @@ impl Service {
     }
 
     pub fn schedule_delete(&self, actor: &Actor, id: i64) -> Result<bool> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
         let was_trusted = self.trust_before();
         let deleted = self.store.write(|db| db.delete_schedule(id))?;
         self.audit(&actor.id(), "scan_schedule_delete", json!({ "id": id }), if deleted { "allow" } else { "noop" })?;
@@ -193,7 +187,7 @@ impl Service {
 
     /// Starts a schedule's scan now (its regular times don't change).
     pub fn schedule_run_now(self: &Arc<Self>, actor: &Actor, id: i64) -> Result<ScanTaskView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SchedulesWrite)?;
         let mut s = self.schedule_get(id)?;
         // A person pressed the button: the run is theirs, whoever the file says saved the schedule.
         let v = self.fire(&mut s, pm_core::now_ms(), actor)?;

@@ -11,11 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::StreamExt;
 use pm_fuzz::{Extract, Grep, Mode, Observed, PayloadSet, Template};
-use pm_policy::{Actor, ActorKind, Tier};
+use pm_policy::{Actor, Tier};
 use pm_replay::Endpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Perm, Principal};
 use crate::events::{Event, Rate};
 use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
@@ -617,7 +618,7 @@ impl Service {
             .cloned()
             .ok_or_else(|| ServiceError::NotFound(format!("attack {id}")))?;
         // People see every attack; agents and plugins only their own.
-        if actor.kind != ActorKind::Human && a.actor != actor.id() {
+        if !Principal::from_actor(actor).allows(Perm::RunsReadAll) && a.actor != actor.id() {
             return Err(ServiceError::NotFound(format!("attack {id}")));
         }
         Ok(a)
@@ -674,11 +675,12 @@ impl Service {
 
     /// Recent attacks, newest first.
     pub fn fuzzer_list(&self, actor: &Actor) -> Vec<AttackSummary> {
+        let all = Principal::from_actor(actor).allows(Perm::RunsReadAll);
         self.attacks
             .lock()
             .iter()
             .rev()
-            .filter(|a| actor.kind == ActorKind::Human || a.actor == actor.id())
+            .filter(|a| all || a.actor == actor.id())
             .map(|a| {
                 let st = a.state.lock();
                 AttackSummary {

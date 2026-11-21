@@ -14,11 +14,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pm_policy::{Actor, ActorKind, Policy, Roe, Target};
+use pm_policy::{Actor, Policy, Roe, Target};
 use pm_tools::{sign, zip};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::findings::issue_key;
 use crate::{Result, Service, ServiceError};
 
@@ -236,9 +237,7 @@ impl Service {
     /// also includes the bytes of every in-scope exchange (up to 5000), not
     /// only those behind findings, proofs and attack paths.
     pub fn evidence_pack(&self, actor: &Actor, all_in_scope: bool) -> Result<(Vec<u8>, String)> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people export evidence".into()));
-        }
+        self.require_actor(actor, Perm::ExportEvidence)?;
         let key = self.evidence_key()?;
         let public = sign::public_key(&key).map_err(ServiceError::Invalid)?;
         let roe = self.policy.roe();

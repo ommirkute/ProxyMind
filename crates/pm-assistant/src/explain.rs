@@ -35,7 +35,7 @@ impl Assistant {
                 return Err(e);
             }
         };
-        if human.kind != pm_service::pm_policy::ActorKind::Human {
+        if !pm_service::access::Principal::from_actor(human).allows(pm_service::access::Perm::FindingsExplain) {
             return Err(AssistantError::Setup("only people ask for a finding explanation".into()));
         }
         let f = self.service.finding_get(id)?;

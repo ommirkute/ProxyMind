@@ -1640,7 +1640,10 @@ fn human_actor(given: Option<&str>) -> Result<Actor> {
         }
     };
     let actor = Actor::parse(&id)?;
-    anyhow::ensure!(actor.kind == ActorKind::Human, "only human:<name> actors can approve");
+    anyhow::ensure!(
+        pm_service::access::Principal::from_actor(&actor).allows(pm_service::access::Perm::ApprovalsDecide),
+        "only human:<name> actors can approve"
+    );
     Ok(actor)
 }
 

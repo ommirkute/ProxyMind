@@ -2,10 +2,11 @@
 //! through this process's proxy and trusting only ProxyMind's CA (pinned
 //! by its public key, so nothing is installed system-wide).
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// Where this process's proxy listens, and what the browser needs to use it.
@@ -46,9 +47,7 @@ impl Service {
 
     /// Opens a browser window for a person to test with.
     pub async fn browser_open(&self, actor: &Actor, req: BrowserOpenRequest) -> Result<BrowserOpened> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only a person can open a browser window".into()));
-        }
+        self.require_actor(actor, Perm::BrowserOpen)?;
         let info = self.proxy_info.get().ok_or_else(|| {
             ServiceError::Invalid("no proxy runs in this process: start ProxyMind with `proxymind ui`".into())
         })?;

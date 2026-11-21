@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind, Target};
+use pm_policy::{Actor, Target};
 use pm_proxy::Rewriter;
 use pm_proxy::rewrite::{self, Rule};
 use pm_store::Store;
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// Project setting that holds the rules as JSON.
@@ -70,9 +71,7 @@ impl Service {
     /// Replaces the rules. Humans only: rules change every request the
     /// browser sends, which is not an agent's call to make.
     pub fn set_match_replace_rules(&self, actor: &Actor, rules: Vec<Rule>) -> Result<Vec<Rule>> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change match-and-replace rules".into()));
-        }
+        self.require_actor(actor, Perm::RulesWrite)?;
         rewrite::validate(&rules).map_err(ServiceError::Invalid)?;
         let text = serde_json::to_string(&rules).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         let was_trusted = self.trust_before();

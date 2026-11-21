@@ -35,6 +35,7 @@ use ring::digest;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 /// The trust records, in the user's home folder.
@@ -688,13 +689,11 @@ impl Service {
     /// listeners start, schedules and triggers run (as this person), rules and network settings apply. People only;
     /// audited, a refusal too.
     pub fn trust_confirm(&self, actor: &Actor, req: &TrustConfirmRequest) -> Result<TrustView> {
-        if actor.kind != ActorKind::Human {
-            let _ =
-                self.audit(&actor.id(), "project_trust", json!({ "reason": "only people confirm a project" }), "deny");
-            return Err(ServiceError::Invalid(
-                "only people can trust a project: review it and confirm yourself".into(),
-            ));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::ProjectTrust,
+            Denial::audited("project_trust", json!({ "reason": "only people confirm a project" })),
+        )?;
         let before = self.trust_status()?;
         if let Some(d) = &req.digest
             && *d != before.digest

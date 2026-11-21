@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use pm_plugin::hooks::{Failure, HookEngine};
 use pm_plugin::v2::{self, HookKind, HookMatch, OnError};
-use pm_policy::{Actor, ActorKind, Target, Tier};
+use pm_policy::{Actor, Target, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::api_types::HookAction;
 use crate::{Authorization, Event, Result, Service, ServiceError};
 use pm_replay::Endpoint;
@@ -251,7 +252,7 @@ impl Service {
     }
 
     /// Refuses a feature a v2 plugin did not declare, or declared but nobody accepted.
-    fn require(&self, p: &pm_plugin::Installed, perm: &str) -> Result<()> {
+    fn require_plugin_permission(&self, p: &pm_plugin::Installed, perm: &str) -> Result<()> {
         let Some(granted) = self.permissions_of(p) else { return Ok(()) };
         if granted.iter().any(|g| g == perm) {
             return Ok(());
@@ -304,15 +305,12 @@ impl Service {
         self.bus.publish(Event::PluginsChanged { plugin: plugin.to_string(), what: what.to_string() }, None);
     }
 
-    /// Only people turn plugins on, accept their permissions and set up hooks: they run code, or change traffic.
-    fn people_only(&self, actor: &Actor, action: &str, detail: serde_json::Value) -> Result<()> {
-        if actor.kind == ActorKind::Human {
-            return Ok(());
-        }
-        let _ = self.audit(&actor.id(), action, detail, "deny");
-        Err(ServiceError::Invalid(format!(
+    /// The refusal for a non-person: audited, and it names the action (`action`), as the checks did before ADR-0022.
+    fn plugin_denial(action: &'static str, detail: serde_json::Value) -> Denial {
+        Denial::message(format!(
             "only people can do this ({action}): plugins run code and hooks change traffic, so an agent can't turn them on, accept their permissions or set them up"
-        )))
+        ))
+        .and_audit(action, detail)
     }
 
     fn registry_for_change(&self) -> Result<pm_plugin::Registry> {
@@ -324,7 +322,11 @@ impl Service {
     /// A person accepts the permissions a v2 plugin declares (the first time, or after an update changed them),
     /// which also turns the plugin on. Audited.
     pub fn plugin_accept_permissions(&self, actor: &Actor, name: &str) -> Result<PluginsView> {
-        self.people_only(actor, "plugin_accept_permissions", json!({ "plugin": name }))?;
+        self.require_actor_with(
+            actor,
+            Perm::PluginsManage,
+            Self::plugin_denial("plugin_accept_permissions", json!({ "plugin": name })),
+        )?;
         let mut reg = self.registry_for_change()?;
         let perms = reg.accept_permissions(name).map_err(|e| ServiceError::Invalid(e.to_string()))?;
         reg.save().map_err(|e| ServiceError::Invalid(e.to_string()))?;
@@ -342,7 +344,7 @@ impl Service {
         action: HookAction,
     ) -> Result<PluginsView> {
         let detail = json!({ "plugin": name, "hook": kind.as_str(), "action": action });
-        self.people_only(actor, "plugin_hook", detail.clone())?;
+        self.require_actor_with(actor, Perm::HooksManage, Self::plugin_denial("plugin_hook", detail.clone()))?;
         let mut reg = self.registry_for_change()?;
         let plugin = reg.find(name).ok_or_else(|| ServiceError::NotFound(format!("plugin {name}")))?;
         if plugin.manifest.hook(kind).is_none() {
@@ -403,9 +405,9 @@ impl Service {
             .into_iter()
             .find(|p| p.manifest.name == plugin)
             .ok_or_else(|| ServiceError::NotFound(format!("enabled plugin {plugin}")))?;
-        self.require(&p, v2::PANELS)?;
+        self.require_plugin_permission(&p, v2::PANELS)?;
         // A v2 panel only gets recorded exchanges if the plugin declared (and a person accepted) history.read.
-        let rows = if self.require(&p, v2::HISTORY_READ).is_err() {
+        let rows = if self.require_plugin_permission(&p, v2::HISTORY_READ).is_err() {
             Vec::new()
         } else {
             self.store.read(|db| {
@@ -446,7 +448,11 @@ impl Service {
     /// Turns a plugin on or off in the user's registry. Humans only. A v2 plugin whose permissions nobody
     /// accepted can't be turned on.
     pub fn plugin_set_enabled(&self, actor: &Actor, name: &str, enabled: bool) -> Result<PluginsView> {
-        self.people_only(actor, "plugin_enable", json!({ "plugin": name, "enabled": enabled }))?;
+        self.require_actor_with(
+            actor,
+            Perm::PluginsManage,
+            Self::plugin_denial("plugin_enable", json!({ "plugin": name, "enabled": enabled })),
+        )?;
         let mut reg = self.registry_for_change()?;
         reg.set_enabled_checked(name, enabled).map_err(|e| match e {
             pm_plugin::PluginError::Invalid(m) if m.starts_with("no plugin") => {
@@ -470,7 +476,7 @@ impl Service {
         if plugin.manifest.active.is_none() {
             return Err(ServiceError::Invalid(format!("{} has no active check", req.plugin)));
         }
-        self.require(&plugin, v2::CHECKS_ACTIVE)?;
+        self.require_plugin_permission(&plugin, v2::CHECKS_ACTIVE)?;
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
         }

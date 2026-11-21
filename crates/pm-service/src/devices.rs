@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::api_types::{DeviceView, DevicesView};
 use crate::network::normalize_client_ip;
 use crate::{Result, Service, ServiceError};
@@ -52,9 +53,7 @@ impl Service {
 
     /// Names a client address. Humans only (it is the person's own workspace).
     pub fn device_set_name(&self, actor: &Actor, addr: &str, name: &str) -> Result<DeviceView> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can name devices".into()));
-        }
+        self.require_actor(actor, Perm::DevicesWrite)?;
         let addr = normalize_client_ip(addr)?;
         let name = name.trim();
         if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control) {
@@ -76,9 +75,7 @@ impl Service {
 
     /// Removes a device's name.
     pub fn device_remove_name(&self, actor: &Actor, addr: &str) -> Result<()> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can name devices".into()));
-        }
+        self.require_actor(actor, Perm::DevicesWrite)?;
         let addr = normalize_client_ip(addr)?;
         let removed = self.store.write(|db| -> Result<bool> {
             let mut names = load_names(db)?;

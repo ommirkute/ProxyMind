@@ -2,11 +2,12 @@
 //! `custom_checks`, the YAML as written) and run against a recorded request
 //! through the policy gate, with one approval for the whole run.
 
-use pm_policy::{Actor, ActorKind, Tier};
+use pm_policy::{Actor, Tier};
 use pm_scan::custom::{self, CustomCheck};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::{Authorization, Result, Service, ServiceError};
 
 const SETTING: &str = "custom_checks";
@@ -95,9 +96,7 @@ impl Service {
 
     /// Adds or replaces (by id) a check. Humans only: checks decide what scans send.
     pub fn custom_check_save(&self, actor: &Actor, yaml: &str) -> Result<SavedCustomCheck> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can save custom checks".into()));
-        }
+        self.require_actor_with(actor, Perm::ScanConfigWrite, Denial::message("only people can save custom checks"))?;
         let check = custom::parse(yaml).map_err(ServiceError::Invalid)?;
         self.store.write(|store| -> Result<()> {
             let mut saved = load(store)?;
@@ -115,9 +114,7 @@ impl Service {
     }
 
     pub fn custom_check_delete(&self, actor: &Actor, id: &str) -> Result<bool> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can delete custom checks".into()));
-        }
+        self.require_actor_with(actor, Perm::ScanConfigWrite, Denial::message("only people can delete custom checks"))?;
         let removed = self.store.write(|store| -> Result<bool> {
             let mut saved = load(store)?;
             let before = saved.len();

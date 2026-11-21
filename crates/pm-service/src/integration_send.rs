@@ -19,6 +19,7 @@ use pm_store::{DeliveryRow, NewDelivery};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::access::{Denial, Perm};
 use crate::integration_payload::{self as payload, Brief, IssueBrief, ProofBrief, Step};
 use crate::integrations::{
     Bucket, Integration, IntegrationKind, IssueLink, SendFindingBody, base_of, clean_secret, origin_of, parse_url,
@@ -637,7 +638,14 @@ impl Service {
         finding_id: i64,
         body: SendFindingBody,
     ) -> Result<IssueLink> {
-        self.people_only_send(actor, finding_id, &body.integration)?;
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsSend,
+            Denial::audited(
+                "integration_send_finding",
+                json!({ "integration": &body.integration, "finding_id": finding_id }),
+            ),
+        )?;
         let integ = self.integration_find(&body.integration)?;
         if !integ.kind.is_tracker() {
             return invalid(format!("{} is a {}: it takes notifications, not issues", integ.name, integ.kind.as_str()));
@@ -661,19 +669,6 @@ impl Service {
         let result = self.send_issue(actor, &integ, finding_id, existing, links).await;
         self.integrations.lock().in_flight.remove(&key);
         result
-    }
-
-    fn people_only_send(&self, actor: &Actor, finding_id: i64, integration: &str) -> Result<()> {
-        if actor.kind == pm_policy::ActorKind::Human {
-            return Ok(());
-        }
-        self.audit(
-            &actor.id(),
-            "integration_send_finding",
-            json!({ "integration": integration, "finding_id": finding_id }),
-            "deny",
-        )?;
-        invalid("only people can send findings to integrations")
     }
 
     async fn send_issue(
@@ -745,7 +740,11 @@ impl Service {
     /// webhook. Recorded in the delivery log. People only; the integration must be on and enabled in this
     /// installation.
     pub async fn integration_test(&self, actor: &Actor, name: &str) -> Result<DeliveryRow> {
-        self.people_only_test(actor, name)?;
+        self.require_actor_with(
+            actor,
+            Perm::IntegrationsWrite,
+            Denial::message("only people can test integrations").and_audit("integration_test", json!({ "name": name })),
+        )?;
         let integ = self.integration_find(name)?;
         self.require_active(&integ)?;
         let mut secrets = self.integration_secret_values(&integ);
@@ -764,14 +763,6 @@ impl Service {
             &result,
             format!("HTTP {}", result.as_ref().map_or(0, |s| s.status)),
         ))
-    }
-
-    fn people_only_test(&self, actor: &Actor, name: &str) -> Result<()> {
-        if actor.kind == pm_policy::ActorKind::Human {
-            return Ok(());
-        }
-        self.audit(&actor.id(), "integration_test", json!({ "name": name }), "deny")?;
-        invalid("only people can test integrations")
     }
 
     fn test_notice(&self, actor: &Actor) -> (String, payload::WebhookData) {

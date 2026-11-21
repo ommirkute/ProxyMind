@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+use crate::access::{Perm, Principal};
 use crate::{Counters, Result, Service};
 
 /// Events a slow subscriber may fall behind by before it gets a resync.
@@ -435,7 +436,7 @@ impl Service {
     /// like `scan_task_*` and `fuzzer_*` ("people see every task, agents only their own"). `ai_scan` is readable by
     /// every actor, like `GET /ai-scan`, which has no actor check; its events carry ids and state words only.
     pub fn may_read_topic(&self, actor: &Actor, topic: Topic) -> bool {
-        topic != Topic::Intercept || actor.kind == ActorKind::Human
+        topic != Topic::Intercept || Principal::from_actor(actor).allows(Perm::InterceptUse)
     }
 
     /// What `actor` may see of a published event, as JSON (`seq`, `topic`, `type` and the event's fields), or

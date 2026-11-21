@@ -6,6 +6,7 @@ use pm_store::{ExchangeSummary, HistoryFilter};
 use pm_tools::hql;
 use serde::Serialize;
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// One page of history search results.
@@ -317,9 +318,7 @@ impl Service {
     /// Saves UI state for this project. People only: it's their workspace.
     pub fn ui_state_put(&self, actor: &Actor, key: &str, value: &serde_json::Value) -> Result<()> {
         check_ui_key(key)?;
-        if actor.kind != pm_policy::ActorKind::Human {
-            return Err(ServiceError::Invalid("only people have UI state".into()));
-        }
+        self.require_actor(actor, Perm::UiStateWrite)?;
         let text = value.to_string();
         if text.len() > UI_STATE_MAX {
             return Err(ServiceError::Invalid(format!("UI state larger than {} MB", UI_STATE_MAX / 1024 / 1024)));

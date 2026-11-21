@@ -25,6 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Denial, Perm, Principal};
 use crate::events::{Delivery, Event, Rate};
 use crate::workflow::{
     self, Current, Host, MAX_RUN_SECS, MAX_TRIGGER_RATE, MAX_WORKFLOWS, Resume, RunStatus, SendOutcome, SendRequest,
@@ -93,7 +94,7 @@ pub(crate) struct Runtime {
     checking: usize,
 }
 
-fn people_only(actor: &Actor) -> bool {
+fn is_person(actor: &Actor) -> bool {
     actor.kind == ActorKind::Human
 }
 
@@ -158,18 +159,13 @@ fn state_of(run: &WorkflowRun) -> String {
 impl Service {
     // ---- definitions ------------------------------------------------------
 
-    fn workflow_deny(&self, actor: &Actor, action: &str, what: &str) -> ServiceError {
-        let _ = self.audit(&actor.id(), action, json!({ "workflow": what }), "deny");
-        ServiceError::Invalid("only people can create, change or delete workflows and switch their triggers".into())
-    }
-
     pub(crate) fn workflow_invalidate(&self) {
         self.workflows.lock().cache = None;
     }
 
     fn workflow_view(&self, actor: &Actor, mut w: Workflow) -> Workflow {
         w.trigger.skipped = self.workflows.lock().skipped.get(&w.id).copied().unwrap_or(0);
-        if people_only(actor) { w } else { w.for_agent() }
+        if is_person(actor) { w } else { w.for_agent() }
     }
 
     /// The saved workflows. For agents, secrets typed into request templates are hidden.
@@ -206,9 +202,11 @@ impl Service {
 
     /// Saves a new workflow. People only; audited.
     pub fn workflow_create(&self, actor: &Actor, input: WorkflowInput) -> Result<Workflow> {
-        if !people_only(actor) {
-            return Err(self.workflow_deny(actor, "workflow_save", &input.name));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::WorkflowsWrite,
+            Denial::audited("workflow_save", json!({ "workflow": &input.name })),
+        )?;
         let wf = self.store.write(|db| -> Result<Workflow> {
             let mut list = load(db)?;
             if list.len() >= MAX_WORKFLOWS {
@@ -240,9 +238,11 @@ impl Service {
     /// Replaces a workflow's name, description and steps. A workflow whose steps changed loses its trigger: a person
     /// turned it on for the steps they had read. People only; audited.
     pub fn workflow_update(&self, actor: &Actor, key: &str, input: WorkflowInput) -> Result<Workflow> {
-        if !people_only(actor) {
-            return Err(self.workflow_deny(actor, "workflow_save", key));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::WorkflowsWrite,
+            Denial::audited("workflow_save", json!({ "workflow": key })),
+        )?;
         let was_trusted = self.trust_before();
         let (wf, trigger_cleared) = self.store.write(|db| -> Result<(Workflow, bool)> {
             let mut list = load(db)?;
@@ -281,9 +281,11 @@ impl Service {
 
     /// Deletes a workflow and its runs. People only; audited.
     pub fn workflow_delete(&self, actor: &Actor, key: &str) -> Result<()> {
-        if !people_only(actor) {
-            return Err(self.workflow_deny(actor, "workflow_delete", key));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::WorkflowsWrite,
+            Denial::audited("workflow_delete", json!({ "workflow": key })),
+        )?;
         let was_trusted = self.trust_before();
         let gone = self.store.write(|db| -> Result<Workflow> {
             let mut list = load(db)?;
@@ -310,9 +312,11 @@ impl Service {
         enabled: bool,
         max_per_minute: Option<u32>,
     ) -> Result<Workflow> {
-        if !people_only(actor) {
-            return Err(self.workflow_deny(actor, "workflow_trigger", key));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::WorkflowTriggers,
+            Denial::audited("workflow_trigger", json!({ "workflow": key })),
+        )?;
         if let Some(n) = max_per_minute
             && !(1..=MAX_TRIGGER_RATE).contains(&n)
         {
@@ -356,7 +360,7 @@ impl Service {
     /// A run as `actor` may see it. Agents get variable values hidden when their names suggest a secret and the rest
     /// marked as target content: a value came out of a response.
     pub fn workflow_run_for(&self, actor: &Actor, mut run: WorkflowRun) -> WorkflowRun {
-        if people_only(actor) {
+        if is_person(actor) {
             return run;
         }
         let redact = self.redacts_for(actor);
@@ -394,10 +398,11 @@ impl Service {
             None => None,
         };
         let rows = self.store.read(|db| db.list_workflow_runs(id, limit.clamp(1, 200)))?;
+        let all_runs = Principal::from_actor(actor).allows(Perm::RunsReadAll);
         let mut out = Vec::new();
         for row in rows {
             let row = self.workflow_fix_stale(row);
-            if !people_only(actor) && row.actor != actor.id() {
+            if !all_runs && row.actor != actor.id() {
                 continue;
             }
             out.push(self.workflow_run_for(actor, row_to_run(&row)?));
@@ -409,7 +414,7 @@ impl Service {
         let row = self
             .store
             .read(|db| db.get_workflow_run(id))?
-            .filter(|r| people_only(actor) || r.actor == actor.id())
+            .filter(|r| Principal::from_actor(actor).allows(Perm::RunsReadAll) || r.actor == actor.id())
             .ok_or_else(|| ServiceError::NotFound(format!("workflow run {id}")))?;
         Ok(self.workflow_run_for(actor, row_to_run(&self.workflow_fix_stale(row))?))
     }
@@ -484,7 +489,7 @@ impl Service {
                     Some(id) => {
                         let c = self.workflow_current(id)?;
                         // What an agent runs a workflow on, it may read back out of the run.
-                        if !people_only(actor) {
+                        if !is_person(actor) {
                             let t =
                                 Target::from_parts(&c.summary.scheme, &c.summary.host, c.summary.port, &c.summary.path)
                                     .map_err(|e| ServiceError::Invalid(e.to_string()))?;
@@ -646,7 +651,7 @@ impl Service {
             }
             // Runs as the person who trusted the project here, never as the name the file says enabled it.
             let Ok(actor) = self.run_as(&wf.trigger.enabled_by) else { continue };
-            if !people_only(&actor) || !self.trigger_admit(wf) {
+            if !Principal::from_actor(&actor).allows(Perm::WorkflowTriggers) || !self.trigger_admit(wf) {
                 continue;
             }
             let (svc, wf) = (self.clone(), wf.clone());
