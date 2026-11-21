@@ -1,7 +1,9 @@
 # ADR-0022: Identity and access: accounts, sessions, tokens and roles for the project server
 
-**Status:** Proposed (2026-11-17, roadmap work packages 3.1 and 3.2). The owner must confirm it before step 1 starts:
-the roadmap lists "local accounts and OIDC both" as a recommendation to confirm when Phase 3 starts. The threat model is
+**Status:** Accepted (2026-11-21, owner decision; roadmap work packages 3.1 and 3.2). The owner chose the recommended
+answers to the open questions below: both identity sources with local accounts first, redacted views for viewers,
+invite-only joining, and step 0 (F-1 documentation, F-2 safe open) now; the other questions take their
+recommendations. The threat model is
 `docs/threat-model.md`; finding and boundary ids (F-1, B2.3…) below refer to it.
 
 ## Context
@@ -373,7 +375,7 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
 - F-1 documented and F-2 fixed (step 0); no open high-severity finding in `docs/threat-model.md`.
 
 ## Open questions for the owner
-Each has a recommendation; the answer decides what step 1 builds.
+Answered 2026-11-21: the owner confirmed 1, 3, 4 and 11 as recommended; 2, 5–10 take the recommendations.
 
 1. **Identity sources.** Both, local first and OIDC second within Phase 3 (recommended), or local only, or OIDC only?
 2. **Second factor.** Allow passkeys and password plus TOTP from the start, owner always needs a second factor, and let the
