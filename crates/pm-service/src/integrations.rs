@@ -568,8 +568,9 @@ fn write_private(path: &std::path::Path, text: &str) -> Result<()> {
 // ---- the service ---------------------------------------------------------------------------------------------
 
 impl Service {
-    /// A random id for this project, kept in the project file; secrets and trust are filed under it.
-    pub(crate) fn project_id(&self) -> Result<String> {
+    /// A random id for this project, kept in the project file; secrets and trust are filed under it. The project
+    /// server (ADR-0022) files memberships under it too: it survives renaming or moving the file.
+    pub fn project_id(&self) -> Result<String> {
         self.store
             .write(|db| -> anyhow::Result<String> {
                 if let Some(id) = db.get_setting("project_id")?.filter(|s| !s.is_empty()) {

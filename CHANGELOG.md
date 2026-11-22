@@ -50,6 +50,23 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Project server: `proxymind serve --accounts`** (ADR-0022 step 4, `docs/server-mode.md`; a preview, roles and agent
+  tokens come with the next steps). The web UI's server for several people: accounts with a password and an
+  authenticator app instead of the install token, browser sessions (`__Host-pm_session`, `Secure`, `HttpOnly`,
+  `SameSite=Strict`; a random id of which only a hash is stored; idle 8 hours, absolute 7 days; a new id at every
+  sign-in), CSRF checks on every state-changing request (`X-ProxyMind: 1` and a matching `Origin`, or
+  `Sec-Fetch-Site: same-origin`), an allowed-hosts list, a sign-in within ten minutes for sensitive actions, one-time
+  setup of the first owner (a URL printed on the console, served over TLS or from the machine itself only), invites,
+  sign-out everywhere and account administration under `/api/v1/auth/`. The server refuses to listen beyond loopback
+  without TLS. Three ways to get TLS: your own certificate (`--tls-cert`, `--tls-key`, reloaded when the files change),
+  a reverse proxy (`--behind-proxy --trusted-proxy IP`, forwarded headers believed only from that address), or a
+  self-signed certificate whose key is reused at every start and whose pin (`sha256:` and the base64 SHA-256 of its public
+  key) is printed; `pm_tls::server::PinVerifier` is the client side that fails hard on any other key. `proxymind server
+  reset-owner` prints a new setup URL and ends every session. In server mode the install token and `/auth?token=` do not
+  work; single-user mode (`proxymind ui`, the desktop app) is unchanged. API handlers now take the actor from the
+  request (`Me`) instead of one actor fixed at start. New routes are in `docs/api/openapi.json` and the generated
+  types. Not yet: roles enforced in the service (every member acts as a human), `pm3_` tokens, passkeys, OIDC, the UI pages.
+
 - **Integrations** (roadmap 3.5, `docs/integrations.md`). Settings → Integrations, `/api/v1/integrations`,
   `proxymind integration list|test|send-finding`. **Jira, GitHub, GitLab:** "Create issue in…" on a finding makes an
   issue (title, severity, CWE/OWASP from the issue library, proof summary, reproduction requests, exchange ids, the

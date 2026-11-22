@@ -890,7 +890,9 @@ checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -1448,16 +1450,19 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "pm-accounts",
  "pm-assistant",
  "pm-core",
  "pm-demo",
  "pm-service",
+ "pm-tls",
  "ring",
  "schemars",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1500,6 +1505,7 @@ dependencies = [
  "axum",
  "clap",
  "jiff",
+ "pm-accounts",
  "pm-api",
  "pm-assistant",
  "pm-demo",

@@ -3630,6 +3630,43 @@
         },
         "type": "object"
       },
+      "EnrolBeginBody": {
+        "additionalProperties": false,
+        "properties": {
+          "pending": {
+            "description": "The `pending` token of the password step that answered `enrolment_required`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending"
+        ],
+        "type": "object"
+      },
+      "EnrolConfirmBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "A TOTP code from the authenticator that holds the new secret.",
+            "type": "string"
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pending": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending",
+          "code"
+        ],
+        "type": "object"
+      },
       "EventsQuery": {
         "description": "Query of `GET /events`.",
         "properties": {
@@ -6736,6 +6773,153 @@
         ],
         "type": "object"
       },
+      "InviteAcceptBody": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invite": {
+            "description": "The token from the invite link (`#invite=<token>`).",
+            "type": "string"
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite",
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "InviteCreateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/RoleName",
+            "description": "The role the invited person gets on the served project."
+          },
+          "ttl_hours": {
+            "default": null,
+            "description": "How long the invite lives, in hours (default 72, at most 720).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "InviteCreated": {
+        "properties": {
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "token": {
+            "description": "The invite secret. Shown once; only its HMAC is stored.",
+            "type": "string"
+          },
+          "url": {
+            "description": "`<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "url",
+          "role",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "InviteView": {
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "used_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "used_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "project_id",
+          "created_by",
+          "created_at",
+          "expires_at",
+          "used_at",
+          "used_by",
+          "revoked_at"
+        ],
+        "type": "object"
+      },
       "IssueLink": {
         "description": "An issue created for a finding in another system.",
         "properties": {
@@ -7272,6 +7456,30 @@
         ],
         "type": "object"
       },
+      "LoginBody": {
+        "additionalProperties": false,
+        "properties": {
+          "next": {
+            "default": null,
+            "description": "Where to go afterwards; only a path on this origin is kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
       "LoginRecording": {
         "description": "What a recording produced (names only; values stay in the identity).",
         "properties": {
@@ -7318,6 +7526,62 @@
           "headers",
           "health_check",
           "notes"
+        ],
+        "type": "object"
+      },
+      "LoginResponse": {
+        "description": "The answer of every sign-in step.",
+        "properties": {
+          "expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "next": {
+            "description": "Where to go next: the `next` the client sent if it is a path on this origin, else `/`.",
+            "type": "string"
+          },
+          "pending": {
+            "description": "The 5-minute token for the next step (not a session).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recovery_codes": {
+            "description": "Shown once, at first enrolment.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "step": {
+            "$ref": "#/components/schemas/StepName"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present once signed in."
+          }
+        },
+        "required": [
+          "step",
+          "pending",
+          "expires_at",
+          "user",
+          "recovery_codes",
+          "next"
         ],
         "type": "object"
       },
@@ -7587,6 +7851,43 @@
           "exchange_id",
           "cells",
           "flags"
+        ],
+        "type": "object"
+      },
+      "MeResponse": {
+        "properties": {
+          "actor": {
+            "description": "The actor name used in the project's audit log (`human:<username>`).",
+            "type": "string"
+          },
+          "fresh": {
+            "description": "Signed in within the last 10 minutes: sensitive actions are allowed.",
+            "type": "boolean"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "role": {
+            "description": "The user's role on the served project; absent for a server admin who is not a member.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionView"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserView"
+          }
+        },
+        "required": [
+          "user",
+          "actor",
+          "project_id",
+          "role",
+          "session",
+          "fresh"
         ],
         "type": "object"
       },
@@ -8098,6 +8399,17 @@
           "json_paths",
           "words",
           "headers"
+        ],
+        "type": "object"
+      },
+      "OkResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
         ],
         "type": "object"
       },
@@ -8661,6 +8973,22 @@
           "response_body"
         ],
         "type": "string"
+      },
+      "PasswordBody": {
+        "additionalProperties": false,
+        "properties": {
+          "current": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "current",
+          "new_password"
+        ],
+        "type": "object"
       },
       "PayloadBody": {
         "additionalProperties": false,
@@ -10236,6 +10564,21 @@
         },
         "type": "object"
       },
+      "RecoveryCodesResponse": {
+        "properties": {
+          "recovery_codes": {
+            "description": "Ten single-use codes; shown once. Earlier ones stop working.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "recovery_codes"
+        ],
+        "type": "object"
+      },
       "RecursiveGrep": {
         "additionalProperties": false,
         "description": "Payloads that come from the responses: `first`, then whatever `extract`\nfinds in each response, up to `count` requests.",
@@ -10850,6 +11193,31 @@
         ],
         "type": "object"
       },
+      "RevokeAllBody": {
+        "additionalProperties": false,
+        "properties": {
+          "keep_current": {
+            "default": false,
+            "description": "Keep the session making the request (default: end every session, this one too).",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "RevokedResponse": {
+        "properties": {
+          "revoked": {
+            "description": "How many sessions ended.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "type": "object"
+      },
       "RoeBody": {
         "description": "Body of `PUT /roe` and `POST /roe/check`.",
         "properties": {
@@ -10885,6 +11253,15 @@
         "enum": [
           "user",
           "assistant"
+        ],
+        "type": "string"
+      },
+      "RoleName": {
+        "description": "A role in the served project.",
+        "enum": [
+          "owner",
+          "tester",
+          "viewer"
         ],
         "type": "string"
       },
@@ -12020,6 +12397,31 @@
         ],
         "type": "object"
       },
+      "SecondFactorBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "description": "A six-digit TOTP code or a recovery code (`ABCD-EFGH-IJKL-MNOP`).",
+            "type": "string"
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pending": {
+            "description": "The `pending` token of the password step.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending",
+          "code"
+        ],
+        "type": "object"
+      },
       "SecretStatus": {
         "description": "Where one secret comes from, never the secret itself.",
         "properties": {
@@ -12199,39 +12601,65 @@
         "type": "object"
       },
       "SessionView": {
+        "description": "One browser session of the signed-in user.",
         "properties": {
-          "macros": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/Macro"
-            },
-            "type": "array"
+          "absolute_expires_at": {
+            "format": "int64",
+            "type": "integer"
           },
-          "rules": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/SessionRule"
-            },
-            "type": "array"
-          },
-          "saved_by": {
-            "default": "",
-            "description": "Who saved these settings (macro steps run as them). Set by the service.",
+          "auth_method": {
+            "description": "`password`, `password+totp`, `password+recovery`.",
             "type": "string"
           },
-          "variables": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Current variable values from macro runs.",
-            "type": "object"
+          "authenticated_at": {
+            "description": "When the person last signed in; the fresh-login check reads this.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "client_addr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "current": {
+            "description": "This is the session making the request.",
+            "type": "boolean"
+          },
+          "idle_expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reference": {
+            "description": "Safe to show and to pass to `DELETE /auth/sessions/{reference}`.",
+            "type": "string"
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "macros",
-          "rules",
-          "saved_by",
-          "variables"
+          "reference",
+          "auth_method",
+          "created_at",
+          "authenticated_at",
+          "last_seen_at",
+          "idle_expires_at",
+          "absolute_expires_at",
+          "client_addr",
+          "user_agent",
+          "current"
         ],
         "type": "object"
       },
@@ -12269,6 +12697,41 @@
             "type": "string"
           }
         ]
+      },
+      "SetupBody": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string"
+          },
+          "setup_token": {
+            "description": "The token from the setup URL the server printed (`#setup=<token>`).",
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "setup_token",
+          "username",
+          "password"
+        ],
+        "type": "object"
       },
       "Severity": {
         "enum": [
@@ -12514,6 +12977,27 @@
           "text",
           "start",
           "end"
+        ],
+        "type": "object"
+      },
+      "StateResponse": {
+        "properties": {
+          "server_mode": {
+            "type": "boolean"
+          },
+          "setup_allowed": {
+            "description": "Setup is served here (TLS, or the machine the server runs on).",
+            "type": "boolean"
+          },
+          "setup_required": {
+            "description": "No owner exists yet: only `setup` works.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "server_mode",
+          "setup_required",
+          "setup_allowed"
         ],
         "type": "object"
       },
@@ -12932,6 +13416,26 @@
               "type"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "StepName": {
+        "description": "Which step of signing in comes next.",
+        "oneOf": [
+          {
+            "const": "authenticated",
+            "description": "Signed in: the session cookie was set.",
+            "type": "string"
+          },
+          {
+            "const": "second_factor_required",
+            "description": "Send the TOTP code (or a recovery code) to `login/second-factor` with `pending`.",
+            "type": "string"
+          },
+          {
+            "const": "enrolment_required",
+            "description": "This account must enrol a second factor first: `login/enrol` then `login/enrol/confirm` with `pending`.",
+            "type": "string"
           }
         ]
       },
@@ -13817,6 +14321,35 @@
         ],
         "type": "string"
       },
+      "TotpConfirmBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "TotpEnrolmentResponse": {
+        "properties": {
+          "otpauth_uri": {
+            "description": "`otpauth://` URI for a QR code. Shown once.",
+            "type": "string"
+          },
+          "secret_base32": {
+            "description": "For typing into an authenticator app. Shown once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_base32",
+          "otpauth_uri"
+        ],
+        "type": "object"
+      },
       "TriageBody": {
         "additionalProperties": false,
         "description": "Body of `POST /traffic/triage`.",
@@ -14326,6 +14859,59 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "UserView": {
+        "description": "An account as the API shows it. Never holds a credential.",
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Stable id (`u_…`).",
+            "type": "string"
+          },
+          "last_login_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The user's role on the served project (`owner`, `tester`, `viewer`); absent for non-members.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "server_admin": {
+            "description": "May manage accounts; has no project access by itself.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "`active` or `disabled`.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The handle, lower case.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "status",
+          "server_admin",
+          "created_at",
+          "last_login_at",
+          "role"
+        ],
         "type": "object"
       },
       "Validity": {
@@ -16275,6 +16861,835 @@
           }
         },
         "summary": "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints."
+      }
+    },
+    "/api/v1/auth/invite/accept": {
+      "post": {
+        "operationId": "auth_invite_accept",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteAcceptBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: accept an invite (choose a username and password); continues like the password step."
+      }
+    },
+    "/api/v1/auth/invites": {
+      "get": {
+        "operationId": "auth_invites",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InviteView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: invites (all for server admins, this project's for its owners)."
+      },
+      "post": {
+        "operationId": "auth_invite_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteCreated"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: invite someone to this project with a role. Needs a fresh sign-in. The token is shown once."
+      }
+    },
+    "/api/v1/auth/invites/{id}": {
+      "delete": {
+        "operationId": "auth_invite_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: revoke an unused invite. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "auth_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the password step. Answers `authenticated` (session cookie set), `second_factor_required` or `enrolment_required` with a pending token."
+      }
+    },
+    "/api/v1/auth/login/enrol": {
+      "post": {
+        "operationId": "auth_login_enrol",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolBeginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolmentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: start the first TOTP enrolment of an account that must have a second factor. Returns the secret once."
+      }
+    },
+    "/api/v1/auth/login/enrol/confirm": {
+      "post": {
+        "operationId": "auth_login_enrol_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolConfirmBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: confirm the first enrolment with a code. Signs in and returns the recovery codes once."
+      }
+    },
+    "/api/v1/auth/login/second-factor": {
+      "post": {
+        "operationId": "auth_login_second_factor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecondFactorBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: finish signing in with a TOTP code or a recovery code."
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "auth_logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: end this session."
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "operationId": "auth_me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the signed-in account, its role on this project and its session."
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "operationId": "auth_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: change the password. Needs a fresh sign-in; ends the other sessions and renews this one."
+      }
+    },
+    "/api/v1/auth/recovery-codes": {
+      "post": {
+        "operationId": "auth_recovery_codes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: make ten new recovery codes; the old ones stop working. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/sessions": {
+      "get": {
+        "operationId": "auth_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the signed-in user's live sessions."
+      }
+    },
+    "/api/v1/auth/sessions/revoke-all": {
+      "post": {
+        "operationId": "auth_sessions_revoke_all",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeAllBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: sign out everywhere (optionally keeping this session)."
+      }
+    },
+    "/api/v1/auth/sessions/{reference}": {
+      "delete": {
+        "operationId": "auth_session_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: end one of the user's sessions by its reference."
+      }
+    },
+    "/api/v1/auth/setup": {
+      "post": {
+        "operationId": "auth_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: claim the first owner account with the one-time setup token. Answers like the password step (`enrolment_required`)."
+      }
+    },
+    "/api/v1/auth/state": {
+      "get": {
+        "operationId": "auth_state",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: whether the server still waits for its first owner, and whether setup is served here."
+      }
+    },
+    "/api/v1/auth/totp/begin": {
+      "post": {
+        "operationId": "auth_totp_begin",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolmentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: start enrolling an authenticator (TOTP). Needs a fresh sign-in. Returns the secret once."
+      }
+    },
+    "/api/v1/auth/totp/confirm": {
+      "post": {
+        "operationId": "auth_totp_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpConfirmBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodesResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: confirm the enrolment with a code; returns new recovery codes once. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/totp/disable": {
+      "post": {
+        "operationId": "auth_totp_disable",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: turn the authenticator off (refused for accounts that must keep one) and end all sessions. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/users": {
+      "get": {
+        "operationId": "auth_users",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: every account with its role on this project."
+      }
+    },
+    "/api/v1/auth/users/{id}/disable": {
+      "post": {
+        "operationId": "auth_user_disable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: disable an account and end its sessions. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/users/{id}/enable": {
+      "post": {
+        "operationId": "auth_user_enable",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: enable an account again. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/users/{id}/reset-second-factor": {
+      "post": {
+        "operationId": "auth_user_reset_second_factor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: remove an account's second factor and end its sessions. Needs a fresh sign-in."
       }
     },
     "/api/v1/authz/candidates": {

@@ -13,6 +13,7 @@ name = "proxymind"
 path = "src/main.rs"
 
 [dependencies]
+pm-accounts = { version = "0.2.0", path = "../pm-accounts" }
 pm-proxy = { path = "../pm-proxy" }
 pm-tls = { path = "../pm-tls" }
 pm-store = { path = "../pm-store" }

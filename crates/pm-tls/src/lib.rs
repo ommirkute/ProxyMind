@@ -25,6 +25,8 @@ use time::{Duration, OffsetDateTime};
 /// Certificates kept for reuse, one per host name.
 const MAX_CACHED_CERTS: usize = 10_000;
 
+pub mod server;
+
 pub use tokio_rustls::rustls::server::Acceptor;
 pub use tokio_rustls::{LazyConfigAcceptor, StartHandshake, TlsAcceptor, TlsConnector};
 

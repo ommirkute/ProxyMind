@@ -2,7 +2,7 @@
 
 mod bench;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -249,6 +249,53 @@ enum Command {
         /// profile; trusts ProxyMind's CA without installing it)
         #[arg(long)]
         open_browser: bool,
+    },
+    /// Run the project server: the web UI and API for several people with accounts, over TLS (ADR-0022; see
+    /// docs/server-mode.md). The first start prints a one-time setup URL.
+    Serve {
+        /// Turn on accounts: sessions instead of the install token. Required (this is what `serve` is for).
+        #[arg(long)]
+        accounts: bool,
+        /// Where the accounts live (server.db, server.key and the self-signed certificate). Default: <home>/server
+        #[arg(long, env = "PROXYMIND_SERVER_HOME")]
+        server_home: Option<PathBuf>,
+        /// Where the UI and API listen. Anything but loopback needs TLS (or --behind-proxy).
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        listen: SocketAddr,
+        /// The address people type, e.g. https://pm.example.com. Browsers must send an Origin that matches it.
+        /// Required beyond loopback and behind a proxy.
+        #[arg(long)]
+        public_url: Option<String>,
+        /// Another Host name to answer to (repeatable).
+        #[arg(long = "allowed-host")]
+        allowed_host: Vec<String>,
+        /// Your own TLS certificate chain (PEM); re-read when the file changes.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// The private key for --tls-cert (PEM).
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+        /// A self-signed certificate kept in the server home; its key pin is printed for clients.
+        #[arg(long)]
+        tls_self_signed: bool,
+        /// A reverse proxy terminates TLS in front of this server (which then listens on loopback or a private address).
+        #[arg(long)]
+        behind_proxy: bool,
+        /// The reverse proxy's address (repeatable); X-Forwarded-* are believed only from it.
+        #[arg(long = "trusted-proxy")]
+        trusted_proxy: Vec<IpAddr>,
+        /// Also run the interception proxy here. Off by default: the interception CA's key should stay on the
+        /// tester's machine, not on a shared server.
+        #[arg(long)]
+        proxy: Option<SocketAddr>,
+        /// Speak only HTTP/1.1 to proxy clients (HTTP/2 is offered by default).
+        #[arg(long)]
+        no_http2: bool,
+    },
+    /// Administer a project server from its own host.
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
     },
     /// Run an out-of-band (OAST) callback listener that records interactions in the project.
     OastServer {
@@ -1240,6 +1287,20 @@ enum WorkflowAction {
 }
 
 #[derive(Subcommand)]
+enum ServerAction {
+    /// Lost every owner? Ends all sessions and prints a new one-time setup URL that creates a new owner (the
+    /// authority needed is write access to the server home).
+    ResetOwner {
+        /// The server home that holds server.db and server.key. Default: <home>/server
+        #[arg(long, env = "PROXYMIND_SERVER_HOME")]
+        server_home: Option<PathBuf>,
+        /// The server's public address, to print the full URL (default: a placeholder you complete).
+        #[arg(long)]
+        public_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum UpdateAction {
     /// Ask GitHub now whether a newer release is out (one GET of the public releases list).
     Check,
@@ -1626,6 +1687,236 @@ async fn run_ci(cli: &Cli, project_given: bool, a: &CiArgs) -> Result<i32> {
 
 /// The user's home folder for this run, set once at start (the trust records live there, F-2).
 static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The server home: the flag, else `<home>/server`.
+fn server_home_dir(cli: &Cli, given: Option<&std::path::Path>) -> Result<PathBuf> {
+    Ok(match given {
+        Some(d) => d.to_path_buf(),
+        None => home_dir(cli)?.join("server"),
+    })
+}
+
+fn private_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// `proxymind server reset-owner`: ends every session and returns the URL of a fresh one-time setup. The token is in
+/// the URL's fragment (`#setup=`), which a browser never sends to a server or writes to a log.
+fn reset_owner(home: &std::path::Path, public_url: Option<&str>) -> Result<String> {
+    anyhow::ensure!(
+        home.join("server.db").exists() && home.join("server.key").exists(),
+        "no server.db and server.key in {}: this is not a server home (pass --server-home)",
+        home.display()
+    );
+    let key = pm_accounts::ServerKey::load_or_create(&home.join("server.key"))?;
+    let accounts = pm_accounts::Accounts::open(&home.join("server.db"), key)?;
+    let token = accounts.reset_owner()?;
+    let base = public_url.map(|u| u.trim_end_matches('/')).unwrap_or("https://<this server's address>");
+    Ok(format!("{base}/#setup={}", token.token.expose()))
+}
+
+/// What `proxymind serve` was given.
+struct ServeArgs {
+    accounts: bool,
+    server_home: Option<PathBuf>,
+    listen: SocketAddr,
+    public_url: Option<String>,
+    allowed_host: Vec<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    tls_self_signed: bool,
+    behind_proxy: bool,
+    trusted_proxy: Vec<IpAddr>,
+    proxy: Option<SocketAddr>,
+    no_http2: bool,
+}
+
+/// `proxymind serve --accounts`: the project server (ADR-0022 step 4).
+async fn serve_command(cli: &Cli, a: ServeArgs) -> Result<()> {
+    use pm_api::listen::{ListenInput, TlsKind};
+    anyhow::ensure!(
+        a.accounts,
+        "`proxymind serve` runs the project server with accounts: add --accounts (for one person on one machine use \
+         `proxymind ui`)"
+    );
+    anyhow::ensure!(
+        !(a.tls_cert.is_some() && a.tls_self_signed),
+        "choose one certificate source: --tls-cert/--tls-key or --tls-self-signed"
+    );
+    let tls_kind = match (&a.tls_cert, &a.tls_key, a.tls_self_signed) {
+        (Some(_), Some(_), false) => TlsKind::Own,
+        (None, None, true) => TlsKind::SelfSigned,
+        (None, None, false) => TlsKind::None,
+        _ => anyhow::bail!("--tls-cert and --tls-key go together"),
+    };
+    // Decide before anything is opened or bound: a refused combination touches nothing.
+    let plan = pm_api::listen::plan(&ListenInput {
+        listen: a.listen,
+        tls: tls_kind,
+        behind_proxy: a.behind_proxy,
+        trusted_proxies: &a.trusted_proxy,
+        public_url: a.public_url.as_deref(),
+        extra_hosts: &a.allowed_host,
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Bind first: a port that is taken fails before anything is opened or printed.
+    let l = tokio::net::TcpListener::bind(a.listen).await.with_context(|| format!("binding {}", a.listen))?;
+    let server_home = server_home_dir(cli, a.server_home.as_deref())?;
+    private_dir(&server_home)?;
+    // server.key: created 0600, refused when other users can read it.
+    let key = pm_accounts::ServerKey::load_or_create(&server_home.join("server.key"))?;
+    let accounts = Arc::new(pm_accounts::Accounts::open(&server_home.join("server.db"), key)?);
+
+    let home = home_dir(cli)?;
+    let service = Arc::new(open_service(&cli.project, None)?);
+    // The project's audit chain is keyed with a key derived from the server key (agents and members cannot read it).
+    let audit_key =
+        pm_service::pm_policy::audit::HmacKey::new(&accounts.server_key().derive(pm_accounts::KeyPurpose::AuditChain))?;
+    service.set_audit_security(pm_service::AuditSecurity { key: Some(Arc::new(audit_key)), ..Default::default() });
+    let rt = Runtime { proxy: a.proxy, no_http2: a.no_http2, open_browser_as: None };
+    let setup = start_runtime(cli, &service, &home, rt).await?;
+
+    let tls = match tls_kind {
+        TlsKind::None => None,
+        TlsKind::Own => {
+            let (Some(cert), Some(key)) = (&a.tls_cert, &a.tls_key) else {
+                anyhow::bail!("--tls-cert and --tls-key go together")
+            };
+            Some(pm_tls::server::ServerTls::from_files(cert, key)?)
+        }
+        TlsKind::SelfSigned => {
+            let (tls, made) = pm_tls::server::ServerTls::self_signed(&server_home, &plan.certificate_names(a.listen))?;
+            out!("Self-signed certificate: {}", made.cert_path.display());
+            out!("Pin (SHA-256 of its public key): {}", made.pin);
+            out!("Clients that pin this server's key check for that value; keep it where your team can compare it.");
+            if made.new_key {
+                eprintln!("This is a new key: clients that pinned an earlier one must confirm the new pin.");
+            }
+            Some(tls)
+        }
+    };
+
+    // The first owner: a one-time setup URL, printed every start until an owner exists.
+    let accounts_for_setup = accounts.clone();
+    let wait = tokio::task::spawn_blocking(move || -> Result<Option<pm_accounts::SetupToken>> {
+        Ok(if accounts_for_setup.has_server_admin()? { None } else { Some(accounts_for_setup.create_setup_token()?) })
+    })
+    .await??;
+    if let Some(t) = wait {
+        out!("This server has no owner yet. Open this URL within the hour to create one (it works once):");
+        out!("  {}/#setup={}", plan.public_origin, t.token.expose());
+        eprintln!("(Setup is served over TLS or from this machine only.)");
+    }
+
+    let project_id = service.project_id()?;
+    let clock: Arc<dyn pm_accounts::Clock> = Arc::new(pm_accounts::SystemClock);
+    let sm = pm_api::ServerMode::new(accounts, clock, project_id, plan.clone());
+    let state = pm_api::AppState::new(
+        service,
+        Actor::parse("human:server")?,
+        pm_api::new_token()?,
+        cli.project.display().to_string(),
+    )?
+    .with_setup(setup)
+    .with_server_mode(sm);
+    let how = match (plan.behind_proxy, tls_kind) {
+        (true, _) => "behind a reverse proxy",
+        (_, TlsKind::None) => "plain HTTP on loopback",
+        (_, TlsKind::Own) => "TLS",
+        (_, TlsKind::SelfSigned) => "TLS (self-signed)",
+    };
+    eprintln!("ProxyMind server on {} ({how}), project {}", plan.public_origin, cli.project.display());
+    tokio::select! {
+        r = pm_api::listen::serve_app(l, pm_api::router(state), tls.map(|t| t.config)) => r?,
+        _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
+    }
+    Ok(())
+}
+
+/// What `proxymind ui` and `proxymind serve` run beside the web server: which parts of the runtime to start.
+struct Runtime<'a> {
+    /// Where the interception proxy listens; `None` runs without it.
+    proxy: Option<SocketAddr>,
+    no_http2: bool,
+    /// Open the built-in browser as this person once the proxy is up.
+    open_browser_as: Option<&'a Actor>,
+}
+
+/// The parts both `ui` and `serve` start around a project's service: plugins, interrupted AI scans, the proxy with its
+/// recorder, intercept queue, rewrite rules, plugin hooks and listeners, the project and ROE watchers, the scheduler,
+/// workflow triggers and the integration notifier. Returns what the Proxy setup page shows.
+async fn start_runtime(
+    cli: &Cli,
+    service: &Arc<Service>,
+    home: &std::path::Path,
+    rt: Runtime<'_>,
+) -> Result<pm_api::ProxySetup> {
+    attach_plugins(cli, service);
+    service.ai_scan_recover()?;
+    let mut setup = pm_api::ProxySetup::default();
+    if let Some(proxy) = &rt.proxy {
+        let ca = Arc::new(CertAuthority::load_or_create(home)?);
+        setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
+        // The Service for this project is in this process: record through its write connection.
+        let (recorder, _writer) = Recorder::spawn_shared(service.store_handle());
+        service.attach_recorder(&recorder)?;
+        let queue = Arc::new(pm_proxy::InterceptQueue::new());
+        service.attach_intercept(queue.clone());
+        let rewriter = Arc::new(pm_proxy::Rewriter::new());
+        service.attach_rewriter(rewriter.clone())?;
+        let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
+        service.attach_hooks(plugin_hooks.clone());
+        let hooks = pm_proxy::Hooks {
+            rewrite: Some(rewriter.clone()),
+            intercept: Some(queue),
+            network: Some(service.network().clone()),
+            http2: !rt.no_http2,
+            plugin_hooks: Some(plugin_hooks),
+        };
+        let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
+        let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
+        service.attach_listeners(extra.clone())?;
+        pm_service::watch_project(
+            &cli.project,
+            Some(rewriter),
+            service.network().clone(),
+            Some(extra),
+            service.trust_gate(),
+        )?;
+        let l = tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
+        pm_proxy::listeners::warn_if_exposed(*proxy);
+        tokio::spawn(p.run(l));
+        eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
+        service.attach_proxy_info(pm_service::ProxyInfo {
+            addr: proxy.to_string(),
+            ca_pem: ca.ca_pem().to_string(),
+            profile_dir: cli.project.with_extension("browser"),
+        });
+        if let Some(me) = rt.open_browser_as {
+            match service.browser_open(me, Default::default()).await {
+                Ok(b) => eprintln!("Browser opened at {} (profile {})", b.url, b.profile),
+                Err(e) => eprintln!("Could not open the browser: {e}"),
+            }
+        }
+    } else {
+        pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
+    }
+    pm_service::watch_roe(service.clone());
+    // Scheduled scans start while the UI server runs.
+    tokio::spawn(service.clone().run_scheduler());
+    // Workflows a person switched to "run on new traffic" react to exchanges the proxy records.
+    tokio::spawn(service.clone().run_workflow_triggers());
+    // Slack and webhook notifications a person enabled in this installation, from the event bus.
+    tokio::spawn(service.clone().run_integration_notifier());
+    Ok(setup)
+}
 
 fn open_service(project: &std::path::Path, roe_file: Option<&std::path::Path>) -> Result<Service> {
     let mut store = Store::open(project)?;
@@ -2565,65 +2856,13 @@ async fn run() -> Result<()> {
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
             let service = Arc::new(open_service(&cli.project, None)?);
-            attach_plugins(&cli, &service);
-            service.ai_scan_recover()?;
             let me = human_actor(actor.as_deref())?;
-            let mut setup = pm_api::ProxySetup::default();
-            if !*no_proxy {
-                let ca = Arc::new(CertAuthority::load_or_create(&home)?);
-                setup = pm_api::ProxySetup { proxy: Some(proxy.to_string()), ca_pem: Some(ca.ca_pem().to_string()) };
-                // The Service for this project is in this process: record through its write connection.
-                let (recorder, _writer) = Recorder::spawn_shared(service.store_handle());
-                service.attach_recorder(&recorder)?;
-                let queue = Arc::new(pm_proxy::InterceptQueue::new());
-                service.attach_intercept(queue.clone());
-                let rewriter = Arc::new(pm_proxy::Rewriter::new());
-                service.attach_rewriter(rewriter.clone())?;
-                let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
-                service.attach_hooks(plugin_hooks.clone());
-                let hooks = pm_proxy::Hooks {
-                    rewrite: Some(rewriter.clone()),
-                    intercept: Some(queue),
-                    network: Some(service.network().clone()),
-                    http2: !*no_http2,
-                    plugin_hooks: Some(plugin_hooks),
-                };
-                let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
-                let extra = pm_proxy::Listeners::new(p.clone(), Some(*proxy));
-                service.attach_listeners(extra.clone())?;
-                pm_service::watch_project(
-                    &cli.project,
-                    Some(rewriter),
-                    service.network().clone(),
-                    Some(extra),
-                    service.trust_gate(),
-                )?;
-                let l =
-                    tokio::net::TcpListener::bind(proxy).await.with_context(|| format!("binding proxy on {proxy}"))?;
-                pm_proxy::listeners::warn_if_exposed(*proxy);
-                tokio::spawn(p.run(l));
-                eprintln!("Proxy on http://{proxy} (CA: {})", ca.ca_cert_path().display());
-                service.attach_proxy_info(pm_service::ProxyInfo {
-                    addr: proxy.to_string(),
-                    ca_pem: ca.ca_pem().to_string(),
-                    profile_dir: cli.project.with_extension("browser"),
-                });
-                if *open_browser {
-                    match service.browser_open(&me, Default::default()).await {
-                        Ok(b) => eprintln!("Browser opened at {} (profile {})", b.url, b.profile),
-                        Err(e) => eprintln!("Could not open the browser: {e}"),
-                    }
-                }
-            } else {
-                pm_service::watch_project(&cli.project, None, service.network().clone(), None, service.trust_gate())?;
-            }
-            pm_service::watch_roe(service.clone());
-            // Scheduled scans start while the UI server runs.
-            tokio::spawn(service.clone().run_scheduler());
-            // Workflows a person switched to "run on new traffic" react to exchanges the proxy records.
-            tokio::spawn(service.clone().run_workflow_triggers());
-            // Slack and webhook notifications a person enabled in this installation, from the event bus.
-            tokio::spawn(service.clone().run_integration_notifier());
+            let runtime = Runtime {
+                proxy: (!*no_proxy).then_some(*proxy),
+                no_http2: *no_http2,
+                open_browser_as: (*open_browser).then_some(&me),
+            };
+            let setup = start_runtime(&cli, &service, &home, runtime).await?;
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
                 .with_setup(setup);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
@@ -2635,6 +2874,42 @@ async fn run() -> Result<()> {
                 r = axum::serve(l, pm_api::router(state)) => r?,
                 _ = tokio::signal::ctrl_c() => eprintln!("\nShutting down"),
             }
+        }
+        Command::Serve {
+            accounts,
+            server_home,
+            listen,
+            public_url,
+            allowed_host,
+            tls_cert,
+            tls_key,
+            tls_self_signed,
+            behind_proxy,
+            trusted_proxy,
+            proxy,
+            no_http2,
+        } => {
+            let args = ServeArgs {
+                accounts: *accounts,
+                server_home: server_home.clone(),
+                listen: *listen,
+                public_url: public_url.clone(),
+                allowed_host: allowed_host.clone(),
+                tls_cert: tls_cert.clone(),
+                tls_key: tls_key.clone(),
+                tls_self_signed: *tls_self_signed,
+                behind_proxy: *behind_proxy,
+                trusted_proxy: trusted_proxy.clone(),
+                proxy: *proxy,
+                no_http2: *no_http2,
+            };
+            serve_command(&cli, args).await?;
+        }
+        Command::Server { action: ServerAction::ResetOwner { server_home, public_url } } => {
+            let home = server_home_dir(&cli, server_home.as_deref())?;
+            let url = reset_owner(&home, public_url.as_deref())?;
+            out!("All sessions are ended. Open this URL within the hour to create a new owner (it works once):");
+            out!("  {url}");
         }
         Command::OastServer { listen, public_url, dns, domain, dns_answer, smtp } => {
             let service = Arc::new(open_service(&cli.project, None)?);

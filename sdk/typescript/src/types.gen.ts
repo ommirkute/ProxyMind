@@ -1068,6 +1068,18 @@ export interface EngageFilter {
   max_scan?: number | null;
 }
 
+export interface EnrolBeginBody {
+  /** The `pending` token of the password step that answered `enrolment_required`. */
+  pending: string;
+}
+
+export interface EnrolConfirmBody {
+  /** A TOTP code from the authenticator that holds the new secret. */
+  code: string;
+  next?: string | null;
+  pending: string;
+}
+
 /** Query of `GET /events`. */
 export interface EventsQuery {
   /** Comma-separated topics, or `all`; `counters` adds the legacy event. Missing: only the legacy `counters` event. */
@@ -2040,6 +2052,44 @@ export interface InterceptState {
   settings: InterceptSettings;
 }
 
+export interface InviteAcceptBody {
+  display_name?: string | null;
+  /** The token from the invite link (`#invite=<token>`). */
+  invite: string;
+  next?: string | null;
+  password: string;
+  username: string;
+}
+
+export interface InviteCreateBody {
+  /** The role the invited person gets on the served project. */
+  role: RoleName;
+  /** How long the invite lives, in hours (default 72, at most 720). */
+  ttl_hours?: number | null;
+}
+
+export interface InviteCreated {
+  expires_at: number;
+  id: string;
+  role: string;
+  /** The invite secret. Shown once; only its HMAC is stored. */
+  token: string;
+  /** `<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server. */
+  url: string;
+}
+
+export interface InviteView {
+  created_at: number;
+  created_by: string;
+  expires_at: number;
+  id: string;
+  project_id: string | null;
+  revoked_at: number | null;
+  role: string;
+  used_at: number | null;
+  used_by: string | null;
+}
+
 /** An issue created for a finding in another system. */
 export interface IssueLink {
   by: string;
@@ -2237,6 +2287,13 @@ export interface LogicReport {
   flow_paths: string[];
 }
 
+export interface LoginBody {
+  /** Where to go afterwards; only a path on this origin is kept. */
+  next?: string | null;
+  password: string;
+  username: string;
+}
+
 /** What a recording produced (names only; values stay in the identity). */
 export interface LoginRecording {
   cookies: string[];
@@ -2246,6 +2303,20 @@ export interface LoginRecording {
   name: string;
   notes: string[];
   steps: RecordedStep[];
+}
+
+/** The answer of every sign-in step. */
+export interface LoginResponse {
+  expires_at: number | null;
+  /** Where to go next: the `next` the client sent if it is a path on this origin, else `/`. */
+  next: string;
+  /** The 5-minute token for the next step (not a session). */
+  pending: string | null;
+  /** Shown once, at first enrolment. */
+  recovery_codes: string[] | null;
+  step: StepName;
+  /** Present once signed in. */
+  user: UserView | null;
 }
 
 export interface Macro {
@@ -2321,6 +2392,18 @@ export interface MatrixRow {
   operation: string;
   /** The identity the recorded request was made as. */
   owner?: string | null;
+}
+
+export interface MeResponse {
+  /** The actor name used in the project's audit log (`human:<username>`). */
+  actor: string;
+  /** Signed in within the last 10 minutes: sensitive actions are allowed. */
+  fresh: boolean;
+  project_id: string;
+  /** The user's role on the served project; absent for a server admin who is not a member. */
+  role: string | null;
+  session: SessionView;
+  user: UserView;
 }
 
 export interface Memory {
@@ -2487,6 +2570,10 @@ export interface NoiseMask {
   words: string[];
 }
 
+export interface OkResponse {
+  ok: boolean;
+}
+
 /** What the proxy does with a message when its hook fails. */
 export type OnError =
   /** Forward the original message (fail open). The default. */
@@ -2650,6 +2737,11 @@ export type Part =
   | "response_first_line"
   | "response_header"
   | "response_body";
+
+export interface PasswordBody {
+  current: string;
+  new_password: string;
+}
 
 /** Body of `POST /collaborator/payloads`. */
 export interface PayloadBody {
@@ -3174,6 +3266,11 @@ export interface RecordingSettings {
   record_devices?: string[];
 }
 
+export interface RecoveryCodesResponse {
+  /** Ten single-use codes; shown once. Earlier ones stop working. */
+  recovery_codes: string[];
+}
+
 /**
  * Payloads that come from the responses: `first`, then whatever `extract`
  * finds in each response, up to `count` requests.
@@ -3381,6 +3478,16 @@ export interface ReviewItem {
   what: string;
 }
 
+export interface RevokeAllBody {
+  /** Keep the session making the request (default: end every session, this one too). */
+  keep_current?: boolean;
+}
+
+export interface RevokedResponse {
+  /** How many sessions ended. */
+  revoked: number;
+}
+
 /** Body of `PUT /roe` and `POST /roe/check`. */
 export interface RoeBody {
   /** The rules of engagement, as YAML. */
@@ -3395,6 +3502,9 @@ export interface RoeView {
 }
 
 export type Role = "user" | "assistant";
+
+/** A role in the served project. */
+export type RoleName = "owner" | "tester" | "viewer";
 
 /** One payload processing step. */
 export type Rule =
@@ -3755,6 +3865,14 @@ export interface SearchResult {
   scanned: number;
 }
 
+export interface SecondFactorBody {
+  /** A six-digit TOTP code or a recovery code (`ABCD-EFGH-IJKL-MNOP`). */
+  code: string;
+  next?: string | null;
+  /** The `pending` token of the password step. */
+  pending: string;
+}
+
 /** Where one secret comes from, never the secret itself. */
 export interface SecretStatus {
   /** The last four characters of a long secret, e.g. `…a1b2`; absent for short ones. */
@@ -3814,13 +3932,22 @@ export interface SessionRule {
   use_cookie_jar?: boolean;
 }
 
+/** One browser session of the signed-in user. */
 export interface SessionView {
-  macros: Macro[];
-  rules: SessionRule[];
-  /** Who saved these settings (macro steps run as them). Set by the service. */
-  saved_by: string;
-  /** Current variable values from macro runs. */
-  variables: { [key: string]: string };
+  absolute_expires_at: number;
+  /** `password`, `password+totp`, `password+recovery`. */
+  auth_method: string;
+  /** When the person last signed in; the fresh-login check reads this. */
+  authenticated_at: number;
+  client_addr: string | null;
+  created_at: number;
+  /** This is the session making the request. */
+  current: boolean;
+  idle_expires_at: number;
+  last_seen_at: number;
+  /** Safe to show and to pass to `DELETE /auth/sessions/{reference}`. */
+  reference: string;
+  user_agent: string | null;
 }
 
 export interface SetValue {
@@ -3835,6 +3962,15 @@ export type SetWhere =
   | "cookie"
   /** A query, form or top-level JSON parameter that's already in the request. */
   | "param";
+
+export interface SetupBody {
+  display_name?: string | null;
+  next?: string | null;
+  password: string;
+  /** The token from the setup URL the server printed (`#setup=<token>`). */
+  setup_token: string;
+  username: string;
+}
 
 export type Severity = "info" | "low" | "medium" | "high";
 
@@ -3913,6 +4049,14 @@ export interface Snippet {
   /** Character offsets of the match within `text`. */
   start: number;
   text: string;
+}
+
+export interface StateResponse {
+  server_mode: boolean;
+  /** Setup is served here (TLS, or the machine the server runs on). */
+  setup_allowed: boolean;
+  /** No owner exists yet: only `setup` works. */
+  setup_required: boolean;
 }
 
 /** What the sandbox can do on this machine. */
@@ -4051,6 +4195,15 @@ export type Step =
        */
       url?: string | null;
     };
+
+/** Which step of signing in comes next. */
+export type StepName =
+  /** Signed in: the session cookie was set. */
+  | "authenticated"
+  /** Send the TOTP code (or a recovery code) to `login/second-factor` with `pending`. */
+  | "second_factor_required"
+  /** This account must enrol a second factor first: `login/enrol` then `login/enrol/confirm` with `pending`. */
+  | "enrolment_required";
 
 /** What one step did. */
 export interface StepRun {
@@ -4294,6 +4447,17 @@ export interface TokensBody {
 
 export type ToolProfile = "full" | "compact";
 
+export interface TotpConfirmBody {
+  code: string;
+}
+
+export interface TotpEnrolmentResponse {
+  /** `otpauth://` URI for a QR code. Shown once. */
+  otpauth_uri: string;
+  /** For typing into an authenticator app. Shown once. */
+  secret_base32: string;
+}
+
 /** Body of `POST /traffic/triage`. */
 export interface TriageBody {
   /** Only exchanges whose host contains this. */
@@ -4484,6 +4648,23 @@ export interface UpstreamRule {
   username?: string;
   /** `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`. */
   via?: string;
+}
+
+/** An account as the API shows it. Never holds a credential. */
+export interface UserView {
+  created_at: number;
+  display_name: string;
+  /** Stable id (`u_…`). */
+  id: string;
+  last_login_at: number | null;
+  /** The user's role on the served project (`owner`, `tester`, `viewer`); absent for non-members. */
+  role: string | null;
+  /** May manage accounts; has no project access by itself. */
+  server_admin: boolean;
+  /** `active` or `disabled`. */
+  status: string;
+  /** The handle, lower case. */
+  username: string;
 }
 
 /**

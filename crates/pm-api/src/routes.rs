@@ -28,6 +28,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AppState;
+use crate::auth_api::{
+    AUTH_BODY_LIMIT, auth_invite_accept, auth_invite_create, auth_invite_revoke, auth_invites, auth_login,
+    auth_login_enrol, auth_login_enrol_confirm, auth_login_second_factor, auth_logout, auth_me, auth_password,
+    auth_recovery_codes, auth_session_revoke, auth_sessions, auth_sessions_revoke_all, auth_setup, auth_state,
+    auth_totp_begin, auth_totp_confirm, auth_totp_disable, auth_user_disable, auth_user_enable,
+    auth_user_reset_second_factor, auth_users,
+};
+use crate::server_mode::Me;
 
 pub enum ApiError {
     Service(ServiceError),
@@ -268,6 +276,42 @@ pub fn api() -> Router<AppState> {
         .route("/attack-paths", get(attack_paths).post(attack_path_create))
         .route("/attack-paths/{id}", axum::routing::delete(attack_path_delete))
         .route("/attack-graph", get(attack_graph))
+        // Server mode (ADR-0022 step 4): accounts and sessions. Every handler answers 404 in single-user mode.
+        .route("/auth/state", get(auth_state))
+        .route("/auth/setup", post(auth_setup).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)))
+        .route("/auth/login", post(auth_login).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)))
+        .route(
+            "/auth/login/second-factor",
+            post(auth_login_second_factor).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/auth/login/enrol", post(auth_login_enrol).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)))
+        .route(
+            "/auth/login/enrol/confirm",
+            post(auth_login_enrol_confirm).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/invite/accept",
+            post(auth_invite_accept).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/auth/me", get(auth_me))
+        .route("/auth/logout", post(auth_logout))
+        .route("/auth/sessions", get(auth_sessions))
+        .route("/auth/sessions/revoke-all", post(auth_sessions_revoke_all))
+        .route("/auth/sessions/{reference}", axum::routing::delete(auth_session_revoke))
+        .route("/auth/password", post(auth_password).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)))
+        .route("/auth/totp/begin", post(auth_totp_begin))
+        .route(
+            "/auth/totp/confirm",
+            post(auth_totp_confirm).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/auth/totp/disable", post(auth_totp_disable))
+        .route("/auth/recovery-codes", post(auth_recovery_codes))
+        .route("/auth/users", get(auth_users))
+        .route("/auth/users/{id}/disable", post(auth_user_disable))
+        .route("/auth/users/{id}/enable", post(auth_user_enable))
+        .route("/auth/users/{id}/reset-second-factor", post(auth_user_reset_second_factor))
+        .route("/auth/invites", get(auth_invites).post(auth_invite_create))
+        .route("/auth/invites/{id}", axum::routing::delete(auth_invite_revoke))
 }
 
 #[derive(Deserialize)]
@@ -278,6 +322,10 @@ pub struct AuthQuery {
 /// Exchanges the token from the launch URL for an HttpOnly cookie, so it
 /// doesn't stay in the address bar or history.
 pub async fn auth(State(st): State<AppState>, Query(q): Query<AuthQuery>) -> Response {
+    // The install token opens a session in single-user mode only.
+    if st.server.is_some() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !crate::constant_eq(q.token.as_bytes(), st.token.as_bytes()) {
         return (StatusCode::UNAUTHORIZED, "wrong token").into_response();
     }
@@ -285,12 +333,12 @@ pub async fn auth(State(st): State<AppState>, Query(q): Query<AuthQuery>) -> Res
     ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
 }
 
-async fn status(State(st): State<AppState>) -> ApiResult {
+async fn status(State(st): State<AppState>, me: Me) -> ApiResult {
     let roe = st.service.policy().roe();
     ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "project": *st.project,
-        "you_are": st.actor.id(),
+        "you_are": me.actor.id(),
         "engagement": roe.engagement.name,
         "in_scope": roe.include.iter().map(|p| &p.text).collect::<Vec<_>>(),
         "counters": st.service.counters()?,
@@ -327,6 +375,7 @@ fn bad_topics(msg: String) -> Response {
 /// What each event shows is decided by `Service::event_for` for this process's actor.
 async fn events(
     State(st): State<AppState>,
+    me: Me,
     Query(q): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -339,11 +388,11 @@ async fn events(
             for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
                 match name {
                     "counters" => counters = true,
-                    "all" => topics.extend(Topic::ALL.into_iter().filter(|t| st.service.may_read_topic(&st.actor, *t))),
+                    "all" => topics.extend(Topic::ALL.into_iter().filter(|t| st.service.may_read_topic(&me.actor, *t))),
                     other => match Topic::parse(other) {
-                        Some(t) if st.service.may_read_topic(&st.actor, t) => topics.push(t),
+                        Some(t) if st.service.may_read_topic(&me.actor, t) => topics.push(t),
                         Some(t) => {
-                            let msg = format!("{} may not read topic {}", st.actor.id(), t.as_str());
+                            let msg = format!("{} may not read topic {}", me.actor.id(), t.as_str());
                             return Ok((StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response());
                         }
                         None => {
@@ -374,6 +423,7 @@ async fn events(
     }
     let state = EventStream {
         st,
+        actor: me.actor.clone(),
         sub,
         topics,
         tracker,
@@ -393,6 +443,8 @@ fn resync_event(missed: u64) -> Event {
 
 struct EventStream {
     st: AppState,
+    /// Whose events these are: the actor of the request that opened the stream.
+    actor: pm_service::pm_policy::Actor,
     sub: pm_service::Subscription,
     topics: Vec<pm_service::Topic>,
     /// Some when this stream sends `counters`.
@@ -478,14 +530,14 @@ impl EventStream {
         if !self.topics.contains(&p.topic) {
             return;
         }
-        if let Some(v) = self.st.service.event_for(&self.st.actor, p) {
+        if let Some(v) = self.st.service.event_for(&self.actor, p) {
             self.queue.push_back(Event::default().event(p.topic.as_str()).id(p.seq.to_string()).data(v.to_string()));
         }
     }
 }
 
-async fn exchanges(State(st): State<AppState>, Query(f): Query<HistoryFilter>) -> ApiResult {
-    ok(st.service.history_search(&st.actor, &f)?)
+async fn exchanges(State(st): State<AppState>, me: Me, Query(f): Query<HistoryFilter>) -> ApiResult {
+    ok(st.service.history_search(&me.actor, &f)?)
 }
 
 /// Query of `GET /exchanges/{id}`.
@@ -514,9 +566,9 @@ fn capped(raw: &[u8], max: Option<usize>) -> (String, Option<usize>) {
     }
 }
 
-async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
+async fn exchange(State(st): State<AppState>, me: Me, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
     let ex = st.service.exchange_raw(id)?;
-    let view = st.service.exchange_get(&st.actor, id, View::Full, 6000)?;
+    let view = st.service.exchange_get(&me.actor, id, View::Full, 6000)?;
     let max = q.max.map(|m| m.max(1024));
     let (request, request_truncated) = capped(&ex.request, max);
     let response = ex.response.as_deref().map(|r| capped(r, max));
@@ -549,7 +601,7 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
     // the server) and the response as delivered to the client (`response` is the server's), the list of changes
     // and a diff per changed message.
     v["changes"] = json!(ex.changes);
-    v["diffs"] = json!(st.service.change_diffs(&st.actor, &ex));
+    v["diffs"] = json!(st.service.change_diffs(&me.actor, &ex));
     for (key, original) in [("request_original", &ex.request_original), ("response_delivered", &ex.response_delivered)]
     {
         if let Some(raw) = original {
@@ -574,8 +626,8 @@ async fn exchange(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Que
     Ok(Json(v))
 }
 
-async fn replay(State(st): State<AppState>, Json(r): Json<ReplayRequest>) -> ApiResult {
-    ok(st.service.replay_send(&st.actor, r).await?)
+async fn replay(State(st): State<AppState>, me: Me, Json(r): Json<ReplayRequest>) -> ApiResult {
+    ok(st.service.replay_send(&me.actor, r).await?)
 }
 
 async fn approvals(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> ApiResult {
@@ -583,57 +635,57 @@ async fn approvals(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> 
     ok(st.service.approvals(status.as_deref(), 200)?)
 }
 
-async fn decide(State(st): State<AppState>, Path((id, decision)): Path<(String, String)>) -> ApiResult {
+async fn decide(State(st): State<AppState>, me: Me, Path((id, decision)): Path<(String, String)>) -> ApiResult {
     let approve = match decision.as_str() {
         "approve" => true,
         "deny" => false,
         _ => return Err(ServiceError::Invalid("use /approve or /deny".into()).into()),
     };
-    ok(st.service.decide_approval(&id, &st.actor, approve)?)
+    ok(st.service.decide_approval(&id, &me.actor, approve)?)
 }
 
 async fn identities(State(st): State<AppState>) -> ApiResult {
     ok(st.service.identity_list()?)
 }
 
-async fn identity_capture(State(st): State<AppState>, Json(b): Json<CaptureBody>) -> ApiResult {
-    ok(st.service.identity_capture(&st.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.exchange_id)?)
+async fn identity_capture(State(st): State<AppState>, me: Me, Json(b): Json<CaptureBody>) -> ApiResult {
+    ok(st.service.identity_capture(&me.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.exchange_id)?)
 }
 
-async fn identity_check(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.identity_check(&st.actor, &name).await?)
+async fn identity_check(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.identity_check(&me.actor, &name).await?)
 }
 
-async fn identity_record_login(State(st): State<AppState>, Json(b): Json<RecordLoginBody>) -> ApiResult {
-    ok(st.service.identity_record_login(&st.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.from, b.to)?)
+async fn identity_record_login(State(st): State<AppState>, me: Me, Json(b): Json<RecordLoginBody>) -> ApiResult {
+    ok(st.service.identity_record_login(&me.actor, &b.name, b.role.as_deref().unwrap_or("user"), b.from, b.to)?)
 }
 
-async fn identity_learn_logged_out(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.identity_learn_logged_out(&st.actor, &name).await?)
+async fn identity_learn_logged_out(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.identity_learn_logged_out(&me.actor, &name).await?)
 }
 
 async fn history_mark(State(st): State<AppState>) -> ApiResult {
     ok(serde_json::json!({ "id": st.service.history_mark()? }))
 }
 
-async fn authz_matrix(State(st): State<AppState>, Json(r): Json<pm_service::AuthzMatrixRequest>) -> ApiResult {
-    ok(st.service.authz_matrix(&st.actor, r).await?)
+async fn authz_matrix(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::AuthzMatrixRequest>) -> ApiResult {
+    ok(st.service.authz_matrix(&me.actor, r).await?)
 }
 
 async fn model_snapshots(State(st): State<AppState>) -> ApiResult {
     ok(st.service.model_snapshot_list()?)
 }
 
-async fn model_snapshot_save(State(st): State<AppState>, Json(b): Json<SnapshotBody>) -> ApiResult {
-    ok(st.service.model_snapshot_save(&st.actor, &b.name)?)
+async fn model_snapshot_save(State(st): State<AppState>, me: Me, Json(b): Json<SnapshotBody>) -> ApiResult {
+    ok(st.service.model_snapshot_save(&me.actor, &b.name)?)
 }
 
 async fn model_changes(State(st): State<AppState>, Query(q): Query<ChangesQuery>) -> ApiResult {
     ok(st.service.model_changes(q.snapshot)?)
 }
 
-async fn authz_check(State(st): State<AppState>, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
-    ok(st.service.authz_check(&st.actor, r).await?)
+async fn authz_check(State(st): State<AppState>, me: Me, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
+    ok(st.service.authz_check(&me.actor, r).await?)
 }
 
 async fn authz_results(State(st): State<AppState>, Query(q): Query<ExchangeQuery>) -> ApiResult {
@@ -648,28 +700,28 @@ async fn model(State(st): State<AppState>, Query(f): Query<ModelFilter>) -> ApiR
     ok(st.service.model_get(&f)?)
 }
 
-async fn scan_task_start(State(st): State<AppState>, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
-    ok(st.service.scan_task_start(&st.actor, r)?)
+async fn scan_task_start(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
+    ok(st.service.scan_task_start(&me.actor, r)?)
 }
 
-async fn scan_tasks_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.scan_task_list(&st.actor))
+async fn scan_tasks_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.scan_task_list(&me.actor))
 }
 
-async fn scan_task_status(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(st.service.scan_task_status(&st.actor, &id)?)
+async fn scan_task_status(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_status(&me.actor, &id)?)
 }
 
-async fn scan_task_cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(st.service.scan_task_cancel(&st.actor, &id)?)
+async fn scan_task_cancel(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_cancel(&me.actor, &id)?)
 }
 
-async fn scan_task_pause(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(st.service.scan_task_pause(&st.actor, &id)?)
+async fn scan_task_pause(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_pause(&me.actor, &id)?)
 }
 
-async fn scan_task_resume(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(st.service.scan_task_resume(&st.actor, &id)?)
+async fn scan_task_resume(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.scan_task_resume(&me.actor, &id)?)
 }
 
 async fn collaborator_probes(State(st): State<AppState>, Query(q): Query<ProbesQuery>) -> ApiResult {
@@ -680,46 +732,47 @@ async fn collaborator_status(State(st): State<AppState>) -> ApiResult {
     ok(st.service.collaborator_status()?)
 }
 
-async fn collaborator_smtp(State(st): State<AppState>, Json(b): Json<SmtpBody>) -> ApiResult {
+async fn collaborator_smtp(State(st): State<AppState>, me: Me, Json(b): Json<SmtpBody>) -> ApiResult {
     let addr = b
         .listen
         .trim()
         .parse()
         .map_err(|_| pm_service::ServiceError::Invalid(format!("listen on host:port, not {:?}", b.listen)))?;
-    ok(st.service.collaborator_smtp(&st.actor, addr).await?)
+    ok(st.service.collaborator_smtp(&me.actor, addr).await?)
 }
 
-async fn collaborator_listen(State(st): State<AppState>, Json(b): Json<ListenBody>) -> ApiResult {
+async fn collaborator_listen(State(st): State<AppState>, me: Me, Json(b): Json<ListenBody>) -> ApiResult {
     let addr = b
         .listen
         .trim()
         .parse()
         .map_err(|_| pm_service::ServiceError::Invalid(format!("listen on host:port, not {:?}", b.listen)))?;
-    ok(st.service.collaborator_listen(&st.actor, addr, b.public_url).await?)
+    ok(st.service.collaborator_listen(&me.actor, addr, b.public_url).await?)
 }
 
-async fn collaborator_payload(State(st): State<AppState>, Json(b): Json<PayloadBody>) -> ApiResult {
-    ok(st.service.collaborator_payload(&st.actor, &b.note)?)
+async fn collaborator_payload(State(st): State<AppState>, me: Me, Json(b): Json<PayloadBody>) -> ApiResult {
+    ok(st.service.collaborator_payload(&me.actor, &b.note)?)
 }
 
-async fn organizer_list(State(st): State<AppState>, Query(q): Query<OrganizerQuery>) -> ApiResult {
-    ok(st.service.organizer_list(&st.actor, q.status.as_deref().filter(|s| !s.is_empty()))?)
+async fn organizer_list(State(st): State<AppState>, me: Me, Query(q): Query<OrganizerQuery>) -> ApiResult {
+    ok(st.service.organizer_list(&me.actor, q.status.as_deref().filter(|s| !s.is_empty()))?)
 }
 
-async fn organizer_add(State(st): State<AppState>, Json(b): Json<OrganizerAdd>) -> ApiResult {
-    ok(st.service.organizer_add(&st.actor, b.exchange_id, &b.note)?)
+async fn organizer_add(State(st): State<AppState>, me: Me, Json(b): Json<OrganizerAdd>) -> ApiResult {
+    ok(st.service.organizer_add(&me.actor, b.exchange_id, &b.note)?)
 }
 
 async fn organizer_update(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<i64>,
     Json(u): Json<pm_service::OrganizerUpdate>,
 ) -> ApiResult {
-    ok(st.service.organizer_update(&st.actor, id, &u)?)
+    ok(st.service.organizer_update(&me.actor, id, &u)?)
 }
 
-async fn organizer_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    st.service.organizer_delete(&st.actor, id)?;
+async fn organizer_delete(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    st.service.organizer_delete(&me.actor, id)?;
     ok(json!({ "deleted": id }))
 }
 
@@ -731,12 +784,12 @@ async fn collaborator_interactions(State(st): State<AppState>, Query(q): Query<C
     ok(st.service.collaborator_interactions(q.token.as_deref().filter(|t| !t.is_empty()), q.limit.unwrap_or(200))?)
 }
 
-async fn engage_comments(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
-    ok(st.service.engage_comments(&st.actor, &f)?)
+async fn engage_comments(State(st): State<AppState>, me: Me, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_comments(&me.actor, &f)?)
 }
 
-async fn engage_scripts(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
-    ok(st.service.engage_scripts(&st.actor, &f)?)
+async fn engage_scripts(State(st): State<AppState>, me: Me, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_scripts(&me.actor, &f)?)
 }
 
 async fn skills_list(State(st): State<AppState>) -> ApiResult {
@@ -756,54 +809,54 @@ async fn update_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.update_get()?)
 }
 
-async fn update_set(State(st): State<AppState>, Json(b): Json<UpdateSet>) -> ApiResult {
-    ok(st.service.update_set(&st.actor, b.enabled)?)
+async fn update_set(State(st): State<AppState>, me: Me, Json(b): Json<UpdateSet>) -> ApiResult {
+    ok(st.service.update_set(&me.actor, b.enabled)?)
 }
 
-async fn recon_dns(State(st): State<AppState>, Json(b): Json<ReconDns>) -> ApiResult {
-    ok(st.service.recon_dns(&st.actor, &b.host, b.resolver).await?)
+async fn recon_dns(State(st): State<AppState>, me: Me, Json(b): Json<ReconDns>) -> ApiResult {
+    ok(st.service.recon_dns(&me.actor, &b.host, b.resolver).await?)
 }
 
-async fn recon_wayback(State(st): State<AppState>, Json(b): Json<ReconWayback>) -> ApiResult {
-    ok(st.service.recon_wayback(&st.actor, &b.host, b.limit.unwrap_or(500), None).await?)
+async fn recon_wayback(State(st): State<AppState>, me: Me, Json(b): Json<ReconWayback>) -> ApiResult {
+    ok(st.service.recon_wayback(&me.actor, &b.host, b.limit.unwrap_or(500), None).await?)
 }
 
-async fn update_check(State(st): State<AppState>, Json(b): Json<UpdateCheck>) -> ApiResult {
-    ok(st.service.update_check(&st.actor, b.force).await?)
+async fn update_check(State(st): State<AppState>, me: Me, Json(b): Json<UpdateCheck>) -> ApiResult {
+    ok(st.service.update_check(&me.actor, b.force).await?)
 }
 
-async fn engage_js_endpoints(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
-    ok(st.service.engage_js_endpoints(&st.actor, &f)?)
+async fn engage_js_endpoints(State(st): State<AppState>, me: Me, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_js_endpoints(&me.actor, &f)?)
 }
 
-async fn traffic_triage(State(st): State<AppState>, Json(b): Json<TriageBody>) -> ApiResult {
+async fn traffic_triage(State(st): State<AppState>, me: Me, Json(b): Json<TriageBody>) -> ApiResult {
     let f = pm_service::EngageFilter { host: b.host, in_scope: b.in_scope, ..Default::default() };
-    ok(st.service.traffic_triage(&st.actor, &f, b.limit.unwrap_or(100))?)
+    ok(st.service.traffic_triage(&me.actor, &f, b.limit.unwrap_or(100))?)
 }
 
 async fn memory_list(State(st): State<AppState>, Query(q): Query<HostQuery>) -> ApiResult {
     ok(st.service.memory_list(q.host.as_deref())?)
 }
 
-async fn memory_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    st.service.memory_delete(&st.actor, id)?;
+async fn memory_delete(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    st.service.memory_delete(&me.actor, id)?;
     ok(serde_json::json!({ "deleted": id }))
 }
 
-async fn engage_logic(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
-    ok(st.service.engage_logic(&st.actor, &f)?)
+async fn engage_logic(State(st): State<AppState>, me: Me, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_logic(&me.actor, &f)?)
 }
 
-async fn engage_analyze(State(st): State<AppState>, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
-    ok(st.service.engage_analyze(&st.actor, &f)?)
+async fn engage_analyze(State(st): State<AppState>, me: Me, Json(f): Json<pm_service::EngageFilter>) -> ApiResult {
+    ok(st.service.engage_analyze(&me.actor, &f)?)
 }
 
-async fn engage_references(State(st): State<AppState>, Json(b): Json<EngageExchange>) -> ApiResult {
-    ok(st.service.engage_references(&st.actor, b.exchange_id, &Default::default())?)
+async fn engage_references(State(st): State<AppState>, me: Me, Json(b): Json<EngageExchange>) -> ApiResult {
+    ok(st.service.engage_references(&me.actor, b.exchange_id, &Default::default())?)
 }
 
-async fn engage_csrf(State(st): State<AppState>, Json(b): Json<EngageExchange>) -> ApiResult {
-    ok(json!({ "html": st.service.engage_csrf_poc(&st.actor, b.exchange_id, b.technique, b.auto_submit)? }))
+async fn engage_csrf(State(st): State<AppState>, me: Me, Json(b): Json<EngageExchange>) -> ApiResult {
+    ok(json!({ "html": st.service.engage_csrf_poc(&me.actor, b.exchange_id, b.technique, b.auto_submit)? }))
 }
 
 async fn engage_clickjacking(State(st): State<AppState>, Json(b): Json<EngageExchange>) -> ApiResult {
@@ -814,91 +867,98 @@ async fn plugins(State(st): State<AppState>) -> ApiResult {
     ok(st.service.plugin_list())
 }
 
-async fn plugin_set(State(st): State<AppState>, Path(name): Path<String>, Json(b): Json<PluginSet>) -> ApiResult {
-    ok(st.service.plugin_set_enabled(&st.actor, &name, b.enabled)?)
+async fn plugin_set(
+    State(st): State<AppState>,
+    me: Me,
+    Path(name): Path<String>,
+    Json(b): Json<PluginSet>,
+) -> ApiResult {
+    ok(st.service.plugin_set_enabled(&me.actor, &name, b.enabled)?)
 }
 
-async fn plugin_accept(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.plugin_accept_permissions(&st.actor, &name)?)
+async fn plugin_accept(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.plugin_accept_permissions(&me.actor, &name)?)
 }
 
 async fn plugin_hook_set(
     State(st): State<AppState>,
+    me: Me,
     Path((name, kind)): Path<(String, String)>,
     Json(b): Json<pm_service::api_types::PluginHookSet>,
 ) -> ApiResult {
     let kind = pm_service::pm_plugin::v2::HookKind::parse(&kind)
         .ok_or_else(|| ServiceError::Invalid("a hook kind is `request` or `response`".into()))?;
-    ok(st.service.plugin_hook_set(&st.actor, &name, kind, b.action)?)
+    ok(st.service.plugin_hook_set(&me.actor, &name, kind, b.action)?)
 }
 
 async fn plugin_panel(
     State(st): State<AppState>,
+    me: Me,
     Path((name, panel)): Path<(String, String)>,
     Query(q): Query<PanelQuery>,
 ) -> ApiResult {
-    ok(st.service.plugin_panel(&st.actor, &name, &panel, q.limit)?)
+    ok(st.service.plugin_panel(&me.actor, &name, &panel, q.limit)?)
 }
 
-async fn plugin_check(State(st): State<AppState>, Json(r): Json<pm_service::PluginCheckRequest>) -> ApiResult {
-    ok(st.service.plugin_check(&st.actor, r).await?)
+async fn plugin_check(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::PluginCheckRequest>) -> ApiResult {
+    ok(st.service.plugin_check(&me.actor, r).await?)
 }
 
 async fn scan_profiles(State(st): State<AppState>) -> ApiResult {
     ok(st.service.scan_profiles()?)
 }
 
-async fn scan_profile_save(State(st): State<AppState>, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
-    ok(st.service.scan_profile_save(&st.actor, p)?)
+async fn scan_profile_save(State(st): State<AppState>, me: Me, Json(p): Json<pm_service::ScanProfile>) -> ApiResult {
+    ok(st.service.scan_profile_save(&me.actor, p)?)
 }
 
-async fn dom_test(State(st): State<AppState>, Json(r): Json<pm_service::DomTestRequest>) -> ApiResult {
-    ok(st.service.dom_test(&st.actor, r).await?)
+async fn dom_test(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::DomTestRequest>) -> ApiResult {
+    ok(st.service.dom_test(&me.actor, r).await?)
 }
 
 async fn custom_checks(State(st): State<AppState>) -> ApiResult {
     ok(st.service.custom_checks()?)
 }
 
-async fn custom_check_save(State(st): State<AppState>, Json(b): Json<CheckYaml>) -> ApiResult {
-    ok(st.service.custom_check_save(&st.actor, &b.yaml)?)
+async fn custom_check_save(State(st): State<AppState>, me: Me, Json(b): Json<CheckYaml>) -> ApiResult {
+    ok(st.service.custom_check_save(&me.actor, &b.yaml)?)
 }
 
-async fn custom_check_delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(serde_json::json!({ "deleted": st.service.custom_check_delete(&st.actor, &id)? }))
+async fn custom_check_delete(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.custom_check_delete(&me.actor, &id)? }))
 }
 
-async fn custom_scan(State(st): State<AppState>, Json(r): Json<pm_service::CustomScanRequest>) -> ApiResult {
-    ok(st.service.custom_scan(&st.actor, r).await?)
+async fn custom_scan(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::CustomScanRequest>) -> ApiResult {
+    ok(st.service.custom_scan(&me.actor, r).await?)
 }
 
-async fn scan_profile_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(serde_json::json!({ "deleted": st.service.scan_profile_delete(&st.actor, &name)? }))
+async fn scan_profile_delete(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.scan_profile_delete(&me.actor, &name)? }))
 }
 
 async fn scan_schedules(State(st): State<AppState>) -> ApiResult {
     ok(st.service.schedule_list()?)
 }
 
-async fn scan_schedule_save(State(st): State<AppState>, Json(s): Json<pm_service::ScanSchedule>) -> ApiResult {
-    ok(st.service.schedule_save(&st.actor, s)?)
+async fn scan_schedule_save(State(st): State<AppState>, me: Me, Json(s): Json<pm_service::ScanSchedule>) -> ApiResult {
+    ok(st.service.schedule_save(&me.actor, s)?)
 }
 
-async fn scan_schedule_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(serde_json::json!({ "deleted": st.service.schedule_delete(&st.actor, id)? }))
+async fn scan_schedule_delete(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.schedule_delete(&me.actor, id)? }))
 }
 
-async fn scan_schedule_run(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.schedule_run_now(&st.actor, id)?)
+async fn scan_schedule_run(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.schedule_run_now(&me.actor, id)?)
 }
 
-async fn scan_active(State(st): State<AppState>, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {
-    ok(st.service.scan_active(&st.actor, r).await?)
+async fn scan_active(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::ActiveScanRequest>) -> ApiResult {
+    ok(st.service.scan_active(&me.actor, r).await?)
 }
 
-async fn scan_issues(State(st): State<AppState>, Query(f): Query<pm_service::ScanFilter>) -> ApiResult {
+async fn scan_issues(State(st): State<AppState>, me: Me, Query(f): Query<pm_service::ScanFilter>) -> ApiResult {
     // Plugins run as processes; keep them off the async workers.
-    let (service, actor) = (st.service.clone(), st.actor.clone());
+    let (service, actor) = (st.service.clone(), me.actor.clone());
     let issues = tokio::task::spawn_blocking(move || service.scan_passive(&actor, &f))
         .await
         .map_err(|e| pm_service::ServiceError::Invalid(format!("scan failed: {e}")))??;
@@ -921,29 +981,30 @@ async fn finding(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
     ok(st.service.finding_get(id)?)
 }
 
-async fn finding_create(State(st): State<AppState>, Json(f): Json<NewFinding>) -> ApiResult {
-    ok(st.service.finding_create(&st.actor, f)?)
+async fn finding_create(State(st): State<AppState>, me: Me, Json(f): Json<NewFinding>) -> ApiResult {
+    ok(st.service.finding_create(&me.actor, f)?)
 }
 
 async fn finding_update(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<i64>,
     Json(mut u): Json<FindingUpdate>,
 ) -> ApiResult {
     u.id = id;
-    ok(st.service.finding_update(&st.actor, u)?)
+    ok(st.service.finding_update(&me.actor, u)?)
 }
 
-async fn proof_run(State(st): State<AppState>, Json(r): Json<ProofRequest>) -> ApiResult {
-    ok(st.service.proof_run(&st.actor, r).await?)
+async fn proof_run(State(st): State<AppState>, me: Me, Json(r): Json<ProofRequest>) -> ApiResult {
+    ok(st.service.proof_run(&me.actor, r).await?)
 }
 
 async fn proof(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
     ok(st.service.proof_get(id)?)
 }
 
-async fn proof_rerun(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.proof_rerun(&st.actor, id).await?)
+async fn proof_rerun(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.proof_rerun(&me.actor, id).await?)
 }
 
 async fn audit(State(st): State<AppState>, Query(q): Query<LimitQuery>) -> ApiResult {
@@ -954,8 +1015,8 @@ async fn audit_verify(State(st): State<AppState>) -> ApiResult {
     ok(st.service.audit_verify_report(Vec::new(), None))
 }
 
-async fn audit_checkpoint(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.audit_checkpoint(&st.actor)?)
+async fn audit_checkpoint(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.audit_checkpoint(&me.actor)?)
 }
 
 async fn audit_checkpoints(State(st): State<AppState>) -> ApiResult {
@@ -985,8 +1046,8 @@ async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Res
 const EVIDENCE_LIMIT: usize = 512 * 1024 * 1024;
 
 /// A signed evidence pack (ZIP) to hand to the client.
-async fn evidence_pack(State(st): State<AppState>, Query(q): Query<PackQuery>) -> Result<Response, ApiError> {
-    let (bytes, fingerprint) = st.service.evidence_pack(&st.actor, q.all)?;
+async fn evidence_pack(State(st): State<AppState>, me: Me, Query(q): Query<PackQuery>) -> Result<Response, ApiError> {
+    let (bytes, fingerprint) = st.service.evidence_pack(&me.actor, q.all)?;
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -1012,8 +1073,8 @@ async fn regress_list(State(st): State<AppState>) -> ApiResult {
 }
 
 /// The regression tests as a ZIP (tests, README, example CI workflow).
-async fn regress_export(State(st): State<AppState>) -> Result<Response, ApiError> {
-    let (bytes, _) = st.service.regression_zip(&st.actor)?;
+async fn regress_export(State(st): State<AppState>, me: Me) -> Result<Response, ApiError> {
+    let (bytes, _) = st.service.regression_zip(&me.actor)?;
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -1028,16 +1089,16 @@ async fn coverage_proof(State(st): State<AppState>) -> ApiResult {
     ok(st.service.coverage_proof()?)
 }
 
-async fn finding_prove(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.finding_prove(&st.actor, id).await?)
+async fn finding_prove(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.finding_prove(&me.actor, id).await?)
 }
 
-async fn findings_prove_all(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.auto_prove(&st.actor).await?)
+async fn findings_prove_all(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.auto_prove(&me.actor).await?)
 }
 
-async fn finding_retest(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.finding_retest(&st.actor, id).await?)
+async fn finding_retest(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.finding_retest(&me.actor, id).await?)
 }
 
 async fn library() -> ApiResult {
@@ -1048,12 +1109,16 @@ async fn report_templates(State(st): State<AppState>) -> ApiResult {
     ok(st.service.report_templates()?)
 }
 
-async fn report_template_save(State(st): State<AppState>, Json(t): Json<pm_service::ReportTemplate>) -> ApiResult {
-    ok(st.service.report_template_save(&st.actor, t)?)
+async fn report_template_save(
+    State(st): State<AppState>,
+    me: Me,
+    Json(t): Json<pm_service::ReportTemplate>,
+) -> ApiResult {
+    ok(st.service.report_template_save(&me.actor, t)?)
 }
 
-async fn report_template_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(serde_json::json!({ "deleted": st.service.report_template_delete(&st.actor, &name)? }))
+async fn report_template_delete(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(serde_json::json!({ "deleted": st.service.report_template_delete(&me.actor, &name)? }))
 }
 
 async fn intercept_state(State(st): State<AppState>) -> ApiResult {
@@ -1062,35 +1127,41 @@ async fn intercept_state(State(st): State<AppState>) -> ApiResult {
 
 async fn intercept_settings(
     State(st): State<AppState>,
+    me: Me,
     Json(s): Json<pm_service::pm_proxy::InterceptSettings>,
 ) -> ApiResult {
-    ok(st.service.intercept_settings(&st.actor, s)?)
+    ok(st.service.intercept_settings(&me.actor, s)?)
 }
 
-async fn intercept_forward(State(st): State<AppState>, Path(id): Path<u64>, Json(b): Json<ForwardBody>) -> ApiResult {
-    st.service.intercept_forward(&st.actor, id, b.raw, b.fix_content_length.unwrap_or(true))?;
+async fn intercept_forward(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<u64>,
+    Json(b): Json<ForwardBody>,
+) -> ApiResult {
+    st.service.intercept_forward(&me.actor, id, b.raw, b.fix_content_length.unwrap_or(true))?;
     ok(json!({ "forwarded": id }))
 }
 
-async fn intercept_drop(State(st): State<AppState>, Path(id): Path<u64>) -> ApiResult {
-    st.service.intercept_drop(&st.actor, id)?;
+async fn intercept_drop(State(st): State<AppState>, me: Me, Path(id): Path<u64>) -> ApiResult {
+    st.service.intercept_drop(&me.actor, id)?;
     ok(json!({ "dropped": id }))
 }
 
-async fn search(State(st): State<AppState>, Json(r): Json<pm_service::SearchRequest>) -> ApiResult {
-    ok(st.service.history_search_text(&st.actor, &r)?)
+async fn search(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::SearchRequest>) -> ApiResult {
+    ok(st.service.history_search_text(&me.actor, &r)?)
 }
 
-async fn search_ws(State(st): State<AppState>, Json(r): Json<pm_service::WsSearchRequest>) -> ApiResult {
-    ok(st.service.ws_search_text(&st.actor, &r)?)
+async fn search_ws(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::WsSearchRequest>) -> ApiResult {
+    ok(st.service.ws_search_text(&me.actor, &r)?)
 }
 
-async fn sitemap(State(st): State<AppState>, Query(q): Query<SiteQuery>) -> ApiResult {
-    ok(st.service.site_map(&st.actor, q.host.as_deref().filter(|h| !h.is_empty()))?)
+async fn sitemap(State(st): State<AppState>, me: Me, Query(q): Query<SiteQuery>) -> ApiResult {
+    ok(st.service.site_map(&me.actor, q.host.as_deref().filter(|h| !h.is_empty()))?)
 }
 
-async fn discover(State(st): State<AppState>, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
-    ok(st.service.discover(&st.actor, r).await?)
+async fn discover(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::DiscoverRequest>) -> ApiResult {
+    ok(st.service.discover(&me.actor, r).await?)
 }
 
 async fn setup(State(st): State<AppState>) -> ApiResult {
@@ -1107,8 +1178,8 @@ async fn setup_mobile(State(st): State<AppState>) -> ApiResult {
     ok(st.service.mobile_setup()?)
 }
 
-async fn browser_open(State(st): State<AppState>, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
-    ok(st.service.browser_open(&st.actor, r).await?)
+async fn browser_open(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::BrowserOpenRequest>) -> ApiResult {
+    ok(st.service.browser_open(&me.actor, r).await?)
 }
 
 /// The CA certificate, as a download (it is public, but stays behind the API token like everything here).
@@ -1131,54 +1202,60 @@ async fn roe_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.roe_get()?)
 }
 
-async fn roe_put(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
-    ok(st.service.roe_set(&st.actor, &b.text)?)
+async fn roe_put(State(st): State<AppState>, me: Me, Json(b): Json<RoeBody>) -> ApiResult {
+    ok(st.service.roe_set(&me.actor, &b.text)?)
 }
 
 async fn roe_check(State(st): State<AppState>, Json(b): Json<RoeBody>) -> ApiResult {
     ok(st.service.roe_check(&b.text)?)
 }
 
-async fn annotate(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AnnotationBody>) -> ApiResult {
-    ok(st.service.exchange_annotate(&st.actor, id, b.highlight.as_deref(), b.comment.as_deref())?)
+async fn annotate(State(st): State<AppState>, me: Me, Path(id): Path<i64>, Json(b): Json<AnnotationBody>) -> ApiResult {
+    ok(st.service.exchange_annotate(&me.actor, id, b.highlight.as_deref(), b.comment.as_deref())?)
 }
 
-async fn ws_history(State(st): State<AppState>, Query(q): Query<WsHistoryQuery>) -> ApiResult {
+async fn ws_history(State(st): State<AppState>, me: Me, Query(q): Query<WsHistoryQuery>) -> ApiResult {
     let host = q.host.as_deref().filter(|h| !h.is_empty());
-    ok(st.service.ws_history(&st.actor, host, q.before_id, q.limit.unwrap_or(500), 2000)?)
+    ok(st.service.ws_history(&me.actor, host, q.before_id, q.limit.unwrap_or(500), 2000)?)
 }
 
 async fn ui_get(State(st): State<AppState>, Path(key): Path<String>) -> ApiResult {
     ok(st.service.ui_state_get(&key)?)
 }
 
-async fn ui_put(State(st): State<AppState>, Path(key): Path<String>, Json(v): Json<Value>) -> ApiResult {
-    st.service.ui_state_put(&st.actor, &key, &v)?;
+async fn ui_put(State(st): State<AppState>, me: Me, Path(key): Path<String>, Json(v): Json<Value>) -> ApiResult {
+    st.service.ui_state_put(&me.actor, &key, &v)?;
     ok(json!({ "saved": key }))
 }
 
-async fn exchange_curl(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(json!({ "command": st.service.exchange_curl(&st.actor, id)? }))
+async fn exchange_curl(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(json!({ "command": st.service.exchange_curl(&me.actor, id)? }))
 }
 
-async fn exchange_code(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<CodeQuery>) -> ApiResult {
-    ok(json!({ "code": st.service.exchange_code(&st.actor, id, q.lang)? }))
+async fn exchange_code(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<i64>,
+    Query(q): Query<CodeQuery>,
+) -> ApiResult {
+    ok(json!({ "code": st.service.exchange_code(&me.actor, id, q.lang)? }))
 }
 
 async fn tools_code(State(st): State<AppState>, Json(b): Json<CodeBody>) -> ApiResult {
     ok(json!({ "code": st.service.request_code(&b.url, &b.raw, b.lang)? }))
 }
 
-async fn import_har(State(st): State<AppState>, Json(r): Json<pm_service::ImportRequest>) -> ApiResult {
-    ok(st.service.traffic_import_har(&st.actor, &r)?)
+async fn import_har(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::ImportRequest>) -> ApiResult {
+    ok(st.service.traffic_import_har(&me.actor, &r)?)
 }
 
 /// A HAR download: it holds target content, so it is never rendered here.
 async fn export_har(
     State(st): State<AppState>,
+    me: Me,
     Json(r): Json<pm_service::ExportRequest>,
 ) -> Result<Response, ApiError> {
-    let har = st.service.traffic_export_har(&st.actor, &r)?;
+    let har = st.service.traffic_export_har(&me.actor, &r)?;
     Ok((
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -1197,16 +1274,24 @@ async fn graphql_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.graphql_get()?)
 }
 
-async fn graphql_import(State(st): State<AppState>, Json(r): Json<pm_service::GraphQlImportRequest>) -> ApiResult {
-    ok(st.service.graphql_import(&st.actor, r).await?)
+async fn graphql_import(
+    State(st): State<AppState>,
+    me: Me,
+    Json(r): Json<pm_service::GraphQlImportRequest>,
+) -> ApiResult {
+    ok(st.service.graphql_import(&me.actor, r).await?)
 }
 
 async fn openapi_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.openapi_get()?)
 }
 
-async fn openapi_import(State(st): State<AppState>, Json(r): Json<pm_service::OpenApiImportRequest>) -> ApiResult {
-    ok(st.service.openapi_import(&st.actor, r).await?)
+async fn openapi_import(
+    State(st): State<AppState>,
+    me: Me,
+    Json(r): Json<pm_service::OpenApiImportRequest>,
+) -> ApiResult {
+    ok(st.service.openapi_import(&me.actor, r).await?)
 }
 
 async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::DecodeRequest>) -> ApiResult {
@@ -1215,9 +1300,10 @@ async fn tools_decode(State(st): State<AppState>, Json(r): Json<pm_service::Deco
 
 async fn tools_protobuf_decode(
     State(st): State<AppState>,
+    me: Me,
     Json(r): Json<pm_service::api_types::ProtobufDecodeRequest>,
 ) -> ApiResult {
-    ok(st.service.protobuf_decode(&st.actor, &r)?)
+    ok(st.service.protobuf_decode(&me.actor, &r)?)
 }
 
 async fn tools_protobuf_encode(
@@ -1231,80 +1317,93 @@ async fn tools_request_transform(State(st): State<AppState>, Json(t): Json<pm_se
     ok(st.service.request_transform(&t)?)
 }
 
-async fn tools_compare(State(st): State<AppState>, Json(r): Json<CompareBody>) -> ApiResult {
-    ok(st.service.compare_exchanges(&st.actor, r.a, r.b)?)
+async fn tools_compare(State(st): State<AppState>, me: Me, Json(r): Json<CompareBody>) -> ApiResult {
+    ok(st.service.compare_exchanges(&me.actor, r.a, r.b)?)
 }
 
 async fn tools_token_analyzer(
     State(st): State<AppState>,
+    me: Me,
     Json(r): Json<pm_service::TokenAnalyzerRequest>,
 ) -> ApiResult {
-    ok(st.service.token_analyzer_run(&st.actor, r).await?)
+    ok(st.service.token_analyzer_run(&me.actor, r).await?)
 }
 
 async fn tools_token_analyzer_analyze(State(st): State<AppState>, Json(r): Json<TokensBody>) -> ApiResult {
     ok(st.service.token_analyzer_analyze(&r.tokens)?)
 }
 
-async fn crawl(State(st): State<AppState>, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {
-    ok(st.service.crawl(&st.actor, r).await?)
+async fn crawl(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::CrawlRequest>) -> ApiResult {
+    ok(st.service.crawl(&me.actor, r).await?)
 }
 
-async fn fuzzer(State(st): State<AppState>, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
-    ok(st.service.fuzzer_run(&st.actor, r).await?)
+async fn fuzzer(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
+    ok(st.service.fuzzer_run(&me.actor, r).await?)
 }
 
-async fn attack_start(State(st): State<AppState>, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
-    ok(st.service.fuzzer_start(&st.actor, r)?)
+async fn attack_start(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::FuzzerRequest>) -> ApiResult {
+    ok(st.service.fuzzer_start(&me.actor, r)?)
 }
 
-async fn attacks_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.fuzzer_list(&st.actor))
+async fn attacks_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.fuzzer_list(&me.actor))
 }
 
-async fn attack_status(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<FromQuery>) -> ApiResult {
-    ok(st.service.fuzzer_status(&st.actor, &id, q.from.unwrap_or(0))?)
+async fn attack_status(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<String>,
+    Query(q): Query<FromQuery>,
+) -> ApiResult {
+    ok(st.service.fuzzer_status(&me.actor, &id, q.from.unwrap_or(0))?)
 }
 
-async fn attack_control(State(st): State<AppState>, Path((id, action)): Path<(String, String)>) -> ApiResult {
-    ok(json!({ "status": st.service.fuzzer_control(&st.actor, &id, &action)? }))
+async fn attack_control(State(st): State<AppState>, me: Me, Path((id, action)): Path<(String, String)>) -> ApiResult {
+    ok(json!({ "status": st.service.fuzzer_control(&me.actor, &id, &action)? }))
 }
 
-async fn replay_group(State(st): State<AppState>, Json(r): Json<pm_service::GroupRequest>) -> ApiResult {
-    ok(st.service.replay_group(&st.actor, r).await?)
+async fn replay_group(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::GroupRequest>) -> ApiResult {
+    ok(st.service.replay_group(&me.actor, r).await?)
 }
 
-async fn race(State(st): State<AppState>, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {
-    ok(st.service.race_send(&st.actor, r).await?)
+async fn race(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::RaceRequest>) -> ApiResult {
+    ok(st.service.race_send(&me.actor, r).await?)
 }
 
-async fn ws_replay(State(st): State<AppState>, Json(r): Json<pm_service::WsReplayRequest>) -> ApiResult {
-    ok(st.service.ws_replay(&st.actor, r).await?)
+async fn ws_replay(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::WsReplayRequest>) -> ApiResult {
+    ok(st.service.ws_replay(&me.actor, r).await?)
 }
 
-async fn streams_list(State(st): State<AppState>, Query(q): Query<pm_service::pm_store::StreamFilter>) -> ApiResult {
-    ok(st.service.streams_list(&st.actor, &q)?)
+async fn streams_list(
+    State(st): State<AppState>,
+    me: Me,
+    Query(q): Query<pm_service::pm_store::StreamFilter>,
+) -> ApiResult {
+    ok(st.service.streams_list(&me.actor, &q)?)
 }
 
 async fn stream_get(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<i64>,
     Query(q): Query<pm_service::api_types::StreamChunksQuery>,
 ) -> ApiResult {
-    ok(st.service.stream_get(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+    ok(st.service.stream_get(&me.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
 }
 
 async fn stream_chunks(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<i64>,
     Query(q): Query<pm_service::api_types::StreamChunksQuery>,
 ) -> ApiResult {
-    ok(st.service.stream_chunks(&st.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
+    ok(st.service.stream_chunks(&me.actor, id, q.after, q.limit.unwrap_or(100), 4000)?)
 }
 
 /// The stream id comes from the path; a `stream_id` in the body must agree with it (or be left out).
 async fn stream_replay(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<i64>,
     Json(mut r): Json<pm_service::StreamReplayRequest>,
 ) -> ApiResult {
@@ -1316,19 +1415,19 @@ async fn stream_replay(
         .into());
     }
     r.stream_id = id;
-    ok(st.service.stream_replay(&st.actor, r).await?)
+    ok(st.service.stream_replay(&me.actor, r).await?)
 }
 
-async fn ws_messages(State(st): State<AppState>, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
-    ok(st.service.ws_messages(&st.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
+async fn ws_messages(State(st): State<AppState>, me: Me, Path(id): Path<i64>, Query(q): Query<WsQuery>) -> ApiResult {
+    ok(st.service.ws_messages(&me.actor, id, q.after_id, q.limit.unwrap_or(200), 1 << 20)?)
 }
 
-async fn model_key_set(State(st): State<AppState>, Json(b): Json<KeyBody>) -> ApiResult {
-    ok(st.service.model_key_set(&st.actor, &b.name, &b.key)?)
+async fn model_key_set(State(st): State<AppState>, me: Me, Json(b): Json<KeyBody>) -> ApiResult {
+    ok(st.service.model_key_set(&me.actor, &b.name, &b.key)?)
 }
 
-async fn model_key_remove(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.model_key_remove(&st.actor, &name)?)
+async fn model_key_remove(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.model_key_remove(&me.actor, &name)?)
 }
 
 async fn assistant_state(State(st): State<AppState>) -> ApiResult {
@@ -1345,8 +1444,12 @@ async fn assistant_state(State(st): State<AppState>) -> ApiResult {
     }))
 }
 
-async fn assistant_config(State(st): State<AppState>, Json(cfg): Json<pm_service::AssistantConfig>) -> ApiResult {
-    ok(st.service.assistant_config_set(&st.actor, cfg)?)
+async fn assistant_config(
+    State(st): State<AppState>,
+    me: Me,
+    Json(cfg): Json<pm_service::AssistantConfig>,
+) -> ApiResult {
+    ok(st.service.assistant_config_set(&me.actor, cfg)?)
 }
 
 /// Models the server in `cfg` offers (the form's values, before saving).
@@ -1354,8 +1457,13 @@ async fn assistant_models(State(st): State<AppState>, Json(cfg): Json<pm_service
     ok(serde_json::json!({ "models": st.assistant.list_models(&cfg).await? }))
 }
 
-async fn finding_explain(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<ExplainBody>) -> ApiResult {
-    let md = st.assistant.explain_finding(&st.actor, id, b.framework.as_deref()).await?;
+async fn finding_explain(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<i64>,
+    Json(b): Json<ExplainBody>,
+) -> ApiResult {
+    let md = st.assistant.explain_finding(&me.actor, id, b.framework.as_deref()).await?;
     ok(serde_json::json!({ "explanation": md }))
 }
 
@@ -1370,8 +1478,8 @@ async fn assistant_send(State(st): State<AppState>, Json(b): Json<SendBody>) -> 
     ok(st.assistant.send(b.chat_id, &b.text).await?)
 }
 
-async fn ai_scan_start(State(st): State<AppState>, Json(req): Json<pm_service::AiScanRequest>) -> ApiResult {
-    ok(st.assistant.start_ai_scan(&st.actor, req)?)
+async fn ai_scan_start(State(st): State<AppState>, me: Me, Json(req): Json<pm_service::AiScanRequest>) -> ApiResult {
+    ok(st.assistant.start_ai_scan(&me.actor, req)?)
 }
 
 async fn ai_scan_list(State(st): State<AppState>) -> ApiResult {
@@ -1382,24 +1490,29 @@ async fn ai_scan_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResu
     ok(st.service.ai_scan_get(id)?)
 }
 
-async fn ai_scan_stop(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.ai_scan_stop(&st.actor, id)?)
+async fn ai_scan_stop(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.ai_scan_stop(&me.actor, id)?)
 }
 
-async fn ai_scan_message(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<AiScanMessage>) -> ApiResult {
-    ok(st.service.ai_scan_message(&st.actor, id, &b.text)?)
+async fn ai_scan_message(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<i64>,
+    Json(b): Json<AiScanMessage>,
+) -> ApiResult {
+    ok(st.service.ai_scan_message(&me.actor, id, &b.text)?)
 }
 
 async fn attack_paths(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
     ok(st.service.attack_path_list(q.scan)?)
 }
 
-async fn attack_path_create(State(st): State<AppState>, Json(p): Json<pm_service::NewAttackPath>) -> ApiResult {
-    ok(st.service.attack_path_create(&st.actor, p)?)
+async fn attack_path_create(State(st): State<AppState>, me: Me, Json(p): Json<pm_service::NewAttackPath>) -> ApiResult {
+    ok(st.service.attack_path_create(&me.actor, p)?)
 }
 
-async fn attack_path_delete(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    st.service.attack_path_delete(&st.actor, id)?;
+async fn attack_path_delete(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    st.service.attack_path_delete(&me.actor, id)?;
     ok(serde_json::json!({ "deleted": id }))
 }
 
@@ -1421,16 +1534,20 @@ async fn network_resolve(State(st): State<AppState>, Json(b): Json<UpstreamResol
     ok(st.service.network_resolve(&b)?)
 }
 
-async fn network_put(State(st): State<AppState>, Json(cfg): Json<pm_service::pm_replay::NetConfig>) -> ApiResult {
-    ok(st.service.network_set(&st.actor, cfg)?)
+async fn network_put(
+    State(st): State<AppState>,
+    me: Me,
+    Json(cfg): Json<pm_service::pm_replay::NetConfig>,
+) -> ApiResult {
+    ok(st.service.network_set(&me.actor, cfg)?)
 }
 
 async fn recording_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.recording_get()?)
 }
 
-async fn recording_put(State(st): State<AppState>, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
-    ok(st.service.recording_set(&st.actor, r)?)
+async fn recording_put(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::RecordingSettings>) -> ApiResult {
+    ok(st.service.recording_set(&me.actor, r)?)
 }
 
 async fn devices_get(State(st): State<AppState>) -> ApiResult {
@@ -1439,90 +1556,98 @@ async fn devices_get(State(st): State<AppState>) -> ApiResult {
 
 async fn device_put(
     State(st): State<AppState>,
+    me: Me,
     Path(addr): Path<String>,
     Json(b): Json<pm_service::api_types::DeviceNameBody>,
 ) -> ApiResult {
-    ok(st.service.device_set_name(&st.actor, &addr, &b.name)?)
+    ok(st.service.device_set_name(&me.actor, &addr, &b.name)?)
 }
 
-async fn device_delete(State(st): State<AppState>, Path(addr): Path<String>) -> ApiResult {
-    st.service.device_remove_name(&st.actor, &addr)?;
+async fn device_delete(State(st): State<AppState>, me: Me, Path(addr): Path<String>) -> ApiResult {
+    st.service.device_remove_name(&me.actor, &addr)?;
     ok(json!({ "deleted": addr }))
 }
 
-async fn session_get(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.session_get(&st.actor)?)
+async fn session_get(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.session_get(&me.actor)?)
 }
 
-async fn session_put(State(st): State<AppState>, Json(cfg): Json<pm_service::SessionConfig>) -> ApiResult {
-    ok(st.service.session_set(&st.actor, cfg)?)
+async fn session_put(State(st): State<AppState>, me: Me, Json(cfg): Json<pm_service::SessionConfig>) -> ApiResult {
+    ok(st.service.session_set(&me.actor, cfg)?)
 }
 
-async fn session_jar(State(st): State<AppState>) -> ApiResult {
-    ok(json!({ "cookies": st.service.session_jar(&st.actor)? }))
+async fn session_jar(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(json!({ "cookies": st.service.session_jar(&me.actor)? }))
 }
 
-async fn session_jar_clear(State(st): State<AppState>) -> ApiResult {
-    st.service.session_jar_clear(&st.actor)?;
+async fn session_jar_clear(State(st): State<AppState>, me: Me) -> ApiResult {
+    st.service.session_jar_clear(&me.actor)?;
     ok(json!({ "cleared": true }))
 }
 
-async fn workflows_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.workflow_list(&st.actor)?)
+async fn workflows_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.workflow_list(&me.actor)?)
 }
 
-async fn workflow_create(State(st): State<AppState>, Json(w): Json<pm_service::WorkflowInput>) -> ApiResult {
-    ok(st.service.workflow_create(&st.actor, w)?)
+async fn workflow_create(State(st): State<AppState>, me: Me, Json(w): Json<pm_service::WorkflowInput>) -> ApiResult {
+    ok(st.service.workflow_create(&me.actor, w)?)
 }
 
-async fn workflow_get(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    ok(st.service.workflow_get(&st.actor, &id)?)
+async fn workflow_get(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    ok(st.service.workflow_get(&me.actor, &id)?)
 }
 
 async fn workflow_update(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<String>,
     Json(w): Json<pm_service::WorkflowInput>,
 ) -> ApiResult {
-    ok(st.service.workflow_update(&st.actor, &id, w)?)
+    ok(st.service.workflow_update(&me.actor, &id, w)?)
 }
 
-async fn workflow_delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    st.service.workflow_delete(&st.actor, &id)?;
+async fn workflow_delete(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> ApiResult {
+    st.service.workflow_delete(&me.actor, &id)?;
     ok(json!({ "deleted": id }))
 }
 
 async fn workflow_trigger(
     State(st): State<AppState>,
+    me: Me,
     Path(id): Path<String>,
     Json(b): Json<WorkflowTriggerBody>,
 ) -> ApiResult {
-    ok(st.service.workflow_trigger_set(&st.actor, &id, b.enabled, b.max_per_minute)?)
+    ok(st.service.workflow_trigger_set(&me.actor, &id, b.enabled, b.max_per_minute)?)
 }
 
-async fn workflow_run(State(st): State<AppState>, Path(id): Path<String>, Json(b): Json<WorkflowRunBody>) -> ApiResult {
+async fn workflow_run(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<String>,
+    Json(b): Json<WorkflowRunBody>,
+) -> ApiResult {
     let req = pm_service::WorkflowRunRequest { workflow: id, exchange_id: b.exchange_id, approval_id: b.approval_id };
-    ok(st.service.workflow_run(&st.actor, req).await?)
+    ok(st.service.workflow_run(&me.actor, req).await?)
 }
 
-async fn workflow_runs(State(st): State<AppState>, Query(q): Query<WorkflowRunsQuery>) -> ApiResult {
-    ok(st.service.workflow_runs(&st.actor, q.workflow.as_deref(), q.limit.unwrap_or(50))?)
+async fn workflow_runs(State(st): State<AppState>, me: Me, Query(q): Query<WorkflowRunsQuery>) -> ApiResult {
+    ok(st.service.workflow_runs(&me.actor, q.workflow.as_deref(), q.limit.unwrap_or(50))?)
 }
 
-async fn workflow_run_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.workflow_run_get(&st.actor, id)?)
+async fn workflow_run_get(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    ok(st.service.workflow_run_get(&me.actor, id)?)
 }
 
-async fn session_macro_run(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.session_macro_run(&st.actor, &name).await?)
+async fn session_macro_run(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.session_macro_run(&me.actor, &name).await?)
 }
 
 async fn listeners_get(State(st): State<AppState>) -> ApiResult {
     ok(st.service.listeners_get()?)
 }
 
-async fn listeners_put(State(st): State<AppState>, Json(b): Json<ListenersBody>) -> ApiResult {
-    ok(st.service.listeners_set(&st.actor, b.listeners)?)
+async fn listeners_put(State(st): State<AppState>, me: Me, Json(b): Json<ListenersBody>) -> ApiResult {
+    ok(st.service.listeners_set(&me.actor, b.listeners)?)
 }
 
 async fn rules_presets(State(st): State<AppState>) -> ApiResult {
@@ -1533,12 +1658,12 @@ async fn rules_get(State(st): State<AppState>) -> ApiResult {
     ok(json!({ "rules": st.service.match_replace_rules()? }))
 }
 
-async fn rules_put(State(st): State<AppState>, Json(b): Json<RulesBody>) -> ApiResult {
-    ok(json!({ "rules": st.service.set_match_replace_rules(&st.actor, b.rules)? }))
+async fn rules_put(State(st): State<AppState>, me: Me, Json(b): Json<RulesBody>) -> ApiResult {
+    ok(json!({ "rules": st.service.set_match_replace_rules(&me.actor, b.rules)? }))
 }
 
-async fn intercept_forward_all(State(st): State<AppState>) -> ApiResult {
-    ok(json!({ "forwarded": st.service.intercept_forward_all(&st.actor)? }))
+async fn intercept_forward_all(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(json!({ "forwarded": st.service.intercept_forward_all(&me.actor)? }))
 }
 
 /// Whether this installation trusts the project, and what is held back if not. Anyone who can call the API may read it.
@@ -1547,51 +1672,59 @@ async fn project_trust(State(st): State<AppState>) -> ApiResult {
 }
 
 /// A person confirms the project's current settings. The API acts as the human who started it.
-async fn project_trust_confirm(State(st): State<AppState>, Json(b): Json<TrustConfirmRequest>) -> ApiResult {
-    ok(st.service.trust_confirm(&st.actor, &b)?)
+async fn project_trust_confirm(State(st): State<AppState>, me: Me, Json(b): Json<TrustConfirmRequest>) -> ApiResult {
+    ok(st.service.trust_confirm(&me.actor, &b)?)
 }
 
-async fn integrations_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.integration_list(&st.actor)?)
+async fn integrations_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    ok(st.service.integration_list(&me.actor)?)
 }
 
-async fn integration_get(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.integration_get(&st.actor, &name)?)
+async fn integration_get(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_get(&me.actor, &name)?)
 }
 
 async fn integration_put(
     State(st): State<AppState>,
+    me: Me,
     Path(name): Path<String>,
     Json(b): Json<IntegrationInput>,
 ) -> ApiResult {
-    ok(st.service.integration_set(&st.actor, &name, b)?)
+    ok(st.service.integration_set(&me.actor, &name, b)?)
 }
 
-async fn integration_delete(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    st.service.integration_delete(&st.actor, &name)?;
+async fn integration_delete(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    st.service.integration_delete(&me.actor, &name)?;
     ok(json!({ "deleted": name }))
 }
 
 async fn integration_enabled(
     State(st): State<AppState>,
+    me: Me,
     Path(name): Path<String>,
     Json(b): Json<IntegrationEnabledBody>,
 ) -> ApiResult {
-    ok(st.service.integration_enable(&st.actor, &name, b.enabled)?)
+    ok(st.service.integration_enable(&me.actor, &name, b.enabled)?)
 }
 
-async fn integration_test(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult {
-    ok(st.service.integration_test(&st.actor, &name).await?)
+async fn integration_test(State(st): State<AppState>, me: Me, Path(name): Path<String>) -> ApiResult {
+    ok(st.service.integration_test(&me.actor, &name).await?)
 }
 
 async fn integration_deliveries(
     State(st): State<AppState>,
+    me: Me,
     Path(name): Path<String>,
     Query(q): Query<DeliveriesQuery>,
 ) -> ApiResult {
-    ok(st.service.integration_deliveries(&st.actor, &name, q.limit.unwrap_or(50))?)
+    ok(st.service.integration_deliveries(&me.actor, &name, q.limit.unwrap_or(50))?)
 }
 
-async fn finding_issue(State(st): State<AppState>, Path(id): Path<i64>, Json(b): Json<SendFindingBody>) -> ApiResult {
-    ok(st.service.integration_send_finding(&st.actor, id, b).await?)
+async fn finding_issue(
+    State(st): State<AppState>,
+    me: Me,
+    Path(id): Path<i64>,
+    Json(b): Json<SendFindingBody>,
+) -> ApiResult {
+    ok(st.service.integration_send_finding(&me.actor, id, b).await?)
 }

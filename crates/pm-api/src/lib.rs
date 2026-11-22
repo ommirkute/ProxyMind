@@ -1,9 +1,13 @@
 //! REST API and live event stream for the UI (and any other client).
 //!
 //! Every route calls `pm-service`, so the same rules apply as for agents
-//! (ADR-0005). The API acts as one human user, set when it starts.
+//! (ADR-0005). In single-user mode (the default) the API acts as one human
+//! user, set when it starts. In **server mode** (`AppState::with_server_mode`,
+//! `proxymind serve --accounts`, ADR-0022) every request is from the signed-in
+//! account: see `server_mode`, `auth_api` and `listen`, and `docs/server-mode.md`.
 //!
-//! Security (it runs on the tester's machine next to client data):
+//! Security in single-user mode (it runs on the tester's machine next to client
+//! data):
 //! - binds to loopback by default; refuses requests whose `Host` isn't
 //!   localhost (stops DNS-rebinding attacks from web pages);
 //! - every request needs the per-install token, as `Authorization: Bearer`
@@ -11,9 +15,14 @@
 //! - requests that change anything must carry `X-ProxyMind: 1`, which a
 //!   cross-site form or image can't send.
 
+mod auth_api;
 mod contract_table;
 pub mod contracts;
+pub mod listen;
 mod routes;
+pub mod server_mode;
+
+pub use server_mode::{AuthContext, ConnInfo, Me, ServerMode, safe_next};
 
 use std::sync::Arc;
 
@@ -41,6 +50,8 @@ pub struct AppState {
     pub assistant: Arc<pm_assistant::Assistant>,
     /// How browsers connect: the proxy address and the CA to trust.
     pub setup: Arc<ProxySetup>,
+    /// Server mode (accounts, sessions, TLS); `None` is single-user mode, where `actor` and `token` rule.
+    pub server: Option<Arc<ServerMode>>,
 }
 
 /// What the Proxy setup page shows.
@@ -73,7 +84,15 @@ impl AppState {
             project: Arc::new(project),
             assistant,
             setup: Arc::new(ProxySetup::default()),
+            server: None,
         })
+    }
+
+    /// Turns on server mode: the install token stops working, sessions and memberships decide who a request is from.
+    /// `actor` and `token` are then never consulted (the token is only a placeholder that nothing accepts).
+    pub fn with_server_mode(mut self, server: ServerMode) -> Self {
+        self.server = Some(Arc::new(server));
+        self
     }
 
     /// Adds the proxy address and CA for the Proxy setup page.
@@ -160,7 +179,24 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+fn add_security_headers(h: &mut HeaderMap) {
+    h.insert("x-content-type-options", "nosniff".parse().expect("static"));
+    h.insert("referrer-policy", "no-referrer".parse().expect("static"));
+    h.insert("x-frame-options", "DENY".parse().expect("static"));
+    h.insert(
+        "content-security-policy",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+            .parse()
+            .expect("static"),
+    );
+}
+
+async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    if let Some(sm) = st.server.clone() {
+        let mut resp = server_mode::server_guard(sm, req, next).await;
+        add_security_headers(resp.headers_mut());
+        return resp;
+    }
     let headers = req.headers();
     if !host_is_local(headers) {
         return (StatusCode::FORBIDDEN, "ProxyMind only answers requests addressed to localhost").into_response();
@@ -174,17 +210,21 @@ async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response
     if is_api && changes_state && headers.get("x-proxymind").and_then(|v| v.to_str().ok()) != Some("1") {
         return (StatusCode::FORBIDDEN, "state-changing requests need the X-ProxyMind: 1 header").into_response();
     }
+    // The account endpoints exist for server mode only; the token does not open them.
+    if path.starts_with("/api/v1/auth/") {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({
+                "error": "this ProxyMind is not running in server mode",
+                "code": "not_server_mode"
+            })),
+        )
+            .into_response();
+    }
+    // Single-user mode: every request is from the process's actor.
+    req.extensions_mut().insert(Me::single_user(st.actor.clone()));
     let mut resp = next.run(req).await;
-    let h = resp.headers_mut();
-    h.insert("x-content-type-options", "nosniff".parse().expect("static"));
-    h.insert("referrer-policy", "no-referrer".parse().expect("static"));
-    h.insert("x-frame-options", "DENY".parse().expect("static"));
-    h.insert(
-        "content-security-policy",
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
-            .parse()
-            .expect("static"),
-    );
+    add_security_headers(resp.headers_mut());
     resp
 }
 

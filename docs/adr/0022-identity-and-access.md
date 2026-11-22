@@ -420,6 +420,56 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    self-signed with pinning), refusal to listen beyond loopback without TLS. Test: route matrix without a session is 401,
    cookie flags, CSRF cases (no header, wrong origin, `Sec-Fetch-Site`), fixation, `next=` handling, plain HTTP refused on
    a non-loopback address, pin mismatch fails.
+
+   *Done 2026-11-22.* `proxymind serve --accounts --server-home DIR [--listen] [--public-url] [--allowed-host]…
+   [--tls-cert/--tls-key | --tls-self-signed | --behind-proxy --trusted-proxy IP…]` and `proxymind server reset-owner`;
+   how to run it is `docs/server-mode.md`. Where things are: `pm-api/src/server_mode.rs` (the guard, `Me`, CSRF, cookies,
+   `next=`), `auth_api.rs` (the `/api/v1/auth/…` endpoints, typed in the OpenAPI document), `listen.rs` (the pure
+   `plan()` that refuses unsafe combinations, the TLS listener), `pm-tls/src/server.rs` (certificate reload, self-signed
+   certificate, pins and the pin verifier); tests in `crates/pm-api/tests/server_mode.rs` (25), `crates/pm-cli/tests/serve.rs`
+   (3) and unit tests in those modules. Decisions and deviations, on purpose:
+   - **Project id** for memberships is the `project_id` setting inside the project file (`Service::project_id`, now public;
+     a random value made once, already used for trust records and integration secrets), not the file's path: it survives
+     renaming and moving the file, and a path would let two files at one path inherit each other's members. The first
+     owner is made owner of that project at setup (a server admin has no project access by itself).
+   - **The actor** is a `Me` (`actor`, the account and session, the client address) that the guard puts in the request;
+     single-user mode puts `AppState::actor` there, so all ~145 handlers changed mechanically from `st.actor` to
+     `me.actor`. In server mode it is `human:<handle>` (the stable user id when the handle has a `+`, which actor names
+     cannot hold). `Me::principal()` builds the `Principal` with user id, session reference and address, but **service
+     methods still take an `Actor`, so audit records do not carry user, session and address yet and every member acts as
+     a human**; both come with step 6, as does the keyed chain's checkpoint schedule (`serve` does hand the derived audit
+     key to `set_audit_security`).
+   - **Sign-in as the API shapes it:** `login` answers `authenticated`, `second_factor_required` or `enrolment_required`
+     with the 5-minute pending token; setup and accepting an invite continue straight into the same flow, so an owner or
+     any invited user lands in TOTP enrolment before a session exists. Signing in again while signed in is the step-up
+     (the old session of the same user is ended, a new id is issued, `authenticated_at` is fresh); there is no separate
+     re-authentication endpoint. Fresh-login (10 minutes, on the server's clock) is required for invites (create and
+     revoke), disabling, enabling and resetting users, TOTP enrol and removal, recovery codes and password change.
+   - **Links with tokens put the token in the URL fragment** (`/#setup=…`, `/#invite=…`): a browser never sends it to a
+     server, and it stays out of logs and `Referer`. The UI task reads `location.hash`.
+   - **Setup is served** over TLS, behind a trusted proxy that says HTTPS, or to a peer on loopback when there is no
+     proxy; a proxy that is on loopback does not count as "this machine".
+   - **Public URL and origins:** with `--public-url` the only allowed `Origin` and `Host` are that one (plus
+     `--allowed-host` names); without it (loopback only) the loopback names and the listen port. Behind a proxy and beyond
+     loopback the URL is required. `--behind-proxy` needs `--trusted-proxy`, a loopback or private listen address and no
+     TLS flags. A peer that is not a trusted proxy is never believed about `X-Forwarded-*`.
+   - **Pin text** is `sha256:` plus standard base64 of the SHA-256 of the certificate's SubjectPublicKeyInfo (as curl's
+     `--pinnedpubkey` and Chromium's SPKI lists use); hex is accepted on input. `PinVerifier` ignores host names and
+     validity dates, as the key is the identity. It lives in `pm-tls::server` for step 5's `proxymind login` and the MCP
+     bridge.
+   - **TLS listener:** handshakes run in their own tasks (10 s timeout, at most 256 at once), so a failed or stalled one
+     never touches the accept loop. ALPN offers `h2` (axum's `http2` feature is now on) and `http/1.1`. HSTS is sent
+     with an own certificate and behind a proxy that says HTTPS, never with a self-signed one.
+   - **`serve` does not run the interception proxy unless `--proxy ADDR` is given.** The CA key should stay on the
+     tester's machine (F-8, ADR 3.3); everything else `ui` starts (service, scheduler, workflow triggers, notifier, plugins)
+     runs through the one shared function `start_runtime`.
+   - **Not done, left for later:** `pm3_` tokens (step 5; `server_mode::authenticate_bearer` is the hook, and the install
+     token is refused as a bearer); roles enforced by `require` and events filtered by membership (step 6; an event stream
+     already open outlives its session's revocation until then); the server's signed audit checkpoints; member management
+     endpoints (invites and `set_membership` through the library only); passkeys and OIDC; the UI pages (a separate task).
+     Account events are in `pm-accounts`' security log, which already records every sign-in, failure, logout, credential
+     change, invite and admin action, so the API adds no second log (its entries carry no client address for admin actions
+     yet).
 5. **Tokens.** `pm3_` tokens for agents, CI and plugins, in both modes; `proxymind token …`; `proxymind login`; the MCP bridge
    to a server. Test: actor derived from the token, role ceiling and tier cap, expiry, revocation takes effect on the next
    request, a token cannot create tokens, tokens never appear in logs or audit detail.

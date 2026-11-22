@@ -10,6 +10,11 @@ use pm_service::api_types::*;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::*;
 
+use crate::auth_api::{
+    EnrolBeginBody, EnrolConfirmBody, InviteAcceptBody, InviteCreateBody, InviteCreated, InviteView, LoginBody,
+    LoginResponse, MeResponse, OkResponse, PasswordBody, RecoveryCodesResponse, RevokeAllBody, RevokedResponse,
+    SecondFactorBody, SessionView, SetupBody, StateResponse, TotpConfirmBody, TotpEnrolmentResponse, UserView,
+};
 use crate::contracts::{Operation, op};
 use crate::routes::{BytesQuery, EventsQuery};
 
@@ -280,5 +285,30 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/attack-paths", "attack_path_create", "Record an attack path.").body::<NewAttackPath>().out::<AttackPath>(),
         op("delete", "/attack-paths/{id}", "attack_path_delete", "Delete an attack path.").json("Object with `deleted` (the id)."),
         op("get", "/attack-graph", "attack_graph", "Attack paths merged into a graph.").query::<ScanQuery>().out::<AttackGraph>(),
+        // Server mode (ADR-0022): these answer 404 unless the server runs with accounts. The first seven work without a session.
+        op("get", "/auth/state", "auth_state", "Server mode: whether the server still waits for its first owner, and whether setup is served here.").out::<StateResponse>(),
+        op("post", "/auth/setup", "auth_setup", "Server mode: claim the first owner account with the one-time setup token. Answers like the password step (`enrolment_required`).").body::<SetupBody>().out::<LoginResponse>(),
+        op("post", "/auth/login", "auth_login", "Server mode: the password step. Answers `authenticated` (session cookie set), `second_factor_required` or `enrolment_required` with a pending token.").body::<LoginBody>().out::<LoginResponse>(),
+        op("post", "/auth/login/second-factor", "auth_login_second_factor", "Server mode: finish signing in with a TOTP code or a recovery code.").body::<SecondFactorBody>().out::<LoginResponse>(),
+        op("post", "/auth/login/enrol", "auth_login_enrol", "Server mode: start the first TOTP enrolment of an account that must have a second factor. Returns the secret once.").body::<EnrolBeginBody>().out::<TotpEnrolmentResponse>(),
+        op("post", "/auth/login/enrol/confirm", "auth_login_enrol_confirm", "Server mode: confirm the first enrolment with a code. Signs in and returns the recovery codes once.").body::<EnrolConfirmBody>().out::<LoginResponse>(),
+        op("post", "/auth/invite/accept", "auth_invite_accept", "Server mode: accept an invite (choose a username and password); continues like the password step.").body::<InviteAcceptBody>().out::<LoginResponse>(),
+        op("get", "/auth/me", "auth_me", "Server mode: the signed-in account, its role on this project and its session.").out::<MeResponse>(),
+        op("post", "/auth/logout", "auth_logout", "Server mode: end this session.").out::<OkResponse>(),
+        op("get", "/auth/sessions", "auth_sessions", "Server mode: the signed-in user's live sessions.").out::<Vec<SessionView>>(),
+        op("post", "/auth/sessions/revoke-all", "auth_sessions_revoke_all", "Server mode: sign out everywhere (optionally keeping this session).").body::<RevokeAllBody>().out::<RevokedResponse>(),
+        op("delete", "/auth/sessions/{reference}", "auth_session_revoke", "Server mode: end one of the user's sessions by its reference.").out::<OkResponse>(),
+        op("post", "/auth/password", "auth_password", "Server mode: change the password. Needs a fresh sign-in; ends the other sessions and renews this one.").body::<PasswordBody>().out::<OkResponse>(),
+        op("post", "/auth/totp/begin", "auth_totp_begin", "Server mode: start enrolling an authenticator (TOTP). Needs a fresh sign-in. Returns the secret once.").out::<TotpEnrolmentResponse>(),
+        op("post", "/auth/totp/confirm", "auth_totp_confirm", "Server mode: confirm the enrolment with a code; returns new recovery codes once. Needs a fresh sign-in.").body::<TotpConfirmBody>().out::<RecoveryCodesResponse>(),
+        op("post", "/auth/totp/disable", "auth_totp_disable", "Server mode: turn the authenticator off (refused for accounts that must keep one) and end all sessions. Needs a fresh sign-in.").out::<OkResponse>(),
+        op("post", "/auth/recovery-codes", "auth_recovery_codes", "Server mode: make ten new recovery codes; the old ones stop working. Needs a fresh sign-in.").out::<RecoveryCodesResponse>(),
+        op("get", "/auth/users", "auth_users", "Server mode, server admins: every account with its role on this project.").out::<Vec<UserView>>(),
+        op("post", "/auth/users/{id}/disable", "auth_user_disable", "Server mode, server admins: disable an account and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/users/{id}/enable", "auth_user_enable", "Server mode, server admins: enable an account again. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/users/{id}/reset-second-factor", "auth_user_reset_second_factor", "Server mode, server admins: remove an account's second factor and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("get", "/auth/invites", "auth_invites", "Server mode: invites (all for server admins, this project's for its owners).").out::<Vec<InviteView>>(),
+        op("post", "/auth/invites", "auth_invite_create", "Server mode: invite someone to this project with a role. Needs a fresh sign-in. The token is shown once.").body::<InviteCreateBody>().out::<InviteCreated>(),
+        op("delete", "/auth/invites/{id}", "auth_invite_revoke", "Server mode: revoke an unused invite. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
     ]
 }

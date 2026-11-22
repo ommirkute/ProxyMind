@@ -1134,6 +1134,21 @@ class EngageFilter(TypedDict, total=False):
     max_scan: _t.Optional[int]
 
 
+class EnrolBeginBody(TypedDict):
+    # The `pending` token of the password step that answered `enrolment_required`.
+    pending: str
+
+
+class _EnrolConfirmBodyRequired(TypedDict):
+    # A TOTP code from the authenticator that holds the new secret.
+    code: str
+    pending: str
+
+
+class EnrolConfirmBody(_EnrolConfirmBodyRequired, total=False):
+    next: _t.Optional[str]
+
+
 class EventsQuery(TypedDict, total=False):
     """Query of `GET /events`."""
     # Comma-separated topics, or `all`; `counters` adds the legacy event. Missing: only the legacy `counters` event.
@@ -2080,6 +2095,50 @@ class InterceptState(TypedDict):
     settings: "InterceptSettings"
 
 
+class _InviteAcceptBodyRequired(TypedDict):
+    # The token from the invite link (`#invite=<token>`).
+    invite: str
+    password: str
+    username: str
+
+
+class InviteAcceptBody(_InviteAcceptBodyRequired, total=False):
+    display_name: _t.Optional[str]
+    next: _t.Optional[str]
+
+
+class _InviteCreateBodyRequired(TypedDict):
+    # The role the invited person gets on the served project.
+    role: "RoleName"
+
+
+class InviteCreateBody(_InviteCreateBodyRequired, total=False):
+    # How long the invite lives, in hours (default 72, at most 720).
+    ttl_hours: _t.Optional[int]
+
+
+class InviteCreated(TypedDict):
+    expires_at: int
+    id: str
+    role: str
+    # The invite secret. Shown once; only its HMAC is stored.
+    token: str
+    # `<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server.
+    url: str
+
+
+class InviteView(TypedDict):
+    created_at: int
+    created_by: str
+    expires_at: int
+    id: str
+    project_id: _t.Optional[str]
+    revoked_at: _t.Optional[int]
+    role: str
+    used_at: _t.Optional[int]
+    used_by: _t.Optional[str]
+
+
 class IssueLink(TypedDict):
     """An issue created for a finding in another system."""
     by: str
@@ -2271,6 +2330,16 @@ class LogicReport(TypedDict):
     flow_paths: _t.List[str]
 
 
+class _LoginBodyRequired(TypedDict):
+    password: str
+    username: str
+
+
+class LoginBody(_LoginBodyRequired, total=False):
+    # Where to go afterwards; only a path on this origin is kept.
+    next: _t.Optional[str]
+
+
 class LoginRecording(TypedDict):
     """What a recording produced (names only; values stay in the identity)."""
     cookies: _t.List[str]
@@ -2280,6 +2349,20 @@ class LoginRecording(TypedDict):
     name: str
     notes: _t.List[str]
     steps: _t.List["RecordedStep"]
+
+
+class LoginResponse(TypedDict):
+    """The answer of every sign-in step."""
+    expires_at: _t.Optional[int]
+    # Where to go next: the `next` the client sent if it is a path on this origin, else `/`.
+    next: str
+    # The 5-minute token for the next step (not a session).
+    pending: _t.Optional[str]
+    # Shown once, at first enrolment.
+    recovery_codes: _t.Optional[_t.List[str]]
+    step: "StepName"
+    # Present once signed in.
+    user: _t.Optional["UserView"]
 
 
 class Macro(TypedDict, total=False):
@@ -2362,6 +2445,18 @@ class _MatrixRowRequired(TypedDict):
 class MatrixRow(_MatrixRowRequired, total=False):
     # The identity the recorded request was made as.
     owner: _t.Optional[str]
+
+
+class MeResponse(TypedDict):
+    # The actor name used in the project's audit log (`human:<username>`).
+    actor: str
+    # Signed in within the last 10 minutes: sensitive actions are allowed.
+    fresh: bool
+    project_id: str
+    # The user's role on the served project; absent for a server admin who is not a member.
+    role: _t.Optional[str]
+    session: "SessionView"
+    user: "UserView"
 
 
 class Memory(TypedDict):
@@ -2516,6 +2611,10 @@ class NoiseMask(TypedDict):
     json_paths: _t.List[str]
     # Words that vary in text/HTML bodies.
     words: _t.List[str]
+
+
+class OkResponse(TypedDict):
+    ok: bool
 
 
 # What the proxy does with a message when its hook fails.
@@ -2690,6 +2789,11 @@ class ParamSummary(TypedDict):
 ParamWhere = _t.Literal["query", "body", "json", "cookie", "multipart"]
 
 Part = _t.Literal["request_first_line", "request_header", "request_body", "response_first_line", "response_header", "response_body"]
+
+class PasswordBody(TypedDict):
+    current: str
+    new_password: str
+
 
 class PayloadBody(TypedDict, total=False):
     """Body of `POST /collaborator/payloads`."""
@@ -3172,6 +3276,11 @@ class RecordingSettings(TypedDict, total=False):
     record_devices: _t.List[str]
 
 
+class RecoveryCodesResponse(TypedDict):
+    # Ten single-use codes; shown once. Earlier ones stop working.
+    recovery_codes: _t.List[str]
+
+
 class RecursiveGrep(TypedDict):
     """Payloads that come from the responses: `first`, then whatever `extract`
     finds in each response, up to `count` requests.
@@ -3376,6 +3485,16 @@ class ReviewItem(TypedDict):
     what: str
 
 
+class RevokeAllBody(TypedDict, total=False):
+    # Keep the session making the request (default: end every session, this one too).
+    keep_current: bool
+
+
+class RevokedResponse(TypedDict):
+    # How many sessions ended.
+    revoked: int
+
+
 class RoeBody(TypedDict):
     """Body of `PUT /roe` and `POST /roe/check`."""
     # The rules of engagement, as YAML.
@@ -3390,6 +3509,9 @@ class RoeView(TypedDict):
 
 
 Role = _t.Literal["user", "assistant"]
+
+# A role in the served project.
+RoleName = _t.Literal["owner", "tester", "viewer"]
 
 class RulePrefix(TypedDict):
     op: _t.Literal["prefix"]
@@ -3734,6 +3856,17 @@ class SearchResult(_SearchResultRequired, total=False):
     next_before_id: _t.Optional[int]
 
 
+class _SecondFactorBodyRequired(TypedDict):
+    # A six-digit TOTP code or a recovery code (`ABCD-EFGH-IJKL-MNOP`).
+    code: str
+    # The `pending` token of the password step.
+    pending: str
+
+
+class SecondFactorBody(_SecondFactorBodyRequired, total=False):
+    next: _t.Optional[str]
+
+
 class _SecretStatusRequired(TypedDict):
     # `saved`, `environment` (a `env:NAME` reference whose variable is set) or `missing`.
     source: str
@@ -3804,12 +3937,21 @@ class SessionRule(TypedDict, total=False):
 
 
 class SessionView(TypedDict):
-    macros: _t.List["Macro"]
-    rules: _t.List["SessionRule"]
-    # Who saved these settings (macro steps run as them). Set by the service.
-    saved_by: str
-    # Current variable values from macro runs.
-    variables: _t.Dict[str, str]
+    """One browser session of the signed-in user."""
+    absolute_expires_at: int
+    # `password`, `password+totp`, `password+recovery`.
+    auth_method: str
+    # When the person last signed in; the fresh-login check reads this.
+    authenticated_at: int
+    client_addr: _t.Optional[str]
+    created_at: int
+    # This is the session making the request.
+    current: bool
+    idle_expires_at: int
+    last_seen_at: int
+    # Safe to show and to pass to `DELETE /auth/sessions/{reference}`.
+    reference: str
+    user_agent: _t.Optional[str]
 
 
 class SetValue(TypedDict, total=False):
@@ -3820,6 +3962,18 @@ class SetValue(TypedDict, total=False):
 
 
 SetWhere = _t.Literal["header", "cookie", "param"]
+
+class _SetupBodyRequired(TypedDict):
+    password: str
+    # The token from the setup URL the server printed (`#setup=<token>`).
+    setup_token: str
+    username: str
+
+
+class SetupBody(_SetupBodyRequired, total=False):
+    display_name: _t.Optional[str]
+    next: _t.Optional[str]
+
 
 Severity = _t.Literal["info", "low", "medium", "high"]
 
@@ -3900,6 +4054,14 @@ class Snippet(TypedDict):
     # Character offsets of the match within `text`.
     start: int
     text: str
+
+
+class StateResponse(TypedDict):
+    server_mode: bool
+    # Setup is served here (TLS, or the machine the server runs on).
+    setup_allowed: bool
+    # No owner exists yet: only `setup` works.
+    setup_required: bool
 
 
 class Status(TypedDict):
@@ -4052,6 +4214,9 @@ class StepSend(_StepSendRequired, total=False):
 
 # One step of a workflow.
 Step = _t.Union["StepMatch", "StepAssert", "StepExtract", "StepTransform", "StepSend"]
+
+# Which step of signing in comes next.
+StepName = _t.Literal["authenticated", "second_factor_required", "enrolment_required"]
 
 class _StepRunRequired(TypedDict):
     elapsed_ms: int
@@ -4324,6 +4489,17 @@ class TokensBody(TypedDict):
 
 ToolProfile = _t.Literal["full", "compact"]
 
+class TotpConfirmBody(TypedDict):
+    code: str
+
+
+class TotpEnrolmentResponse(TypedDict):
+    # `otpauth://` URI for a QR code. Shown once.
+    otpauth_uri: str
+    # For typing into an authenticator app. Shown once.
+    secret_base32: str
+
+
 class TriageBody(TypedDict, total=False):
     """Body of `POST /traffic/triage`."""
     # Only exchanges whose host contains this.
@@ -4509,6 +4685,23 @@ class UpstreamRule(TypedDict, total=False):
     username: str
     # `direct`, `http://host:port` (CONNECT for HTTPS) or `socks5://host:port`.
     via: str
+
+
+class UserView(TypedDict):
+    """An account as the API shows it. Never holds a credential."""
+    created_at: int
+    display_name: str
+    # Stable id (`u_…`).
+    id: str
+    last_login_at: _t.Optional[int]
+    # The user's role on the served project (`owner`, `tester`, `viewer`); absent for non-members.
+    role: _t.Optional[str]
+    # May manage accounts; has no project access by itself.
+    server_admin: bool
+    # `active` or `disabled`.
+    status: str
+    # The handle, lower case.
+    username: str
 
 
 class Validity(TypedDict, total=False):

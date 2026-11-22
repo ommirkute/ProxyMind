@@ -82,6 +82,11 @@ impl Accounts {
         find_user_by_name(&self.conn(), &name)
     }
 
+    /// Does any server admin exist (active or not)? False means the server is waiting to be set up (bootstrap).
+    pub fn has_server_admin(&self) -> Result<bool> {
+        owner_exists(&self.conn())
+    }
+
     pub fn list_users(&self) -> Result<Vec<User>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!("SELECT {USER_COLS} FROM users ORDER BY created_at, id"))?;
