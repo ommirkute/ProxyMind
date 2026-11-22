@@ -95,6 +95,8 @@ function viaProxy(proxyPort, shopPort, raw) {
     s.on("data", (d) => (out += d));
     s.on("end", () => resolve(out));
     s.on("error", reject);
+    // A connection the other side keeps open ends at the deadline with what arrived (never left pending).
+    s.on("close", () => resolve(out));
     setTimeout(() => s.destroy(), 5000);
   });
 }
@@ -121,6 +123,8 @@ function rawTo(port, raw) {
     s.on("data", (d) => (out += d));
     s.on("end", () => resolve(out));
     s.on("error", reject);
+    // A connection the other side keeps open ends at the deadline with what arrived (never left pending).
+    s.on("close", () => resolve(out));
     setTimeout(() => s.destroy(), 5000);
   });
 }
@@ -1208,8 +1212,10 @@ try {
 
       // The preset that removes the advertisement is offered on the Rules page.
       await open("rules");
-      const titles = await page.getByTestId("rules-preset").locator("option").allTextContents();
-      check(titles.includes("Remove HTTP/3 advertisements (Alt-Svc h3)"), "the Rules page offers the \"Remove HTTP/3 advertisements\" preset");
+      // The presets load after the page opens: wait for the option rather than reading the list once.
+      const offered = await page.getByTestId("rules-preset").locator("option", { hasText: "Remove HTTP/3 advertisements (Alt-Svc h3)" })
+        .waitFor({ state: "attached", timeout: 10000 }).then(() => true, () => false);
+      check(offered, "the Rules page offers the \"Remove HTTP/3 advertisements\" preset");
     } finally {
       await putRoe(originalRoe);
       h3.kill();
@@ -1684,7 +1690,13 @@ match:
     await page.getByLabel("Delete listener 1").click();
     await page.getByTestId("listeners-save").click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="listener-status"]'));
-    check(await rawTo(extra, "GET / HTTP/1.1\r\n\r\n").then(() => false, () => true), "a removed listener stops");
+    // Removing a listener cancels its accept loop, which the runtime finishes a moment after the save returns.
+    let refused = false;
+    for (let i = 0; i < 50 && !refused; i++) {
+      refused = await rawTo(extra, "GET / HTTP/1.1\r\nConnection: close\r\n\r\n").then(() => false, () => true);
+      if (!refused) await sleep(100);
+    }
+    check(refused, "a removed listener stops");
   });
 
   await section("Capture modes: SOCKS5 and transparent listeners", async () => {
