@@ -243,26 +243,27 @@ fn token_refused() -> Response {
 }
 
 /// Single-user mode: a `pm3_` bearer token becomes the token's actor. Nothing is cached: the file is read now.
-async fn single_user_token(st: &AppState, token: &str, method: &Method, path: &str) -> Result<Me, Response> {
+/// The refusal is boxed: a `Response` is large, and the error path is the rare one.
+async fn single_user_token(st: &AppState, token: &str, method: &Method, path: &str) -> Result<Me, Box<Response>> {
     let Some(store) = st.tokens.clone() else {
         note_token_refused("this process has no token store");
-        return Err(token_refused());
+        return Err(Box::new(token_refused()));
     };
     let t = token.to_string();
     let auth = match tokio::task::spawn_blocking(move || store.authenticate(&t)).await {
         Ok(Ok(a)) => a,
         Ok(Err(pm_accounts::AccountError::TokenStore(e))) => {
             note_token_refused(&e);
-            return Err(token_refused());
+            return Err(Box::new(token_refused()));
         }
         _ => {
             note_token_refused("unknown, expired or revoked");
-            return Err(token_refused());
+            return Err(Box::new(token_refused()));
         }
     };
-    let Ok(actor) = Actor::parse(&auth.info.actor_id()) else { return Err(token_refused()) };
+    let Ok(actor) = Actor::parse(&auth.info.actor_id()) else { return Err(Box::new(token_refused())) };
     let me = Me::with_token(actor, TokenContext::of(&auth), None);
-    server_mode::token_restrictions(&me, method, path).map_err(|r| *r)?;
+    server_mode::token_restrictions(&me, method, path)?;
     st.service.policy().set_tier_cap(&me.actor, me.token.as_ref().and_then(|t| t.tier_cap));
     Ok(me)
 }
@@ -310,7 +311,8 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
                 add_security_headers(resp.headers_mut());
                 resp
             }
-            Err(mut r) => {
+            Err(r) => {
+                let mut r = *r;
                 add_security_headers(r.headers_mut());
                 r
             }
