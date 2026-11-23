@@ -210,7 +210,18 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     if is_api && changes_state && headers.get("x-proxymind").and_then(|v| v.to_str().ok()) != Some("1") {
         return (StatusCode::FORBIDDEN, "state-changing requests need the X-ProxyMind: 1 header").into_response();
     }
-    // The account endpoints exist for server mode only; the token does not open them.
+    // The account endpoints exist for server mode only; the token does not open them. The UI's start-up probe gets a
+    // plain answer, so a browser console shows no failed request in single-user mode.
+    if path == "/api/v1/auth/state" && *req.method() == Method::GET {
+        let mut resp = axum::Json(serde_json::json!({
+            "server_mode": false,
+            "setup_required": false,
+            "setup_allowed": false
+        }))
+        .into_response();
+        add_security_headers(resp.headers_mut());
+        return resp;
+    }
     if path.starts_with("/api/v1/auth/") {
         return (
             StatusCode::NOT_FOUND,

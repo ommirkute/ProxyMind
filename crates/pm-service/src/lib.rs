@@ -43,6 +43,7 @@ mod login_record;
 pub mod mcp_args;
 mod memory;
 mod mobile;
+pub use mobile::qr_svg;
 mod model;
 mod network;
 mod openapi;

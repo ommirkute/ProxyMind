@@ -147,7 +147,7 @@ fn parse_fib_trie(text: &str) -> Vec<IpAddr> {
 
 /// A QR code for `text` as a self-contained SVG: black modules on white with a four-module quiet zone, no scripts,
 /// no external references. None if the text does not fit in a QR code.
-pub(crate) fn qr_svg(text: &str) -> Option<String> {
+pub fn qr_svg(text: &str) -> Option<String> {
     use qrcode::{Color, EcLevel, QrCode};
     let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M).ok()?;
     let n = code.width();

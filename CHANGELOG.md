@@ -65,7 +65,19 @@ version may change project files, APIs and the CLI.
   reset-owner` prints a new setup URL and ends every session. In server mode the install token and `/auth?token=` do not
   work; single-user mode (`proxymind ui`, the desktop app) is unchanged. API handlers now take the actor from the
   request (`Me`) instead of one actor fixed at start. New routes are in `docs/api/openapi.json` and the generated
-  types. Not yet: roles enforced in the service (every member acts as a human), `pm3_` tokens, passkeys, OIDC, the UI pages.
+  types. Not yet: roles enforced in the service (every member acts as a human), `pm3_` tokens, passkeys, OIDC.
+
+- **Web UI for the project server** (ADR-0022 step 4, `docs/server-mode.md`, "The web UI"). In server mode the UI starts
+  with the one-time setup screen (`/#setup=…`), the invite screen (`/#invite=…`) or the sign-in (password, then an
+  authenticator code or a recovery code; first-time TOTP enrolment with a QR code and the secret as text; recovery codes
+  shown once with copy and download). A lost session returns to the sign-in and back to the same page; actions that
+  need a recent sign-in open a re-authentication dialog and are repeated once; an account without a role in the project
+  gets a clear screen. New navigation entries, server mode only: Account (who you are, sessions, password, authenticator,
+  recovery codes, sign out) and, for administrators and project owners, Users & invites (disable, enable, reset second
+  factor; create, copy and revoke invites). Single-user mode looks and behaves as before. `POST /auth/login/enrol` and
+  `POST /auth/totp/begin` now also return `qr_svg`. A browser test (`ui/tests/e2e-server.mjs`, run by `npm run
+  test:e2e`) starts `proxymind serve --accounts` and walks setup, enrolment, invites, sign-out, wrong password, sign-in
+  with a code and with a recovery code, session loss and re-authentication.
 
 - **Integrations** (roadmap 3.5, `docs/integrations.md`). Settings → Integrations, `/api/v1/integrations`,
   `proxymind integration list|test|send-finding`. **Jira, GitHub, GitLab:** "Create issue in…" on a finding makes an

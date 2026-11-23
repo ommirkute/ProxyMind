@@ -446,7 +446,7 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
      re-authentication endpoint. Fresh-login (10 minutes, on the server's clock) is required for invites (create and
      revoke), disabling, enabling and resetting users, TOTP enrol and removal, recovery codes and password change.
    - **Links with tokens put the token in the URL fragment** (`/#setup=…`, `/#invite=…`): a browser never sends it to a
-     server, and it stays out of logs and `Referer`. The UI task reads `location.hash`.
+     server, and it stays out of logs and `Referer`. The UI reads `location.hash` and removes the token from the address bar.
    - **Setup is served** over TLS, behind a trusted proxy that says HTTPS, or to a peer on loopback when there is no
      proxy; a proxy that is on loopback does not count as "this machine".
    - **Public URL and origins:** with `--public-url` the only allowed `Origin` and `Host` are that one (plus
@@ -466,10 +466,28 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    - **Not done, left for later:** `pm3_` tokens (step 5; `server_mode::authenticate_bearer` is the hook, and the install
      token is refused as a bearer); roles enforced by `require` and events filtered by membership (step 6; an event stream
      already open outlives its session's revocation until then); the server's signed audit checkpoints; member management
-     endpoints (invites and `set_membership` through the library only); passkeys and OIDC; the UI pages (a separate task).
+     endpoints (invites and `set_membership` through the library only); passkeys and OIDC.
      Account events are in `pm-accounts`' security log, which already records every sign-in, failure, logout, credential
      change, invite and admin action, so the API adds no second log (its entries carry no client address for admin actions
      yet).
+
+   *UI done 2026-11-23.* The web UI has the server-mode screens (`docs/server-mode.md`, "The web UI"). Where things are:
+   `ui/src/Root.tsx` (mode detection and the setup, invite, sign-in, not-a-member and re-authentication screens),
+   `ui/src/authparts.tsx` (the shared steps: second factor, enrolment, recovery codes), `ui/src/pages/Account.tsx` (the
+   Account and Users & invites pages), `ui/src/api.ts` (the 401 and `fresh_login_required` hooks), and the browser test
+   `ui/tests/e2e-server.mjs` (run by `npm run test:e2e`). Decisions, on purpose:
+   - **Mode is detected once at start-up** with `GET /auth/state`: only a 200 with `server_mode: true` is server mode. In
+     single-user mode that URL answers `{"server_mode": false}` (with the install token; the other account endpoints are
+     404 there) or 401 (no token), and the UI renders the app as before, with no extra screen and no failed request.
+   - **One backend addition:** `TotpEnrolmentResponse` now has `qr_svg`, the otpauth URI as a self-contained SVG made by the
+     same `qr_svg` function the proxy-setup page uses (`pm_service::qr_svg` is public now). The UI has no QR code of its
+     own, and adding a library was ruled out. The secret is in the response anyway; the SVG adds nothing the client did
+     not already get.
+   - **A lost session (any 401 `unauthenticated`) unmounts the app** (closing the event stream), shows the sign-in with a
+     notice and returns to the same `#/route` afterwards. A 403 `fresh_login_required` opens a re-authentication dialog
+     (password, then code), and the call is repeated once after it. `not_a_member` has its own screen.
+   - **No secret is kept:** passwords, codes, the TOTP secret, recovery codes and tokens live in component state only (never
+     in `localStorage`, `sessionStorage` or the console). Recovery codes are offered for copy and as a `data:` download.
 5. **Tokens.** `pm3_` tokens for agents, CI and plugins, in both modes; `proxymind token …`; `proxymind login`; the MCP bridge
    to a server. Test: actor derived from the token, role ceiling and tier cap, expiry, revocation takes effect on the next
    request, a token cannot create tokens, tokens never appear in logs or audit detail.

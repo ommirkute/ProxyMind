@@ -8,8 +8,7 @@ not finished.
 **Not finished yet (read this first).** Every signed-in member of the served project acts as a human with full powers:
 roles (owner, tester, viewer) are stored and shown, but `pm-service` does not enforce them until ADR-0022 step 6. Agent and
 CI tokens (`pm3_`, `proxymind login`, the MCP bridge to a server) are step 5; the install token is refused in server mode
-and nothing replaces it yet. The web UI has no pages for sign-in, setup or invites yet; until the UI task lands the
-endpoints in the last section are used directly. Passkeys and OIDC are steps 7 and 8. Treat a server today as a preview
+and nothing replaces it yet. Passkeys and OIDC are steps 7 and 8. Treat a server today as a preview
 for testing the mechanics, not for a client engagement.
 
 ## What you need
@@ -100,7 +99,7 @@ loopback, to a peer on the same machine; otherwise the setup endpoint answers 40
 at least 12 characters), makes it **server admin and owner of the served project**, and goes straight into TOTP
 enrolment: there is no session until an authenticator is confirmed. The recovery codes shown at that moment are shown once.
 
-Invited people do the same through an invite (`POST /api/v1/auth/invites`, or the link
+In the browser, open that URL: the web UI shows the setup screen (see "The web UI" below). Invited people do the same through an invite (`POST /api/v1/auth/invites`, or the link
 `https://pm.example.com/#invite=<token>`): choose a username and password, enrol an authenticator, sign in.
 
 ### Lost the owner
@@ -134,6 +133,34 @@ creates a new owner (disable the old account afterwards). It works while the ser
   the process log or into an error message (a test greps for them).
 - **Not accepted in server mode:** the install token (`/auth?token=` is 404, `Authorization: Bearer` is 401).
 
+## The web UI
+
+The same web UI as single-user mode, with a few screens in front of it. When it loads it asks `GET /api/v1/auth/state`; in
+single-user mode that does not answer 200 and nothing changes (no extra screen, no extra navigation entry).
+
+- **Setup** (`/#setup=<token>`): choose username, display name and password, then add an authenticator (QR code, or
+  type the secret, then a code), then save the ten recovery codes, which are shown once with copy and download. The
+  token is taken out of the address bar as soon as it is read. Without the token the page says the link is printed on
+  the server console (and lets you paste it); where setup is not served (no TLS and not the server's own machine) it says so.
+- **Sign-in:** username and password, then the code from the authenticator app, or "Use a recovery code". An account without
+  an authenticator goes through the enrolment first. A wrong password, unknown user and wrong code all show the same
+  text; a throttled attempt shows the server's message with the wait.
+- **Invite** (`/#invite=<token>`): choose username, display name and password, then the same enrolment and recovery codes.
+- **Session lost:** when the server answers 401 (session expired, signed out elsewhere, password changed) the app is
+  replaced by the sign-in with "Your session ended", and after signing in you are back on the page you were on.
+- **Fresh sign-in:** actions that need one (invites, users, password, authenticator, recovery codes) open a "Confirm it's
+  you" dialog (password, then code); the action is then repeated once. Cancelling leaves it undone.
+- **Not a member:** a signed-in account with no role in the served project gets a screen saying so, with a sign-out button.
+- **Account** (navigation entry "Account", server mode only): who you are (user, actor, role, project), your sessions
+  (this one is marked; sign one out, or sign out everywhere else), change password, set up a new authenticator or turn it
+  off (some accounts must keep one), new recovery codes, sign out.
+- **Users & invites** (server administrators and project owners): users with disable, enable and reset second factor
+  (administrators); invites with role and expiry, the link shown once with a copy button, the list and revoke.
+
+Nothing secret is written to browser storage or the console. `next` is followed only if it is a path on this origin.
+`POST /auth/login/enrol` and `POST /auth/totp/begin` also return `qr_svg`, the authenticator URI as an SVG QR code (the UI
+has no QR library).
+
 ## The auth endpoints (for the UI and scripts)
 
 All under `/api/v1/auth`, JSON, described with their request and response types in `docs/api/openapi.json`. Every
@@ -145,7 +172,7 @@ state-changing call needs the CSRF headers above. Errors are `{"error": "<text>"
 | `POST /setup` `{setup_token, username, display_name?, password, next?}` | no | First owner; answers like `login` (`enrolment_required`). |
 | `POST /login` `{username, password, next?}` | no | `{step, pending?, expires_at?, user?, recovery_codes?, next}` with `step` = `authenticated` (cookie set), `second_factor_required` or `enrolment_required`. |
 | `POST /login/second-factor` `{pending, code, next?}` | no | TOTP code or recovery code (`ABCD-EFGH-IJKL-MNOP`); `authenticated` and the cookie. |
-| `POST /login/enrol` `{pending}` | no | `{secret_base32, otpauth_uri}`, once. |
+| `POST /login/enrol` `{pending}` | no | `{secret_base32, otpauth_uri, qr_svg}`, once. |
 | `POST /login/enrol/confirm` `{pending, code, next?}` | no | Confirms, sets the cookie, returns `recovery_codes` once. |
 | `POST /invite/accept` `{invite, username, display_name?, password, next?}` | no | Creates the account, continues like `login`. |
 | `GET /me` | yes | `{user, actor, project_id, role, session, fresh}` |
@@ -159,7 +186,8 @@ state-changing call needs the CSRF headers above. Errors are `{"error": "<text>"
 `next` is a path on this server: it must start with exactly one `/`, hold only visible ASCII and no backslash, else the answer
 says `/`.
 
-In single-user mode these endpoints answer 404.
+In single-user mode these endpoints answer 404, except `GET /state`, which answers `{"server_mode": false, …}` so the UI
+knows which mode it is in.
 
 ## Limits to know
 

@@ -4454,6 +4454,8 @@ export interface TotpConfirmBody {
 export interface TotpEnrolmentResponse {
   /** `otpauth://` URI for a QR code. Shown once. */
   otpauth_uri: string;
+  /** The same URI as a QR code (a self-contained SVG), so the UI needs no QR library. Shown once. */
+  qr_svg: string | null;
   /** For typing into an authenticator app. Shown once. */
   secret_base32: string;
 }

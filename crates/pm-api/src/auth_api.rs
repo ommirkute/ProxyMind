@@ -283,6 +283,18 @@ pub(crate) struct TotpEnrolmentResponse {
     secret_base32: String,
     /// `otpauth://` URI for a QR code. Shown once.
     otpauth_uri: String,
+    /// The same URI as a QR code (a self-contained SVG), so the UI needs no QR library. Shown once.
+    qr_svg: Option<String>,
+}
+
+impl TotpEnrolmentResponse {
+    fn of(e: &pm_accounts::TotpEnrolment) -> Self {
+        Self {
+            secret_base32: e.secret_base32.clone(),
+            otpauth_uri: e.otpauth_uri.clone(),
+            qr_svg: pm_service::qr_svg(&e.otpauth_uri),
+        }
+    }
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -581,11 +593,7 @@ pub(crate) async fn auth_login_enrol(State(st): State<AppState>, Json(b): Json<E
     let sm = server(&st)?;
     limit(&[(&b.pending, 256)])?;
     let e = sm.run(move |a| a.begin_totp_enrolment_pending(&b.pending)).await??;
-    Ok(reply(
-        StatusCode::OK,
-        &TotpEnrolmentResponse { secret_base32: e.secret_base32.clone(), otpauth_uri: e.otpauth_uri.clone() },
-        &[],
-    ))
+    Ok(reply(StatusCode::OK, &TotpEnrolmentResponse::of(&e), &[]))
 }
 
 pub(crate) async fn auth_login_enrol_confirm(
@@ -728,11 +736,7 @@ pub(crate) async fn auth_totp_begin(State(st): State<AppState>, me: Me) -> AuthR
     fresh(&sm, c)?;
     let uid = c.user.id.clone();
     let e = sm.run(move |a| a.totp_begin_enrolment(&uid)).await??;
-    Ok(reply(
-        StatusCode::OK,
-        &TotpEnrolmentResponse { secret_base32: e.secret_base32.clone(), otpauth_uri: e.otpauth_uri.clone() },
-        &[],
-    ))
+    Ok(reply(StatusCode::OK, &TotpEnrolmentResponse::of(&e), &[]))
 }
 
 /// Confirms the enrolment with a code, makes new recovery codes (shown once) and gives the session a new id.

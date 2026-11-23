@@ -4496,6 +4496,8 @@ class TotpConfirmBody(TypedDict):
 class TotpEnrolmentResponse(TypedDict):
     # `otpauth://` URI for a QR code. Shown once.
     otpauth_uri: str
+    # The same URI as a QR code (a self-contained SVG), so the UI needs no QR library. Shown once.
+    qr_svg: _t.Optional[str]
     # For typing into an authenticator app. Shown once.
     secret_base32: str
 

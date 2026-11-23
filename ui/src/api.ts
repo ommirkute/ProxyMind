@@ -3,12 +3,51 @@
 // server requires.
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** The machine code of an `{error, code}` answer (server mode), e.g. `fresh_login_required`. */
+    public code?: string,
+    /** Seconds from `Retry-After` (throttled sign-ins). */
+    public retryAfter?: number,
+  ) {
     super(message);
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+/**
+ * Hooks the server-mode shell installs (see auth.tsx). In single-user mode nothing is installed and `call` behaves as
+ * it always did. `reauthenticate` resolves true once the person signed in again.
+ */
+export const authHooks: {
+  serverMode: boolean;
+  onUnauthenticated?: () => void;
+  onNotMember?: () => void;
+  reauthenticate?: () => Promise<boolean>;
+} = { serverMode: false };
+
+function parseError(res: Response, text: string): ApiError {
+  let msg = text;
+  let code: string | undefined;
+  try {
+    const j = JSON.parse(text);
+    msg = j.error ?? text;
+    code = typeof j.code === "string" ? j.code : undefined;
+  } catch {
+    /* plain text error */
+  }
+  const ra = Number(res.headers.get("Retry-After"));
+  return new ApiError(res.status, msg || res.statusText, code, Number.isFinite(ra) && ra > 0 ? ra : undefined);
+}
+
+/** In server mode: a lost session sends the person to the sign-in screen, a missing membership to its own screen. */
+function noteAuthFailure(e: ApiError) {
+  if (!authHooks.serverMode) return;
+  if (e.status === 401 && e.code === "unauthenticated") authHooks.onUnauthenticated?.();
+  else if (e.status === 403 && e.code === "not_a_member") authHooks.onNotMember?.();
+}
+
+async function call<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
   const headers: Record<string, string> = {};
   if (method !== "GET") headers["X-ProxyMind"] = "1";
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -20,13 +59,14 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   });
   const text = await res.text();
   if (!res.ok) {
-    let msg = text;
-    try {
-      msg = JSON.parse(text).error ?? text;
-    } catch {
-      /* plain text error */
+    const err = parseError(res, text);
+    // A sensitive action needs a recent sign-in: ask once, then repeat it once.
+    if (authHooks.serverMode && !retried && err.status === 403 && err.code === "fresh_login_required" && authHooks.reauthenticate) {
+      if (await authHooks.reauthenticate()) return call<T>(method, path, body, true);
+      throw err;
     }
-    throw new ApiError(res.status, msg || res.statusText);
+    noteAuthFailure(err);
+    throw err;
   }
   return (text ? JSON.parse(text) : null) as T;
 }
@@ -41,7 +81,11 @@ export const api = {
   text: async (path: string): Promise<string> => {
     const res = await fetch(`/api/v1${path}`, { credentials: "same-origin" });
     const text = await res.text();
-    if (!res.ok) throw new ApiError(res.status, text || res.statusText);
+    if (!res.ok) {
+      const err = parseError(res, text);
+      noteAuthFailure(err);
+      throw err;
+    }
     return text;
   },
 };

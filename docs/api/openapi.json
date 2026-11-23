@@ -14339,6 +14339,13 @@
             "description": "`otpauth://` URI for a QR code. Shown once.",
             "type": "string"
           },
+          "qr_svg": {
+            "description": "The same URI as a QR code (a self-contained SVG), so the UI needs no QR library. Shown once.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "secret_base32": {
             "description": "For typing into an authenticator app. Shown once.",
             "type": "string"
@@ -14346,7 +14353,8 @@
         },
         "required": [
           "secret_base32",
-          "otpauth_uri"
+          "otpauth_uri",
+          "qr_svg"
         ],
         "type": "object"
       },

@@ -308,6 +308,8 @@ impl Harness {
         assert_eq!(r.status, 200, "{}", r.body);
         let secret = r.json()["secret_base32"].as_str().unwrap().to_string();
         assert!(r.json()["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+        let qr = r.json()["qr_svg"].as_str().unwrap().to_string();
+        assert!(qr.starts_with("<svg ") && !qr.contains("<script"), "a self-contained QR code of the URI");
         let code = self.code(&secret);
         let r = self
             .api(None, "POST", "/api/v1/auth/login/enrol/confirm", Some(json!({ "pending": pending, "code": code })))
@@ -476,8 +478,13 @@ async fn single_user_mode_is_unchanged_and_has_no_account_endpoints() {
         let r = call(m, path.clone(), vec![("X-ProxyMind", "1".into())]).await;
         assert_eq!(r.status, 401, "{} {}", op.method, op.path);
         assert_eq!(r.body, "missing or wrong ProxyMind token");
-        // With the token, the account endpoints are simply not there.
-        if op.path.starts_with("/api/v1/auth/") {
+        // With the token, the account endpoints are simply not there; the state probe says "not server mode".
+        if op.path == "/api/v1/auth/state" && m == "GET" {
+            let r =
+                call(m, path, vec![("X-ProxyMind", "1".into()), ("Authorization", format!("Bearer {TOKEN}"))]).await;
+            assert_eq!(r.status, 200, "{}", r.body);
+            assert_eq!(r.json()["server_mode"], false);
+        } else if op.path.starts_with("/api/v1/auth/") {
             let r =
                 call(m, path, vec![("X-ProxyMind", "1".into()), ("Authorization", format!("Bearer {TOKEN}"))]).await;
             assert_eq!(r.status, 404, "{} {}: {}", op.method, op.path, r.body);
