@@ -1,11 +1,12 @@
 //! `server.db` schema. Append-only: never edit a released entry (tracked in `user_version`).
 //!
-//! Tables ADR-0022 lists that later steps add as new entries: `tokens` (step 5), `oidc_providers` (step 8) and
-//! `checkpoints`. Passkeys (step 7) need no schema change: a `credentials` row of kind `passkey` with the credential id
+//! Tables ADR-0022 lists that later steps add as new entries: `oidc_providers` (step 8) and `checkpoints`. `tokens`
+//! is the second entry (step 5). Passkeys (step 7) need no schema change: a `credentials` row of kind `passkey` with the credential id
 //! in `external_id`, the COSE public key in `secret`, the signature counter in `counter` and transports, AAGUID and
 //! name in `meta` / `label`. OIDC links use kind `oidc` with `(iss, sub)` in `external_id`.
 
-pub(crate) const MIGRATIONS: &[&str] = &[r#"
+pub(crate) const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE users (
     id            TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
@@ -120,7 +121,29 @@ CREATE TABLE security_audit (
     prev        BLOB NOT NULL,
     mac         BLOB NOT NULL
 );
-"#];
+"#,
+    r#"
+CREATE TABLE tokens (
+    id             TEXT PRIMARY KEY,
+    token_hash     BLOB NOT NULL UNIQUE,
+    kind           TEXT NOT NULL CHECK (kind IN ('agent', 'ci', 'plugin')),
+    name           TEXT NOT NULL,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id     TEXT NOT NULL,
+    role           TEXT NOT NULL CHECK (role IN ('tester', 'viewer')),
+    tier_cap       TEXT,
+    created_at     INTEGER NOT NULL,
+    created_by     TEXT NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    last_used_at   INTEGER,
+    use_count      INTEGER NOT NULL DEFAULT 0,
+    revoked_at     INTEGER,
+    revoked_reason TEXT
+);
+CREATE INDEX tokens_user ON tokens(user_id);
+CREATE INDEX tokens_project ON tokens(project_id);
+"#,
+];
 
 pub(crate) fn apply(conn: &mut rusqlite::Connection) -> crate::error::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;

@@ -1477,3 +1477,534 @@ impl Harness {
         r.set_cookie(self.cookie_name()).unwrap().1
     }
 }
+
+// ---- tokens (ADR-0022 step 5) -------------------------------------------------------------------------------------
+
+/// Makes a token through the API as a signed-in person; returns the secret and the answer.
+async fn make_token(h: &Harness, who: &Signed, body: Value) -> (String, Value) {
+    let r = h.api(Some(&who.cookie), "POST", "/api/v1/tokens", Some(body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    (v["token"].as_str().unwrap().to_string(), v)
+}
+
+/// What curl, a CI job or the MCP bridge sends: the bearer header and nothing else a browser would add.
+async fn bearer(h: &Harness, method: &str, path: &str, token: &str, body: Option<Value>) -> Resp {
+    h.raw(method, path, &[("Authorization", format!("Bearer {token}"))], body).await
+}
+
+fn mcp_call(id: u32, name: &str, args: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": args}})
+}
+
+fn tool_json(r: &Resp) -> Value {
+    assert_eq!(r.status, 200, "{}", r.body);
+    let text = r.json()["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+    serde_json::from_str(&text).unwrap_or_else(|_| json!(text))
+}
+
+#[tokio::test]
+async fn a_token_acts_as_its_own_actor_and_the_client_cannot_choose_another() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let (secret, made) = make_token(&h, &owner, json!({"kind": "agent", "name": "claude"})).await;
+    assert!(secret.starts_with("pm3_agent_") && secret.len() == 4 + 5 + 1 + 64, "{secret}");
+    assert_eq!(made["actor"], "agent:claude");
+    assert_eq!(made["role"], "tester");
+    assert_eq!(made["status"], "active");
+    assert_eq!(made["owner"], owner.user_id.as_str());
+    // The default lifetime is 30 days.
+    assert_eq!(made["expires_at"].as_i64().unwrap() - made["created_at"].as_i64().unwrap(), 30 * 86_400);
+
+    let r = bearer(&h, "GET", "/api/v1/status", &secret, None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["you_are"], "agent:claude");
+    // Nothing the client sends changes who it is.
+    let r = h
+        .raw(
+            "GET",
+            "/api/v1/status?actor=human:owner&you_are=human:owner",
+            &[
+                ("Authorization", format!("Bearer {secret}")),
+                ("X-ProxyMind-Actor", "human:owner".into()),
+                ("X-Actor", "human:owner".into()),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(r.json()["you_are"], "agent:claude");
+    // The token is accepted in the Authorization header only: not in the query, not as a cookie.
+    let r = h.raw("GET", &format!("/api/v1/status?token={secret}&access_token={secret}"), &[], None).await;
+    assert_eq!(r.status, 401);
+    let r =
+        h.raw("GET", "/api/v1/status", &[("Cookie", format!("pm_session={secret}; pm_token={secret}"))], None).await;
+    assert_eq!(r.status, 401);
+    // Each kind is its own actor kind.
+    for (kind, name) in [("ci", "pipeline"), ("plugin", "hosts-panel")] {
+        let (s, v) = make_token(&h, &owner, json!({"kind": kind, "name": name})).await;
+        assert_eq!(v["actor"], format!("{kind}:{name}"));
+        assert_eq!(bearer(&h, "GET", "/api/v1/status", &s, None).await.json()["you_are"], format!("{kind}:{name}"));
+    }
+    // The install token is not a credential here, a malformed pm3_ is refused like a wrong one, and the answers say so
+    // in one way only.
+    let wrong = format!("pm3_agent_{}", "0".repeat(64));
+    for t in [wrong.as_str(), "pm3_agent_short", "pm3_", "install-token-that-server-mode-must-refuse"] {
+        let r = bearer(&h, "GET", "/api/v1/status", t, None).await;
+        assert_eq!(r.status, 401, "{t}");
+        assert!(r.body.len() < 200 && !r.body.contains(t), "{}", r.body);
+    }
+    let r = bearer(&h, "GET", "/api/v1/status", &wrong, None).await;
+    assert_eq!(r.code(), "invalid_token");
+    assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+    // Listing shows it without the secret, with its use.
+    let r = h.api(Some(&owner.cookie), "GET", "/api/v1/tokens", None).await;
+    assert_eq!(r.status, 200);
+    assert!(!r.body.contains(&secret) && !r.body.contains(&secret[secret.len() - 20..]));
+    let list = r.json();
+    let row = list.as_array().unwrap().iter().find(|t| t["name"] == "claude").unwrap();
+    assert!(row["use_count"].as_u64().unwrap() >= 2 && row["last_used_at"].is_i64(), "{row}");
+}
+
+#[tokio::test]
+async fn bearer_requests_skip_the_browser_layers_and_a_cookie_brings_them_back() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let (secret, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "claude"})).await;
+    let auth = ("Authorization", format!("Bearer {secret}"));
+    // No cookie: no Origin and no X-ProxyMind needed (a script or CI job sends neither); it gets to the handler.
+    let r = h.raw("POST", "/api/v1/findings", std::slice::from_ref(&auth), Some(json!({}))).await;
+    assert!(r.status != 403 || r.code() != "csrf", "{} {}", r.status, r.body);
+    let r = h
+        .raw("POST", "/api/v1/mcp", std::slice::from_ref(&auth), Some(json!({"jsonrpc":"2.0","id":1,"method":"ping"})))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    // The session cookie, valid or not, makes it a cookie request: the cookie path's layers apply in full.
+    for cookie in [owner.cookie.clone(), "0".repeat(64)] {
+        let with_cookie = ("Cookie", format!("pm_session={cookie}"));
+        let r = h.raw("POST", "/api/v1/findings", &[auth.clone(), with_cookie.clone()], Some(json!({}))).await;
+        assert_eq!((r.status, r.code().as_str()), (403, "csrf"), "cookie and bearer, no headers");
+        let r = h
+            .raw(
+                "POST",
+                "/api/v1/findings",
+                &[
+                    auth.clone(),
+                    with_cookie.clone(),
+                    ("X-ProxyMind", "1".into()),
+                    ("Origin", "https://evil.example".into()),
+                ],
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!((r.status, r.code().as_str()), (403, "csrf"), "cookie and bearer, wrong Origin");
+    }
+    // With the cookie and the browser headers the cookie wins: the person acts, not the token.
+    let r =
+        h.raw("GET", "/api/v1/status", &[auth.clone(), ("Cookie", format!("pm_session={}", owner.cookie))], None).await;
+    assert_eq!(r.json()["you_are"], "human:owner");
+    // Something that is not a pm3_ token is not a bearer credential here, so the browser layers apply to it too.
+    let r =
+        h.raw("POST", "/api/v1/findings", &[("Authorization", "Bearer something-else".into())], Some(json!({}))).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "csrf"));
+    let r = h.raw("GET", "/api/v1/status", &[("Authorization", "Bearer something-else".into())], None).await;
+    assert_eq!(r.status, 401);
+    // The scheme name is case-insensitive; a bare token is not a bearer header.
+    let r = h.raw("GET", "/api/v1/status", &[("Authorization", format!("bearer {secret}"))], None).await;
+    assert_eq!(r.status, 200);
+    let r = h.raw("GET", "/api/v1/status", &[("Authorization", secret.clone())], None).await;
+    assert_eq!(r.status, 401);
+    // Host checks still apply to bearer requests (DNS rebinding).
+    let r = h.raw("GET", "/api/v1/status", &[auth.clone(), ("Host", "evil.example".into())], None).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "bad_host"));
+}
+
+#[tokio::test]
+async fn a_token_cannot_create_list_or_revoke_tokens_or_use_account_endpoints() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let (secret, made) = make_token(&h, &owner, json!({"kind": "agent", "name": "claude"})).await;
+    let id = made["id"].as_str().unwrap().to_string();
+    let attempts = [
+        ("POST", "/api/v1/tokens".to_string(), Some(json!({"kind": "agent", "name": "child"}))),
+        ("GET", "/api/v1/tokens".to_string(), None),
+        ("GET", "/api/v1/tokens?all=true".to_string(), None),
+        ("DELETE", format!("/api/v1/tokens/{id}"), None),
+    ];
+    for (m, p, body) in attempts {
+        let r = bearer(&h, m, &p, &secret, body).await;
+        assert_eq!((r.status, r.code().as_str()), (403, "tokens_need_a_person"), "{m} {p}: {}", r.body);
+    }
+    for (m, p) in [
+        ("GET", "/api/v1/auth/me"),
+        ("GET", "/api/v1/auth/users"),
+        ("GET", "/api/v1/auth/sessions"),
+        ("POST", "/api/v1/auth/invites"),
+        ("POST", "/api/v1/auth/logout"),
+    ] {
+        let r = bearer(&h, m, p, &secret, Some(json!({"role": "tester"}))).await;
+        assert_eq!((r.status, r.code().as_str()), (403, "token_not_allowed"), "{m} {p}");
+    }
+    // Still alive: nothing above revoked it, and no child token exists.
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &secret, None).await.status, 200);
+    let list = h.api(Some(&owner.cookie), "GET", "/api/v1/tokens", None).await.json();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn token_rules_are_enforced_when_making_one() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let post = |body: Value| h.api(Some(&owner.cookie), "POST", "/api/v1/tokens", Some(body));
+    // Never owner or admin: not a role of a token, and nothing else is accepted.
+    for body in [
+        json!({"kind": "agent", "name": "x", "role": "owner"}),
+        json!({"kind": "agent", "name": "x", "role": "admin"}),
+        json!({"kind": "human", "name": "x"}),
+        json!({"kind": "agent", "name": "x", "tier_cap": "everything"}),
+        json!({"kind": "agent", "name": "x", "surprise": 1}),
+        json!({"kind": "agent", "name": "has space"}),
+        json!({"kind": "agent", "name": ""}),
+        json!({"kind": "agent", "name": "x", "expires_days": 0}),
+        json!({"kind": "agent", "name": "x", "expires_days": 366}),
+    ] {
+        let r = post(body.clone()).await;
+        assert!(r.status == 400 || r.status == 422, "{body}: {} {}", r.status, r.body);
+    }
+    let r =
+        post(json!({"kind": "agent", "name": "x", "expires_days": 365, "tier_cap": "active_safe", "role": "viewer"}))
+            .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    assert_eq!((v["role"].as_str(), v["tier_cap"].as_str()), (Some("viewer"), Some("active_safe")));
+    assert_eq!(v["expires_at"].as_i64().unwrap() - v["created_at"].as_i64().unwrap(), 365 * 86_400);
+    // A name is taken while its token lives, in any case.
+    let r = post(json!({"kind": "agent", "name": "X"})).await;
+    assert_eq!((r.status, r.code().as_str()), (409, "token_name_taken"));
+    assert_eq!(post(json!({"kind": "ci", "name": "x"})).await.status, 200, "another kind is another actor");
+    // Without a session, and without the browser headers: refused.
+    assert_eq!(
+        h.raw("POST", "/api/v1/tokens", &h.browser(), Some(json!({"kind": "agent", "name": "y"}))).await.status,
+        401
+    );
+    let cookie = ("Cookie", format!("pm_session={}", owner.cookie));
+    let r = h.raw("POST", "/api/v1/tokens", &[cookie], Some(json!({"kind": "agent", "name": "y"}))).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "csrf"));
+}
+
+#[tokio::test]
+async fn managing_other_peoples_tokens_needs_an_owner_and_a_fresh_sign_in() {
+    let h = Harness::start(Kind::Plain).await;
+    let mut owner = h.setup_owner().await;
+    let tester = h.invited_user(&owner, "tester1", "tester").await;
+    let viewer = h.invited_user(&owner, "viewer1", "viewer").await;
+    // A tester makes their own, lists their own, revokes their own: no fresh sign-in needed for one's own.
+    h.clock.advance(3600);
+    let (t_secret, t_made) = make_token(&h, &tester, json!({"kind": "agent", "name": "mine"})).await;
+    let r = h.api(Some(&tester.cookie), "GET", "/api/v1/tokens", None).await;
+    assert_eq!(r.json().as_array().unwrap().len(), 1);
+    // ...but not other people's, and not "all".
+    let r = h
+        .api(
+            Some(&tester.cookie),
+            "POST",
+            "/api/v1/tokens",
+            Some(json!({"kind": "agent", "name": "x", "for_user": "owner"})),
+        )
+        .await;
+    assert_eq!((r.status, r.code().as_str()), (403, "not_authorised"));
+    let r = h.api(Some(&tester.cookie), "GET", "/api/v1/tokens?all=true", None).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "not_authorised"));
+    // A viewer may not manage tokens at all.
+    let r = h.api(Some(&viewer.cookie), "POST", "/api/v1/tokens", Some(json!({"kind": "agent", "name": "v"}))).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "not_authorised"));
+    // The owner's session is an hour old: for someone else's, it must be fresh.
+    let r = h
+        .api(
+            Some(&owner.cookie),
+            "POST",
+            "/api/v1/tokens",
+            Some(json!({"kind": "ci", "name": "for-tester", "for_user": "tester1"})),
+        )
+        .await;
+    assert_eq!((r.status, r.code().as_str()), (403, "fresh_login_required"), "{}", r.body);
+    let r =
+        h.api(Some(&owner.cookie), "DELETE", &format!("/api/v1/tokens/{}", t_made["id"].as_str().unwrap()), None).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "fresh_login_required"), "{}", r.body);
+    assert_eq!(
+        bearer(&h, "GET", "/api/v1/status", &t_secret, None).await.status,
+        200,
+        "a refused revoke revokes nothing"
+    );
+    // ...but their own is not a sensitive action.
+    make_token(&h, &owner, json!({"kind": "agent", "name": "owners"})).await;
+    // After signing in again: fine, and the owner's list shows everyone's, with names.
+    h.relogin(&mut owner).await;
+    let (c_secret, c) =
+        make_token(&h, &owner, json!({"kind": "ci", "name": "for-tester", "for_user": "tester1"})).await;
+    assert_eq!(c["owner"], tester.user_id.as_str());
+    assert_eq!(c["owner_name"], "tester1");
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &c_secret, None).await.json()["you_are"], "ci:for-tester");
+    let all = h.api(Some(&owner.cookie), "GET", "/api/v1/tokens?all=true", None).await.json();
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    assert_eq!(h.api(Some(&owner.cookie), "GET", "/api/v1/tokens", None).await.json().as_array().unwrap().len(), 1);
+    // Not for a user who does not exist or is not a member.
+    let r = h
+        .api(
+            Some(&owner.cookie),
+            "POST",
+            "/api/v1/tokens",
+            Some(json!({"kind": "ci", "name": "ghost", "for_user": "nobody"})),
+        )
+        .await;
+    assert_eq!((r.status, r.code().as_str()), (404, "no_such_user"));
+    // The owner revokes the tester's; the tester cannot revoke the owner's.
+    let owners_id =
+        all.as_array().unwrap().iter().find(|t| t["name"] == "owners").unwrap()["id"].as_str().unwrap().to_string();
+    let r = h.api(Some(&tester.cookie), "DELETE", &format!("/api/v1/tokens/{owners_id}"), None).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "not_authorised"));
+    let r =
+        h.api(Some(&owner.cookie), "DELETE", &format!("/api/v1/tokens/{}", t_made["id"].as_str().unwrap()), None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &t_secret, None).await.status, 401, "dead at the next request");
+    let r = h.api(Some(&owner.cookie), "DELETE", "/api/v1/tokens/t_unknown", None).await;
+    assert_eq!((r.status, r.code().as_str()), (404, "no_such_token"));
+    // The security log has creation and revocation, and who did it, never a secret.
+    let log = format!("{:?}", h.accounts.security_log(300).unwrap());
+    assert!(log.contains("token_created") && log.contains("token_revoked") && log.contains("token_first_use"));
+    for s in [&t_secret, &c_secret] {
+        assert!(!log.contains(s.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn expiry_revocation_and_the_owners_state_take_effect_on_the_next_request() {
+    let h = Harness::start(Kind::Plain).await;
+    let mut owner = h.setup_owner().await;
+    let mut tester = h.invited_user(&owner, "tester1", "tester").await;
+    // Expiry, to the second.
+    let (short, _) = make_token(&h, &tester, json!({"kind": "ci", "name": "job", "expires_days": 1})).await;
+    h.clock.advance(86_399);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &short, None).await.status, 200);
+    h.clock.advance(1);
+    let r = bearer(&h, "GET", "/api/v1/status", &short, None).await;
+    assert_eq!((r.status, r.code().as_str()), (401, "invalid_token"));
+    h.relogin(&mut owner).await;
+    h.relogin(&mut tester).await;
+    // Revocation by the owner of the token.
+    let (s1, m1) = make_token(&h, &tester, json!({"kind": "agent", "name": "a1"})).await;
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s1, None).await.status, 200);
+    let r =
+        h.api(Some(&tester.cookie), "DELETE", &format!("/api/v1/tokens/{}", m1["id"].as_str().unwrap()), None).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s1, None).await.status, 401);
+    let listed = h.api(Some(&tester.cookie), "GET", "/api/v1/tokens", None).await.json();
+    assert!(listed.as_array().unwrap().iter().any(|t| t["id"] == m1["id"] && t["status"] == "revoked"));
+    // Demotion narrows: a tester's token becomes read-only at once; promotion does not widen it past its ceiling.
+    let (s2, _) = make_token(&h, &tester, json!({"kind": "agent", "name": "a2"})).await;
+    let hr = &h;
+    let post = |s: String| async move { bearer(hr, "POST", "/api/v1/findings", &s, Some(json!({}))).await };
+    assert!(post(s2.clone()).await.status != 403);
+    h.accounts.set_membership(&owner.user_id, &h.project, &tester.user_id, pm_accounts::Role::Viewer).unwrap();
+    let r = post(s2.clone()).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "read_only_token"), "{}", r.body);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s2, None).await.status, 200, "it can still read");
+    h.accounts.set_membership(&owner.user_id, &h.project, &tester.user_id, pm_accounts::Role::Tester).unwrap();
+    assert!(post(s2.clone()).await.status != 403, "back to tester");
+    // A viewer's own ceiling: read-only whatever the owner is.
+    let (s3, v3) = make_token(&h, &owner, json!({"kind": "plugin", "name": "reader", "role": "viewer"})).await;
+    assert_eq!(v3["role"], "viewer");
+    let r = post(s3.clone()).await;
+    assert_eq!((r.status, r.code().as_str()), (403, "read_only_token"));
+    assert_eq!(bearer(&h, "GET", "/api/v1/exchanges", &s3, None).await.status, 200);
+    // Removing the membership kills the token; adding the person back does not bring it back.
+    h.accounts.remove_membership(&owner.user_id, &h.project, &tester.user_id).unwrap();
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s2, None).await.status, 401);
+    h.accounts.set_membership(&owner.user_id, &h.project, &tester.user_id, pm_accounts::Role::Tester).unwrap();
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s2, None).await.status, 401);
+    // Disabling the owner (through the admin API) kills theirs at once; enabling does not revive them.
+    let r = h
+        .api(
+            Some(&owner.cookie),
+            "POST",
+            "/api/v1/tokens",
+            Some(json!({"kind": "agent", "name": "a4", "for_user": "tester1"})),
+        )
+        .await;
+    let s4 = r.json()["token"].as_str().unwrap().to_string();
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s4, None).await.status, 200);
+    let r = h.api(Some(&owner.cookie), "POST", &format!("/api/v1/auth/users/{}/disable", tester.user_id), None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s4, None).await.status, 401);
+    let r = h.api(Some(&owner.cookie), "POST", &format!("/api/v1/auth/users/{}/enable", tester.user_id), None).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(bearer(&h, "GET", "/api/v1/status", &s4, None).await.status, 401);
+}
+
+#[tokio::test]
+async fn a_tier_cap_is_enforced_by_the_gate_and_denials_are_audited() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let (capped, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "careful", "tier_cap": "passive"})).await;
+    let (free, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "free"})).await;
+    let send = json!({"url": "http://127.0.0.1:9/", "raw": "GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"});
+    // The capped agent: a GET is active_safe, above its cap: denied by the gate, and the reason says why.
+    let r = bearer(&h, "POST", "/api/v1/replay", &capped, Some(send.clone())).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["status"], "denied", "{}", r.body);
+    assert!(r.json()["reasons"][0].as_str().unwrap().contains("limited to passive"), "{}", r.body);
+    // The uncapped agent with the same rules gets past the gate (the send itself fails: nothing listens there).
+    let r = bearer(&h, "POST", "/api/v1/replay", &free, Some(send.clone())).await;
+    assert_ne!(r.json()["status"], "denied", "{}", r.body);
+    // Both are recorded: the denial with the actor and the reason.
+    let r = h.api(Some(&owner.cookie), "GET", "/api/v1/audit", None).await;
+    let audit = r.json();
+    let denied: Vec<&Value> =
+        audit.as_array().unwrap().iter().filter(|a| a["actor"] == "agent:careful" && a["decision"] == "deny").collect();
+    assert_eq!(denied.len(), 1, "{}", r.body);
+    assert!(denied[0]["detail"].to_string().contains("limited to passive"), "{}", denied[0]);
+    assert!(audit.as_array().unwrap().iter().any(|a| a["actor"] == "agent:free" && a["decision"] == "allow"));
+    // Reading is not capped away: passive tools and plain reads work.
+    assert_eq!(bearer(&h, "GET", "/api/v1/exchanges", &capped, None).await.status, 200);
+    // The cap follows the credential, not the request: a new uncapped token of that name lifts it; the old one's
+    // cap is held for the actor id until then.
+    let again = bearer(&h, "POST", "/api/v1/replay", &capped, Some(send)).await;
+    assert_eq!(again.json()["status"], "denied");
+    // Approving cannot lift it: the gate checks the cap again when an approved action runs.
+    let (mid, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "mid", "tier_cap": "active_safe"})).await;
+    let post = json!({"url": "http://127.0.0.1:9/x", "raw": "POST /x HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Length: 0\r\n\r\n"});
+    let r = bearer(&h, "POST", "/api/v1/replay", &mid, Some(post)).await;
+    assert_eq!(r.json()["status"], "denied", "{}", r.body);
+    assert!(r.json()["reasons"][0].as_str().unwrap().contains("limited to active_safe"));
+}
+
+#[tokio::test]
+async fn mcp_over_http_runs_the_tools_as_the_tokens_agent() {
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let (secret, _) =
+        make_token(&h, &owner, json!({"kind": "agent", "name": "claude", "tier_cap": "active_safe"})).await;
+    let rpc = |body: Value| bearer(&h, "POST", "/api/v1/mcp", &secret, Some(body));
+    // The handshake and the tool list: the same 80-odd tools a local MCP agent gets.
+    let r =
+        rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}))
+            .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["result"]["serverInfo"]["name"], "proxymind");
+    assert_eq!(rpc(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await.status, 204);
+    let r = rpc(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await;
+    let names: Vec<String> =
+        r.json()["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().into()).collect();
+    assert!(names.len() > 80 && names.iter().any(|n| n == "replay_send") && names.iter().any(|n| n == "roe_get"));
+    // A tool call acts as the token's agent, with its cap shown; an actor named in the message is ignored.
+    let mut call = mcp_call(3, "roe_get", json!({}));
+    call["params"]["actor"] = json!("human:owner");
+    call["actor"] = json!("human:owner");
+    let r = h
+        .raw(
+            "POST",
+            "/api/v1/mcp?actor=human:owner",
+            &[("Authorization", format!("Bearer {secret}")), ("X-ProxyMind-Actor", "human:owner".into())],
+            Some(call),
+        )
+        .await;
+    let roe = tool_json(&r);
+    assert_eq!(roe["you_are"], "agent:claude", "{roe}");
+    assert_eq!(roe["credential_tier_cap"], "active_safe");
+    assert_eq!(roe["your_permissions"]["active_intrusive"], "deny", "the cap shows in what the agent may do");
+    assert_eq!(roe["your_permissions"]["active_safe"], "allow");
+    assert_eq!(roe["secrets_redacted"], true, "agents get what local MCP agents get: redaction");
+    // A tool call that goes through the gate: denied above the cap, with the reason, as for a local agent.
+    let r = rpc(mcp_call(4, "replay_send", json!({"url": "http://127.0.0.1:9/x", "raw": "POST /x HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Length: 0\r\n\r\n"}))).await;
+    let v = tool_json(&r);
+    assert_eq!(v["status"], "denied", "{v}");
+    // Batches, errors and bad bodies.
+    let r =
+        rpc(json!([{"jsonrpc":"2.0","id":5,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]))
+            .await;
+    assert_eq!(r.json().as_array().unwrap().len(), 1);
+    let r = rpc(json!({"jsonrpc":"2.0","id":6,"method":"nope"})).await;
+    assert_eq!(r.json()["error"]["code"], -32601);
+    let r = h.raw("POST", "/api/v1/mcp", &[("Authorization", format!("Bearer {secret}"))], None).await;
+    assert_eq!((r.status, r.json()["error"]["code"].as_i64()), (400, Some(-32700)));
+    // No credential, no MCP.
+    let ping = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+    assert_eq!(h.api(None, "POST", "/api/v1/mcp", Some(ping.clone())).await.status, 401);
+    assert_eq!(
+        h.raw("POST", "/api/v1/mcp", &[], Some(ping)).await.status,
+        403,
+        "not a bearer request: the browser layers apply"
+    );
+    // A viewer's token may list tools but not call them.
+    let (v, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "reader", "role": "viewer"})).await;
+    let r = bearer(&h, "POST", "/api/v1/mcp", &v, Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))).await;
+    assert!(r.json()["result"]["tools"].is_array());
+    let r = bearer(&h, "POST", "/api/v1/mcp", &v, Some(mcp_call(2, "roe_get", json!({})))).await;
+    assert_eq!(r.json()["error"]["code"], -32001, "{}", r.body);
+    // A signed-in person reaches it too, with the browser layers, and is the person.
+    let r = h.api(Some(&owner.cookie), "POST", "/api/v1/mcp", Some(mcp_call(7, "roe_get", json!({})))).await;
+    assert_eq!(tool_json(&r)["you_are"], "human:owner");
+}
+
+#[tokio::test]
+async fn no_token_reaches_a_log_the_audit_trail_or_an_error() {
+    let lines = captured().clone();
+    let h = Harness::start(Kind::Plain).await;
+    let owner = h.setup_owner().await;
+    let mut secrets = Vec::new();
+    for (kind, name, cap) in [("agent", "claude", Some("passive")), ("ci", "pipeline", None), ("plugin", "p", None)] {
+        let mut body = json!({"kind": kind, "name": name});
+        if let Some(c) = cap {
+            body["tier_cap"] = json!(c);
+        }
+        let (s, v) = make_token(&h, &owner, body).await;
+        // The answer that makes it holds the secret once; nothing else does.
+        assert!(v.to_string().contains(&s));
+        secrets.push(s);
+    }
+    let mut bodies: Vec<String> = Vec::new();
+    for s in &secrets {
+        // Use, a denied send, MCP, attempts to manage tokens and accounts: nothing answers with the token.
+        for (m, p, b) in [
+            ("GET", "/api/v1/status".to_string(), None),
+            ("POST", "/api/v1/mcp".to_string(), Some(mcp_call(1, "roe_get", json!({})))),
+            ("POST", "/api/v1/tokens".to_string(), Some(json!({"kind": "agent", "name": "child"}))),
+            ("DELETE", "/api/v1/tokens/t_x".to_string(), None),
+            ("GET", "/api/v1/auth/me".to_string(), None),
+            (
+                "POST",
+                "/api/v1/replay".to_string(),
+                Some(json!({"url": "http://127.0.0.1:9/", "raw": "GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"})),
+            ),
+        ] {
+            bodies.push(bearer(&h, m, &p, s, b).await.body);
+        }
+        // Failures with a near copy, and with the token where it does not belong (a query, a cookie).
+        let mut near = s.clone();
+        near.replace_range(near.len() - 1.., if near.ends_with('0') { "1" } else { "0" });
+        bodies.push(bearer(&h, "GET", "/api/v1/status", &near, None).await.body);
+        bodies.push(
+            h.raw("GET", &format!("/api/v1/status?token={s}"), &[("Cookie", format!("pm_session={s}"))], None)
+                .await
+                .body,
+        );
+    }
+    let owner_views = [
+        h.api(Some(&owner.cookie), "GET", "/api/v1/tokens?all=true", None).await.body,
+        h.api(Some(&owner.cookie), "GET", "/api/v1/audit", None).await.body,
+        h.api(Some(&owner.cookie), "GET", "/api/v1/exchanges", None).await.body,
+    ];
+    let security = format!("{:?}", h.accounts.security_log(1000).unwrap());
+    let logs = lines.lock().unwrap().join("\n");
+    for s in &secrets {
+        let tail = &s[s.len() - 24..];
+        for (what, text) in [("log lines", &logs), ("security log", &security)] {
+            assert!(!text.contains(s.as_str()) && !text.contains(tail), "a token is in the {what}");
+        }
+        for b in bodies.iter().chain(owner_views.iter()) {
+            assert!(!b.contains(s.as_str()) && !b.contains(tail), "an answer holds a token: {b}");
+        }
+    }
+    // The audit trail names tokens by id, and the security log recorded the failures.
+    assert!(owner_views[1].contains("token_create"), "{}", owner_views[1]);
+    assert!(security.contains("token_failure"));
+}

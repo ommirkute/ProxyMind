@@ -17,6 +17,9 @@
 //!   with exponential back-off; never a permanent lock.
 //! * **Invite only:** an account is created by accepting an invite, or by bootstrapping the first owner with a
 //!   one-time setup token. `reset_owner` (local console) is the recovery path.
+//! * **Tokens:** `pm3_<kind>_<256 bits>` for agents, CI and plugins; stored as HMAC-SHA256, shown once, with an owner,
+//!   a role ceiling, a tier cap and an expiry (`token`, the shared rules; `tokens`, `server.db`; `token_file`, the
+//!   single-user file `<home>/tokens.json`).
 //! * **Security log:** every account event goes to an append-only, HMAC-chained table; never a secret.
 //!
 //! Everything here trusts its caller to have authenticated *the caller*: functions that act on behalf of a user
@@ -34,6 +37,9 @@ mod password;
 mod sessions;
 mod store;
 mod throttle;
+mod token;
+mod token_file;
+mod tokens;
 mod totp;
 mod users;
 mod util;
@@ -51,5 +57,12 @@ pub use model::{
 pub use password::{Argon2Cost, check_policy as check_password_policy};
 pub use store::{Accounts, Config};
 pub use throttle::ThrottleConfig;
+pub use token::{
+    DEFAULT_TTL, MAX_TTL, MIN_TTL, NewToken, NewTokenSpec, TIER_NAMES, TOKEN_PREFIX, TokenAuth, TokenInfo, TokenKind,
+    effective_role, effective_tier_cap, generate as generate_token, parse_ttl, shape as token_shape,
+    validate_name as validate_token_name, validate_tier_cap,
+};
+pub use token_file::TokenFile;
+pub use tokens::CONSOLE;
 pub use totp::{hotp, totp};
 pub use util::Secret;

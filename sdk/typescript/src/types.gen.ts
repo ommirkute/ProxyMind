@@ -4406,6 +4406,9 @@ export interface TestFinding {
   vuln_class: string;
 }
 
+/** A tier of the policy gate, as the rules of engagement name them. */
+export type TierName = "read" | "passive" | "active_safe" | "active_intrusive" | "destructive";
+
 export interface TokenAnalyzerRequest {
   /** Run a previously approved request. All other fields must be identical. */
   approval_id?: string | null;
@@ -4439,10 +4442,98 @@ export type TokenAnalyzerResult =
       status: "denied";
     };
 
+export interface TokenCreateBody {
+  /** Lifetime in days: 1 to 365 (default 30). */
+  expires_days?: number | null;
+  /** Server mode, owners only (and a fresh sign-in): make the token for this other user (their username). */
+  for_user?: string | null;
+  /** What the token acts as: `agent`, `ci` or `plugin` (`agent:<name>`, `ci:<name>`, `plugin:<name>`). */
+  kind: TokenKindName;
+  /** The actor name: 1 to 64 characters of letters, digits and `- _ . @`. Unique among live tokens of its kind. */
+  name: string;
+  /**
+   * The role ceiling, `tester` (default) or `viewer`; never `owner`. The token acts with the lower of this and its
+   * owner's current role.
+   */
+  role?: TokenRoleName | null;
+  /** The highest tier the token may reach (the rules of engagement can only narrow it further). */
+  tier_cap?: TierName | null;
+}
+
+/** The answer of `POST /tokens`: the token, and its secret, once. */
+export interface TokenCreated {
+  /** What requests with this token act as, e.g. `agent:claude`. */
+  actor: string;
+  created_at: number;
+  expires_at: number;
+  /** `t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records. */
+  id: string;
+  /** `agent`, `ci` or `plugin`. */
+  kind: string;
+  last_used_at: number | null;
+  name: string;
+  /** The owning account (`u_…`); absent in single-user mode. */
+  owner: string | null;
+  /** The owner's username, when known. */
+  owner_name: string | null;
+  project_id: string | null;
+  revoked_at: number | null;
+  /** The role ceiling (`tester` or `viewer`). */
+  role: string;
+  /** `active`, `expired` or `revoked`. */
+  status: string;
+  /** The highest tier the token may reach; absent for no cap. */
+  tier_cap: string | null;
+  /** The secret, `pm3_<kind>_<64 hex digits>`. Shown once; only its HMAC is stored. */
+  token: string;
+  /** Requests made with it (counts at most a minute behind). */
+  use_count: number;
+}
+
+/** What a token acts as. */
+export type TokenKindName = "agent" | "ci" | "plugin";
+
+/** A token's role ceiling. Never `owner`. */
+export type TokenRoleName = "tester" | "viewer";
+
+/** A token as the API shows it. Never holds the secret. */
+export interface TokenView {
+  /** What requests with this token act as, e.g. `agent:claude`. */
+  actor: string;
+  created_at: number;
+  expires_at: number;
+  /** `t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records. */
+  id: string;
+  /** `agent`, `ci` or `plugin`. */
+  kind: string;
+  last_used_at: number | null;
+  name: string;
+  /** The owning account (`u_…`); absent in single-user mode. */
+  owner: string | null;
+  /** The owner's username, when known. */
+  owner_name: string | null;
+  project_id: string | null;
+  revoked_at: number | null;
+  /** The role ceiling (`tester` or `viewer`). */
+  role: string;
+  /** `active`, `expired` or `revoked`. */
+  status: string;
+  /** The highest tier the token may reach; absent for no cap. */
+  tier_cap: string | null;
+  /** Requests made with it (counts at most a minute behind). */
+  use_count: number;
+}
+
 /** Body of `POST /tools/token-analyzer/analyze`. */
 export interface TokensBody {
   /** Tokens to analyze (session ids, CSRF tokens, ...). */
   tokens: string[];
+}
+
+/** Query of `GET /tokens`. */
+export interface TokensQuery {
+  /** Server mode, owners of the project: list everyone's tokens instead of your own. */
+  all?: boolean | null;
 }
 
 export type ToolProfile = "full" | "compact";

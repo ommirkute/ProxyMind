@@ -17,6 +17,7 @@ use crate::auth_api::{
 };
 use crate::contracts::{Operation, op};
 use crate::routes::{BytesQuery, EventsQuery};
+use crate::tokens_api::{TokenCreateBody, TokenCreated, TokenView, TokensQuery};
 
 const ZIP: &str = "application/zip";
 
@@ -285,6 +286,11 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/attack-paths", "attack_path_create", "Record an attack path.").body::<NewAttackPath>().out::<AttackPath>(),
         op("delete", "/attack-paths/{id}", "attack_path_delete", "Delete an attack path.").json("Object with `deleted` (the id)."),
         op("get", "/attack-graph", "attack_graph", "Attack paths merged into a graph.").query::<ScanQuery>().out::<AttackGraph>(),
+        // Tokens (ADR-0022 step 5): both modes; people only, a token cannot manage tokens.
+        op("get", "/tokens", "tokens_list", "Your `pm3_` tokens (never their secrets); in server mode owners may pass `all=true` for everyone's. A token cannot call this.").query::<TokensQuery>().out::<Vec<TokenView>>(),
+        op("post", "/tokens", "token_create", "Make a `pm3_` token for an agent, CI job or plugin. The secret is in the answer once. In server mode owners may make one for another user (`for_user`), which needs a fresh sign-in. A token cannot call this.").body::<TokenCreateBody>().out::<TokenCreated>(),
+        op("delete", "/tokens/{id}", "token_revoke", "Revoke a token: it stops working at its next request. In server mode revoking someone else's needs an owner and a fresh sign-in. A token cannot call this.").id_is_string().json("Object with `ok`."),
+        op("post", "/mcp", "mcp_endpoint", "MCP over HTTP: one JSON-RPC message (or a batch) in, the response out, 204 for a notification. Runs the same tools as `proxymind mcp` as the request's actor (a token's `agent:<name>`), never an actor named in the message. This is what `proxymind mcp --server` talks to.").any_body("A JSON-RPC 2.0 request or notification, or an array of them.").json_any("The JSON-RPC response (or an array of responses); no body (204) for a notification."),
         // Server mode (ADR-0022): these answer 404 unless the server runs with accounts. The first seven work without a session.
         op("get", "/auth/state", "auth_state", "Server mode: whether the server still waits for its first owner, and whether setup is served here.").out::<StateResponse>(),
         op("post", "/auth/setup", "auth_setup", "Server mode: claim the first owner account with the one-time setup token. Answers like the password step (`enrolment_required`).").body::<SetupBody>().out::<LoginResponse>(),

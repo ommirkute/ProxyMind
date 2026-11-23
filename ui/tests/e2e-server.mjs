@@ -457,6 +457,53 @@ try {
     check(true, "the new password + authenticator code signs in");
   });
 
+  await section("API tokens (pm3_): make one, use it with only a bearer header, revoke it", async () => {
+    await go(page, "account");
+    await page.getByTestId("account-page").waitFor();
+    await page.getByTestId("tokens-intro").waitFor();
+    await page.getByTestId("token-kind").selectOption("agent");
+    await page.getByTestId("token-name").fill("e2e-agent");
+    await page.getByTestId("token-cap").selectOption("passive");
+    await page.getByTestId("token-days").fill("7");
+    await page.getByTestId("token-create").click();
+    await page.getByTestId("token-made").waitFor();
+    const secret = await page.getByTestId("token-value").inputValue();
+    check(/^pm3_agent_[0-9a-f]{64}$/.test(secret), "the token is shown once, as pm3_agent_ and 64 hex digits");
+    await page.screenshot({ path: join(SHOTS, "server-9-tokens.png"), fullPage: true });
+    const call = (method, path, body, headers = {}) =>
+      fetch(`${base}/api/v1${path}`, { method, headers: { Authorization: `Bearer ${secret}`, ...(body ? { "Content-Type": "application/json" } : {}), ...headers }, body: body && JSON.stringify(body) });
+    // Only a bearer header: no cookie, no Origin, no X-ProxyMind. Node's fetch sends none of them.
+    const who = await (await call("GET", "/status")).json();
+    check(who.you_are === "agent:e2e-agent", `a script with the token is ${who.you_are}`);
+    const post = await call("POST", "/findings", { nothing: "useful" });
+    check(post.status !== 403 || (await post.json()).code !== "csrf", "a bearer request needs no Origin or X-ProxyMind");
+    const replay = await (await call("POST", "/replay", { url: "http://127.0.0.1:9", raw: "GET / HTTP/1.1\r\nHost: x\r\n\r\n" })).json();
+    check(replay.status === "denied" && /limited to passive/.test(replay.reasons?.[0] ?? ""), "the tier cap denies a request above it");
+    for (const [m, p, b] of [["POST", "/tokens", { kind: "agent", name: "child" }], ["GET", "/tokens"], ["GET", "/auth/me"]]) {
+      const r = await call(m, p, b);
+      check(r.status === 403, `a token cannot use ${m} ${p} (${r.status})`);
+    }
+    const mcp = await (await call("POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roe_get", arguments: {} } })).json();
+    check(JSON.parse(mcp.result.content[0].text).you_are === "agent:e2e-agent", "the MCP endpoint runs the tools as the token's agent");
+    // The install token of single-user mode is no credential here.
+    check((await fetch(`${base}/api/v1/status`, { headers: { Authorization: "Bearer pm2_nothing" } })).status === 401, "the install token is not accepted");
+    await page.getByTestId("token-dismiss").click();
+    await page.reload();
+    await page.getByTestId("token-agent:e2e-agent").waitFor();
+    check((await page.getByTestId("token-agent:e2e-agent").textContent()).includes("passive"), "the list shows the token and its cap");
+    check(!(await page.content()).includes(secret), "the page never holds the token after it was dismissed");
+    const stored = await page.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]));
+    check(!stored.includes(secret), "the token is not in browser storage");
+    check(!consoleText.some((t) => t.includes(secret)), "the token never reached the console");
+    // The owner may see everyone's tokens.
+    await page.getByTestId("tokens-all").check();
+    await page.getByTestId("token-agent:e2e-agent").waitFor();
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("token-revoke-agent:e2e-agent").click();
+    await page.locator('[data-testid="token-agent:e2e-agent"] .chip.bad').waitFor();
+    check((await call("GET", "/status")).status === 401, "after revoking, the token gets 401");
+  });
+
   await section("Not a member", async () => {
     // The server never answers this for the project's own members; the screen is checked with a faked /me.
     await page.route("**/api/v1/auth/me", async (route) => {

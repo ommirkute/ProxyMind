@@ -4438,6 +4438,9 @@ class TestFinding(TypedDict):
     vuln_class: str
 
 
+# A tier of the policy gate, as the rules of engagement name them.
+TierName = _t.Literal["read", "passive", "active_safe", "active_intrusive", "destructive"]
+
 class _TokenAnalyzerRequestRequired(TypedDict):
     # The request that issues a token (e.g. a login or a page setting a cookie).
     exchange_id: int
@@ -4481,10 +4484,99 @@ TokenAnalyzerResult = _t.Union[
     "TokenAnalyzerResultDenied",
 ]
 
+class _TokenCreateBodyRequired(TypedDict):
+    # What the token acts as: `agent`, `ci` or `plugin` (`agent:<name>`, `ci:<name>`, `plugin:<name>`).
+    kind: "TokenKindName"
+    # The actor name: 1 to 64 characters of letters, digits and `- _ . @`. Unique among live tokens of its kind.
+    name: str
+
+
+class TokenCreateBody(_TokenCreateBodyRequired, total=False):
+    # Lifetime in days: 1 to 365 (default 30).
+    expires_days: _t.Optional[int]
+    # Server mode, owners only (and a fresh sign-in): make the token for this other user (their username).
+    for_user: _t.Optional[str]
+    # The role ceiling, `tester` (default) or `viewer`; never `owner`. The token acts with the lower of this and its
+    # owner's current role.
+    role: _t.Optional["TokenRoleName"]
+    # The highest tier the token may reach (the rules of engagement can only narrow it further).
+    tier_cap: _t.Optional["TierName"]
+
+
+class TokenCreated(TypedDict):
+    """The answer of `POST /tokens`: the token, and its secret, once."""
+    # What requests with this token act as, e.g. `agent:claude`.
+    actor: str
+    created_at: int
+    expires_at: int
+    # `t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records.
+    id: str
+    # `agent`, `ci` or `plugin`.
+    kind: str
+    last_used_at: _t.Optional[int]
+    name: str
+    # The owning account (`u_…`); absent in single-user mode.
+    owner: _t.Optional[str]
+    # The owner's username, when known.
+    owner_name: _t.Optional[str]
+    project_id: _t.Optional[str]
+    revoked_at: _t.Optional[int]
+    # The role ceiling (`tester` or `viewer`).
+    role: str
+    # `active`, `expired` or `revoked`.
+    status: str
+    # The highest tier the token may reach; absent for no cap.
+    tier_cap: _t.Optional[str]
+    # The secret, `pm3_<kind>_<64 hex digits>`. Shown once; only its HMAC is stored.
+    token: str
+    # Requests made with it (counts at most a minute behind).
+    use_count: int
+
+
+# What a token acts as.
+TokenKindName = _t.Literal["agent", "ci", "plugin"]
+
+# A token's role ceiling. Never `owner`.
+TokenRoleName = _t.Literal["tester", "viewer"]
+
+class TokenView(TypedDict):
+    """A token as the API shows it. Never holds the secret."""
+    # What requests with this token act as, e.g. `agent:claude`.
+    actor: str
+    created_at: int
+    expires_at: int
+    # `t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records.
+    id: str
+    # `agent`, `ci` or `plugin`.
+    kind: str
+    last_used_at: _t.Optional[int]
+    name: str
+    # The owning account (`u_…`); absent in single-user mode.
+    owner: _t.Optional[str]
+    # The owner's username, when known.
+    owner_name: _t.Optional[str]
+    project_id: _t.Optional[str]
+    revoked_at: _t.Optional[int]
+    # The role ceiling (`tester` or `viewer`).
+    role: str
+    # `active`, `expired` or `revoked`.
+    status: str
+    # The highest tier the token may reach; absent for no cap.
+    tier_cap: _t.Optional[str]
+    # Requests made with it (counts at most a minute behind).
+    use_count: int
+
+
 class TokensBody(TypedDict):
     """Body of `POST /tools/token-analyzer/analyze`."""
     # Tokens to analyze (session ids, CSRF tokens, ...).
     tokens: _t.List[str]
+
+
+class TokensQuery(TypedDict, total=False):
+    """Query of `GET /tokens`."""
+    # Server mode, owners of the project: list everyone's tokens instead of your own.
+    all: _t.Optional[bool]
 
 
 ToolProfile = _t.Literal["full", "compact"]

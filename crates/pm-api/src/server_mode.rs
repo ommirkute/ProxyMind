@@ -11,7 +11,10 @@
 //!    session behind it) or answers 401, and for project routes requires a membership on the served project (403).
 //!
 //! The install token is not accepted here (it opens `/auth?token=` and `Authorization: Bearer` in single-user mode
-//! only). Step 5's `pm3_` tokens plug in at [`authenticate_bearer`].
+//! only). `pm3_` tokens (ADR-0022 step 5) are accepted as `Authorization: Bearer` ([`authenticate_bearer`]) when the
+//! request carries no session cookie: such a request has no ambient credential, so the Origin and `X-ProxyMind`
+//! layers, which exist to stop a browser from being tricked into using one, do not apply to it. A request that has the
+//! session cookie gets the cookie path's checks whatever else it carries.
 //!
 //! Single-user mode never reaches this file except through [`Me`], which there is the fixed `AppState::actor`.
 
@@ -25,9 +28,10 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use pm_accounts::{AccountError, Accounts, Clock, Membership, SessionInfo, User};
+use pm_accounts::{AccountError, Accounts, Clock, Membership, SessionInfo, TokenAuth, User};
+use pm_service::Service;
 use pm_service::access::{Principal, Role};
-use pm_service::pm_policy::Actor;
+use pm_service::pm_policy::{Actor, Tier};
 use serde_json::json;
 
 use crate::listen::{ListenPlan, TlsKind, normalise_origin};
@@ -186,28 +190,87 @@ impl std::fmt::Debug for AuthContext {
 #[derive(Debug, Clone)]
 pub struct Me {
     pub actor: Actor,
-    /// Server mode: the account and session; `None` in single-user mode.
+    /// Server mode: the account and session; `None` in single-user mode and for a request made with a token.
     pub auth: Option<Arc<AuthContext>>,
     /// The client's address, when known (server mode).
     pub addr: Option<String>,
+    /// The `pm3_` token the request came with, when it came with one. The actor above is then the token's
+    /// (`agent:<name>`), never anything the client said.
+    pub token: Option<Arc<TokenContext>>,
+}
+
+/// What a request authenticated by a `pm3_` token knows about it. No secret.
+#[derive(Debug, Clone)]
+pub struct TokenContext {
+    /// `t_…`: safe to log and to put in audit records.
+    pub id: String,
+    /// The owning account (`u_…`); `None` in single-user mode.
+    pub owner: Option<String>,
+    /// The role in force: the lower of the token's ceiling and its owner's current role.
+    pub role: Role,
+    /// The tier cap in force (the token's own, and `passive` for a viewer), which the policy gate enforces.
+    pub tier_cap: Option<Tier>,
+    pub expires_at: i64,
+}
+
+impl TokenContext {
+    pub(crate) fn of(auth: &TokenAuth) -> Self {
+        Self {
+            id: auth.info.id.clone(),
+            owner: auth.info.user_id.clone(),
+            role: access_role(auth.role),
+            tier_cap: auth.tier_cap.as_deref().and_then(Tier::parse),
+            expires_at: auth.info.expires_at,
+        }
+    }
+}
+
+/// `pm-accounts`' role as `pm-service`'s.
+pub(crate) fn access_role(r: pm_accounts::Role) -> Role {
+    match r {
+        pm_accounts::Role::Owner => Role::Owner,
+        pm_accounts::Role::Tester => Role::Tester,
+        pm_accounts::Role::Viewer => Role::Viewer,
+    }
 }
 
 impl Me {
     pub(crate) fn single_user(actor: Actor) -> Self {
-        Self { actor, auth: None, addr: None }
+        Self { actor, auth: None, addr: None, token: None }
+    }
+
+    /// A request made with a token: the actor is the token's, and the policy gate enforces its tier cap.
+    pub(crate) fn with_token(actor: Actor, token: TokenContext, addr: Option<String>) -> Self {
+        Self { actor, auth: None, addr, token: Some(Arc::new(token)) }
+    }
+
+    /// The role this request acts with: a token's effective role, a signed-in member's role on the project, and in
+    /// single-user mode the implicit owner (a person) or the machine ceiling (any other actor).
+    pub fn role(&self) -> Role {
+        if let Some(t) = &self.token {
+            return t.role;
+        }
+        match &self.auth {
+            Some(a) => a.role.map_or(Role::Viewer, access_role),
+            None => Principal::from_actor(&self.actor).role,
+        }
     }
 
     /// The service-level principal for this request: the actor, the account id, the session reference and the
     /// address, ready for `Service::audit_principal` and for the role checks of ADR-0022 step 6.
     ///
-    /// TODO(step 6): service methods still take `&Actor`; once they take a `Principal` the handlers pass this, the
-    /// audit records gain user, session and address, and `role` comes from the membership. Until then every member
-    /// acts as a human (owner), as the step-4 brief says.
+    /// The role is the real one ([`Me::role`]). TODO(step 6): service methods still take `&Actor`; once they take a
+    /// `Principal` the handlers pass this and the audit records of every action gain user, token, session and
+    /// address. Until then only the token endpoints (and anything that audits through `audit_principal`) use it.
     pub fn principal(&self) -> Principal {
-        let mut p = Principal::new(self.actor.clone(), Role::Owner);
+        let mut p = Principal::new(self.actor.clone(), self.role());
         if let Some(a) = &self.auth {
             p.user_id = Some(a.user.id.clone());
             p.session_id = Some(a.session.reference.clone());
+        }
+        if let Some(t) = &self.token {
+            p.user_id = t.owner.clone();
+            p.token_id = Some(t.id.clone());
         }
         p.client_addr = self.addr.clone();
         p
@@ -230,11 +293,34 @@ pub(crate) fn actor_for(user: &User) -> Actor {
         .unwrap_or_else(|_| Actor { kind: pm_service::pm_policy::ActorKind::Human, name: "unknown".into() })
 }
 
-/// The hook for step 5: a `pm3_` bearer token becomes a [`Me`] with an agent actor. Server mode does not accept the
-/// install token, and until step 5 there are no other tokens, so no bearer credential is accepted.
-pub(crate) fn authenticate_bearer(_sm: &ServerMode, _token: &str) -> Option<Me> {
-    None
+/// A `pm3_` bearer token becomes a [`Me`] whose actor is the token's (`agent:<name>`, `ci:<name>`, `plugin:<name>`),
+/// with the token id, its owner and its effective role. Everything is read from `server.db` now: expiry, revocation,
+/// the owner's state and membership. `Err` for every failure, which the caller answers with one 401; the security log
+/// has the reason. The install token is not a `pm3_` token and never gets here.
+pub(crate) async fn authenticate_bearer(sm: &Arc<ServerMode>, token: &str, conn: &ConnInfo) -> Result<Me, ()> {
+    let (t, project, client) = (token.to_string(), sm.project_id.clone(), conn.client());
+    let auth = match sm.run(move |a| a.authenticate_token(&t, &project, &client)).await {
+        Ok(Ok(auth)) => auth,
+        _ => return Err(()),
+    };
+    let actor = Actor::parse(&auth.info.actor_id()).map_err(|_| ())?;
+    Ok(Me::with_token(actor, TokenContext::of(&auth), conn.client_ip.map(|i| i.to_string())))
 }
+
+/// The value of `Authorization: Bearer <value>` (the scheme in any case), if there is one.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim();
+    let (scheme, rest) = v.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim()).filter(|t| !t.is_empty())
+}
+
+/// May a token whose role is `viewer` make this request? Reads only; the MCP endpoint decides for itself (it refuses
+/// `tools/call` for a viewer, but answers `initialize` and `tools/list`).
+pub(crate) fn viewer_may(method: &Method, path: &str) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || path == MCP_PATH
+}
+
+pub(crate) const MCP_PATH: &str = "/api/v1/mcp";
 
 // ---- pure helpers (unit tested) --------------------------------------------------------------------------------
 
@@ -368,17 +454,17 @@ fn deny(status: StatusCode, code: &'static str, msg: &str) -> Response {
     (status, Json(json!({ "error": msg, "code": code }))).into_response()
 }
 
-pub(crate) async fn server_guard(sm: Arc<ServerMode>, req: Request, next: Next) -> Response {
+pub(crate) async fn server_guard(sm: Arc<ServerMode>, service: Arc<Service>, req: Request, next: Next) -> Response {
     let conn = sm.conn_info(&req);
     let https = conn.https;
-    let mut resp = gate(&sm, conn, req, next).await;
+    let mut resp = gate(&sm, &service, conn, req, next).await;
     if sm.plan.hsts && https {
         resp.headers_mut().insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000"));
     }
     resp
 }
 
-async fn gate(sm: &Arc<ServerMode>, conn: ConnInfo, mut req: Request, next: Next) -> Response {
+async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: Request, next: Next) -> Response {
     if !host_allowed(req.headers(), &sm.plan.allowed_hosts) {
         return deny(
             StatusCode::FORBIDDEN,
@@ -395,7 +481,20 @@ async fn gate(sm: &Arc<ServerMode>, conn: ConnInfo, mut req: Request, next: Next
         req.extensions_mut().insert(conn);
         return run_next(req, next, false).await;
     }
-    if let Err(why) = csrf_check(req.method(), req.headers(), &sm.plan.allowed_origins) {
+    // A request with a `pm3_` bearer token and no session cookie has no ambient credential, so there is nothing for a
+    // cross-site page to ride on and the browser-only layers (Origin, `X-ProxyMind`) do not apply: a plain
+    // `Authorization: Bearer` client (curl, a CI job, the MCP bridge) needs neither. Any session cookie brings the
+    // full cookie-path checks back, whatever else the request carries.
+    let name = sm.cookie_name();
+    let secure = sm.cookie_secure();
+    let has_session_cookie = cookie_value(req.headers(), name).is_some();
+    let token_bearer = bearer_token(req.headers())
+        .filter(|t| t.starts_with(pm_accounts::TOKEN_PREFIX))
+        .filter(|_| !has_session_cookie)
+        .map(str::to_string);
+    if token_bearer.is_none()
+        && let Err(why) = csrf_check(req.method(), req.headers(), &sm.plan.allowed_origins)
+    {
         return deny(StatusCode::FORBIDDEN, "csrf", why);
     }
     let set_up = match sm.run(|a| a.has_server_admin()).await {
@@ -423,13 +522,17 @@ async fn gate(sm: &Arc<ServerMode>, conn: ConnInfo, mut req: Request, next: Next
         return run_next(req, next, true).await;
     }
 
-    let name = sm.cookie_name();
-    let secure = sm.cookie_secure();
     let Some(session_id) = cookie_value(&headers, name) else {
-        if let Some(token) =
-            headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "))
-            && let Some(me) = authenticate_bearer(sm, token)
-        {
+        if let Some(token) = token_bearer {
+            let Ok(me) = authenticate_bearer(sm, &token, &conn).await else {
+                let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", "the token is not valid");
+                r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+                return r;
+            };
+            if let Err(r) = token_restrictions(&me, req.method(), &path) {
+                return *r;
+            }
+            service.policy().set_tier_cap(&me.actor, me.token.as_ref().and_then(|t| t.tier_cap));
             req.extensions_mut().insert(me);
             return run_next(req, next, true).await;
         }
@@ -467,9 +570,30 @@ async fn gate(sm: &Arc<ServerMode>, conn: ConnInfo, mut req: Request, next: Next
         actor: actor_for(&user),
         addr: conn.client_ip.map(|i| i.to_string()),
         auth: Some(Arc::new(AuthContext { user, session, session_id, role })),
+        token: None,
     };
     req.extensions_mut().insert(me);
     run_next(req, next, true).await
+}
+
+/// What a token may not do whatever its ceiling: use the account endpoints (sessions, passwords, invites, users are for
+/// a person who signed in), and, with the effective role `viewer`, anything but reads.
+pub(crate) fn token_restrictions(me: &Me, method: &Method, path: &str) -> Result<(), Box<Response>> {
+    if path.starts_with(API_PREFIX) && path != STATE {
+        return Err(Box::new(deny(
+            StatusCode::FORBIDDEN,
+            "token_not_allowed",
+            "a token cannot use the account endpoints",
+        )));
+    }
+    if me.role() == Role::Viewer && !viewer_may(method, path) {
+        return Err(Box::new(deny(
+            StatusCode::FORBIDDEN,
+            "read_only_token",
+            "this token acts as a viewer (its ceiling, or its owner's role) and may only read",
+        )));
+    }
+    Ok(())
 }
 
 /// Runs the rest of the stack; API answers are never cached.

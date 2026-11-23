@@ -6,10 +6,10 @@ and the server listens on a network address over TLS. The design is ADR-0022; th
 not finished.
 
 **Not finished yet (read this first).** Every signed-in member of the served project acts as a human with full powers:
-roles (owner, tester, viewer) are stored and shown, but `pm-service` does not enforce them until ADR-0022 step 6. Agent and
-CI tokens (`pm3_`, `proxymind login`, the MCP bridge to a server) are step 5; the install token is refused in server mode
-and nothing replaces it yet. Passkeys and OIDC are steps 7 and 8. Treat a server today as a preview
-for testing the mechanics, not for a client engagement.
+roles (owner, tester, viewer) are stored and shown, but `pm-service` does not enforce them until ADR-0022 step 6 (tokens
+are the exception: a token's ceiling, its owner's role and its tier cap are enforced, see "Tokens, login and the MCP
+bridge"). Passkeys and OIDC are steps 7 and 8. Treat a server today as a preview for testing the mechanics, not for a
+client engagement.
 
 ## What you need
 
@@ -122,7 +122,10 @@ creates a new owner (disable the old account afterwards). It works while the ser
   enrolling or removing an authenticator, new recovery codes and changing the password. Without it: 403 with
   `"code": "fresh_login_required"`; sign in again and repeat.
 - **CSRF:** every state-changing `/api/` request (the sign-in endpoints too) needs `X-ProxyMind: 1` and an `Origin` equal to the
-  public origin, or no `Origin` and `Sec-Fetch-Site: same-origin`; anything else is 403. No CORS header is ever sent.
+  public origin, or no `Origin` and `Sec-Fetch-Site: same-origin`; anything else is 403. No CORS header is ever sent. The one
+  exception is a request that carries a `pm3_` bearer token and **no session cookie**: it has no ambient credential for a
+  page to ride on, so it needs neither (curl, CI jobs and the MCP bridge send neither). With the session cookie present the
+  checks apply in full, whatever else the request carries.
 - **Membership:** a signed-in user may use the project's API only with a membership (any role) on the served project, else
   403 `not_a_member`. The project id is the random `project_id` stored inside the project file. A server admin without a
   membership keeps the account endpoints.
@@ -131,7 +134,8 @@ creates a new owner (disable the old account afterwards). It works while the ser
 - **Security log:** `pm-accounts` writes every sign-in, failure, logout, credential change, invite and administrator action to a
   chained log in `server.db`. No password, TOTP secret, session id or token is written to it, to the project's audit log, to
   the process log or into an error message (a test greps for them).
-- **Not accepted in server mode:** the install token (`/auth?token=` is 404, `Authorization: Bearer` is 401).
+- **Not accepted in server mode:** the install token (`/auth?token=` is 404, `Authorization: Bearer <install token>` is 401).
+  What replaces it for scripts, CI and agents is a `pm3_` token (next section).
 
 ## The web UI
 
@@ -189,10 +193,84 @@ says `/`.
 In single-user mode these endpoints answer 404, except `GET /state`, which answers `{"server_mode": false, …}` so the UI
 knows which mode it is in.
 
+## Tokens, login and the MCP bridge
+
+Agents, CI jobs and plugins use **`pm3_` tokens**, one credential per actor, owned by a person. A token is
+`pm3_<kind>_<64 hex digits>` with kind `agent`, `ci` or `plugin`; the `pm3_` prefix lets secret scanners find a leak. It is
+shown once when it is made; the server stores only an HMAC-SHA256 of it under a key derived from `server.key`. A token carries:
+
+- its **owner** (an account) and the project; it works only while the owner is an active member, so disabling, removing or
+  (for what it may do) demoting the owner takes effect at its next request;
+- an **actor**: requests with it are `agent:<name>`, `ci:<name>` or `plugin:<name>`, never anything the client sends. A name
+  is unique among live tokens of its kind;
+- a **role ceiling**, `tester` (default) or `viewer`, never `owner`: the token acts with the lower of this and its owner's
+  current role. Enforced now: a *viewer* (either way) may only read on the REST API (`403 read_only_token`), may list tools
+  but not call them over MCP, and is held to tier `passive`, which sends nothing. The finer role rules come with step 6;
+- an optional **tier cap** (`read`, `passive`, `active_safe`, `active_intrusive`): the policy gate refuses anything above it,
+  before scope and the rules, also for approved actions; the rules of engagement can only narrow it further;
+- an **expiry** (default 30 days, 1 hour to 365 days in the UI and API, 1 minute to 365 days on the command line), a last-use
+  time and use count (written at most once a minute) and revocation.
+
+**Making tokens.** In the web UI: Account → API tokens (create with kind, name, role, highest tier and expiry; the value is
+shown once with a copy button; the list shows last use and a Revoke button). Owners can list everyone's (`Everyone's
+tokens`) and make a token for another member (`For user`), which asks for a fresh sign-in; one's own need none. Through the
+API: `POST /api/v1/tokens` `{kind, name, role?, tier_cap?, expires_days?, for_user?}` answers with the token once;
+`GET /api/v1/tokens[?all=true]`; `DELETE /api/v1/tokens/{id}`. A token **cannot** create, list or revoke tokens, or use the
+`/auth` endpoints; a viewer cannot manage tokens. On the server host, with write access to the server home:
+
+```bash
+proxymind token create --server-home ~/.proxymind/server --user alice --kind agent --name claude \
+    --role tester --tier-cap active_safe --expires 30d        # prints the token, once, on stdout
+proxymind token list   --server-home ~/.proxymind/server --user alice     # --all for everyone's
+proxymind token revoke --server-home ~/.proxymind/server t_0123456789abcdef
+```
+
+(The security log records `local_console` as the actor of those.) Away from the host, use the UI or the API.
+
+**Using a token.** `Authorization: Bearer pm3_…`, and nowhere else (not a query string, not a cookie):
+
+```bash
+curl -H "Authorization: Bearer $PROXYMIND_TOKEN" https://pm.example.com/api/v1/status      # {"you_are": "agent:claude", …}
+```
+
+`proxymind login` checks a server and saves what is needed to use it:
+
+```bash
+proxymind login https://pm.example.com --token-env PROXYMIND_TOKEN             # certificate from a public CA
+proxymind login https://10.0.0.5:7777 --pin sha256:…                           # self-signed: the pin the server printed
+```
+
+It asks for the token without echo (or reads `--token-env VAR`, or one line of stdin when there is no terminal) and writes
+`<home>/servers.json` (mode 0600) with the address, the pin and the token only after `GET /api/v1/status` has answered for
+that token over a verified connection. Without `--pin` the certificate must verify against the public roots built into
+ProxyMind (a private CA needs `--pin`); with it the server's public key must hash to the pin, whatever its name or dates say.
+A wrong pin fails with both pins named, is never retried with weaker checks and saves nothing. Run again without `--pin` it
+keeps using the saved pin; `proxymind logout URL` forgets a server. `http://` works for loopback addresses only.
+
+**MCP for agents.** `POST /api/v1/mcp` takes one JSON-RPC message (or a batch) and runs the same tools as `proxymind mcp`
+under the token's actor, through the same service and gate: scope, tiers, approvals, redaction and untrusted-content tagging
+are unchanged, and an agent's pending approvals are decided by people in the UI or `proxymind approvals`. The bridge makes it a
+stdio server for any MCP client:
+
+```bash
+proxymind mcp --server https://pm.example.com                      # uses the pin and token `proxymind login` saved
+proxymind mcp --server https://pm.example.com --token-env PROXYMIND_TOKEN
+claude mcp add proxymind -- proxymind mcp --server https://pm.example.com
+```
+
+It checks the server and the token first and exits with the reason on a bad certificate, a wrong pin or a refused token; later
+a revoked token turns each call into a JSON-RPC error, and a certificate or pin failure ends the bridge. The actor is the
+token's: `--actor` means nothing here.
+
 ## Limits to know
+
+- A token's role enforcement is the viewer rule above, the tier cap and the people-only rules every agent has; everything finer
+  waits for step 6, and the project audit records of a token's actions do not yet carry the token id and owner (token
+  creation and revocation, and every token failure, are in the security log).
+- A tier cap is kept for the actor id until another token of that name sets another, also after the token is revoked.
 
 - An event stream (`/events`) opened before a session is revoked keeps running until the client disconnects; step 6 filters
   events by membership and closes them.
-- Roles are not enforced yet (see the top). Member management (changing a role) is not an endpoint yet.
+- Roles are not enforced yet for people (see the top). Member management (changing a role) is not an endpoint yet.
 - Step-up is "sign in again"; there is no password-only re-check endpoint.
 - The server's audit checkpoints (signed, hourly) are not scheduled yet.

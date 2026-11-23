@@ -20,7 +20,7 @@ What to do about it, in order of strength:
 2. **Run ProxyMind as a different operating-system user** (or in a container or VM) from the agent, with the home folder and the project file readable by that user only, and give the agent only the MCP stdio pipe (for example `ssh other-host proxymind mcp ...`, or `sudo -u proxymind proxymind -p ... mcp --actor agent:claude` started by the client). The agent then cannot read the token, the project file or the CA key.
 3. **Treat the agent as the human** when you cannot do either: only point it at targets you would let that person test, keep the rules of engagement narrow, and keep the audit head hash (`proxymind audit verify` prints it) or an exported signed checkpoint (`proxymind audit checkpoint -o FILE`, checked with `audit verify --checkpoint FILE`) somewhere the agent cannot write. The checkpoint key is in your home folder, so an agent that can read it can sign a new one.
 
-What changes next: Phase 3 adds per-agent scoped tokens (ADR-0022: a token carries an actor, a role ceiling and a tier cap; the install token stops being the way an agent talks to ProxyMind), a project server that holds the project and the rules so the agent's machine does not, and a keyed audit chain with a key the agent's user cannot read. Until then, the sentence above is the guarantee.
+What Phase 3 adds (ADR-0022): **per-agent tokens** (`pm3_…`, in both modes since step 5: a token carries an actor, a role ceiling and a tier cap, and a script or agent that uses one acts as `agent:name`, not as you), a **project server** that holds the project and the rules so the agent's machine does not (`proxymind serve --accounts`, with `proxymind mcp --server` as the agent's bridge: it needs no project file, home folder or install token on its machine), and a keyed audit chain with a key the agent's user cannot read. A token narrows what the *credential* can do; it does not make a shell-capable agent on the same machine as the install token safe, because that agent can still read `api-token` and the project file. For an agent that can run commands, the strong setups are a server on another host or user with only the token on the agent's side, or the list above.
 
 The gate also refuses agents in one more case: a project that this installation does not trust is in **safe mode** (a file that came from somewhere else), and in safe mode every action of an agent, plugin or AI scan that would send traffic is refused until a person has reviewed and trusted the project. `project_trust_status` tells you whether that is why a call was refused; you cannot trust a project yourself.
 
@@ -62,6 +62,25 @@ claude mcp add proxymind -- proxymind -p /full/path/engagement.pmproj mcp --acto
 ```
 
 `--actor` is how the agent appears in history and the audit log. Use a different name per agent if you run several.
+
+**Against a project server** (`docs/server-mode.md`), the agent needs no project file and no shell on the server: make it a
+token (`proxymind token create --kind agent --name claude` on your own install, or Account → API tokens on a server), then
+
+```bash
+proxymind login https://pm.example.com --token-env PROXYMIND_TOKEN      # once; add --pin sha256:… for a self-signed server
+claude mcp add proxymind -- proxymind mcp --server https://pm.example.com
+```
+
+`proxymind mcp --server` is a stdio-to-HTTPS bridge: the server runs the tools in its service, as `agent:claude` (the name
+stored with the token, never one the client picks), with the token's role ceiling and tier cap on top of the rules of
+engagement. Everything below (approvals, redaction, untrusted content, audit) is the same as for a local agent.
+
+**Tokens in single-user mode.** A script or an agent that calls the REST API (the TypeScript and Python SDKs) can run as
+`agent:name` instead of as you: `proxymind token create --kind agent --name ci-bot --tier-cap active_safe --expires 7d`
+makes a `pm3_` token (stored hashed in `~/.proxymind/tokens.json`), sent as `Authorization: Bearer pm3_…`. A running
+`proxymind ui` picks tokens up and drops revoked ones at the next request. The install token (`api-token`) stays the full
+human credential: an agent that can read that file, or the project file, is you (see the next section), so give agents a
+token, not the install token.
 
 ## 4. Approve risky actions
 

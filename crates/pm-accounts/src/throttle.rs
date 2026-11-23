@@ -62,8 +62,8 @@ impl ThrottleConfig {
     }
 }
 
-const ACCOUNT: &str = "account";
-const ADDRESS: &str = "address";
+pub(crate) const ACCOUNT: &str = "account";
+pub(crate) const ADDRESS: &str = "address";
 
 impl Accounts {
     /// The throttle key for a claimed handle, normalised or not.
@@ -76,7 +76,7 @@ impl Accounts {
         client.addr.as_deref().map(|a| clip(a.trim(), 64).to_lowercase())
     }
 
-    fn retry_of(conn: &Connection, scope: &str, key: &str, now: i64) -> Result<i64> {
+    pub(crate) fn retry_of(conn: &Connection, scope: &str, key: &str, now: i64) -> Result<i64> {
         let blocked: Option<i64> = conn
             .query_row("SELECT blocked_until FROM login_throttle WHERE scope = ?1 AND key = ?2", [scope, key], |r| {
                 r.get(0)
@@ -111,7 +111,7 @@ impl Accounts {
         }
     }
 
-    fn bump(&self, conn: &Connection, scope: &str, key: &str, free: u32, now: i64) -> Result<()> {
+    pub(crate) fn bump(&self, conn: &Connection, scope: &str, key: &str, free: u32, now: i64) -> Result<()> {
         let row: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT failures, last_failure_at FROM login_throttle WHERE scope = ?1 AND key = ?2",

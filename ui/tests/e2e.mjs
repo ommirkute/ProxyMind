@@ -1643,6 +1643,55 @@ match:
     await page.screenshot({ path: join(SHOTS, "7c-engagement.png"), fullPage: true });
   });
 
+  await section("API tokens (pm3_): make one, use it from a script, hit its tier cap, revoke it", async () => {
+    const base = new URL(link).origin;
+    await open("about");
+    await page.getByTestId("tokens-intro").waitFor();
+    await page.getByTestId("token-kind").selectOption("agent");
+    await page.getByTestId("token-name").fill("e2e-agent");
+    await page.getByTestId("token-cap").selectOption("active_safe");
+    await page.getByTestId("token-create").click();
+    await page.getByTestId("token-made").waitFor();
+    const secret = await page.getByTestId("token-value").inputValue();
+    check(/^pm3_agent_[0-9a-f]{64}$/.test(secret), "the token is shown once, as pm3_agent_ and 64 hex digits");
+    await page.screenshot({ path: join(SHOTS, "9-tokens.png"), fullPage: true });
+    // A script with only the bearer header acts as the token's agent, not as the person.
+    const call = (method, path, body, headers = {}) =>
+      fetch(`${base}/api/v1${path}`, { method, headers: { Authorization: `Bearer ${secret}`, ...(body ? { "Content-Type": "application/json" } : {}), ...headers }, body: body && JSON.stringify(body) });
+    const who = await (await call("GET", "/status")).json();
+    check(who.you_are === "agent:e2e-agent", `a script with the token is ${who.you_are}`);
+    // The actor cannot be chosen by the client.
+    const spoof = await (await call("GET", "/status?actor=human:tester", undefined, { "X-ProxyMind-Actor": "human:tester" })).json();
+    check(spoof.you_are === "agent:e2e-agent", "a client-supplied actor is ignored");
+    // The tier cap: a safe GET goes through the gate, a POST is above the cap and is denied (audited).
+    const get = await (await call("POST", "/replay", { url: `http://127.0.0.1:${shop}`, raw: "GET /api/me HTTP/1.1\r\nHost: shop\r\n\r\n" })).json();
+    check(get.status !== "denied", `a GET is within the cap (${get.status})`);
+    const post = await (await call("POST", "/replay", { url: `http://127.0.0.1:${shop}`, raw: "POST /api/orders HTTP/1.1\r\nHost: shop\r\nContent-Length: 0\r\n\r\n" })).json();
+    check(post.status === "denied" && /limited to active_safe/.test(post.reasons?.[0] ?? ""), "a POST is above the cap and denied");
+    // A token cannot make tokens.
+    const child = await call("POST", "/tokens", { kind: "agent", name: "child" });
+    check(child.status === 403, "a token cannot create tokens");
+    // MCP over HTTP as the same agent.
+    const mcp = await (await call("POST", "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roe_get", arguments: {} } })).json();
+    check(JSON.parse(mcp.result.content[0].text).you_are === "agent:e2e-agent", "the MCP endpoint runs the tools as the token's agent");
+    // The list shows it with its use, never the value; dismissing removes the value from the page.
+    await page.getByTestId("token-dismiss").click();
+    await page.getByTestId("token-made").waitFor({ state: "detached" });
+    await page.reload();
+    await page.getByTestId("token-agent:e2e-agent").waitFor();
+    const row = await page.getByTestId("token-agent:e2e-agent").textContent();
+    check(row.includes("active") && row.includes("active_safe") && !/never\s*0\s*$/.test(row), `the list shows its use and cap (${row.replace(/\s+/g, " ").slice(0, 120)})`);
+    check(!(await page.content()).includes(secret), "the page never holds the token after it was dismissed");
+    // Revoking in the UI ends it at its next request.
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("token-revoke-agent:e2e-agent").click();
+    await page.locator('[data-testid="token-agent:e2e-agent"] .chip.bad').waitFor();
+    const after = await call("GET", "/status");
+    check(after.status === 401, "after revoking, the token gets 401");
+    // The install token (the person) still works: nothing above changed it.
+    check((await (await fetch(`${base}/api/v1/status`, { headers: { Authorization: `Bearer ${new URL(link).searchParams.get("token")}` } })).json()).you_are === "human:tester", "the install token is still the human");
+  });
+
   await section("Proxy setup", async () => {
     await open("setup");
     await page.waitForSelector('[data-testid="ca-fingerprint"]');

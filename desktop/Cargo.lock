@@ -2814,6 +2814,8 @@ dependencies = [
  "parking_lot",
  "ring",
  "rusqlite",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -2843,6 +2845,7 @@ dependencies = [
  "pm-accounts",
  "pm-assistant",
  "pm-core",
+ "pm-mcp",
  "pm-service",
  "pm-tls",
  "ring",

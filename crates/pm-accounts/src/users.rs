@@ -62,7 +62,7 @@ fn is_constraint(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation)
 }
 
-fn new_id(prefix: &str) -> Result<String> {
+pub(crate) fn new_id(prefix: &str) -> Result<String> {
     Ok(format!("{prefix}{}", hex(&random::<16>()?)))
 }
 
@@ -101,7 +101,7 @@ impl Accounts {
         }
     }
 
-    fn is_project_owner(conn: &Connection, user_id: &str, project: &str) -> Result<bool> {
+    pub(crate) fn is_project_owner(conn: &Connection, user_id: &str, project: &str) -> Result<bool> {
         let role: Option<String> = conn
             .query_row(
                 "SELECT m.role FROM memberships m JOIN users u ON u.id = m.user_id \
@@ -500,6 +500,8 @@ impl Accounts {
             tx.execute("UPDATE users SET status = 'disabled' WHERE id = ?1", [target])?;
             tx.execute("DELETE FROM pending_logins WHERE user_id = ?1", [target])?;
             Self::revoke_sessions_in(tx, target, None, "user_disabled", self.now())?;
+            // A token is its owner's credential: it dies with them, and stays dead if the account is enabled again.
+            self.revoke_tokens_in(tx, target, None, "user_disabled", self.now())?;
             self.audit(tx, "user_disabled", Some(target), &format!("user:{acting}"), None, "")
         })
     }
@@ -566,6 +568,7 @@ impl Accounts {
                 tx.execute("DELETE FROM memberships WHERE project_id = ?1 AND user_id = ?2", [project_id, user_id])?;
             if n > 0 {
                 Self::revoke_sessions_in(tx, user_id, None, "membership_removed", self.now())?;
+                self.revoke_tokens_in(tx, user_id, Some(project_id), "membership_removed", self.now())?;
                 self.audit(tx, "role_removed", Some(user_id), &format!("user:{acting}"), None, project_id)?;
             }
             Ok(())

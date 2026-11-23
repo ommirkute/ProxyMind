@@ -35,7 +35,9 @@ use crate::auth_api::{
     auth_totp_begin, auth_totp_confirm, auth_totp_disable, auth_user_disable, auth_user_enable,
     auth_user_reset_second_factor, auth_users,
 };
+use crate::mcp_api::{MCP_BODY_LIMIT, mcp_endpoint};
 use crate::server_mode::Me;
+use crate::tokens_api::{token_create, token_revoke, tokens_list};
 
 pub enum ApiError {
     Service(ServiceError),
@@ -276,6 +278,14 @@ pub fn api() -> Router<AppState> {
         .route("/attack-paths", get(attack_paths).post(attack_path_create))
         .route("/attack-paths/{id}", axum::routing::delete(attack_path_delete))
         .route("/attack-graph", get(attack_graph))
+        // Tokens (ADR-0022 step 5), both modes: people manage them, a token never does. The MCP endpoint is what
+        // `proxymind mcp --server` talks to.
+        .route(
+            "/tokens",
+            get(tokens_list).post(token_create).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/tokens/{id}", axum::routing::delete(token_revoke))
+        .route("/mcp", post(mcp_endpoint).layer(axum::extract::DefaultBodyLimit::max(MCP_BODY_LIMIT)))
         // Server mode (ADR-0022 step 4): accounts and sessions. Every handler answers 404 in single-user mode.
         .route("/auth/state", get(auth_state))
         .route("/auth/setup", post(auth_setup).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)))

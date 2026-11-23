@@ -207,7 +207,7 @@ fn migrations_apply_to_an_empty_database_and_are_idempotent() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(tables, 10);
+    assert_eq!(tables, 11);
     // Applying again to a migrated connection changes nothing.
     crate::migrations::apply(&mut acc.conn()).unwrap();
     drop(acc);
@@ -1198,4 +1198,473 @@ fn credential_table_has_room_for_passkeys() {
         rusqlite::params![o.id, b"cred-a".to_vec()],
     );
     assert!(dup.is_err(), "a credential id is unique per kind");
+}
+
+// ---- tokens (ADR-0022 step 5) -----------------------------------------------------------------------------
+
+mod tokens {
+    use super::*;
+    use crate::token::{self, DEFAULT_TTL, TokenKind};
+
+    fn spec(kind: TokenKind, name: &str) -> NewTokenSpec {
+        NewTokenSpec::new(kind, name)
+    }
+
+    /// An admin who owns project `p`, plus a tester and a viewer member.
+    fn team(e: &Env) -> (User, User, User) {
+        let admin = bootstrap(e);
+        e.acc.set_membership(&admin.id, "p", &admin.id, Role::Owner).unwrap();
+        let tester = invited(e, &admin.id, "tester1", Role::Tester);
+        let viewer = invited(e, &admin.id, "viewer1", Role::Viewer);
+        (admin, tester, viewer)
+    }
+
+    fn auth(e: &Env, token: &str) -> Result<TokenAuth> {
+        e.acc.authenticate_token(token, "p", &c())
+    }
+
+    fn log_kinds(e: &Env) -> Vec<String> {
+        e.acc.security_log(200).unwrap().into_iter().map(|x| x.kind).collect()
+    }
+
+    #[test]
+    fn format_and_rules() {
+        for kind in [TokenKind::Agent, TokenKind::Ci, TokenKind::Plugin] {
+            let t = token::generate(kind).unwrap();
+            let t = t.expose();
+            assert!(t.starts_with(&format!("pm3_{}_", kind.as_str())), "{t}");
+            assert_eq!(t.len(), 4 + kind.as_str().len() + 1 + 64);
+            assert_eq!(token::shape(t), Some(kind));
+        }
+        assert_ne!(token::generate(TokenKind::Agent).unwrap(), token::generate(TokenKind::Agent).unwrap());
+        let good = format!("pm3_agent_{}", "ab".repeat(32));
+        assert_eq!(token::shape(&good), Some(TokenKind::Agent));
+        for bad in [
+            "",
+            "pm3_",
+            "pm2_agent_00",
+            &format!("pm3_human_{}", "ab".repeat(32)),
+            &format!("pm3_agent_{}", "AB".repeat(32)),
+            &format!("pm3_agent_{}", "ab".repeat(31)),
+            &format!("pm3_agent_{}x", "ab".repeat(32)),
+            &format!(" pm3_agent_{}", "ab".repeat(32)),
+            &format!("pm3_agent_{}\n", "ab".repeat(32)),
+        ] {
+            assert_eq!(token::shape(bad), None, "{bad:?}");
+        }
+        // Names follow the actor syntax.
+        for ok in ["claude", "ci-1", "a.b_c@d", &"x".repeat(64)] {
+            assert!(token::validate_name(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "   ", "has space", "a:b", "x/y", &"x".repeat(65), "\u{e9}"] {
+            assert!(token::validate_name(bad).is_err(), "{bad:?}");
+        }
+        // Roles: never owner. Tier caps: names of the gate, destructive caps nothing.
+        assert!(token::validate_role(Role::Owner).is_err());
+        assert_eq!(token::validate_role(Role::Viewer).unwrap(), Role::Viewer);
+        assert_eq!(token::validate_tier_cap(Some("passive")).unwrap().as_deref(), Some("passive"));
+        assert_eq!(token::validate_tier_cap(Some("destructive")).unwrap(), None);
+        assert_eq!(token::validate_tier_cap(None).unwrap(), None);
+        assert!(token::validate_tier_cap(Some("everything")).is_err());
+        assert!(token::validate_tier_cap(Some("Passive")).is_err());
+        // Lifetimes: default 30 d, one minute to one year.
+        assert_eq!(token::validate_ttl(None).unwrap(), DEFAULT_TTL);
+        assert!(token::validate_ttl(Some(Duration::from_secs(59))).is_err());
+        assert!(token::validate_ttl(Some(Duration::from_secs(365 * 86_400 + 1))).is_err());
+        assert!(token::validate_ttl(Some(Duration::from_secs(365 * 86_400))).is_ok());
+        assert_eq!(parse_ttl("30d").unwrap(), Duration::from_secs(30 * 86_400));
+        assert_eq!(parse_ttl("12h").unwrap(), Duration::from_secs(12 * 3600));
+        assert_eq!(parse_ttl("90m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_ttl("7").unwrap(), Duration::from_secs(7 * 86_400));
+        for bad in ["", "d", "-1d", "1w", "1.5d", "99999999999999999999d"] {
+            assert!(parse_ttl(bad).is_err(), "{bad}");
+        }
+        // The effective role is the lower; a viewer's cap is at most passive.
+        assert_eq!(effective_role(Role::Tester, Role::Viewer), Role::Viewer);
+        assert_eq!(effective_role(Role::Viewer, Role::Owner), Role::Viewer);
+        assert_eq!(effective_role(Role::Tester, Role::Owner), Role::Tester);
+        assert_eq!(effective_tier_cap(Role::Tester, None), None);
+        assert_eq!(effective_tier_cap(Role::Tester, Some("active_safe")).as_deref(), Some("active_safe"));
+        assert_eq!(effective_tier_cap(Role::Viewer, None).as_deref(), Some("passive"));
+        assert_eq!(effective_tier_cap(Role::Viewer, Some("read")).as_deref(), Some("read"));
+        assert_eq!(effective_tier_cap(Role::Viewer, Some("active_safe")).as_deref(), Some("passive"));
+        // The list of tier names is the gate's, lowest first.
+        assert_eq!(TIER_NAMES, ["read", "passive", "active_safe", "active_intrusive", "destructive"]);
+    }
+
+    #[test]
+    fn a_token_authenticates_its_owner_with_a_ceiling_and_a_cap() {
+        let e = env();
+        let (_, tester, _) = team(&e);
+        let mut s = spec(TokenKind::Agent, "claude");
+        s.tier_cap = Some("active_safe".into());
+        let made = e.acc.create_token(&tester.id, &tester.id, "p", &s).unwrap();
+        assert_eq!(made.info.actor_id(), "agent:claude");
+        assert_eq!(made.info.expires_at, T0 + 30 * 86_400, "30 days by default");
+        let a = auth(&e, made.token.expose()).unwrap();
+        assert_eq!(a.info.id, made.info.id);
+        assert_eq!(a.info.user_id.as_deref(), Some(tester.id.as_str()));
+        assert_eq!((a.role, a.tier_cap.as_deref()), (Role::Tester, Some("active_safe")));
+        // Wrong token, wrong shape, wrong project: all one error.
+        let other = token::generate(TokenKind::Agent).unwrap();
+        for t in [other.expose(), "pm3_agent_x", "", made.token.expose().to_uppercase().as_str()] {
+            assert!(matches!(auth(&e, t), Err(AccountError::InvalidToken)), "{t}");
+        }
+        assert!(matches!(
+            e.acc.authenticate_token(made.token.expose(), "elsewhere", &c()),
+            Err(AccountError::InvalidToken)
+        ));
+        // A viewer ceiling, however the owner is ranked, and a tester token of a viewer member are both viewers, which
+        // sends nothing: held to `passive`.
+        let mut v = spec(TokenKind::Ci, "reader");
+        v.role = Role::Viewer;
+        let read = e.acc.create_token(&tester.id, &tester.id, "p", &v).unwrap();
+        let a = auth(&e, read.token.expose()).unwrap();
+        assert_eq!((a.role, a.tier_cap.as_deref()), (Role::Viewer, Some("passive")));
+    }
+
+    #[test]
+    fn tokens_are_never_owner_and_never_made_by_the_wrong_person() {
+        let e = env();
+        let (admin, tester, viewer) = team(&e);
+        let mut s = spec(TokenKind::Agent, "x");
+        s.role = Role::Owner;
+        assert!(matches!(e.acc.create_token(&admin.id, &admin.id, "p", &s), Err(AccountError::InvalidArgument(_))));
+        let ok = spec(TokenKind::Agent, "mine");
+        // A member may not make one for somebody else; the project's owner may.
+        assert!(matches!(e.acc.create_token(&tester.id, &viewer.id, "p", &ok), Err(AccountError::NotAuthorised)));
+        let t = e.acc.create_token(&admin.id, &viewer.id, "p", &ok).unwrap();
+        assert_eq!(t.info.created_by, admin.id);
+        assert_eq!(t.info.user_id.as_deref(), Some(viewer.id.as_str()));
+        // Not for a user who is not a member, nor of a project the maker does not own.
+        let stranger = invited(&e, &admin.id, "stranger", Role::Tester);
+        e.acc.remove_membership(&admin.id, "p", &stranger.id).unwrap();
+        assert!(matches!(
+            e.acc.create_token(&stranger.id, &stranger.id, "p", &spec(TokenKind::Agent, "s")),
+            Err(AccountError::NoSuchUser)
+        ));
+        assert!(matches!(
+            e.acc.create_token(&tester.id, &tester.id, "q", &spec(TokenKind::Agent, "q")),
+            Err(AccountError::NoSuchUser)
+        ));
+        // Names: one live token per actor id, in any case; free again once revoked.
+        e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "Claude")).unwrap();
+        assert!(matches!(
+            e.acc.create_token(&admin.id, &admin.id, "p", &spec(TokenKind::Agent, "claude")),
+            Err(AccountError::TokenNameTaken)
+        ));
+        e.acc.create_token(&admin.id, &admin.id, "p", &spec(TokenKind::Ci, "claude")).unwrap();
+        let id = e.acc.list_tokens("p", Some(&tester.id)).unwrap()[0].id.clone();
+        e.acc.revoke_token(&tester.id, &id).unwrap();
+        e.acc.create_token(&admin.id, &admin.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        // A disabled maker can do nothing.
+        e.acc.disable_user(&admin.id, &tester.id).unwrap();
+        assert!(matches!(
+            e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "again")),
+            Err(AccountError::NotAuthorised)
+        ));
+    }
+
+    #[test]
+    fn expiry_and_revocation_take_effect_on_the_next_call() {
+        let e = env();
+        let (admin, tester, viewer) = team(&e);
+        let mut short = spec(TokenKind::Ci, "job");
+        short.ttl = Some(Duration::from_secs(3600));
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &short).unwrap();
+        assert!(auth(&e, t.token.expose()).is_ok());
+        e.clock.advance(3599);
+        assert!(auth(&e, t.token.expose()).is_ok());
+        e.clock.advance(1);
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)), "expired at its expiry");
+        // Revocation: by the owner, or by an owner of the project; not by another member.
+        let t2 = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "a")).unwrap();
+        assert!(auth(&e, t2.token.expose()).is_ok());
+        assert!(matches!(e.acc.revoke_token(&viewer.id, &t2.info.id), Err(AccountError::NoSuchToken)));
+        assert!(auth(&e, t2.token.expose()).is_ok(), "a refused revoke changes nothing");
+        e.acc.revoke_token(&admin.id, &t2.info.id).unwrap();
+        assert!(matches!(auth(&e, t2.token.expose()), Err(AccountError::InvalidToken)));
+        assert!(matches!(e.acc.revoke_token(&admin.id, &t2.info.id), Err(AccountError::NoSuchToken)), "once");
+        assert!(matches!(e.acc.revoke_token(&admin.id, "t_nope"), Err(AccountError::NoSuchToken)));
+        let listed = e.acc.list_tokens("p", None).unwrap();
+        assert!(listed.iter().any(|x| x.id == t2.info.id && x.revoked_at.is_some()));
+        assert_eq!(e.acc.list_tokens("p", Some(&viewer.id)).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn the_owners_state_decides_what_a_token_can_do() {
+        let e = env();
+        let (admin, tester, _) = team(&e);
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        let ok = |role: Role, cap: Option<&str>| {
+            let a = auth(&e, t.token.expose()).unwrap();
+            assert_eq!((a.role, a.tier_cap.as_deref()), (role, cap));
+        };
+        ok(Role::Tester, None);
+        // Promotion does not widen a token past its ceiling.
+        e.acc.set_membership(&admin.id, "p", &tester.id, Role::Owner).unwrap();
+        ok(Role::Tester, None);
+        // Demotion narrows it at once, to a viewer who sends nothing.
+        e.acc.set_membership(&admin.id, "p", &tester.id, Role::Viewer).unwrap();
+        ok(Role::Viewer, Some("passive"));
+        e.acc.set_membership(&admin.id, "p", &tester.id, Role::Tester).unwrap();
+        ok(Role::Tester, None);
+        // Removal kills the token, and it stays dead if the person is added back.
+        e.acc.remove_membership(&admin.id, "p", &tester.id).unwrap();
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)));
+        e.acc.set_membership(&admin.id, "p", &tester.id, Role::Tester).unwrap();
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)));
+        let reason = e.acc.get_token(&t.info.id).unwrap().unwrap().revoked_reason;
+        assert_eq!(reason.as_deref(), Some("membership_removed"));
+        // Disabling the owner kills theirs, and enabling does not bring them back.
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Plugin, "hosts")).unwrap();
+        assert!(auth(&e, t.token.expose()).is_ok());
+        e.acc.disable_user(&admin.id, &tester.id).unwrap();
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)));
+        e.acc.enable_user(&admin.id, &tester.id).unwrap();
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)));
+        assert_eq!(e.acc.get_token(&t.info.id).unwrap().unwrap().revoked_reason.as_deref(), Some("user_disabled"));
+        // A disabled owner's token is dead even if the row were not revoked (checked at use, not only at disable).
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Plugin, "later")).unwrap();
+        e.acc.conn().execute("UPDATE users SET status = 'disabled' WHERE id = ?1", [&tester.id]).unwrap();
+        assert!(matches!(auth(&e, t.token.expose()), Err(AccountError::InvalidToken)));
+    }
+
+    #[test]
+    fn use_is_counted_at_most_once_a_minute_and_the_first_use_is_logged() {
+        let e = env();
+        let (_, tester, _) = team(&e);
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        assert!(e.acc.get_token(&t.info.id).unwrap().unwrap().last_used_at.is_none());
+        for _ in 0..5 {
+            auth(&e, t.token.expose()).unwrap();
+        }
+        let stored = e.acc.get_token(&t.info.id).unwrap().unwrap();
+        assert_eq!((stored.last_used_at, stored.use_count), (Some(T0), 1), "one write: the first use");
+        assert_eq!(e.acc.list_tokens("p", None).unwrap()[0].use_count, 5, "a listing includes what is not written yet");
+        e.clock.advance(61);
+        let a = auth(&e, t.token.expose()).unwrap();
+        assert_eq!(a.info.use_count, 6);
+        let stored = e.acc.get_token(&t.info.id).unwrap().unwrap();
+        assert_eq!((stored.last_used_at, stored.use_count), (Some(T0 + 61), 6));
+        assert_eq!(log_kinds(&e).iter().filter(|k| *k == "token_first_use").count(), 1);
+        assert!(log_kinds(&e).contains(&"token_created".to_string()));
+        e.acc.revoke_token(&tester.id, &t.info.id).unwrap();
+        assert!(log_kinds(&e).contains(&"token_revoked".to_string()));
+    }
+
+    #[test]
+    fn failures_are_logged_without_the_value_and_a_flood_is_not_logged_forever() {
+        let e = env();
+        let (_, tester, _) = team(&e);
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        e.acc.revoke_token(&tester.id, &t.info.id).unwrap();
+        let _ = auth(&e, t.token.expose());
+        let guess = token::generate(TokenKind::Agent).unwrap();
+        let _ = auth(&e, guess.expose());
+        let _ = auth(&e, "pm3_not-a-token");
+        let log = e.acc.security_log(50).unwrap();
+        let fails: Vec<&SecurityEvent> = log.iter().filter(|x| x.kind == "token_failure").collect();
+        assert_eq!(fails.len(), 3);
+        assert!(fails.iter().any(|f| f.detail.starts_with("revoked") && f.detail.contains(&t.info.id)));
+        assert!(fails.iter().any(|f| f.detail == "unknown token"));
+        assert!(fails.iter().any(|f| f.detail == "malformed token"));
+        assert!(fails.iter().all(|f| f.client_addr.as_deref() == Some("203.0.113.9")));
+        let dump = format!("{log:?}");
+        for secret in [t.token.expose(), guess.expose()] {
+            assert!(!dump.contains(secret), "a token value is in the security log");
+            assert!(!dump.contains(&secret[secret.len() - 16..]), "part of a token value is in the security log");
+        }
+        // A flood from one address: after the free failures the log entries thin out (the delay doubles), and a
+        // valid token is never refused because of it.
+        let live = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "live")).unwrap();
+        for _ in 0..200 {
+            let _ = auth(&e, guess.expose());
+        }
+        let n = e.acc.security_log(1000).unwrap().iter().filter(|x| x.kind == "token_failure").count();
+        assert!(n < 30, "{n} failures logged out of 203");
+        assert!(auth(&e, live.token.expose()).is_ok());
+        // The flood does not throttle sign-in from the same address.
+        assert!(e.acc.login_retry_after("tester1", &c()).unwrap().is_none());
+        assert!(e.acc.verify_security_log().unwrap().is_ok());
+    }
+
+    #[test]
+    fn only_a_hash_is_stored() {
+        let dir = TempDir::new("tokdisk");
+        let path = dir.file("server.db");
+        let clock = Arc::new(ManualClock::new(T0));
+        let acc = Accounts::open_with(&path, key(), Config::insecure_for_tests(), clock.clone()).unwrap();
+        let e = Env { acc, clock };
+        let (_, tester, _) = team(&e);
+        let t = e.acc.create_token(&tester.id, &tester.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        let secret = t.token.expose().to_string();
+        let bare = secret.rsplit('_').next().unwrap().to_string();
+        let mut disk = Vec::new();
+        for name in ["server.db", "server.db-wal"] {
+            if let Ok(b) = std::fs::read(dir.file(name)) {
+                disk.extend(b);
+            }
+        }
+        for needle in [secret.as_bytes(), bare.as_bytes()] {
+            assert!(!disk.windows(needle.len()).any(|w| w == needle), "the token is on disk in plain text");
+        }
+        let (hash, count): (Vec<u8>, i64) = e
+            .acc
+            .conn()
+            .query_row("SELECT token_hash, COUNT(*) FROM tokens", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((hash.len(), count), (32, 1));
+        // The hash is keyed: a server with another key cannot verify it.
+        let other =
+            Accounts::open_in_memory(ServerKey::from_bytes([8; 32]), Config::insecure_for_tests(), e.clock.clone())
+                .unwrap();
+        assert_ne!(token::digest(&other.keys.api_token, &secret), hash);
+        assert_eq!(token::digest(&e.acc.keys.api_token, &secret), hash);
+    }
+
+    #[test]
+    fn the_server_console_may_make_and_revoke_tokens_and_is_logged_as_such() {
+        let e = env();
+        let (_, tester, _) = team(&e);
+        let made = e.acc.create_token(CONSOLE, &tester.id, "p", &spec(TokenKind::Agent, "claude")).unwrap();
+        assert_eq!(made.info.created_by, CONSOLE);
+        assert!(auth(&e, made.token.expose()).is_ok());
+        // Still for a real member of the project, and nobody can claim to be the console by id.
+        assert!(matches!(
+            e.acc.create_token(CONSOLE, "u_nobody", "p", &spec(TokenKind::Agent, "x")),
+            Err(AccountError::NoSuchUser)
+        ));
+        assert!(matches!(
+            e.acc.create_token("local_console ", &tester.id, "p", &spec(TokenKind::Agent, "y")),
+            Err(AccountError::NotAuthorised)
+        ));
+        e.acc.revoke_token(CONSOLE, &made.info.id).unwrap();
+        assert!(matches!(auth(&e, made.token.expose()), Err(AccountError::InvalidToken)));
+        let log = e.acc.security_log(50).unwrap();
+        assert!(log.iter().any(|x| x.kind == "token_created" && x.actor == CONSOLE));
+        assert!(log.iter().any(|x| x.kind == "token_revoked" && x.actor == CONSOLE));
+        assert!(e.acc.verify_security_log().unwrap().is_ok());
+    }
+
+    // ---- the single-user file ---------------------------------------------------------------------------
+
+    fn file_store(dir: &TempDir, clock: Arc<ManualClock>) -> TokenFile {
+        TokenFile::open_with_clock(&dir.0, clock).unwrap()
+    }
+
+    #[test]
+    fn the_token_file_has_the_same_rules() {
+        let dir = TempDir::new("tokfile");
+        let clock = Arc::new(ManualClock::new(T0));
+        let f = file_store(&dir, clock.clone());
+        assert!(f.list().unwrap().is_empty());
+        let mut s = spec(TokenKind::Agent, "claude");
+        s.tier_cap = Some("passive".into());
+        let t = f.create(&s).unwrap();
+        assert_eq!((t.info.user_id.clone(), t.info.project_id.clone()), (None, None));
+        assert_eq!(t.info.expires_at, T0 + 30 * 86_400);
+        let a = f.authenticate(t.token.expose()).unwrap();
+        assert_eq!(
+            (a.info.actor_id(), a.role, a.tier_cap.as_deref()),
+            ("agent:claude".into(), Role::Tester, Some("passive"))
+        );
+        // Rules: names, roles, caps, unique live names.
+        let mut owner = spec(TokenKind::Agent, "o");
+        owner.role = Role::Owner;
+        assert!(f.create(&owner).is_err());
+        assert!(f.create(&spec(TokenKind::Agent, "bad name")).is_err());
+        assert!(matches!(f.create(&spec(TokenKind::Agent, "CLAUDE")), Err(AccountError::TokenNameTaken)));
+        f.create(&spec(TokenKind::Ci, "claude")).unwrap();
+        // A viewer ceiling is held to passive.
+        let mut v = spec(TokenKind::Plugin, "reader");
+        v.role = Role::Viewer;
+        let v = f.create(&v).unwrap();
+        let a = f.authenticate(v.token.expose()).unwrap();
+        assert_eq!((a.role, a.tier_cap.as_deref()), (Role::Viewer, Some("passive")));
+        // Unknown, malformed, expired, revoked.
+        let guess = token::generate(TokenKind::Agent).unwrap();
+        assert!(matches!(f.authenticate(guess.expose()), Err(AccountError::InvalidToken)));
+        assert!(matches!(f.authenticate("pm3_x"), Err(AccountError::InvalidToken)));
+        let mut short = spec(TokenKind::Ci, "short");
+        short.ttl = Some(Duration::from_secs(120));
+        let short = f.create(&short).unwrap();
+        assert!(f.authenticate(short.token.expose()).is_ok());
+        clock.advance(120);
+        assert!(matches!(f.authenticate(short.token.expose()), Err(AccountError::InvalidToken)));
+        f.revoke(&t.info.id).unwrap();
+        assert!(matches!(f.authenticate(t.token.expose()), Err(AccountError::InvalidToken)));
+        assert!(matches!(f.revoke(&t.info.id), Err(AccountError::NoSuchToken)));
+        // The name is free again once revoked.
+        f.create(&spec(TokenKind::Agent, "claude")).unwrap();
+    }
+
+    #[test]
+    fn the_token_file_is_private_hashed_and_shared_between_processes() {
+        let dir = TempDir::new("tokfile2");
+        let clock = Arc::new(ManualClock::new(T0));
+        let ui = file_store(&dir, clock.clone());
+        let cli = file_store(&dir, clock.clone());
+        let t = cli.create(&spec(TokenKind::Agent, "claude")).unwrap();
+        // The other handle (the running UI) sees it at once, and a revoke by the CLI is seen at the next request.
+        let first = ui.authenticate(t.token.expose()).unwrap();
+        assert_eq!(first.info.use_count, 1);
+        cli.revoke(&t.info.id).unwrap();
+        assert!(matches!(ui.authenticate(t.token.expose()), Err(AccountError::InvalidToken)));
+        // The UI's bookkeeping cannot undo it: its next write re-reads under the lock.
+        let t2 = cli.create(&spec(TokenKind::Agent, "second")).unwrap();
+        ui.authenticate(t2.token.expose()).unwrap();
+        clock.advance(61);
+        ui.authenticate(t2.token.expose()).unwrap();
+        cli.revoke(&t2.info.id).unwrap();
+        let docs = cli.list().unwrap();
+        assert!(docs.iter().all(|d| d.revoked_at.is_some()));
+        assert_eq!(docs.iter().find(|d| d.id == t2.info.id).unwrap().use_count, 2);
+        // On disk: the hash only, in files only the owner can read; no lock file left behind.
+        let text = std::fs::read_to_string(dir.file("tokens.json")).unwrap();
+        let bare = t.token.expose().rsplit('_').next().unwrap().to_string();
+        assert!(!text.contains(t.token.expose()) && !text.contains(&bare), "the token is in the file");
+        assert!(text.contains("\"hash\""));
+        assert!(!dir.file("tokens.lock").exists());
+        assert!(!dir.file("tokens.json.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["tokens.json", "tokens.key"] {
+                let mode = std::fs::metadata(dir.file(name)).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{name}");
+            }
+            // A file that others can read is refused, by reads and by a new handle.
+            std::fs::set_permissions(dir.file("tokens.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(matches!(ui.authenticate(t2.token.expose()), Err(AccountError::TokenStore(_))));
+            assert!(matches!(ui.list(), Err(AccountError::TokenStore(_))));
+            assert!(matches!(ui.create(&spec(TokenKind::Ci, "x")), Err(AccountError::TokenStore(_))));
+            assert!(TokenFile::open(&dir.0).is_err());
+            std::fs::set_permissions(dir.file("tokens.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(dir.file("tokens.key"), std::fs::Permissions::from_mode(0o640)).unwrap();
+            assert!(TokenFile::open(&dir.0).is_err(), "a key others can read is refused");
+        }
+    }
+
+    #[test]
+    fn a_token_made_in_another_home_does_not_work_here() {
+        let (a, b) = (TempDir::new("homea"), TempDir::new("homeb"));
+        let clock = Arc::new(ManualClock::new(T0));
+        let fa = file_store(&a, clock.clone());
+        let fb = file_store(&b, clock.clone());
+        let t = fa.create(&spec(TokenKind::Agent, "claude")).unwrap();
+        assert!(matches!(fb.authenticate(t.token.expose()), Err(AccountError::InvalidToken)));
+        // Even with the file copied over, the key is the home's own.
+        std::fs::copy(a.file("tokens.json"), b.file("tokens.json")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(b.file("tokens.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(matches!(fb.authenticate(t.token.expose()), Err(AccountError::InvalidToken)));
+        assert!(fa.authenticate(t.token.expose()).is_ok());
+        // A damaged file fails closed.
+        std::fs::write(a.file("tokens.json"), "{ not json").unwrap();
+        assert!(matches!(fa.authenticate(t.token.expose()), Err(AccountError::TokenStore(_))));
+    }
 }

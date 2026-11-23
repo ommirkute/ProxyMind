@@ -686,12 +686,18 @@ fn tier_name(t: Tier) -> String {
 
 pub fn roe_summary(service: &Service, actor: &Actor) -> Value {
     let roe = service.policy().roe();
+    // A credential's tier cap (a token's) is checked before the rules: above it, everything is denied.
+    let cap = service.policy().tier_cap(actor);
     let tiers: serde_json::Map<String, Value> =
         [Tier::Read, Tier::Passive, Tier::ActiveSafe, Tier::ActiveIntrusive, Tier::Destructive]
             .into_iter()
-            .map(|t| (tier_name(t), json!(roe.tier_decision(actor.kind, t).as_str())))
+            .map(|t| {
+                let decision =
+                    if cap.is_some_and(|c| t > c) { "deny" } else { roe.tier_decision(actor.kind, t).as_str() };
+                (tier_name(t), json!(decision))
+            })
             .collect();
-    json!({
+    let mut summary = json!({
         "you_are": actor.id(),
         "engagement": {
             "name": roe.engagement.name,
@@ -710,7 +716,11 @@ pub fn roe_summary(service: &Service, actor: &Actor) -> Value {
         },
         "secrets_redacted": service.redacts_for(actor),
         "only_local_models_allowed": !roe.data.allow_cloud_models && actor.kind == ActorKind::Agent,
-    })
+    });
+    if let Some(cap) = cap {
+        summary["credential_tier_cap"] = json!(cap.name());
+    }
+    summary
 }
 
 /// Runs a tool. Every result passes the same filter (for agents: secrets

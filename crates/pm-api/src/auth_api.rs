@@ -47,7 +47,7 @@ pub(crate) struct AuthError {
 }
 
 impl AuthError {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self { status, code, message: message.into(), retry_after: None }
     }
 
@@ -72,13 +72,23 @@ impl From<AccountError> for AuthError {
                 (StatusCode::BAD_REQUEST, "invalid_input")
             }
             E::UsernameTaken => (StatusCode::CONFLICT, "username_taken"),
+            E::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid_token"),
+            E::TokenNameTaken => (StatusCode::CONFLICT, "token_name_taken"),
+            E::NoSuchToken => (StatusCode::NOT_FOUND, "no_such_token"),
+            E::TooManyTokens => (StatusCode::CONFLICT, "too_many_tokens"),
             E::NoSuchUser => (StatusCode::NOT_FOUND, "no_such_user"),
             E::NotAuthorised => (StatusCode::FORBIDDEN, "not_authorised"),
             E::LastAdmin => (StatusCode::CONFLICT, "last_admin"),
             E::SecondFactorRequired => (StatusCode::CONFLICT, "second_factor_required"),
             E::AlreadyEnrolled => (StatusCode::CONFLICT, "already_enrolled"),
             E::NotEnrolling => (StatusCode::CONFLICT, "not_enrolling"),
-            E::Decrypt | E::ServerKey(_) | E::NewerSchema(_) | E::Storage(_) | E::Io(_) | E::Internal(_) => {
+            E::Decrypt
+            | E::ServerKey(_)
+            | E::TokenStore(_)
+            | E::NewerSchema(_)
+            | E::Storage(_)
+            | E::Io(_)
+            | E::Internal(_) => {
                 // The text of a storage or crypto failure stays in the log, not in the answer.
                 tracing::error!("accounts error: {e}");
                 return Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
@@ -105,20 +115,20 @@ impl IntoResponse for AuthError {
     }
 }
 
-type AuthResult = Result<Response, AuthError>;
+pub(crate) type AuthResult = Result<Response, AuthError>;
 
-fn server(st: &AppState) -> Result<Arc<ServerMode>, AuthError> {
+pub(crate) fn server(st: &AppState) -> Result<Arc<ServerMode>, AuthError> {
     st.server.clone().ok_or_else(|| {
         AuthError::new(StatusCode::NOT_FOUND, "not_server_mode", "this ProxyMind is not running in server mode")
     })
 }
 
-fn signed_in(me: &Me) -> Result<&AuthContext, AuthError> {
+pub(crate) fn signed_in(me: &Me) -> Result<&AuthContext, AuthError> {
     me.auth.as_deref().ok_or_else(AuthError::unauthenticated)
 }
 
 /// Sensitive actions need a sign-in within the last 10 minutes.
-fn fresh(sm: &ServerMode, c: &AuthContext) -> Result<(), AuthError> {
+pub(crate) fn fresh(sm: &ServerMode, c: &AuthContext) -> Result<(), AuthError> {
     if sm.fresh(&c.session) {
         Ok(())
     } else {
@@ -147,7 +157,7 @@ fn limit(fields: &[(&str, usize)]) -> Result<(), AuthError> {
     Ok(())
 }
 
-fn reply<T: Serialize>(status: StatusCode, body: &T, cookies: &[String]) -> Response {
+pub(crate) fn reply<T: Serialize>(status: StatusCode, body: &T, cookies: &[String]) -> Response {
     let mut resp = (status, Json(body)).into_response();
     for c in cookies {
         if let Ok(v) = HeaderValue::from_str(c) {

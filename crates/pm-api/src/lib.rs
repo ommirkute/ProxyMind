@@ -14,15 +14,21 @@
 //!   or the `pm_token` cookie set by `/auth?token=…`;
 //! - requests that change anything must carry `X-ProxyMind: 1`, which a
 //!   cross-site form or image can't send.
+//!
+//! `pm3_` tokens (ADR-0022 step 5, `tokens_api`, `mcp_api`) work in both modes: `Authorization: Bearer pm3_…` makes the
+//! request act as the token's actor (`agent:<name>`, `ci:<name>`, `plugin:<name>`), with the token's tier cap enforced
+//! by the policy gate. In single-user mode the install token still means the human.
 
 mod auth_api;
 mod contract_table;
 pub mod contracts;
 pub mod listen;
+mod mcp_api;
 mod routes;
 pub mod server_mode;
+mod tokens_api;
 
-pub use server_mode::{AuthContext, ConnInfo, Me, ServerMode, safe_next};
+pub use server_mode::{AuthContext, ConnInfo, Me, ServerMode, TokenContext, safe_next};
 
 use std::sync::Arc;
 
@@ -52,6 +58,9 @@ pub struct AppState {
     pub setup: Arc<ProxySetup>,
     /// Server mode (accounts, sessions, TLS); `None` is single-user mode, where `actor` and `token` rule.
     pub server: Option<Arc<ServerMode>>,
+    /// Single-user mode: the install's `pm3_` tokens (`<home>/tokens.json`). `None` means this process has no token
+    /// store, and a `pm3_` bearer is refused. Server mode keeps tokens in `server.db` and never reads this.
+    pub tokens: Option<Arc<pm_accounts::TokenFile>>,
 }
 
 /// What the Proxy setup page shows.
@@ -85,6 +94,7 @@ impl AppState {
             assistant,
             setup: Arc::new(ProxySetup::default()),
             server: None,
+            tokens: None,
         })
     }
 
@@ -92,6 +102,12 @@ impl AppState {
     /// `actor` and `token` are then never consulted (the token is only a placeholder that nothing accepts).
     pub fn with_server_mode(mut self, server: ServerMode) -> Self {
         self.server = Some(Arc::new(server));
+        self
+    }
+
+    /// Single-user mode: accepts `pm3_` tokens from this store (`proxymind token create`, the Tokens panel).
+    pub fn with_tokens(mut self, tokens: pm_accounts::TokenFile) -> Self {
+        self.tokens = Some(Arc::new(tokens));
         self
     }
 
@@ -191,9 +207,69 @@ fn add_security_headers(h: &mut HeaderMap) {
     );
 }
 
+/// Is there a `pm_token` cookie (the single-user browser credential) on the request?
+fn has_install_cookie(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .any(|c| c.trim().starts_with("pm_token="))
+}
+
+/// Logs that a `pm3_` token was refused, at most once a minute (the log must not become a way to fill a disk, and
+/// says nothing about the token).
+fn note_token_refused(what: &str) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
+        .unwrap_or(0);
+    if now - LAST.load(Ordering::Relaxed) >= 60 {
+        LAST.store(now, Ordering::Relaxed);
+        tracing::warn!("a pm3_ token was refused: {what}");
+    }
+}
+
+fn token_refused() -> Response {
+    let mut r = (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({ "error": "the token is not valid", "code": "invalid_token" })),
+    )
+        .into_response();
+    r.headers_mut().insert(header::WWW_AUTHENTICATE, "Bearer".parse().expect("static"));
+    r
+}
+
+/// Single-user mode: a `pm3_` bearer token becomes the token's actor. Nothing is cached: the file is read now.
+async fn single_user_token(st: &AppState, token: &str, method: &Method, path: &str) -> Result<Me, Response> {
+    let Some(store) = st.tokens.clone() else {
+        note_token_refused("this process has no token store");
+        return Err(token_refused());
+    };
+    let t = token.to_string();
+    let auth = match tokio::task::spawn_blocking(move || store.authenticate(&t)).await {
+        Ok(Ok(a)) => a,
+        Ok(Err(pm_accounts::AccountError::TokenStore(e))) => {
+            note_token_refused(&e);
+            return Err(token_refused());
+        }
+        _ => {
+            note_token_refused("unknown, expired or revoked");
+            return Err(token_refused());
+        }
+    };
+    let Ok(actor) = Actor::parse(&auth.info.actor_id()) else { return Err(token_refused()) };
+    let me = Me::with_token(actor, TokenContext::of(&auth), None);
+    server_mode::token_restrictions(&me, method, path).map_err(|r| *r)?;
+    st.service.policy().set_tier_cap(&me.actor, me.token.as_ref().and_then(|t| t.tier_cap));
+    Ok(me)
+}
+
 async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
     if let Some(sm) = st.server.clone() {
-        let mut resp = server_mode::server_guard(sm, req, next).await;
+        let mut resp = server_mode::server_guard(sm, st.service.clone(), req, next).await;
         add_security_headers(resp.headers_mut());
         return resp;
     }
@@ -203,10 +279,46 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
     }
     let path = req.uri().path();
     let is_api = path.starts_with("/api/");
+    let changes_state = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    // A `pm3_` token is a bearer credential of its own (agents, CI, plugins): the actor comes from the token. With no
+    // install cookie on the request there is no ambient credential, so `X-ProxyMind` is not needed (a plain bearer
+    // client, like the SDKs and the MCP bridge, need not send it); with the cookie, the cookie path's check applies.
+    if is_api
+        && let Some(token) = server_mode::bearer_token(headers).filter(|t| t.starts_with(pm_accounts::TOKEN_PREFIX))
+    {
+        if changes_state
+            && has_install_cookie(headers)
+            && headers.get("x-proxymind").and_then(|v| v.to_str().ok()) != Some("1")
+        {
+            return (StatusCode::FORBIDDEN, "state-changing requests need the X-ProxyMind: 1 header").into_response();
+        }
+        if path.starts_with("/api/v1/auth/") {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({
+                    "error": "this ProxyMind is not running in server mode",
+                    "code": "not_server_mode"
+                })),
+            )
+                .into_response();
+        }
+        let (token, method, path) = (token.to_string(), req.method().clone(), path.to_string());
+        return match single_user_token(&st, &token, &method, &path).await {
+            Ok(me) => {
+                req.extensions_mut().insert(me);
+                let mut resp = next.run(req).await;
+                add_security_headers(resp.headers_mut());
+                resp
+            }
+            Err(mut r) => {
+                add_security_headers(r.headers_mut());
+                r
+            }
+        };
+    }
     if is_api && !token_ok(headers, &st.token) {
         return (StatusCode::UNAUTHORIZED, "missing or wrong ProxyMind token").into_response();
     }
-    let changes_state = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if is_api && changes_state && headers.get("x-proxymind").and_then(|v| v.to_str().ok()) != Some("1") {
         return (StatusCode::FORBIDDEN, "state-changing requests need the X-ProxyMind: 1 header").into_response();
     }

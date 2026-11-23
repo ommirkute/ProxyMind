@@ -1,6 +1,8 @@
 //! `proxymind`: command-line entry point.
 
 mod bench;
+mod remote;
+mod token_cmd;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -208,6 +210,28 @@ enum Command {
         #[command(subcommand)]
         action: AuditAction,
     },
+    /// Make, list and revoke `pm3_` tokens for agents, CI jobs and plugins (ADR-0022).
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+    /// Save a project server's address, certificate pin and your token, and check them by asking who you are.
+    Login {
+        /// The server's address, e.g. https://pm.example.com:7777
+        url: String,
+        /// Pin a self-signed certificate: sha256:<base64 or hex of its public key>, as the server printed at start.
+        /// Without it the certificate must verify against the public roots.
+        #[arg(long)]
+        pin: Option<String>,
+        /// Read the token from this environment variable (else it is asked for, hidden, or read from stdin).
+        #[arg(long)]
+        token_env: Option<String>,
+    },
+    /// Forget a server saved by `proxymind login` (its address, pin and token).
+    Logout {
+        /// The server's address, as given to `login`
+        url: String,
+    },
     /// Run an MCP server on stdin/stdout so AI agents (e.g. Claude Code) can use ProxyMind.
     Mcp {
         /// Rules of engagement to use (saved to the project). Defaults to the project's saved ROE.
@@ -222,6 +246,17 @@ enum Command {
         /// URL targets should call back (default: http://<oast-listen>)
         #[arg(long)]
         oast_public_url: Option<String>,
+        /// Do not run tools here: bridge stdin/stdout to this project server's MCP endpoint
+        /// (https://host[:port]), as the agent your `pm3_` token is. The pin and token saved by `proxymind login`
+        /// are used unless given.
+        #[arg(long)]
+        server: Option<String>,
+        /// With --server: read the token from this environment variable (default: the one saved by `login`).
+        #[arg(long)]
+        token_env: Option<String>,
+        /// With --server: pin a self-signed certificate (default: the pin saved by `login`).
+        #[arg(long)]
+        pin: Option<String>,
     },
     /// Start the web UI, the proxy and the API together.
     Ui {
@@ -1286,6 +1321,62 @@ enum WorkflowAction {
     },
 }
 
+/// Where `proxymind token` works: the install's own file, or a server home.
+#[derive(clap::Args)]
+struct TokenTarget {
+    /// On the server host: the server home that holds server.db and server.key. Without it, the tokens are this
+    /// install's (single-user mode, `<home>/tokens.json`).
+    #[arg(long)]
+    server_home: Option<PathBuf>,
+    /// With --server-home: the account the token belongs to.
+    #[arg(long)]
+    user: Option<String>,
+    /// With --server-home: the project's id (default: read from the project file).
+    #[arg(long)]
+    project_id: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Make a token. It is printed once, on stdout alone; keep it where only the agent or job can read it.
+    Create {
+        /// What it acts as
+        #[arg(long, value_parser = ["agent", "ci", "plugin"])]
+        kind: String,
+        /// The actor name: agent:<name>, ci:<name> or plugin:<name> in the audit log
+        #[arg(long)]
+        name: String,
+        /// The role ceiling (never owner); the token acts with the lower of this and its owner's role
+        #[arg(long, default_value = "tester", value_parser = ["tester", "viewer"])]
+        role: String,
+        /// The highest tier it may reach: read, passive, active_safe, active_intrusive (the rules can narrow it more)
+        #[arg(long)]
+        tier_cap: Option<String>,
+        /// Lifetime: 30d, 12h or 90m (at most 365d)
+        #[arg(long, default_value = "30d")]
+        expires: String,
+        #[command(flatten)]
+        target: TokenTarget,
+    },
+    /// List tokens (never their secrets).
+    List {
+        #[arg(long)]
+        json: bool,
+        /// With --server-home: everyone's tokens in the project, not only --user's
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        target: TokenTarget,
+    },
+    /// Revoke a token: it stops working at its next request.
+    Revoke {
+        /// The token's id (t_…), as `token list` shows it
+        id: String,
+        #[command(flatten)]
+        target: TokenTarget,
+    },
+}
+
 #[derive(Subcommand)]
 enum ServerAction {
     /// Lost every owner? Ends all sessions and prints a new one-time setup URL that creates a new owner (the
@@ -1689,6 +1780,73 @@ async fn run_ci(cli: &Cli, project_given: bool, a: &CiArgs) -> Result<i32> {
 static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// The server home: the flag, else `<home>/server`.
+/// `proxymind token create | list | revoke`.
+fn token_command(cli: &Cli, action: &TokenAction) -> Result<()> {
+    let target = match action {
+        TokenAction::Create { target, .. } | TokenAction::List { target, .. } | TokenAction::Revoke { target, .. } => {
+            target
+        }
+    };
+    let need_user = matches!(action, TokenAction::Create { .. });
+    let store = match &target.server_home {
+        Some(dir) => token_cmd::open_server(
+            &token_cmd::ServerArgs {
+                server_home: dir,
+                user: target.user.as_deref(),
+                project_id: target.project_id.as_deref(),
+                project_file: &cli.project,
+            },
+            need_user,
+        )?,
+        None => {
+            anyhow::ensure!(
+                target.user.is_none() && target.project_id.is_none(),
+                "--user and --project-id are for a server's tokens: add --server-home on the server host"
+            );
+            token_cmd::open_home(&home_dir(cli)?)?
+        }
+    };
+    match action {
+        TokenAction::Create { kind, name, role, tier_cap, expires, .. } => {
+            let made = store.create(&token_cmd::spec(kind, name, role, tier_cap.as_deref(), expires)?)?;
+            eprintln!("Token created: {}", token_cmd::describe(&made.info));
+            eprintln!("It is shown once and cannot be shown again: store it where only the {kind} can read it.");
+            eprintln!("Use it as `Authorization: Bearer <token>`, or `proxymind login` / `proxymind mcp --server`.");
+            out!("{}", made.token.expose());
+        }
+        TokenAction::List { json, all, .. } => {
+            let list = store.list(*all)?;
+            if *json {
+                let rows: Vec<serde_json::Value> = list
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "id": t.id, "kind": t.kind.as_str(), "name": t.name, "actor": t.actor_id(),
+                            "owner": t.user_id, "project_id": t.project_id, "role": t.role.as_str(),
+                            "tier_cap": t.tier_cap, "created_at": t.created_at, "expires_at": t.expires_at,
+                            "last_used_at": t.last_used_at, "use_count": t.use_count, "revoked_at": t.revoked_at,
+                        })
+                    })
+                    .collect();
+                out!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if list.is_empty() {
+                out!("No tokens. Make one with `proxymind token create --kind agent --name claude`.");
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
+                    .unwrap_or(0);
+                out!("{}", token_cmd::table(&list, now).trim_end());
+            }
+        }
+        TokenAction::Revoke { id, .. } => {
+            store.revoke(id)?;
+            out!("Revoked {id}. It stops working at its next request.");
+        }
+    }
+    Ok(())
+}
+
 fn server_home_dir(cli: &Cli, given: Option<&std::path::Path>) -> Result<PathBuf> {
     Ok(match given {
         Some(d) => d.to_path_buf(),
@@ -2834,7 +2992,45 @@ async fn run() -> Result<()> {
                 None => out!("No rules of engagement saved. Run `proxymind roe use <file>`."),
             }
         }
-        Command::Mcp { roe, actor, oast_listen, oast_public_url } => {
+        Command::Token { action } => token_command(&cli, action)?,
+        Command::Login { url, pin, token_env } => {
+            let home = home_dir(&cli)?;
+            let token = remote::read_token(token_env.as_deref())?;
+            let done = remote::login(&home, url, pin.as_deref(), &token).await?;
+            out!("Signed in to {} as {} (project {}).", done.url, done.you_are, done.project);
+            out!("Saved the address, pin and token in {} (owner-only).", done.saved_to.display());
+            out!("Use it with: proxymind mcp --server {}", done.url);
+        }
+        Command::Logout { url } => {
+            let home = home_dir(&cli)?;
+            if remote::forget_server(&home, url)? {
+                out!("Forgot {url}. (The token still works until it is revoked on the server.)");
+            } else {
+                out!("No saved server {url}.");
+            }
+        }
+        Command::Mcp { server: Some(url), token_env, pin, roe, actor, oast_listen, oast_public_url } => {
+            anyhow::ensure!(
+                roe.is_none() && oast_listen.is_none() && oast_public_url.is_none(),
+                "--roe and --oast-listen belong to a local MCP server; with --server the tools run on the server"
+            );
+            if actor != "agent:mcp" {
+                eprintln!("Note: with --server the agent's identity is the token's, not --actor.");
+            }
+            let home = home_dir(&cli)?;
+            let saved = remote::saved_server(&home, url)?;
+            let token = match (token_env, &saved) {
+                (Some(var), _) => remote::read_token(Some(var))?,
+                (None, Some(s)) => s.token.clone(),
+                (None, None) => {
+                    anyhow::bail!("no token for {url}: run `proxymind login {url}` first, or pass --token-env VAR")
+                }
+            };
+            // A pin given now wins; else the one saved by `login` (a saved pin is never dropped silently).
+            let pin = pin.clone().or_else(|| saved.and_then(|s| s.pin));
+            remote::mcp_bridge(remote::Remote::new(url, pin.as_deref(), &token)?).await?;
+        }
+        Command::Mcp { roe, actor, oast_listen, oast_public_url, .. } => {
             let actor = Actor::parse(actor)?;
             anyhow::ensure!(actor.kind != ActorKind::Human, "the MCP server acts for an agent; use agent:<name>");
             let service = Arc::new(open_service(&cli.project, roe.as_deref())?);
@@ -2855,6 +3051,7 @@ async fn run() -> Result<()> {
             );
             let home = home_dir(&cli)?;
             let token = pm_api::load_or_create_token(&home.join("api-token"))?;
+            let tokens = pm_accounts::TokenFile::open(&home)?;
             let service = Arc::new(open_service(&cli.project, None)?);
             let me = human_actor(actor.as_deref())?;
             let runtime = Runtime {
@@ -2864,7 +3061,8 @@ async fn run() -> Result<()> {
             };
             let setup = start_runtime(&cli, &service, &home, runtime).await?;
             let state = pm_api::AppState::new(service, me.clone(), token.clone(), cli.project.display().to_string())?
-                .with_setup(setup);
+                .with_setup(setup)
+                .with_tokens(tokens);
             let l = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("binding UI on {listen}"))?;
             eprintln!("ProxyMind UI for {} on project {}", me.id(), cli.project.display());
             let shown =

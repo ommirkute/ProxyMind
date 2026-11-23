@@ -87,6 +87,8 @@ pub(crate) struct Keys {
     pub(crate) session: hmac::Key,
     pub(crate) recovery: hmac::Key,
     pub(crate) token: hmac::Key,
+    /// HMAC of `pm3_` API tokens.
+    pub(crate) api_token: hmac::Key,
     pub(crate) throttle: hmac::Key,
     pub(crate) audit: hmac::Key,
 }
@@ -105,6 +107,7 @@ pub struct Accounts {
     gate: Gate,
     pub(crate) dummy_hash: String,
     dummy_verifications: AtomicU64,
+    pub(crate) token_uses: crate::token::UseTracker,
 }
 
 impl Accounts {
@@ -143,6 +146,7 @@ impl Accounts {
             session: mac(KeyPurpose::SessionId),
             recovery: mac(KeyPurpose::RecoveryCode),
             token: mac(KeyPurpose::OneTimeToken),
+            api_token: mac(KeyPurpose::ApiToken),
             throttle: mac(KeyPurpose::Throttle),
             audit: mac(KeyPurpose::AuditChain),
         };
@@ -158,6 +162,7 @@ impl Accounts {
             gate,
             dummy_hash,
             dummy_verifications: AtomicU64::new(0),
+            token_uses: Default::default(),
         };
         accounts.purge_expired()?;
         Ok(accounts)
@@ -248,6 +253,11 @@ impl Accounts {
             tx.execute("DELETE FROM pending_logins WHERE expires_at < ?1", [now])?;
             tx.execute("DELETE FROM setup_tokens WHERE expires_at < ?1", [now - 86_400])?;
             tx.execute("DELETE FROM login_throttle WHERE last_failure_at < ?1", [now - forget])?;
+            // A token that ended (revoked, or past its expiry) is kept for 90 days so an id in a log still has a name.
+            tx.execute(
+                "DELETE FROM tokens WHERE MIN(COALESCE(revoked_at, expires_at), expires_at) < ?1",
+                [now - 90 * 86_400],
+            )?;
             tx.execute(
                 "DELETE FROM sessions WHERE MIN(absolute_expires_at, idle_expires_at) < ?1 \
                  OR (revoked_at IS NOT NULL AND revoked_at < ?1)",

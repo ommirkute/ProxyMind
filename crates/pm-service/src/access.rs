@@ -199,6 +199,10 @@ perms! {
     FindingStatusFinal,
     /// See every fuzzer attack, scan task and workflow run, not only the actor's own.
     RunsReadAll,
+    /// Create, list and revoke one's own `pm3_` tokens (ADR-0022 step 5). A token can never do this itself.
+    TokensManage,
+    /// Create, list and revoke other people's tokens.
+    TokensManageOthers,
 }
 
 impl Perm {
@@ -351,6 +355,18 @@ impl Perm {
                 true,
                 "See every attack, scan task and workflow run (others see their own)",
                 "only people see every run",
+            ),
+            Perm::TokensManage => rule(
+                WORKERS,
+                true,
+                "Create, list and revoke one's own tokens (a token cannot manage tokens)",
+                "only a person signed in as themselves can manage tokens: a token cannot create, list or revoke tokens",
+            ),
+            Perm::TokensManageOthers => rule(
+                OWNER,
+                true,
+                "Create, list and revoke other people's tokens",
+                "only an owner of the project can manage other people's tokens",
             ),
         }
     }

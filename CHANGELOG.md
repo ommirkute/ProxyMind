@@ -5,7 +5,37 @@ version may change project files, APIs and the CLI.
 
 ## Unreleased
 
+### Added
+
+- **Tokens for agents, CI jobs and plugins, and a bridge to a project server** (ADR-0022 step 5, threat model B2.2 and
+  F-1). `proxymind token create --kind agent|ci|plugin --name claude [--role tester|viewer] [--tier-cap active_safe]
+  [--expires 30d]` makes a `pm3_<kind>_<64 hex>` token (shown once; stored only as an HMAC), `token list` and `token
+  revoke <id>` manage them. In single-user mode they live in `~/.proxymind/tokens.json` (owner-only, refused when others
+  can read it) and a running `proxymind ui` accepts them as `Authorization: Bearer` next to the unchanged install token;
+  a request with one acts as `agent:claude` (or `ci:`, `plugin:`), never as you and never as a name the client picks. In
+  server mode (`proxymind serve --accounts`) they belong to an account, work only while its owner is an active member, take
+  the lower of their ceiling and the owner's role, and are made in the new Account → API tokens panel, with
+  `POST /api/v1/tokens`, or on the server host with `proxymind token … --server-home DIR --user NAME`. A token's tier cap
+  is enforced by the policy gate before scope and the rules (also for approved actions); a viewer's token can only read.
+  People manage tokens, tokens never do. `proxymind login https://host [--pin sha256:…]` verifies a server (public
+  roots, or the pin of a self-signed certificate; a mismatch fails hard) and saves its address, pin and your token
+  (`servers.json`, owner-only); `proxymind logout` forgets it. `proxymind mcp --server https://host` is a stdio bridge to
+  the server's new MCP endpoint (`POST /api/v1/mcp`), so an agent on another machine gets the tools of a local MCP
+  agent, as its token's actor, with scope, tiers, approvals, redaction and untrusted tagging unchanged. The Tokens panel is
+  on Account (server mode) and About (single-user mode). `proxymind mcp --actor …` is unchanged. See `docs/server-mode.md`
+  and `docs/agents.md`.
+
 ### Security
+
+- **Credentials for agents that are not the human** (threat model B2.2, F-1, F-3; ADR-0022 step 5). Until now a script
+  or agent using the REST API had to hold the install token and so was the human. A `pm3_` token is a separate,
+  narrower credential: its own actor in the audit log, a role ceiling, an optional tier cap the gate enforces, an
+  expiry (30 days by default, one year at most), last-use and use count, and revocation that takes effect at the next
+  request (in server mode also when the owner is disabled, removed or demoted). A token cannot create, list or revoke
+  tokens and cannot use the account endpoints. In server mode, requests with a bearer token and no session cookie
+  skip the browser-only CSRF checks (they have no ambient credential); with the session cookie they get the full ones.
+  Honest limit: an agent that can read the install token or the project file as your OS user is still you (F-1); give
+  agents a token, or run the server on another host.
 
 - **The audit log records more context and can be checkpointed** (threat model F-6, ADR-0022 step 2). New audit
   records (version 2) also carry who and where: the project, and, once accounts exist, the user, token, session and

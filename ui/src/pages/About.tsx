@@ -1,5 +1,6 @@
-import { api, toast } from "../api";
+import { api, authHooks, toast } from "../api";
 import { ErrorBox, Panel, useAction, useLoad } from "../components";
+import { TokensPanel } from "./Tokens";
 
 export interface UpdateStatus {
   current: string;
@@ -63,6 +64,7 @@ export default function About() {
           </p>
         )}
       </Panel>
+      {!authHooks.serverMode && <TokensPanel />}
     </div>
   );
 }

@@ -14163,6 +14163,17 @@
         ],
         "type": "object"
       },
+      "TierName": {
+        "description": "A tier of the policy gate, as the rules of engagement name them.",
+        "enum": [
+          "read",
+          "passive",
+          "active_safe",
+          "active_intrusive",
+          "destructive"
+        ],
+        "type": "string"
+      },
       "TokenAnalyzerRequest": {
         "additionalProperties": false,
         "properties": {
@@ -14298,6 +14309,288 @@
           }
         ]
       },
+      "TokenCreateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_days": {
+            "default": null,
+            "description": "Lifetime in days: 1 to 365 (default 30).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "for_user": {
+            "default": null,
+            "description": "Server mode, owners only (and a fresh sign-in): make the token for this other user (their username).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TokenKindName",
+            "description": "What the token acts as: `agent`, `ci` or `plugin` (`agent:<name>`, `ci:<name>`, `plugin:<name>`)."
+          },
+          "name": {
+            "description": "The actor name: 1 to 64 characters of letters, digits and `- _ . @`. Unique among live tokens of its kind.",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenRoleName"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The role ceiling, `tester` (default) or `viewer`; never `owner`. The token acts with the lower of this and its\nowner's current role."
+          },
+          "tier_cap": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TierName"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The highest tier the token may reach (the rules of engagement can only narrow it further)."
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "type": "object"
+      },
+      "TokenCreated": {
+        "description": "The answer of `POST /tokens`: the token, and its secret, once.",
+        "properties": {
+          "actor": {
+            "description": "What requests with this token act as, e.g. `agent:claude`.",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "`t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`agent`, `ci` or `plugin`.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "description": "The owning account (`u_…`); absent in single-user mode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner_name": {
+            "description": "The owner's username, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The role ceiling (`tester` or `viewer`).",
+            "type": "string"
+          },
+          "status": {
+            "description": "`active`, `expired` or `revoked`.",
+            "type": "string"
+          },
+          "tier_cap": {
+            "description": "The highest tier the token may reach; absent for no cap.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "description": "The secret, `pm3_<kind>_<64 hex digits>`. Shown once; only its HMAC is stored.",
+            "type": "string"
+          },
+          "use_count": {
+            "description": "Requests made with it (counts at most a minute behind).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "actor",
+          "owner",
+          "owner_name",
+          "project_id",
+          "role",
+          "tier_cap",
+          "created_at",
+          "expires_at",
+          "last_used_at",
+          "use_count",
+          "revoked_at",
+          "status",
+          "token"
+        ],
+        "type": "object"
+      },
+      "TokenKindName": {
+        "description": "What a token acts as.",
+        "enum": [
+          "agent",
+          "ci",
+          "plugin"
+        ],
+        "type": "string"
+      },
+      "TokenRoleName": {
+        "description": "A token's role ceiling. Never `owner`.",
+        "enum": [
+          "tester",
+          "viewer"
+        ],
+        "type": "string"
+      },
+      "TokenView": {
+        "description": "A token as the API shows it. Never holds the secret.",
+        "properties": {
+          "actor": {
+            "description": "What requests with this token act as, e.g. `agent:claude`.",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "`t_…`: what `DELETE /tokens/{id}` takes, and what the audit log records.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`agent`, `ci` or `plugin`.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "description": "The owning account (`u_…`); absent in single-user mode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner_name": {
+            "description": "The owner's username, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "The role ceiling (`tester` or `viewer`).",
+            "type": "string"
+          },
+          "status": {
+            "description": "`active`, `expired` or `revoked`.",
+            "type": "string"
+          },
+          "tier_cap": {
+            "description": "The highest tier the token may reach; absent for no cap.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "use_count": {
+            "description": "Requests made with it (counts at most a minute behind).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "actor",
+          "owner",
+          "owner_name",
+          "project_id",
+          "role",
+          "tier_cap",
+          "created_at",
+          "expires_at",
+          "last_used_at",
+          "use_count",
+          "revoked_at",
+          "status"
+        ],
+        "type": "object"
+      },
       "TokensBody": {
         "description": "Body of `POST /tools/token-analyzer/analyze`.",
         "properties": {
@@ -14312,6 +14605,20 @@
         "required": [
           "tokens"
         ],
+        "type": "object"
+      },
+      "TokensQuery": {
+        "description": "Query of `GET /tokens`.",
+        "properties": {
+          "all": {
+            "default": null,
+            "description": "Server mode, owners of the project: list everyone's tokens instead of your own.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "ToolProfile": {
@@ -21178,6 +21485,44 @@
         "summary": "Ready-made match-and-replace rules."
       }
     },
+    "/api/v1/mcp": {
+      "post": {
+        "operationId": "mcp_endpoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "A JSON-RPC 2.0 request or notification, or an array of them."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The JSON-RPC response (or an array of responses); no body (204) for a notification."
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "MCP over HTTP: one JSON-RPC message (or a batch) in, the response out, 204 for a notification. Runs the same tools as `proxymind mcp` as the request's actor (a token's `agent:<name>`), never an actor named in the message. This is what `proxymind mcp --server` talks to."
+      }
+    },
     "/api/v1/memory": {
       "get": {
         "operationId": "memory_list",
@@ -24344,6 +24689,127 @@
           }
         },
         "summary": "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream."
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "operationId": "tokens_list",
+        "parameters": [
+          {
+            "description": "Server mode, owners of the project: list everyone's tokens instead of your own.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TokenView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Your `pm3_` tokens (never their secrets); in server mode owners may pass `all=true` for everyone's. A token cannot call this."
+      },
+      "post": {
+        "operationId": "token_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreated"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Make a `pm3_` token for an agent, CI job or plugin. The secret is in the answer once. In server mode owners may make one for another user (`for_user`), which needs a fresh sign-in. A token cannot call this."
+      }
+    },
+    "/api/v1/tokens/{id}": {
+      "delete": {
+        "operationId": "token_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Object with `ok`.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Revoke a token: it stops working at its next request. In server mode revoking someone else's needs an owner and a fresh sign-in. A token cannot call this."
       }
     },
     "/api/v1/tools/code": {

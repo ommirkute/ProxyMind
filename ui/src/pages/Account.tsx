@@ -16,6 +16,7 @@ import type {
 } from "../api-types.gen";
 import { CopyButton, Field, RecoveryCodesView, TotpSecret, useAuth } from "../authparts";
 import { Empty, ErrorBox, Panel, useAction, useLoad } from "../components";
+import { TokensPanel } from "./Tokens";
 
 const when = (secs: number | null | undefined) => (secs ? fmtDateTime(secs * 1000) : "never");
 
@@ -49,6 +50,7 @@ export default function Account() {
         </dl>
       </Panel>
       <Sessions reloadKey={tick} />
+      {me.role && me.role !== "viewer" && <TokensPanel serverMode isOwner={me.role === "owner"} />}
       <Password onChanged={() => setTick((t) => t + 1)} />
       <Authenticator />
       <RecoveryCodes />

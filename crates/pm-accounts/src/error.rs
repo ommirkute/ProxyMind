@@ -48,6 +48,19 @@ pub enum AccountError {
     NotEnrolling,
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+    /// A presented `pm3_` token is unknown, revoked, expired, or its owner is disabled or no longer a member:
+    /// deliberately the same for all of them (the security log says which).
+    #[error("the token is not valid")]
+    InvalidToken,
+    #[error("a live token already has that name: pick another or revoke it")]
+    TokenNameTaken,
+    #[error("no such token")]
+    NoSuchToken,
+    #[error("too many live tokens for this user: revoke some first")]
+    TooManyTokens,
+    /// The single-user token file or its key cannot be used (readable by others, damaged, locked).
+    #[error("token file: {0}")]
+    TokenStore(String),
     #[error("server key: {0}")]
     ServerKey(String),
     #[error("a stored secret could not be decrypted (wrong server key, or the record was moved)")]

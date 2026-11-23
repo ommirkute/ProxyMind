@@ -130,6 +130,7 @@ fn roles_narrow_and_never_widen() {
             "ProjectTrust",
             "IntegrationsRead",
             "IntegrationsWrite",
+            "TokensManageOthers",
         ]
     );
 }

@@ -43,3 +43,5 @@ Who may do what in `pm-service` (ADR-0022, migration step 1). Every action that 
 | `FindingsExplain` | yes | yes | no | yes | Save a model-written explanation on a finding | `finding_set_explanation`, `pm-assistant::explain_finding` |
 | `FindingStatusFinal` | yes | yes | no | yes | Change a judged finding; set statuses only people may set | `finding_update` |
 | `RunsReadAll` | yes | yes | yes | yes | See every attack, scan task and workflow run (others see their own) | `attack`, `fuzzer_list`, `scan_task`, `scan_task_list`, `workflow_run_get`, `workflow_runs` |
+| `TokensManage` | yes | yes | no | yes | Create, list and revoke one's own tokens (a token cannot manage tokens) | `pm-api::require_person` |
+| `TokensManageOthers` | yes | no | no | yes | Create, list and revoke other people's tokens | `pm-api::others_allowed` |

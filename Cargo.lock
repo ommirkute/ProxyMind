@@ -1424,6 +1424,8 @@ dependencies = [
  "parking_lot",
  "ring",
  "rusqlite",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1454,6 +1456,7 @@ dependencies = [
  "pm-assistant",
  "pm-core",
  "pm-demo",
+ "pm-mcp",
  "pm-service",
  "pm-tls",
  "ring",

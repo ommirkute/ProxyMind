@@ -491,6 +491,82 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
 5. **Tokens.** `pm3_` tokens for agents, CI and plugins, in both modes; `proxymind token …`; `proxymind login`; the MCP bridge
    to a server. Test: actor derived from the token, role ceiling and tier cap, expiry, revocation takes effect on the next
    request, a token cannot create tokens, tokens never appear in logs or audit detail.
+
+   *Done 2026-11-23.* `pm3_<kind>_<64 hex>` tokens work in both modes, with `proxymind token`, `proxymind login` and
+   `logout`, a stdio-to-HTTPS MCP bridge (`proxymind mcp --server`), the Tokens panel in the web UI and an MCP endpoint
+   on the server (`POST /api/v1/mcp`). How to use it is `docs/server-mode.md` ("Tokens, login and the MCP bridge") and
+   `docs/agents.md`. Where things are: `crates/pm-accounts/src/token.rs` (the rules both modes share: format, hash,
+   name, ceiling, cap, lifetime, use bookkeeping), `tokens.rs` (the `tokens` table of `server.db`, migration 2),
+   `token_file.rs` (single-user `<home>/tokens.json`); `pm-api/src/{tokens_api,mcp_api,server_mode,lib}.rs`;
+   `pm-policy` (`Policy::set_tier_cap`); `pm-cli/src/{token_cmd,remote}.rs`; `ui/src/pages/Tokens.tsx`. Tests:
+   `pm-accounts` (60, 12 of them for tokens), `pm-api/tests/{tokens,server_mode}.rs`, `pm-policy/tests/tier_cap.rs`,
+   `pm-service/tests/tier_cap.rs`, `pm-cli/tests/tokens.rs`, both browser tests. Decisions and deviations, on purpose:
+   - **Stored as HMAC-SHA256** under the `ApiToken` subkey (server mode) or under a key in `<home>/tokens.key`
+     (single-user, 0600, also refused when others can read it); lookup is by the hash and the digests are then compared
+     in constant time. The single-user file `tokens.json` (0600; refused and every token then fails when group or
+     others can read it) holds the same records as the table; writers (the CLI, the running UI's bookkeeping) take a
+     lock file and replace the file atomically, readers read it at every request, so a CLI revoke is seen by a running
+     `proxymind ui` at once.
+   - **Single-user tokens have no owner and no project** (`user_id` and `project_id` are empty): the owner is whoever owns
+     the home, and a token works for whatever project that install serves. The brief for this step asked for a project
+     id; there is none to bind to before a project is open, and binding to the file's id would make `proxymind token
+     create` open a project. Server-mode tokens carry both.
+   - **One live token per actor id.** A name is unique among live tokens of its kind (any case). That is what makes the
+     tier cap enforceable by actor id (below) and makes every audit line name exactly one credential.
+   - **Tier cap in the gate, by actor id.** Service methods take an `Actor`, so the cap cannot ride a request without
+     changing every signature. `Policy` keeps `caps: actor id -> Tier`; the API's guard sets it each time a token
+     authenticates (`Policy::set_tier_cap`, a person is never capped) and `Policy::evaluate` checks it *before* scope,
+     windows and the rules, so it holds for every path that asks the gate (REST, MCP, the CLI, background scan tasks the
+     actor started) and for approved actions, which are evaluated again when they run. The rules can only narrow it. A
+     cap is held for the actor id until another token of that name sets another, also after the token is revoked (a
+     scan the token started stays capped). Not capped by it: actions that are not tiered (writing a finding, a note).
+     `roe_get` shows the cap (`credential_tier_cap`, tiers above it read `deny`).
+   - **Effective role = lower of the token's ceiling and the owner's current role,** read at every request (server
+     mode). What is enforced now: a **viewer** (by ceiling or by the owner's role) gets only `GET`/`HEAD`/`OPTIONS` on the
+     REST API (`403 read_only_token`), may initialize and list tools on the MCP endpoint but not call them, and is held
+     to tier `passive` by the gate; an owner demoted to viewer narrows their tokens at once, a removed membership or a
+     disabled account kills them (and revokes the rows, so enabling the account again does not bring them back).
+     **Not enforced yet (step 6):** the rest of the roles table for tokens (a tester's token has the people-only rules
+     of every agent and nothing finer; `Perm`s per role are still not asked of service methods), and the project audit
+     records of a token's actions do not yet carry the token id and owner (`Me::principal()` has them; service methods
+     take an `Actor`). The token's own management (create, revoke) is audited with the full principal.
+   - **People manage tokens, tokens never do.** `Perm::TokensManage` (owner, tester; people only) and
+     `TokensManageOthers` (owner, people only) are in the access table. In server mode one's own tokens need no fresh
+     sign-in (the ADR lists creating and revoking tokens *for other users*); for others, an owner and a fresh sign-in
+     (`for_user`). Tokens cannot use the account endpoints at all (`403 token_not_allowed`). A viewer cannot manage
+     tokens.
+   - **CSRF for bearer requests (server mode).** A request with a `pm3_` bearer token and **no session cookie** is exempt
+     from the Origin / `Sec-Fetch-Site` layer and does not need `X-ProxyMind: 1`: there is no ambient credential for a
+     cross-site page to use, and curl, CI jobs, the SDKs and the MCP bridge send neither. A request that has the
+     session cookie (valid or not) gets the full cookie-path checks whatever else it carries, and then acts as the
+     person (the cookie wins). A bearer that is not a `pm3_` token (the install token) gets the checks as before, then
+     401. In single-user mode the same: a `pm3_` bearer without the `pm_token` cookie needs no `X-ProxyMind`; the install
+     token as a bearer still does. Host checks apply to both.
+   - **Last use and use count** are written at most once a minute per token (counted in memory in between; a listing
+     includes the pending count; a crash loses at most a minute's count). The first use is a security-log entry.
+   - **Security log** (server mode): `token_created`, `token_first_use`, `token_revoked`, `tokens_revoked` (owner
+     disabled or removed) and `token_failure` (reason, address and the token's id when known, never a value). Failures
+     are logged in their own throttle bucket: after 20 from one address the entries thin out with the login back-off,
+     and a flood can neither fill the log nor lock anyone out of signing in. Single-user mode logs a refusal to stderr at
+     most once a minute and has no security log.
+   - **`proxymind token`** works on the install's file (single-user) or, on the server host with `--server-home DIR
+     --user NAME`, on `server.db` (the write access to the home is the authority; the security log says
+     `local_console`). Away from the host, server tokens are made in the web UI or with `POST /api/v1/tokens`.
+   - **`proxymind login URL [--pin sha256:…]`** saves the address, pin and token in `<home>/servers.json` (0600) only
+     after `GET /api/v1/status` has answered for that token over a verified connection. Without `--pin` the
+     certificate must verify against the bundled public roots (the roots upstream verification uses; a private CA
+     therefore needs `--pin`); with it, `pm_tls::server::pin_client_config`. A mismatch is an error naming both pins,
+     never retried and never saved. A saved pin is used when none is given and replaced only by one given on the command
+     line (`proxymind logout URL` forgets the entry). `http://` is accepted for loopback addresses only. The token is
+     read from `--token-env VAR`, else a hidden prompt on a terminal, else one line of stdin.
+   - **MCP.** `POST /api/v1/mcp` takes one JSON-RPC message or a batch (204 for a notification) and runs
+     `pm_mcp::McpServer::handle` under the request's actor, built per request around the shared `Service`; a message
+     cannot name another actor. A session or the install token reaches it too and acts as that person. The bridge
+     (`proxymind mcp --server URL`) posts each stdin line, answers errors as JSON-RPC errors per request id, and ends at
+     once on a certificate or pin failure. Plain `proxymind mcp --actor …` is unchanged.
+   - **Left for step 6:** roles per tool and route for tokens (above), the token id and owner on every audit record,
+     filtering events and the MCP endpoint by membership, the per-user redactor, and the open question of server-side
+     approval routing (a tester approving their own token's pending actions).
 6. **Roles and memberships (3.2).** Per-project roles, the matrix in this ADR enforced by `require`, the people-only set
    fixed for agents of owners, the ROE option `approvals.require_other_person`, per-user redactor with host binding (F-5),
    events filtered by membership. Test: the matrix test over every REST route and MCP tool for each role and for an
