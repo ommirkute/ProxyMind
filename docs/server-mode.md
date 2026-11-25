@@ -5,11 +5,10 @@ team: people sign in with a password and an authenticator app, a browser holds a
 and the server listens on a network address over TLS. The design is ADR-0022; this page is how to run it and what is
 not finished.
 
-**Not finished yet (read this first).** Every signed-in member of the served project acts as a human with full powers:
-roles (owner, tester, viewer) are stored and shown, but `pm-service` does not enforce them until ADR-0022 step 6 (tokens
-are the exception: a token's ceiling, its owner's role and its tier cap are enforced, see "Tokens, login and the MCP
-bridge"). Passkeys and OIDC are steps 7 and 8. Treat a server today as a preview for testing the mechanics, not for a
-client engagement.
+**What is finished.** Roles are enforced (ADR-0022 step 6): owner, tester and viewer decide what a person, and what each of
+their tokens, may do ("Roles and members" below). **Not finished:** passkeys and OIDC (steps 7 and 8), the per-host binding
+of secret placeholders (a placeholder is per user now, but still unredacts toward any in-scope host), and the server's signed
+checkpoint schedule. Run it for a small team you trust with the project's data; the security review of step 9 is still to come.
 
 ## What you need
 
@@ -136,6 +135,42 @@ creates a new owner (disable the old account afterwards). It works while the ser
   the process log or into an error message (a test greps for them).
 - **Not accepted in server mode:** the install token (`/auth?token=` is 404, `Authorization: Bearer <install token>` is 401).
   What replaces it for scripts, CI and agents is a `pm3_` token (next section).
+
+## Roles and members
+
+A member has one role on the project. The whole table is `docs/access.md`; the effect of it on every route and tool is
+`docs/access-matrix.md` (generated, and a test fails when it drifts).
+
+| | owner | tester | viewer |
+| --- | --- | --- | --- |
+| Read history, findings, reports, model, coverage | yes | yes | yes, **with secrets replaced by placeholders**, as agents see them |
+| Send traffic (replay, fuzz, scan, crawl, workflows, proofs) through the gate | yes | yes | no |
+| Write findings, hypotheses, notes, identities, workflows, schedules, checks | yes | yes | no |
+| Decide approvals | any | only what their own tokens (or they) asked; with `approvals.testers_decide_team: true` also other testers' tokens | none |
+| ROE, scope, network, listeners, integrations, model keys and settings, trust, updates | yes | no | no |
+| Members and roles, other people's tokens | yes | no | no |
+
+- **Agents and tokens.** A token is its own actor with the lower of its ceiling and its owner's current role, and never above
+  `tester`: an owner's token cannot approve, change the ROE or manage members. The people-only rules (approve, ROE, rules,
+  listeners, keys, workflow triggers, plugins, schedules) hold whatever the role.
+- **Deny by default.** An actor the server did not register on a request is a viewer. Every public service method that
+  takes an actor asks for its permission first; the API checks the route's permission before the handler and the MCP
+  endpoint the tool's.
+- **Takes effect on the next request.** The role is read from `server.db` on every request. A demotion or removal ends the
+  member's sessions; their tokens follow the new role at once (removal revokes them). A promotion shows at the next
+  request, with no new sign-in. An open event stream checks its session or token every two seconds and ends when it no
+  longer holds; its topics follow the role (a viewer gets no intercept, approvals, audit, plugin or Collaborator events).
+- **Members** (owners; a fresh sign-in for changes): `GET /api/v1/auth/members`, `PUT /api/v1/auth/members/{user_id}` with
+  `{"role": "owner|tester|viewer"}`, `DELETE /api/v1/auth/members/{user_id}`; the **Members** panel on Account, Users & invites.
+  The last owner cannot be demoted or removed. Invites still make new accounts.
+- **Four eyes.** `approvals: { require_other_person: true }` in the ROE: an owner cannot decide an approval that they or
+  their own tokens asked, so a different owner must. `testers_decide_team: true` lets a tester also decide approvals asked by
+  other testers' tokens. Both default to false. Approvals record who asked (account, token, role).
+- **The audit log** names the account, the session or token and the address of every action made over the API or MCP
+  (version 2 records). Work a request starts (scan tasks, fuzzer attacks) runs after the request: its records name the
+  account and token, and the session and address last seen for that actor.
+- **The web UI** hides what a viewer cannot do (sidebar entries and buttons) and reads its role again when the event stream says it changed (or the tab is shown again), so a
+  promotion shows without signing in again; the server is the authority.
 
 ## The web UI
 
@@ -264,13 +299,12 @@ token's: `--actor` means nothing here.
 
 ## Limits to know
 
-- A token's role enforcement is the viewer rule above, the tier cap and the people-only rules every agent has; everything finer
-  waits for step 6, and the project audit records of a token's actions do not yet carry the token id and owner (token
-  creation and revocation, and every token failure, are in the security log).
+- A viewer's token reads on REST (GET only) and calls the read tools of the MCP endpoint; everything else is refused.
 - A tier cap is kept for the actor id until another token of that name sets another, also after the token is revoked.
 
-- An event stream (`/events`) opened before a session is revoked keeps running until the client disconnects; step 6 filters
-  events by membership and closes them.
-- Roles are not enforced yet for people (see the top). Member management (changing a role) is not an endpoint yet.
+- Placeholders of secrets are per user now, but a placeholder is not bound to the host its secret came from: an agent or tester
+  can still send it to any in-scope host (threat model F-5, left for the security review).
+- REST reads by an agent token of routes without an actor (findings, the model) are not redacted; a viewer's are.
+- Export, delete and seal of the project are file operations, not service methods yet (3.3); "viewers comment" waits for 3.4.
 - Step-up is "sign in again"; there is no password-only re-check endpoint.
 - The server's audit checkpoints (signed, hourly) are not scheduled yet.

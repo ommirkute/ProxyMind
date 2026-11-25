@@ -504,6 +504,101 @@ try {
     check((await call("GET", "/status")).status === 401, "after revoking, the token gets 401");
   });
 
+  await section("Roles: a viewer reads redacted traffic, a promotion and a removal take effect without signing in again", async () => {
+    const COOKIE = "SECRETCOOKIEVALUE123456";
+    // History with a secret in it, imported by the owner.
+    const har = {
+      log: { version: "1.2", entries: [{
+        startedDateTime: new Date().toISOString(), time: 5,
+        request: { method: "GET", url: "http://127.0.0.1:9/account", httpVersion: "HTTP/1.1", headers: [{ name: "Host", value: "127.0.0.1:9" }, { name: "Cookie", value: `session=${COOKIE}` }], queryString: [], cookies: [], headersSize: -1, bodySize: 0 },
+        response: { status: 200, statusText: "OK", httpVersion: "HTTP/1.1", headers: [{ name: "Content-Type", value: "text/plain" }], cookies: [], content: { size: 2, mimeType: "text/plain", text: "hi" }, redirectURL: "", headersSize: -1, bodySize: 2 },
+        cache: {}, timings: { send: 0, wait: 5, receive: 0 },
+      }] },
+    };
+    const imp = await page.evaluate(async (h) => {
+      const r = await fetch("/api/v1/import/har", { method: "POST", headers: { "X-ProxyMind": "1", "Content-Type": "application/json" }, body: JSON.stringify({ har: JSON.stringify(h) }) });
+      return { status: r.status, body: await r.text() };
+    }, har);
+    check(imp.status === 200 && /"imported":1/.test(imp.body), `the owner imports history that holds a cookie (${imp.status})`);
+
+    // Invite a viewer.
+    await go(page, "admin");
+    await page.getByTestId("admin-page").waitFor();
+    check((await page.getByTestId("member-owner").count()) === 1, "the Members panel lists the owner");
+    await page.getByTestId("invite-role").selectOption("viewer");
+    const before = await page.getByTestId("invite-url").count() ? await page.getByTestId("invite-url").inputValue() : "";
+    await buttonNamed(page, "Create invite").click();
+    await page.waitForFunction((old) => (document.querySelector('[data-testid="invite-url"]')?.value ?? "") !== old, before);
+    const viewerInvite = await page.getByTestId("invite-url").inputValue();
+    const ctxV = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const pv = await newPage(ctxV);
+    await pv.goto(viewerInvite);
+    await pv.getByLabel("Username", { exact: true }).fill("vera");
+    await pv.getByLabel("Password", { exact: true }).fill(PW2);
+    await pv.getByLabel("Confirm password").fill(PW2);
+    await buttonNamed(pv, "Create account").click();
+    await enrolAndSave(pv);
+    await appLoaded(pv);
+    await pv.getByTestId("tab-account").click();
+    check((await pv.getByTestId("account-role").textContent()) === "viewer", "the invited person is a viewer");
+
+    // What a viewer sees: history with the secret hidden, and no way to send.
+    await go(pv, "history");
+    await pv.getByText("/account").first().waitFor();
+    await pv.getByText("/account").first().click();
+    await pv.getByTestId("tab-request").click().catch(() => {});
+    await sleep(500);
+    const html = await pv.content();
+    check(!html.includes(COOKIE), "the viewer's history page does not contain the cookie value");
+    const viewerDetail = await pv.evaluate(async () => {
+      const list = await (await fetch("/api/v1/exchanges")).json();
+      const id = list.exchanges[0].id;
+      return await (await fetch(`/api/v1/exchanges/${id}`)).text();
+    });
+    check(!viewerDetail.includes(COOKIE) && viewerDetail.includes("{{secret:"), "the exchange the API gives a viewer has the secret replaced by a placeholder");
+    const ownerDetail = await page.evaluate(async () => {
+      const list = await (await fetch("/api/v1/exchanges")).json();
+      return await (await fetch(`/api/v1/exchanges/${list.exchanges[0].id}`)).text();
+    });
+    check(ownerDetail.includes(COOKIE), "while the owner sees the real value");
+    check((await pv.getByTestId("tab-replay").count()) === 0 && (await pv.getByTestId("tab-fuzzer").count()) === 0, "a viewer's sidebar has no Replay or Fuzzer");
+    const attempt = (p, path, body) =>
+      p.evaluate(async ([path, body]) => (await fetch(`/api/v1${path}`, { method: "POST", headers: { "X-ProxyMind": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) })).status, [path, body]);
+    const replayBody = { url: "http://127.0.0.1:9", raw: "GET / HTTP/1.1\r\nHost: x\r\n\r\n" };
+    check((await attempt(pv, "/replay", replayBody)) === 403, "the server refuses a viewer's replay (403)");
+    check((await attempt(pv, "/scan/tasks", { url: "http://127.0.0.1:9/" })) === 403, "and a viewer's scan (403)");
+    await pv.screenshot({ path: join(SHOTS, "server-10-viewer.png") });
+
+    // Promote: the owner changes the role; the viewer's open page follows without signing in again.
+    await page.reload();
+    await page.getByTestId("member-role-vera").waitFor();
+    await page.getByTestId("member-role-vera").selectOption("tester");
+    await page.getByText("vera is now tester").waitFor();
+    check(true, "the owner makes the viewer a tester in the Members panel");
+    check((await attempt(pv, "/replay", replayBody)) !== 403, "at once the server lets that session send");
+    await pv.getByTestId("tab-replay").waitFor({ timeout: 25_000 });
+    check(true, "and the open page shows Replay without a new sign-in");
+
+    // Remove: the session ends.
+    page.once("dialog", (d) => void d.accept());
+    await page.getByTestId("member-remove-vera").click();
+    await page.getByText("vera removed").waitFor();
+    const gone = await pv.evaluate(async () => (await fetch("/api/v1/status")).status);
+    check(gone === 401, `the removed member's session is refused at once (${gone})`);
+    await pv.getByTestId("auth-notice").waitFor({ timeout: 25_000 });
+    check(true, "and their open page shows the sign-in");
+    // The last owner cannot be removed or demoted.
+    const lastOwner = await page.evaluate(async () => {
+      const members = await (await fetch("/api/v1/auth/members")).json();
+      const me = members.find((m) => m.you);
+      const r = await fetch(`/api/v1/auth/members/${me.user_id}`, { method: "PUT", headers: { "X-ProxyMind": "1", "Content-Type": "application/json" }, body: JSON.stringify({ role: "viewer" }) });
+      return { status: r.status, code: (await r.json()).code };
+    });
+    check(lastOwner.status === 409 && lastOwner.code === "last_owner", "the last owner cannot be demoted");
+    await ctxV.close();
+    pages.splice(pages.indexOf(pv), 1);
+  });
+
   await section("Not a member", async () => {
     // The server never answers this for the project's own members; the screen is checked with a faked /me.
     await page.route("**/api/v1/auth/me", async (route) => {

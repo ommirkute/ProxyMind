@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::access::{Denial, Perm, Principal};
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError, now_ms};
 
 pub(crate) const SEVERITIES: &[&str] = &["critical", "high", "medium", "low", "info"];
@@ -111,6 +111,7 @@ fn decode(row: &serde_json::Map<String, Value>) -> Value {
 
 impl Service {
     pub fn finding_create(&self, actor: &Actor, f: NewFinding) -> Result<Value> {
+        self.require_actor(actor, Perm::FindingsWrite)?;
         let severity = f.severity.to_ascii_lowercase();
         if !SEVERITIES.contains(&severity.as_str()) {
             return Err(ServiceError::Invalid(format!("severity must be one of {}", SEVERITIES.join(", "))));
@@ -221,7 +222,7 @@ impl Service {
         // agent, possibly steered by target content, can't reopen, downgrade
         // or reword it. It can still attach evidence.
         let settled = current["status"].as_str().is_some_and(|s| s != "suspected");
-        let principal = Principal::from_actor(actor);
+        let principal = self.principal_of(actor);
         if settled && (u.status.is_some() || u.severity.is_some() || u.description.is_some()) {
             self.require_with(
                 &principal,
@@ -295,6 +296,7 @@ impl Service {
     }
 
     pub async fn finding_retest(&self, actor: &Actor, id: i64) -> Result<Retest> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let f = self.finding_get(id)?;
         let mut r = Retest {
             finding_id: id,

@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use crate::access::{Perm, Principal};
+use crate::access::Perm;
 use crate::{Counters, Result, Service};
 
 /// Events a slow subscriber may fall behind by before it gets a resync.
@@ -436,7 +436,21 @@ impl Service {
     /// like `scan_task_*` and `fuzzer_*` ("people see every task, agents only their own"). `ai_scan` is readable by
     /// every actor, like `GET /ai-scan`, which has no actor check; its events carry ids and state words only.
     pub fn may_read_topic(&self, actor: &Actor, topic: Topic) -> bool {
-        topic != Topic::Intercept || Principal::from_actor(actor).allows(Perm::InterceptUse)
+        self.principal_of(actor).allows(Self::topic_perm(topic))
+    }
+
+    /// The permission that reads a topic (ADR-0022 step 6: the stream is filtered by role like the routes are).
+    fn topic_perm(topic: Topic) -> Perm {
+        match topic {
+            Topic::Intercept => Perm::InterceptUse,
+            Topic::Approvals => Perm::ApprovalsRead,
+            Topic::Audit => Perm::AuditRead,
+            Topic::Plugins => Perm::ConfigRead,
+            Topic::Collaborator => Perm::CollaboratorUse,
+            Topic::Findings | Topic::Proofs => Perm::FindingsRead,
+            Topic::Scans | Topic::Fuzzer | Topic::AiScan | Topic::Workflows => Perm::RunsRead,
+            Topic::Exchanges | Topic::Websockets | Topic::Streams => Perm::HistoryRead,
+        }
     }
 
     /// What `actor` may see of a published event, as JSON (`seq`, `topic`, `type` and the event's fields), or

@@ -544,7 +544,9 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version;
+                "ALTER TABLE approvals DROP COLUMN requested_user; ALTER TABLE approvals DROP COLUMN requested_token;
+                 ALTER TABLE approvals DROP COLUMN requested_role;
+                 DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version;
                  ALTER TABLE audit_log DROP COLUMN principal_kind; ALTER TABLE audit_log DROP COLUMN user_id;
                  ALTER TABLE audit_log DROP COLUMN token_id; ALTER TABLE audit_log DROP COLUMN project_id;
                  ALTER TABLE audit_log DROP COLUMN session_id; ALTER TABLE audit_log DROP COLUMN client_addr;
@@ -553,7 +555,7 @@ mod tests {
                  DROP TABLE workflow_runs; DROP TABLE stream_chunks; DROP TABLE streams;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (crate::MIGRATIONS.len() - 4) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (crate::MIGRATIONS.len() - 5) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         assert_eq!(s.get_setting("keep").unwrap().as_deref(), Some("me"));

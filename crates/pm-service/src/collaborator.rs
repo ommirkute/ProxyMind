@@ -227,6 +227,7 @@ impl Service {
 
     /// Hands out a new payload. It sends nothing.
     pub fn collaborator_payload(&self, actor: &Actor, note: &str) -> Result<CollaboratorPayload> {
+        self.require_actor(actor, Perm::CollaboratorUse)?;
         let (public_url, dns_domain) = self.oast_settings()?;
         let smtp = self.smtp_setting()?;
         if public_url.is_none() && dns_domain.is_none() && smtp.is_none() {

@@ -1,6 +1,7 @@
 //! Race-condition testing through the policy gate: one request sent many
 //! times so the copies reach the server together.
 
+use crate::access::Perm;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -93,6 +94,7 @@ impl Service {
     /// Sends `count` copies of a request so they arrive together, if the
     /// policy allows it. Racing is at least active-intrusive.
     pub async fn race_send(&self, actor: &Actor, req: RaceRequest) -> Result<RaceResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let count = req.count.unwrap_or(10);
         if !(2..=MAX_RACE).contains(&count) {
             return Err(ServiceError::Invalid(format!("count must be 2 to {MAX_RACE}")));
@@ -105,7 +107,7 @@ impl Service {
             hypothesis_id: req.hypothesis_id,
             ..Default::default()
         };
-        let out = self.outgoing_from_request(&base)?;
+        let out = self.outgoing_from_request(actor, &base)?;
         let fix_cl = req.fix_content_length.unwrap_or(true);
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
@@ -149,7 +151,7 @@ impl Service {
     ) -> Result<RaceResult> {
         // One slot for the whole race: the point is to send at once.
         let _permit = self.acquire_slot(&out.endpoint.host).await?;
-        let mut wire = self.redactor.unredact(&out.raw);
+        let mut wire = self.redactor_of(actor).unredact(&out.raw);
         if let Some(name) = identity {
             wire = pm_identity::apply(&wire, &self.load_identity(name)?.auth);
         }

@@ -40,6 +40,8 @@ pub enum AccountError {
     NotAuthorised,
     #[error("this would leave the server without an active administrator")]
     LastAdmin,
+    #[error("this would leave the project without an owner")]
+    LastOwner,
     #[error("this account must keep a second factor")]
     SecondFactorRequired,
     #[error("a second factor is already enrolled; remove it first")]

@@ -571,6 +571,59 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    fixed for agents of owners, the ROE option `approvals.require_other_person`, per-user redactor with host binding (F-5),
    events filtered by membership. Test: the matrix test over every REST route and MCP tool for each role and for an
    unauthenticated client.
+
+   *Done 2026-11-25.* Roles are enforced on a project server; the matrix is `docs/access-matrix.md` (generated and
+   tested by `crates/pm-api/tests/matrix.rs`) over the table in `docs/access.md`. Where things are: `pm-service/src/access.rs`
+   (56 `Perm`s, the principal registry, request scope, `require*`), `pm-api/src/route_perms.rs` (route to `Perm`),
+   `pm-mcp::tool_perm` (tool to `Perm`), `pm-api/src/{server_mode,auth_api,routes}.rs` (guard, members, stream watch),
+   `pm-store` migration 27 (who asked, on approvals), `pm-accounts` (`LastOwner`), `ui/src/pages/Account.tsx` (Members),
+   `ui/tests/e2e-server.mjs`. Design and deviations, on purpose:
+   - **Who is this actor?** Service methods still take an `&Actor`. `Service::set_access_control(true)` (done by
+     `AppState::with_server_mode`) switches `principal_of(actor)` from `Principal::from_actor` to a registry that the
+     API's guard fills on every authenticated request, from the membership (session) or the token's effective role, after
+     `server.db` was read. An actor nobody registered is a **viewer**, never an owner; a non-person is never above
+     `tester`, so an owner's token is an agent. Single-user mode keeps `from_actor` and the `Invalid` refusal (server mode
+     refuses with `Forbidden`, a 403, text `access denied: ...`). Work the service starts itself registers too: scheduled
+     scans and triggers (`run_as`) as `tester` with no account, an AI scan's agent and workers inherit the starter's
+     role. A demotion or removal through the API updates every registered actor of the account at once
+     (`principals_of_user_changed`); an open event stream re-checks its session or token every two seconds and ends when
+     it no longer holds.
+   - **Every public method asks.** 89 methods gained `self.require_actor(actor, Perm::X)?` as their first statement; 158 of
+     the public `Service` methods that take an actor now ask before touching the store, gate or network (a source-scan test,
+     `tests/access.rs`, fails otherwise) and 16 are on an explicit allow-list with reasons. Reads and calls that take no
+     actor (listing identities, approvals, the audit log, settings, findings) are not covered by that scan; the API
+     checks the route table before the handler, and MCP the tool table, which is what keeps a viewer out of them.
+   - **Second line in the API, on purpose.** The ADR puts enforcement in `pm-service`; it is there. The route table in
+     `pm-api` repeats it before the handler so the handlers that call a method without an actor cannot be a hole, and the
+     matrix test proves every route and tool. Single-user mode does not use the route table.
+   - **Audit context per request.** `Service::in_request` scopes the request's principal around the handler (a
+     `tokio::task_local`); every audit record written for that actor meanwhile carries its user, token, session and
+     address. Work spawned from a request (scan tasks, fuzzer attacks) runs outside the scope and falls back to the
+     registry (user, token, the last session and address seen); the record may name the latest session of that account.
+     In single-user mode a `pm3_` token's requests carry the token id.
+   - **Viewers see redacted traffic.** `redacts_for` is true for a viewer even when the ROE's `redact_before_llm` is off;
+     history, exchange detail (the REST `GET /exchanges/{id}` hides the exact bytes for a viewer), search, evidence in
+     reports (`report_render_for`), findings, proofs, the model and the events pass the redactor. REST agent tokens still
+     read actor-less JSON as stored (unchanged).
+   - **Per-user redactor (F-5), half done.** One redactor per account (a token shares its owner's; single-user mode shares
+     one), so a placeholder means nothing to another user. **Host binding is not done:** a placeholder still unredacts toward
+     any in-scope host. It needs a host recorded at every `redact` call site and an approval step in every send path
+     (`replay`, `race`, `group`, `identity`, `session`, `streams`, `ws_replay`, scans); left for the security review (step 9).
+   - **Events** are filtered per topic by `Perm` (`topic_perm`): viewers get no intercept, approvals, audit, plugin or
+     Collaborator topic, and payloads are redacted.
+   - **Approvals.** The row stores the asking account, token and the account's role (`requested_*`). An owner decides any;
+     a tester only what they, or their own tokens, asked, plus other testers' tokens when the ROE says
+     `approvals.testers_decide_team: true` (default false); a viewer none. `approvals.require_other_person: true` (default
+     false): nobody decides what they or their own tokens asked, so a different owner must (it applies to tokens as well
+     as the person, a choice for four eyes). Both options matter only on a server; one person approves everything in
+     single-user mode.
+   - **Members.** `GET /auth/members`, `PUT /auth/members/{user_id}`, `DELETE /auth/members/{user_id}` for the project's
+     owner (fresh sign-in for changes); the last owner is never demoted or removed. Demotion and removal end sessions
+     (pm-accounts); tokens follow the role at the next request, and removal revokes them.
+   - **Not done.** Export-project, delete and seal are not service methods (they are file operations; 3.3 owns them), so the
+     table has no entry for them; "viewers comment" waits for 3.4; the server's signed checkpoint schedule and the
+     host binding above are for step 9; an agent token's REST reads of actor-less routes are unredacted as before;
+     event streams of single-user tokens are not closed on revocation.
 7. **Passkeys.** Decide the library or the in-house verifier (OpenSSL check first), enrolment, login, counter checks,
    recovery by link and by `reset-owner`. Test: WebAuthn vectors, a cloned authenticator is refused, host-name change
    behaviour documented.

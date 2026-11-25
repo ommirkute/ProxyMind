@@ -208,6 +208,8 @@ pub struct TokenContext {
     pub owner: Option<String>,
     /// The role in force: the lower of the token's ceiling and its owner's current role.
     pub role: Role,
+    /// The owner's own role on the project (`None` in single-user mode).
+    pub owner_role: Option<Role>,
     /// The tier cap in force (the token's own, and `passive` for a viewer), which the policy gate enforces.
     pub tier_cap: Option<Tier>,
     pub expires_at: i64,
@@ -219,6 +221,7 @@ impl TokenContext {
             id: auth.info.id.clone(),
             owner: auth.info.user_id.clone(),
             role: access_role(auth.role),
+            owner_role: auth.owner_role.map(access_role),
             tier_cap: auth.tier_cap.as_deref().and_then(Tier::parse),
             expires_at: auth.info.expires_at,
         }
@@ -257,20 +260,19 @@ impl Me {
     }
 
     /// The service-level principal for this request: the actor, the account id, the session reference and the
-    /// address, ready for `Service::audit_principal` and for the role checks of ADR-0022 step 6.
-    ///
-    /// The role is the real one ([`Me::role`]). TODO(step 6): service methods still take `&Actor`; once they take a
-    /// `Principal` the handlers pass this and the audit records of every action gain user, token, session and
-    /// address. Until then only the token endpoints (and anything that audits through `audit_principal`) use it.
+    /// address, with the real role ([`Me::role`]). The guard registers it with the service and puts it in scope for
+    /// the audit writer (`run_as`), so service methods that take an `&Actor` resolve to it.
     pub fn principal(&self) -> Principal {
         let mut p = Principal::new(self.actor.clone(), self.role());
         if let Some(a) = &self.auth {
             p.user_id = Some(a.user.id.clone());
             p.session_id = Some(a.session.reference.clone());
+            p.account_role = a.role.map(access_role);
         }
         if let Some(t) = &self.token {
             p.user_id = t.owner.clone();
             p.token_id = Some(t.id.clone());
+            p.account_role = t.owner_role;
         }
         p.client_addr = self.addr.clone();
         p
@@ -533,8 +535,7 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
                 return *r;
             }
             service.policy().set_tier_cap(&me.actor, me.token.as_ref().and_then(|t| t.tier_cap));
-            req.extensions_mut().insert(me);
-            return run_next(req, next, true).await;
+            return run_as(service, me, req, next).await;
         }
         return deny(StatusCode::UNAUTHORIZED, "unauthenticated", "not signed in");
     };
@@ -572,8 +573,59 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
         auth: Some(Arc::new(AuthContext { user, session, session_id, role })),
         token: None,
     };
+    run_as(service, me, req, next).await
+}
+
+/// Runs the rest of the stack for an authenticated request: the principal is registered with the service (so the role
+/// read from `server.db` just now is the one every `require` of this and later work sees: a demotion takes effect on
+/// the next request) and put in scope for the audit writer (so every audit record of this request names the account,
+/// session or token and address of exactly this request).
+pub(crate) async fn run_as(service: &Service, me: Me, mut req: Request, next: Next) -> Response {
+    let principal = me.principal();
+    service.register_principal(&principal);
     req.extensions_mut().insert(me);
-    run_next(req, next, true).await
+    service.in_request(principal, run_next(req, next, true)).await
+}
+
+/// Whether the sign-in or token behind a long-lived request (an event stream) still holds, and the role it holds now:
+/// `None` when the session ended or expired, the token was revoked or expired, the account was disabled or the member
+/// was removed. Read from `server.db` each time, so a revocation or a demotion reaches a stream that is already open.
+pub(crate) async fn still_valid(sm: &Arc<ServerMode>, me: &Me) -> Option<Role> {
+    let project = sm.project_id.clone();
+    let now = sm.clock.now();
+    if let Some(c) = &me.auth {
+        let sid = c.session_id().to_string();
+        let found = sm
+            .run(move |a| -> Result<Option<(User, Option<pm_accounts::Role>)>, AccountError> {
+                let info = a.validate_session(&sid)?;
+                let user = a.get_user(&info.user_id)?;
+                let role =
+                    a.memberships_of_user(&info.user_id)?.iter().find(|m| m.project_id == project).map(|m| m.role);
+                Ok(user.map(|u| (u, role)))
+            })
+            .await;
+        return match found {
+            Ok(Ok(Some((u, Some(role))))) if u.status == pm_accounts::UserStatus::Active => Some(access_role(role)),
+            _ => None,
+        };
+    }
+    let t = me.token.as_ref()?;
+    let (id, owner) = (t.id.clone(), t.owner.clone()?);
+    // The effective role, or `None` when the token or its owner no longer counts.
+    let found = sm
+        .run(move |a| -> Result<Option<pm_accounts::Role>, AccountError> {
+            let Some(info) = a.get_token(&id)?.filter(|i| i.is_live(now)) else { return Ok(None) };
+            let Some(owner_user) = a.get_user(&owner)?.filter(|u| u.status == pm_accounts::UserStatus::Active) else {
+                return Ok(None);
+            };
+            let member = a.memberships_of_user(&owner_user.id)?.into_iter().find(|m| m.project_id == project);
+            Ok(member.map(|m| if info.role.rank() <= m.role.rank() { info.role } else { m.role }))
+        })
+        .await;
+    match found {
+        Ok(Ok(Some(role))) => Some(access_role(role)),
+        _ => None,
+    }
 }
 
 /// What a token may not do whatever its ceiling: use the account endpoints (sessions, passwords, invites, users are for

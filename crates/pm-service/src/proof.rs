@@ -1,6 +1,7 @@
 //! Proof runs: send the requests an oracle needs, decide, and store the
 //! result with its inputs so it can be re-run later (e.g. during a retest).
 
+use crate::access::Perm;
 use std::time::Duration;
 
 use pm_policy::{ActionRequest, Actor, Target, Tier};
@@ -116,14 +117,14 @@ fn invalid<T>(msg: impl Into<String>) -> Result<T> {
 }
 
 impl Service {
-    fn exchange_outgoing(&self, id: i64) -> Result<(Outgoing, Option<String>)> {
+    fn exchange_outgoing(&self, actor: &Actor, id: i64) -> Result<(Outgoing, Option<String>)> {
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))?;
         let s = &ex.summary;
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
-        let out = self.outgoing(Endpoint::new(&s.scheme, &s.host, s.port), raw.as_bytes(), false)?;
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
+        let out = self.outgoing(actor, Endpoint::new(&s.scheme, &s.host, s.port), raw.as_bytes(), false)?;
         let who = s.identity.clone().or_else(|| {
             let ids: Vec<pm_identity::Identity> = self
                 .store
@@ -181,6 +182,7 @@ impl Service {
     }
 
     pub async fn proof_run(&self, actor: &Actor, req: ProofRequest) -> Result<ProofResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let run = match req.oracle.as_str() {
             "differential_authz" => self.prove_differential(actor, &req).await?,
             "timing" => self.prove_timing(actor, &req).await?,
@@ -263,6 +265,7 @@ impl Service {
 
     /// Re-runs a stored proof with the same inputs (new requests, new result).
     pub async fn proof_rerun(&self, actor: &Actor, proof_id: i64) -> Result<ProofResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let row = self
             .store
             .read(|db| db.row("proofs", proof_id))?
@@ -320,7 +323,7 @@ impl Service {
         let id = req.exchange_id.ok_or_else(|| ServiceError::Invalid("differential_authz needs exchange_id".into()))?;
         let attacker =
             req.attacker.clone().ok_or_else(|| ServiceError::Invalid("differential_authz needs attacker".into()))?;
-        let (mut out, recorded_as) = self.exchange_outgoing(id)?;
+        let (mut out, recorded_as) = self.exchange_outgoing(actor, id)?;
         out.hypothesis_id = req.hypothesis_id;
         if Tier::for_http_method(&out.method) != Tier::ActiveSafe {
             // A GraphQL query sent by POST only reads; anything else could change state.
@@ -404,7 +407,7 @@ impl Service {
             req.payload_raw.clone().ok_or_else(|| ServiceError::Invalid("timing needs payload_raw".into()))?;
         let (endpoint, baseline_raw) = match (req.exchange_id, &req.url) {
             (Some(id), _) => {
-                let (o, _) = self.exchange_outgoing(id)?;
+                let (o, _) = self.exchange_outgoing(actor, id)?;
                 (
                     o.endpoint.clone(),
                     req.baseline_raw.clone().unwrap_or_else(|| String::from_utf8_lossy(&o.raw).into_owned()),
@@ -418,8 +421,8 @@ impl Service {
             ),
             _ => return invalid("timing needs exchange_id or url"),
         };
-        let mut base = self.outgoing(endpoint.clone(), baseline_raw.as_bytes(), true)?;
-        let mut pay = self.outgoing(endpoint, payload.as_bytes(), true)?;
+        let mut base = self.outgoing(actor, endpoint.clone(), baseline_raw.as_bytes(), true)?;
+        let mut pay = self.outgoing(actor, endpoint, payload.as_bytes(), true)?;
         base.hypothesis_id = req.hypothesis_id;
         pay.hypothesis_id = req.hypothesis_id;
         let samples = req.samples.unwrap_or(8).clamp(5, 30);
@@ -486,12 +489,12 @@ impl Service {
             );
         }
         let endpoint = match (req.exchange_id, &req.url) {
-            (Some(id), _) => self.exchange_outgoing(id)?.0.endpoint,
+            (Some(id), _) => self.exchange_outgoing(actor, id)?.0.endpoint,
             (None, Some(u)) => parse_url_endpoint(u)?,
             _ => return invalid("oast needs exchange_id or url"),
         };
         let wait = req.wait_seconds.unwrap_or(10).clamp(1, 60);
-        let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let template = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         let params = json!({
             "endpoint": format!("{}://{}:{}", endpoint.scheme, endpoint.host, endpoint.port),
             "raw": raw, "identity": req.identity, "wait_seconds": wait,
@@ -520,7 +523,7 @@ impl Service {
         if let Some(n) = &dns_name {
             filled = filled.replace("{{oast_dns}}", n);
         }
-        let mut out = self.outgoing(endpoint, filled.as_bytes(), true)?;
+        let mut out = self.outgoing(actor, endpoint, filled.as_bytes(), true)?;
         out.hypothesis_id = req.hypothesis_id;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let deadline = std::time::Instant::now() + Duration::from_secs(wait);
@@ -568,7 +571,7 @@ impl Service {
             return invalid("put {{xss}}, {{xss_url}} (percent-encoded) or {{token}} in raw where the payload goes");
         }
         let endpoint = match (req.exchange_id, &req.url) {
-            (Some(id), _) => self.exchange_outgoing(id)?.0.endpoint,
+            (Some(id), _) => self.exchange_outgoing(actor, id)?.0.endpoint,
             (None, Some(u)) => parse_url_endpoint(u)?,
             _ => return invalid("reflection needs exchange_id or url"),
         };
@@ -579,8 +582,9 @@ impl Service {
                 pm_browser::ENV_CHROMIUM
             ))
         })?;
-        let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
-        let view = req.view_raw.as_deref().map(|v| self.outgoing(endpoint.clone(), v.as_bytes(), true)).transpose()?;
+        let template = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
+        let view =
+            req.view_raw.as_deref().map(|v| self.outgoing(actor, endpoint.clone(), v.as_bytes(), true)).transpose()?;
         let params = json!({
             "endpoint": format!("{}://{}:{}", endpoint.scheme, endpoint.host, endpoint.port),
             "raw": raw, "view_raw": req.view_raw, "identity": req.identity,
@@ -600,7 +604,8 @@ impl Service {
             }
         }
         let token = xss_token()?;
-        let mut out = self.outgoing(endpoint.clone(), pm_proof::fill_xss_template(&raw, &token).as_bytes(), true)?;
+        let mut out =
+            self.outgoing(actor, endpoint.clone(), pm_proof::fill_xss_template(&raw, &token).as_bytes(), true)?;
         out.hypothesis_id = req.hypothesis_id;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let mut exchange_ids = vec![sent.exchange_id];
@@ -688,7 +693,7 @@ impl Service {
                     let path = format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default());
                     let host = pm_core::authority(&endpoint.scheme, &endpoint.host, endpoint.port);
                     let get = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\n\r\n");
-                    let Ok(o) = self.outgoing(endpoint.clone(), get.as_bytes(), true) else { continue };
+                    let Ok(o) = self.outgoing(actor, endpoint.clone(), get.as_bytes(), true) else { continue };
                     match self.send_as(actor, &o, identity, true, "proof").await {
                         Ok((sent, _)) => match sent.response {
                             Some(r) => r,
@@ -717,9 +722,12 @@ impl Service {
         if req.raws.len() != 4 {
             return invalid("sql_error needs raws = [baseline, quote, second-quote, benign]");
         }
-        let endpoint = self.proof_endpoint(req)?;
-        let outs: Vec<_> =
-            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let endpoint = self.proof_endpoint(actor, req)?;
+        let outs: Vec<_> = req
+            .raws
+            .iter()
+            .map(|r| self.outgoing(actor, endpoint.clone(), r.as_bytes(), true))
+            .collect::<Result<_>>()?;
         let params = json!({ "raws": req.raws, "identity": req.identity });
         match self.gate_proof(
             actor,
@@ -758,10 +766,10 @@ impl Service {
         if req.raws.len() != 3 {
             return invalid("boolean_injection needs raws = [baseline, true-condition, false-condition]");
         }
-        let endpoint = self.proof_endpoint(req)?;
-        let base = self.outgoing(endpoint.clone(), req.raws[0].as_bytes(), true)?;
-        let tcond = self.outgoing(endpoint.clone(), req.raws[1].as_bytes(), true)?;
-        let fcond = self.outgoing(endpoint, req.raws[2].as_bytes(), true)?;
+        let endpoint = self.proof_endpoint(actor, req)?;
+        let base = self.outgoing(actor, endpoint.clone(), req.raws[0].as_bytes(), true)?;
+        let tcond = self.outgoing(actor, endpoint.clone(), req.raws[1].as_bytes(), true)?;
+        let fcond = self.outgoing(actor, endpoint, req.raws[2].as_bytes(), true)?;
         let params = json!({ "raws": req.raws, "identity": req.identity });
         match self.gate_proof(
             actor,
@@ -805,9 +813,12 @@ impl Service {
                 "path_traversal needs raws = [baseline, control, file-1, …] and one marker per file request",
             );
         }
-        let endpoint = self.proof_endpoint(req)?;
-        let outs: Vec<_> =
-            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let endpoint = self.proof_endpoint(actor, req)?;
+        let outs: Vec<_> = req
+            .raws
+            .iter()
+            .map(|r| self.outgoing(actor, endpoint.clone(), r.as_bytes(), true))
+            .collect::<Result<_>>()?;
         let params = json!({ "raws": req.raws, "markers": req.markers, "identity": req.identity });
         // The first file request carries the traversal payload: gate on it.
         match self.gate_proof(
@@ -849,9 +860,12 @@ impl Service {
                  payload request",
             );
         }
-        let endpoint = self.proof_endpoint(req)?;
-        let outs: Vec<_> =
-            req.raws.iter().map(|r| self.outgoing(endpoint.clone(), r.as_bytes(), true)).collect::<Result<_>>()?;
+        let endpoint = self.proof_endpoint(actor, req)?;
+        let outs: Vec<_> = req
+            .raws
+            .iter()
+            .map(|r| self.outgoing(actor, endpoint.clone(), r.as_bytes(), true))
+            .collect::<Result<_>>()?;
         let params = json!({ "raws": req.raws, "markers": req.markers, "identity": req.identity });
         match self.gate_proof(
             actor,
@@ -896,8 +910,8 @@ impl Service {
         if !MARKER_KINDS.contains(&kind.as_str()) {
             return invalid("marker_kind must be \"redirect\", \"crlf\", \"host\" or \"cors\"");
         }
-        let endpoint = self.proof_endpoint(req)?;
-        let template = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let endpoint = self.proof_endpoint(actor, req)?;
+        let template = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         let params = json!({ "raw": raw, "marker_kind": kind, "identity": req.identity });
         match self.gate_proof(
             actor,
@@ -915,7 +929,7 @@ impl Service {
         }
         let marker = marker_token()?;
         let filled = raw.replace("{{marker}}", &marker);
-        let out = self.outgoing(endpoint, filled.as_bytes(), true)?;
+        let out = self.outgoing(actor, endpoint, filled.as_bytes(), true)?;
         let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), true, "proof").await?;
         let resp = sent.response.clone().unwrap_or_default();
         let (verdict, mut details) = judge_marker(&kind, &marker, &resp, &out.endpoint.host);
@@ -924,9 +938,9 @@ impl Service {
     }
 
     /// Endpoint for an oracle that works from a template, from exchange_id or url.
-    fn proof_endpoint(&self, req: &ProofRequest) -> Result<Endpoint> {
+    fn proof_endpoint(&self, actor: &Actor, req: &ProofRequest) -> Result<Endpoint> {
         match (req.exchange_id, &req.url) {
-            (Some(id), _) => Ok(self.exchange_outgoing(id)?.0.endpoint),
+            (Some(id), _) => Ok(self.exchange_outgoing(actor, id)?.0.endpoint),
             (None, Some(u)) => parse_url_endpoint(u),
             _ => invalid("needs exchange_id or url"),
         }

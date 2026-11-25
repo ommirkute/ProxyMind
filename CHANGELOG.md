@@ -7,6 +7,19 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Roles and memberships on the project server** (ADR-0022 step 6, roadmap 3.2, threat model F-5 half and F-7). Owner,
+  tester and viewer are now enforced: every public service method that takes an actor asks for a permission first (56
+  permissions in `docs/access.md`, a source-scan test fails on a method that does not), the API checks each route and
+  the MCP endpoint each tool, and an actor the server did not register is a viewer. A viewer reads history, findings,
+  reports and events with secrets replaced by placeholders and cannot send, write or configure; a tester cannot change
+  the ROE, network, integrations, keys or members; a token is never above tester and an owner's token still cannot approve.
+  A demotion or removal takes effect on the next request (sessions end, tokens follow), and an open event stream closes.
+  New: `GET/PUT/DELETE /api/v1/auth/members`, a Members panel, the last owner is protected, audit records of every
+  request carry the account, token or session and address, per-user secret placeholders, event topics by role, approvals
+  that record who asked (tester: own tokens only; ROE `approvals.require_other_person` for four eyes and
+  `approvals.testers_decide_team`), `docs/access-matrix.md` (every route and tool for six kinds of caller, tested), and a
+  browser test (invite a viewer, promote, remove). A viewer token may now call the read MCP tools. `pm-store` migration 27.
+  Not done: binding a placeholder to its host (F-5), the server's checkpoint schedule.
 - **Tokens for agents, CI jobs and plugins, and a bridge to a project server** (ADR-0022 step 5, threat model B2.2 and
   F-1). `proxymind token create --kind agent|ci|plugin --name claude [--role tester|viewer] [--tier-cap active_safe]
   [--expires 30d]` makes a `pm3_<kind>_<64 hex>` token (shown once; stored only as an HMAC), `token list` and `token

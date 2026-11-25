@@ -337,6 +337,24 @@ impl Service {
 
     /// Renders a report. `format`: html, md, pdf, json or sarif; `template`
     /// (default technical) applies to html, md and pdf.
+    /// [`Service::report_render`] for `actor`: a viewer gets the report with secrets replaced by placeholders, as
+    /// agents see traffic (evidence in a report quotes requests and responses).
+    pub async fn report_render_for(
+        &self,
+        actor: &Actor,
+        template: Option<&str>,
+        format: &str,
+        opts: &ReportOptions,
+    ) -> Result<Rendered> {
+        self.require_actor(actor, Perm::ReportsRead)?;
+        let mut r = self.report_render(template, format, opts).await?;
+        if self.is_viewer(actor) {
+            let text = String::from_utf8_lossy(&r.body).into_owned();
+            r.body = self.redactor_of(actor).redact(&text).into_bytes();
+        }
+        Ok(r)
+    }
+
     pub async fn report_render(&self, template: Option<&str>, format: &str, opts: &ReportOptions) -> Result<Rendered> {
         let r = self.report_with(opts)?;
         let name = template.filter(|t| !t.trim().is_empty()).unwrap_or("technical");

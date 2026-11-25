@@ -195,6 +195,10 @@ pub enum ServiceError {
     ApprovalMismatch(String),
     #[error("{0}")]
     Invalid(String),
+    /// The principal's role does not allow this (server mode; single-user mode reports the same refusal as
+    /// `Invalid`, as it always has).
+    #[error("access denied: {0}")]
+    Forbidden(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("{0:#}")]
@@ -221,7 +225,8 @@ pub struct Service {
     store: std::sync::Arc<StoreHandle>,
     sender: Sender,
     limiter: RateLimiter,
-    redactor: Redactor,
+    /// One redactor per user (placeholders are not shared between people, ADR-0022, F-5); single-user mode has one.
+    redactors: parking_lot::Mutex<std::collections::HashMap<String, &'static Redactor>>,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
     rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
     /// The ROE text in force (to notice changes saved by other processes).
@@ -265,6 +270,8 @@ pub struct Service {
     integrations: parking_lot::Mutex<integrations::Runtime>,
     /// Whether this installation trusts the project file (safe mode, threat model F-2).
     trust: TrustGate,
+    /// Server-mode access control and the registry of what is known about each actor (`access.rs`).
+    access: parking_lot::RwLock<access::AccessState>,
     /// Which server each model key name is bound to, when there is no home folder to keep that in.
     key_hosts_mem: parking_lot::Mutex<std::collections::BTreeMap<String, String>>,
 }
@@ -420,7 +427,7 @@ impl Service {
             policy: std::sync::Arc::new(policy),
             store,
             sender,
-            redactor: Redactor::new(),
+            redactors: parking_lot::Mutex::default(),
             intercept: std::sync::OnceLock::new(),
             rewriter: std::sync::OnceLock::new(),
             roe_text: parking_lot::Mutex::new(None),
@@ -444,6 +451,7 @@ impl Service {
             run_guard: parking_lot::Mutex::default(),
             integrations: parking_lot::Mutex::default(),
             trust,
+            access: parking_lot::RwLock::default(),
             key_hosts_mem: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
@@ -464,14 +472,38 @@ impl Service {
         *self.plugins.write() = plugins;
     }
 
-    /// Whether content shown to this actor should have secrets replaced.
-    /// Agents follow the ROE setting; humans see real values.
+    /// Whether content shown to this actor should have secrets replaced. Agents (and every other non-person) follow
+    /// the ROE setting; people with a working role see real values; a viewer always sees placeholders, as an agent
+    /// does (owner decision, ADR-0022).
     pub fn redacts_for(&self, actor: &Actor) -> bool {
-        actor.kind != pm_policy::ActorKind::Human && self.policy.roe().data.redact_before_llm
+        let p = self.principal_of(actor);
+        p.role == access::Role::Viewer
+            || (actor.kind != pm_policy::ActorKind::Human && self.policy.roe().data.redact_before_llm)
     }
 
-    fn redactor_for(&self, actor: &Actor) -> Option<&Redactor> {
-        self.redacts_for(actor).then_some(&self.redactor)
+    /// The redactor whose placeholders `actor` sees and may send back: one per user and project, so a placeholder
+    /// another user was shown means nothing to this one. A token shares its owner's; single-user mode shares one.
+    ///
+    /// The redactors are made once per user and kept for the life of the process (the leak is one small map per
+    /// account, which the map would hold anyway), so callers can keep a plain `&Redactor` across a request.
+    pub(crate) fn redactor_of(&self, actor: &Actor) -> &'static Redactor {
+        let p = self.principal_of(actor);
+        let key = match (&p.user_id, self.access_control()) {
+            (Some(u), _) => format!("user:{u}"),
+            (None, true) => format!("actor:{}", actor.id()),
+            (None, false) => "local".to_string(),
+        };
+        self.redactors.lock().entry(key).or_insert_with(|| Box::leak(Box::default()))
+    }
+
+    pub(crate) fn redactor_for(&self, actor: &Actor) -> Option<&'static Redactor> {
+        self.redacts_for(actor).then(|| self.redactor_of(actor))
+    }
+
+    /// A redactor for work that is not one user's (what is written to an integration's payload): its placeholders are
+    /// never sent back, so it is shared by the process.
+    pub(crate) fn redactor_scope(&self, key: &str) -> &'static Redactor {
+        self.redactors.lock().entry(format!("scope:{key}")).or_insert_with(|| Box::leak(Box::default()))
     }
 
     /// A stored result (finding, proof) as `actor` may see it: for agents,

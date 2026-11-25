@@ -64,6 +64,10 @@ pub fn summarize(roe: &Roe) -> Value {
             "redact_before_llm": roe.data.redact_before_llm,
             "allow_cloud_models": roe.data.allow_cloud_models,
         },
+        "approvals": {
+            "require_other_person": roe.approvals.require_other_person,
+            "testers_decide_team": roe.approvals.testers_decide_team,
+        },
         "permissions": permissions,
     })
 }

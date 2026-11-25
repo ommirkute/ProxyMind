@@ -718,3 +718,6 @@ iframe.render { width: 100%; min-height: 420px; border: 1px solid var(--border);
   box-shadow: var(--shadow-lg); padding: 22px 24px; animation: pop .14s var(--ease);
 }
 .modal h2 { font-size: 17px; margin: 0 0 6px; letter-spacing: -.02em; }
+
+/* A viewer reads; controls that change the project are hidden (the server refuses them regardless). */
+body.viewer [data-write] { display: none !important; }

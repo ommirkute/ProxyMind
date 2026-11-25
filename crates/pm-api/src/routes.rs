@@ -30,14 +30,15 @@ use serde_json::{Value, json};
 use crate::AppState;
 use crate::auth_api::{
     AUTH_BODY_LIMIT, auth_invite_accept, auth_invite_create, auth_invite_revoke, auth_invites, auth_login,
-    auth_login_enrol, auth_login_enrol_confirm, auth_login_second_factor, auth_logout, auth_me, auth_password,
-    auth_recovery_codes, auth_session_revoke, auth_sessions, auth_sessions_revoke_all, auth_setup, auth_state,
-    auth_totp_begin, auth_totp_confirm, auth_totp_disable, auth_user_disable, auth_user_enable,
-    auth_user_reset_second_factor, auth_users,
+    auth_login_enrol, auth_login_enrol_confirm, auth_login_second_factor, auth_logout, auth_me, auth_member_remove,
+    auth_member_set, auth_members, auth_password, auth_recovery_codes, auth_session_revoke, auth_sessions,
+    auth_sessions_revoke_all, auth_setup, auth_state, auth_totp_begin, auth_totp_confirm, auth_totp_disable,
+    auth_user_disable, auth_user_enable, auth_user_reset_second_factor, auth_users,
 };
 use crate::mcp_api::{MCP_BODY_LIMIT, mcp_endpoint};
 use crate::server_mode::Me;
 use crate::tokens_api::{token_create, token_revoke, tokens_list};
+use pm_service::access::Role;
 
 pub enum ApiError {
     Service(ServiceError),
@@ -63,6 +64,7 @@ fn service_status(e: &ServiceError) -> StatusCode {
     match e {
         ServiceError::NotFound(_) => StatusCode::NOT_FOUND,
         ServiceError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ServiceError::Forbidden(_) => StatusCode::FORBIDDEN,
         ServiceError::Approval(_) | ServiceError::ApprovalMismatch(_) => StatusCode::CONFLICT,
         ServiceError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -85,6 +87,13 @@ type ApiResult = Result<Json<Value>, ApiError>;
 
 fn ok<T: serde::Serialize>(v: T) -> ApiResult {
     Ok(Json(serde_json::to_value(v).unwrap_or(Value::Null)))
+}
+
+/// What `me` may read of `v`: a viewer gets the redacted view agents get (secrets replaced by placeholders, evidence
+/// marked as target content); everyone else reads it as stored.
+fn shown<T: serde::Serialize>(st: &AppState, me: &Me, v: T) -> ApiResult {
+    let v = serde_json::to_value(v).unwrap_or(Value::Null);
+    Ok(Json(if st.service.is_viewer(&me.actor) { st.service.json_for(&me.actor, v) } else { v }))
 }
 
 /// Request size limit for imported API descriptions.
@@ -316,6 +325,8 @@ pub fn api() -> Router<AppState> {
         )
         .route("/auth/totp/disable", post(auth_totp_disable))
         .route("/auth/recovery-codes", post(auth_recovery_codes))
+        .route("/auth/members", get(auth_members))
+        .route("/auth/members/{user_id}", axum::routing::put(auth_member_set).delete(auth_member_remove))
         .route("/auth/users", get(auth_users))
         .route("/auth/users/{id}/disable", post(auth_user_disable))
         .route("/auth/users/{id}/enable", post(auth_user_enable))
@@ -367,6 +378,8 @@ pub(crate) struct EventsQuery {
 /// processes (they publish nothing on this process's bus).
 const COUNTERS_EVERY: Duration = Duration::from_millis(250);
 const COUNTERS_RELOAD: Duration = Duration::from_secs(5);
+/// How often an open stream re-checks that its session or token still holds (server mode).
+const WATCH_EVERY: Duration = Duration::from_secs(2);
 
 fn bad_topics(msg: String) -> Response {
     ApiError::Service(ServiceError::Invalid(msg)).into_response()
@@ -431,8 +444,13 @@ async fn events(
     {
         queue.push_back(resync_event(sub.latest_seq().saturating_sub(last).max(1)));
     }
+    // Server mode: the stream is only as long-lived as the sign-in or token that opened it, and as privileged as that
+    // account is now (checked again every couple of seconds and at the next event).
+    let watch = st.server.is_some().then(|| (me.clone(), tokio::time::Instant::now() + WATCH_EVERY));
     let state = EventStream {
+        role: me.role(),
         st,
+        watch,
         actor: me.actor.clone(),
         sub,
         topics,
@@ -453,6 +471,10 @@ fn resync_event(missed: u64) -> Event {
 
 struct EventStream {
     st: AppState,
+    /// Server mode: who opened the stream and when its sign-in or token is next checked.
+    watch: Option<(Me, tokio::time::Instant)>,
+    /// The role last seen for this stream's account (to tell the client when it changes).
+    role: Role,
     /// Whose events these are: the actor of the request that opened the stream.
     actor: pm_service::pm_policy::Actor,
     sub: pm_service::Subscription,
@@ -477,9 +499,14 @@ impl EventStream {
             if let Some(ev) = self.queue.pop_front() {
                 return Some((Ok(ev), self));
             }
+            if !self.still_allowed().await {
+                return None;
+            }
             let Some(tracker) = self.tracker.as_mut() else {
                 // Typed events only.
-                match self.sub.recv().await? {
+                let wait = self.watch.as_ref().map_or(COUNTERS_RELOAD, |_| WATCH_EVERY);
+                let Ok(d) = tokio::time::timeout(wait, self.sub.recv()).await else { continue };
+                match d? {
                     Delivery::Resync { missed } => self.queue.push_back(resync_event(missed)),
                     Delivery::Event(p) => self.typed(&p),
                 }
@@ -505,10 +532,13 @@ impl EventStream {
                 continue;
             }
             // Wake for the next delivery, the end of the coalescing window, or the next reload.
-            let wake = match (self.dirty, self.last_sent) {
+            let mut wake = match (self.dirty, self.last_sent) {
                 (true, Some(t)) => (t + COUNTERS_EVERY).min(self.reload_at),
                 _ => self.reload_at,
             };
+            if let Some((_, at)) = &self.watch {
+                wake = wake.min(*at);
+            }
             tokio::select! {
                 d = self.sub.recv() => match d? {
                     Delivery::Resync { missed } => {
@@ -532,6 +562,32 @@ impl EventStream {
                 },
                 () = sleep_until(wake) => {}
             }
+        }
+    }
+
+    /// Server mode: re-checks the sign-in or token behind this stream when it is due, and re-registers the role it
+    /// holds now. `false` ends the stream (revoked session, removed member, disabled account, revoked token).
+    async fn still_allowed(&mut self) -> bool {
+        let Some((me, at)) = self.watch.as_mut() else { return true };
+        if tokio::time::Instant::now() < *at {
+            return true;
+        }
+        *at = tokio::time::Instant::now() + WATCH_EVERY;
+        let Some(sm) = self.st.server.clone() else { return true };
+        match crate::server_mode::still_valid(&sm, me).await {
+            Some(role) => {
+                let mut p = me.principal();
+                p.role = role;
+                self.st.service.register_principal(&p);
+                if role != self.role {
+                    // Tell the client its role changed; it reads who it is again.
+                    self.role = role;
+                    self.queue
+                        .push_back(Event::default().event("role").data(json!({ "role": role.name() }).to_string()));
+                }
+                true
+            }
+            None => false,
         }
     }
 
@@ -577,6 +633,7 @@ fn capped(raw: &[u8], max: Option<usize>) -> (String, Option<usize>) {
 }
 
 async fn exchange(State(st): State<AppState>, me: Me, Path(id): Path<i64>, Query(q): Query<BytesQuery>) -> ApiResult {
+    st.service.require_actor(&me.actor, pm_service::access::Perm::HistoryRead)?;
     let ex = st.service.exchange_raw(id)?;
     let view = st.service.exchange_get(&me.actor, id, View::Full, 6000)?;
     let max = q.max.map(|m| m.max(1024));
@@ -621,6 +678,11 @@ async fn exchange(State(st): State<AppState>, me: Me, Path(id): Path<i64>, Query
                 v[format!("{key}_truncated")] = json!(n);
             }
         }
+    }
+    // A viewer sees what an agent sees: every string passes the redactor, and the exact bytes are not offered (they
+    // would carry the secrets the text hides).
+    if st.service.is_viewer(&me.actor) {
+        return Ok(Json(st.service.json_for(&me.actor, v)));
     }
     if q.bytes == Some(1) {
         let cut = |b: &[u8]| pm_core::base64(&b[..max.map_or(b.len(), |m| m.min(b.len()))]);
@@ -690,24 +752,24 @@ async fn model_snapshot_save(State(st): State<AppState>, me: Me, Json(b): Json<S
     ok(st.service.model_snapshot_save(&me.actor, &b.name)?)
 }
 
-async fn model_changes(State(st): State<AppState>, Query(q): Query<ChangesQuery>) -> ApiResult {
-    ok(st.service.model_changes(q.snapshot)?)
+async fn model_changes(State(st): State<AppState>, me: Me, Query(q): Query<ChangesQuery>) -> ApiResult {
+    shown(&st, &me, st.service.model_changes(q.snapshot)?)
 }
 
 async fn authz_check(State(st): State<AppState>, me: Me, Json(r): Json<AuthzCheckRequest>) -> ApiResult {
     ok(st.service.authz_check(&me.actor, r).await?)
 }
 
-async fn authz_results(State(st): State<AppState>, Query(q): Query<ExchangeQuery>) -> ApiResult {
-    ok(st.service.authz_results(q.exchange_id)?)
+async fn authz_results(State(st): State<AppState>, me: Me, Query(q): Query<ExchangeQuery>) -> ApiResult {
+    shown(&st, &me, st.service.authz_results(q.exchange_id)?)
 }
 
-async fn authz_candidates(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.authz_candidates()?)
+async fn authz_candidates(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.authz_candidates()?)
 }
 
-async fn model(State(st): State<AppState>, Query(f): Query<ModelFilter>) -> ApiResult {
-    ok(st.service.model_get(&f)?)
+async fn model(State(st): State<AppState>, me: Me, Query(f): Query<ModelFilter>) -> ApiResult {
+    shown(&st, &me, st.service.model_get(&f)?)
 }
 
 async fn scan_task_start(State(st): State<AppState>, me: Me, Json(r): Json<pm_service::ScanTaskRequest>) -> ApiResult {
@@ -844,8 +906,8 @@ async fn traffic_triage(State(st): State<AppState>, me: Me, Json(b): Json<Triage
     ok(st.service.traffic_triage(&me.actor, &f, b.limit.unwrap_or(100))?)
 }
 
-async fn memory_list(State(st): State<AppState>, Query(q): Query<HostQuery>) -> ApiResult {
-    ok(st.service.memory_list(q.host.as_deref())?)
+async fn memory_list(State(st): State<AppState>, me: Me, Query(q): Query<HostQuery>) -> ApiResult {
+    shown(&st, &me, st.service.memory_list(q.host.as_deref())?)
 }
 
 async fn memory_delete(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
@@ -975,20 +1037,20 @@ async fn scan_issues(State(st): State<AppState>, me: Me, Query(f): Query<pm_serv
     ok(issues)
 }
 
-async fn coverage(State(st): State<AppState>, Query(q): Query<CoverageQuery>) -> ApiResult {
-    ok(st.service.coverage(!q.all.unwrap_or(false))?)
+async fn coverage(State(st): State<AppState>, me: Me, Query(q): Query<CoverageQuery>) -> ApiResult {
+    shown(&st, &me, st.service.coverage(!q.all.unwrap_or(false))?)
 }
 
-async fn hypotheses(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> ApiResult {
-    ok(st.service.hypothesis_list(q.status.as_deref())?)
+async fn hypotheses(State(st): State<AppState>, me: Me, Query(q): Query<StatusQuery>) -> ApiResult {
+    shown(&st, &me, st.service.hypothesis_list(q.status.as_deref())?)
 }
 
-async fn findings(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> ApiResult {
-    ok(st.service.finding_list(q.status.as_deref())?)
+async fn findings(State(st): State<AppState>, me: Me, Query(q): Query<StatusQuery>) -> ApiResult {
+    shown(&st, &me, st.service.finding_list(q.status.as_deref())?)
 }
 
-async fn finding(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.finding_get(id)?)
+async fn finding(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    shown(&st, &me, st.service.finding_get(id)?)
 }
 
 async fn finding_create(State(st): State<AppState>, me: Me, Json(f): Json<NewFinding>) -> ApiResult {
@@ -1009,8 +1071,8 @@ async fn proof_run(State(st): State<AppState>, me: Me, Json(r): Json<ProofReques
     ok(st.service.proof_run(&me.actor, r).await?)
 }
 
-async fn proof(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.proof_get(id)?)
+async fn proof(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    shown(&st, &me, st.service.proof_get(id)?)
 }
 
 async fn proof_rerun(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
@@ -1033,7 +1095,7 @@ async fn audit_checkpoints(State(st): State<AppState>) -> ApiResult {
     ok(st.service.audit_checkpoints()?)
 }
 
-async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
+async fn report(State(st): State<AppState>, me: Me, Query(q): Query<ReportQuery>) -> Result<Response, ApiError> {
     let opts = pm_service::ReportOptions {
         min_severity: q.min_severity.clone(),
         statuses: q
@@ -1044,7 +1106,7 @@ async fn report(State(st): State<AppState>, Query(q): Query<ReportQuery>) -> Res
         evidence: q.evidence,
     };
     let format = q.format.as_deref().unwrap_or("md");
-    let r = st.service.report_render(q.template.as_deref(), format, &opts).await?;
+    let r = st.service.report_render_for(&me.actor, q.template.as_deref(), format, &opts).await?;
     // Always a download: reports hold target content (escaped, with their own
     // CSP). The UI previews HTML in a sandboxed srcdoc frame instead.
     let disposition = format!("attachment; filename=\"proxymind-report.{}\"", r.extension);
@@ -1078,8 +1140,8 @@ async fn evidence_verify(body: axum::body::Bytes) -> ApiResult {
     ok(pm_service::verify_evidence(&body))
 }
 
-async fn regress_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.regression_tests()?)
+async fn regress_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.regression_tests()?)
 }
 
 /// The regression tests as a ZIP (tests, README, example CI workflow).
@@ -1095,8 +1157,8 @@ async fn regress_export(State(st): State<AppState>, me: Me) -> Result<Response, 
         .into_response())
 }
 
-async fn coverage_proof(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.coverage_proof()?)
+async fn coverage_proof(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.coverage_proof()?)
 }
 
 async fn finding_prove(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
@@ -1280,8 +1342,8 @@ async fn tools_curl(State(st): State<AppState>, Json(r): Json<CurlBody>) -> ApiR
     ok(st.service.curl_parse(&r.command)?)
 }
 
-async fn graphql_get(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.graphql_get()?)
+async fn graphql_get(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.graphql_get()?)
 }
 
 async fn graphql_import(
@@ -1292,8 +1354,8 @@ async fn graphql_import(
     ok(st.service.graphql_import(&me.actor, r).await?)
 }
 
-async fn openapi_get(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.openapi_get()?)
+async fn openapi_get(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.openapi_get()?)
 }
 
 async fn openapi_import(
@@ -1492,12 +1554,12 @@ async fn ai_scan_start(State(st): State<AppState>, me: Me, Json(req): Json<pm_se
     ok(st.assistant.start_ai_scan(&me.actor, req)?)
 }
 
-async fn ai_scan_list(State(st): State<AppState>) -> ApiResult {
-    ok(st.service.ai_scan_list(50)?)
+async fn ai_scan_list(State(st): State<AppState>, me: Me) -> ApiResult {
+    shown(&st, &me, st.service.ai_scan_list(50)?)
 }
 
-async fn ai_scan_get(State(st): State<AppState>, Path(id): Path<i64>) -> ApiResult {
-    ok(st.service.ai_scan_get(id)?)
+async fn ai_scan_get(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
+    shown(&st, &me, st.service.ai_scan_get(id)?)
 }
 
 async fn ai_scan_stop(State(st): State<AppState>, me: Me, Path(id): Path<i64>) -> ApiResult {
@@ -1513,8 +1575,8 @@ async fn ai_scan_message(
     ok(st.service.ai_scan_message(&me.actor, id, &b.text)?)
 }
 
-async fn attack_paths(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
-    ok(st.service.attack_path_list(q.scan)?)
+async fn attack_paths(State(st): State<AppState>, me: Me, Query(q): Query<ScanQuery>) -> ApiResult {
+    shown(&st, &me, st.service.attack_path_list(q.scan)?)
 }
 
 async fn attack_path_create(State(st): State<AppState>, me: Me, Json(p): Json<pm_service::NewAttackPath>) -> ApiResult {
@@ -1526,8 +1588,8 @@ async fn attack_path_delete(State(st): State<AppState>, me: Me, Path(id): Path<i
     ok(serde_json::json!({ "deleted": id }))
 }
 
-async fn attack_graph(State(st): State<AppState>, Query(q): Query<ScanQuery>) -> ApiResult {
-    ok(st.service.attack_graph(q.scan)?)
+async fn attack_graph(State(st): State<AppState>, me: Me, Query(q): Query<ScanQuery>) -> ApiResult {
+    shown(&st, &me, st.service.attack_graph(q.scan)?)
 }
 
 /// The system prompt a scan would get (with the default target).

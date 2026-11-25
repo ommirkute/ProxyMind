@@ -233,7 +233,7 @@ impl Accounts {
             }
         }
         info.use_count = stored_count + written + self.token_uses.pending(&info.id);
-        Ok(TokenAuth { info, role, tier_cap })
+        Ok(TokenAuth { info, role, tier_cap, owner_role: Some(owner_role) })
     }
 
     /// A project's tokens, newest first: `owner` only, or everyone's (`None`). Revoked and expired ones are listed

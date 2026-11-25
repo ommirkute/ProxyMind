@@ -56,7 +56,7 @@ export default function Issues() {
                   <td className="mono small" style={{ overflowWrap: "anywhere", minWidth: 160 }}>{i.origin}{i.path === "*" ? " (site-wide)" : i.path}</td>
                   <td className="small">{i.count}× {i.exchange_ids.slice(0, 3).map((e) => <span key={e}><ExchangeLink id={e} /> </span>)}</td>
                   <td className="small" style={{ maxWidth: 360, wordBreak: "break-word" }}>{i.evidence}</td>
-                  <td><button className="btn" disabled={action.busy} onClick={() => toFinding(i)}>Make finding</button></td>
+                  <td><button data-write className="btn" disabled={action.busy} onClick={() => toFinding(i)}>Make finding</button></td>
                 </tr>
               ))}
             </tbody>
@@ -87,7 +87,7 @@ function ActiveScan({ initial }: { initial?: string }) {
       <div className="row">
         <span className="small">Probe every parameter of exchange</span>
         <input aria-label="Exchange to scan" value={ex} onChange={(e) => setEx(e.target.value)} style={{ width: 80 }} />
-        <button className="btn primary" disabled={!ex || action.busy} onClick={run} data-testid="active-scan">{action.busy ? "Scanning…" : "Scan"}</button>
+        <button data-write className="btn primary" disabled={!ex || action.busy} onClick={run} data-testid="active-scan">{action.busy ? "Scanning…" : "Scan"}</button>
         <span className="small muted">SQL errors, unencoded reflection, open redirect, path traversal, template injection. Sends requests; goes through the policy gate.</span>
       </div>
       <ErrorBox error={action.error} />
@@ -215,8 +215,8 @@ function CrawlAudit() {
         <label className="small">pages <input aria-label="Pages to crawl" value={pages} onChange={(e) => setPages(e.target.value)} style={{ width: 50 }} /></label>
         <label className="small"><input type="checkbox" checked={quick} onChange={(e) => setQuick(e.target.checked)} /> quick checks only</label>
         <label className="small" title="Crawl in a headless browser that runs the app's JavaScript (needs Chromium)"><input type="checkbox" checked={js} onChange={(e) => setJs(e.target.checked)} /> run JavaScript</label>
-        <button className="btn primary" disabled={!url || action.busy || running(task)} onClick={start} data-testid="audit-start">Crawl and audit</button>
-        {running(task) && <button className="btn" onClick={cancel}>Cancel</button>}
+        <button data-write className="btn primary" disabled={!url || action.busy || running(task)} onClick={start} data-testid="audit-start">Crawl and audit</button>
+        {running(task) && <button data-write className="btn" onClick={cancel}>Cancel</button>}
       </div>
       <p className="small muted">Crawls the start URL, then scans each recorded operation of that origin (submissions only get the stored XSS and CSRF checks). Runs in the background; every request goes through the policy gate, and strong issues become suspected findings.</p>
       <ErrorBox error={action.error} />

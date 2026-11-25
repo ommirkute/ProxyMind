@@ -505,6 +505,9 @@ impl Service {
         if actor.kind != ActorKind::Human {
             return Err(ServiceError::Invalid(format!("{name} is not a person; scheduled work needs one")));
         }
+        // On a project server this work has no request behind it: it acts with the tester role (never owner),
+        // unless the same person is signed in, whose registered role stays.
+        self.register_background(&actor);
         Ok(actor)
     }
 

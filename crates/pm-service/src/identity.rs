@@ -102,6 +102,7 @@ impl Service {
     /// Creates an identity from the credentials in a recorded request (its
     /// cookies and auth headers). Agents may do this: they never see the values.
     pub fn identity_capture(&self, actor: &Actor, name: &str, role: &str, exchange_id: i64) -> Result<IdentityInfo> {
+        self.require_actor(actor, Perm::IdentitiesCapture)?;
         if !pm_identity::valid_name(name) || name == ANONYMOUS {
             return Err(ServiceError::Invalid(format!("bad identity name {name:?}")));
         }
@@ -149,6 +150,7 @@ impl Service {
         expect_contains: Option<String>,
         expect_status: Option<u16>,
     ) -> Result<IdentityInfo> {
+        self.require_actor(actor, Perm::IdentitiesCapture)?;
         let (url, raw, method) = self.exchange_url_and_raw(exchange_id)?;
         if Tier::for_http_method(&method) != Tier::ActiveSafe {
             return Err(ServiceError::Invalid("health checks must use GET, HEAD or OPTIONS".into()));
@@ -220,12 +222,12 @@ impl Service {
         let mut vars = std::collections::HashMap::new();
         for (i, step) in recipe.steps.iter().enumerate() {
             let raw = crate::session::substitute(&step.request, &vars);
-            let out = self.outgoing(parse_url_endpoint(&step.url)?, raw.as_bytes(), true)?;
+            let out = self.outgoing(&owner, parse_url_endpoint(&step.url)?, raw.as_bytes(), true)?;
             match self.gate_send(&owner, "identity_login", &out, None, true, None)? {
                 Authorization::Allowed { .. } => {}
                 other => return Err(ServiceError::Invalid(format!("login step {} not allowed: {other:?}", i + 1))),
             }
-            let wire = crate::session::set_cookies(&self.redactor.unredact(&out.raw), &run.cookies);
+            let wire = crate::session::set_cookies(&self.redactor_of(&owner).unredact(&out.raw), &run.cookies);
             let sent = self.transmit(&owner, &out, wire, None, true, "login").await?;
             let resp = sent.response.ok_or_else(|| {
                 ServiceError::Invalid(format!("login step {} failed: {}", i + 1, sent.error.unwrap_or_default()))
@@ -267,6 +269,7 @@ impl Service {
     /// Checks whether an identity's session works, logging in again if it
     /// doesn't and a recipe exists.
     pub async fn identity_check(&self, actor: &Actor, name: &str) -> Result<IdentityCheck> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let ident = self.load_identity(name)?;
         let Some(health) = ident.health.clone() else {
             return Ok(IdentityCheck {
@@ -276,7 +279,7 @@ impl Service {
                 exchange_id: None,
             });
         };
-        let out = self.outgoing(parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
+        let out = self.outgoing(actor, parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
         if Tier::for_http_method(&out.method) != Tier::ActiveSafe {
             return Err(ServiceError::Invalid("health checks must use GET, HEAD or OPTIONS".into()));
         }

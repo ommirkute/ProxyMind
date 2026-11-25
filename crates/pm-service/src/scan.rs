@@ -1,6 +1,7 @@
 //! Passive scanning: run the checks in `pm-scan` over recorded traffic and
 //! group duplicates. Sends nothing, so it is a read action.
 
+use crate::access::Perm;
 use std::collections::BTreeMap;
 
 use pm_policy::{Actor, ActorKind, Tier};
@@ -54,6 +55,7 @@ impl Service {
     /// Passive issues in recorded traffic, most severe first. These are
     /// leads to test, not findings.
     pub fn scan_passive(&self, actor: &Actor, filter: &ScanFilter) -> Result<Vec<ScanIssue>> {
+        self.require_actor(actor, Perm::FindingsRead)?;
         let min = match filter.min_severity.as_deref() {
             Some(s) => severity(s)
                 .ok_or_else(|| crate::ServiceError::Invalid("min_severity: info, low, medium or high".into()))?,
@@ -427,7 +429,7 @@ impl Service {
 
     /// Pages that may show stored input: recent HTML GETs to the same
     /// origin from history (not the scanner's own probes), one per path.
-    fn stored_xss_pages(&self, s: &pm_store::ExchangeSummary) -> Result<Vec<(String, Vec<u8>)>> {
+    fn stored_xss_pages(&self, actor: &Actor, s: &pm_store::ExchangeSummary) -> Result<Vec<(String, Vec<u8>)>> {
         // By source: the scanner's own probes would crowd out the pages.
         let mut rows = Vec::new();
         for source in ["proxy", "crawl", "replay"] {
@@ -454,7 +456,10 @@ impl Service {
             let Some(e) = self.store.read(|db| db.get_exchange(r.id))? else { continue };
             let html = seen_of(e.response.as_deref()).content_type.is_some_and(|c| c.contains("html"));
             if html {
-                out.push((r.path.clone(), self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes()));
+                out.push((
+                    r.path.clone(),
+                    self.redactor_of(actor).redact(&String::from_utf8_lossy(&e.request)).into_bytes(),
+                ));
             }
             if out.len() >= 8 {
                 break;
@@ -464,6 +469,7 @@ impl Service {
     }
 
     pub async fn scan_active(&self, actor: &Actor, req: ActiveScanRequest) -> Result<ActiveScanResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         use crate::Authorization;
         use pm_scan::active::{self as act, PointKind};
         let known = |c: &str| act::CHECKS.contains(&c) || pm_scan::oob::CHECKS.contains(&c);
@@ -484,7 +490,7 @@ impl Service {
             .ok_or_else(|| crate::ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
         // Work on what the actor may see: secrets stay placeholders until sent.
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
         let marker = format!("pm{}", &pm_oast::new_token()[..10]);
         let limit = req.max_requests.unwrap_or(300).clamp(1, 2000);
         // Path segments the app model knows are identifiers (`/users/{username}`) are tested too.
@@ -532,7 +538,7 @@ impl Service {
             .filter_map(|(i, pt)| Some((pt.clone(), act::inject(&raw, pt, &act::stored_payload(&marker, i))?, i)))
             .collect();
         if want("stored_xss") && !ex.summary.method.eq_ignore_ascii_case("GET") && !stores.is_empty() {
-            let pages = self.stored_xss_pages(&ex.summary)?;
+            let pages = self.stored_xss_pages(actor, &ex.summary)?;
             if pages.is_empty() {
                 if !req.checks.is_empty() {
                     notes.push(
@@ -549,7 +555,7 @@ impl Service {
                 if pm_browser::find_chromium().is_none() {
                     notes.push(format!("DOM XSS skipped: no Chromium found (set {})", pm_browser::ENV_CHROMIUM));
                 } else {
-                    let page_url = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?.url();
+                    let page_url = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?.url();
                     let scripts: Vec<(String, Vec<u8>)> = act::script_srcs(&recorded.body, &page_url)
                         .into_iter()
                         .filter_map(|u| {
@@ -584,7 +590,7 @@ impl Service {
             use pm_scan::advanced as adv;
             let get = ex.summary.method.eq_ignore_ascii_case("GET");
             // Tokens and serialized cookies are redacted in `raw`: look at the real request.
-            let real = String::from_utf8_lossy(&self.redactor.unredact(raw.as_bytes())).into_owned();
+            let real = String::from_utf8_lossy(&self.redactor_of(actor).unredact(raw.as_bytes())).into_owned();
             if want("jwt") {
                 let tokens = adv::find_jwts(&real);
                 if !tokens.is_empty() {
@@ -699,7 +705,7 @@ impl Service {
 
         // One gate decision covers every request the scan may send: the tier
         // of the most intrusive payload, and the number as an upper bound.
-        let mut base = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let mut base = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         base.hypothesis_id = req.hypothesis_id;
         let mut tier = Tier::ActiveIntrusive;
         let mut planned = probes.len() + oob.len() + if plans.is_empty() { 1 } else { 3 };
@@ -754,7 +760,7 @@ impl Service {
         let send = |raw: Vec<u8>| {
             let endpoint = endpoint.clone();
             async move {
-                let mut o = self.outgoing(endpoint, &raw, true)?;
+                let mut o = self.outgoing(actor, endpoint, &raw, true)?;
                 o.hypothesis_id = req.hypothesis_id;
                 let (sent, _) = self.send_as(actor, &o, identity, true, "scan").await?;
                 Ok::<_, crate::ServiceError>(sent)
@@ -763,7 +769,7 @@ impl Service {
         // A race goes first: the baseline request would use up a one-time action.
         let mut raced: Option<(usize, usize, Option<u16>, Vec<i64>)> = None;
         if let Some(Plan::Race(n)) = plans.iter().find(|p| matches!(p, Plan::Race(_))) {
-            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+            let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
             if let crate::RaceResult::Done { exchange_ids, .. } =
                 self.race_execute(actor, &out, identity, true, *n, crate::RaceModeChoice::Auto).await?
             {
@@ -1140,7 +1146,7 @@ impl Service {
                             }
                             sent_count += 1;
                             let page_sent = send(r.clone()).await?;
-                            let url = format!("{}{fragment}", self.outgoing(endpoint.clone(), r, true)?.url());
+                            let url = format!("{}{fragment}", self.outgoing(actor, endpoint.clone(), r, true)?.url());
                             let Some(mut doc) =
                                 page_sent.response.as_deref().and_then(|x| crate::proof::recorded_document(&url, x))
                             else {
@@ -1450,7 +1456,9 @@ impl Service {
                                     let Some(e) = self.store.read(|db| db.get_exchange(row.id))? else { continue };
                                     if pm_scan::advanced::lists_privileges(&seen_of(e.response.as_deref()).body) {
                                         out.push(
-                                            self.redactor.redact(&String::from_utf8_lossy(&e.request)).into_bytes(),
+                                            self.redactor_of(actor)
+                                                .redact(&String::from_utf8_lossy(&e.request))
+                                                .into_bytes(),
                                         );
                                     }
                                 }
@@ -1642,7 +1650,7 @@ impl Service {
                         let send_exact = |raw: Vec<u8>| {
                             let endpoint = endpoint.clone();
                             async move {
-                                let mut o = self.outgoing(endpoint, &raw, false)?;
+                                let mut o = self.outgoing(actor, endpoint, &raw, false)?;
                                 o.hypothesis_id = req.hypothesis_id;
                                 let (sent, _) = self.send_as(actor, &o, identity, false, "scan").await?;
                                 Ok::<_, crate::ServiceError>(sent)

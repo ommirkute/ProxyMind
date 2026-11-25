@@ -1032,7 +1032,9 @@ async fn a_signed_in_user_without_a_membership_gets_403_on_the_project() {
     h.accounts.remove_membership(&owner_id, &h.project, &carol.user_id).unwrap();
     assert_eq!(h.api(Some(&carol.cookie), "GET", "/api/v1/status", None).await.status, 401);
 
-    // A server admin with no membership keeps the account-admin endpoints and loses the project.
+    // A server admin with no membership keeps the account-admin endpoints and loses the project. (The project
+    // must keep an owner: carol takes over.)
+    h.accounts.set_membership(&owner_id, &h.project, &carol.user_id, pm_accounts::Role::Owner).unwrap();
     h.accounts.remove_membership(&owner_id, &h.project, &owner_id).unwrap();
     let mut owner = owner;
     h.relogin(&mut owner).await;
@@ -1934,12 +1936,18 @@ async fn mcp_over_http_runs_the_tools_as_the_tokens_agent() {
         403,
         "not a bearer request: the browser layers apply"
     );
-    // A viewer's token may list tools but not call them.
+    // A viewer's token lists tools and calls the read ones (ADR-0022 step 6: roles are per tool); the tools that send
+    // are refused.
     let (v, _) = make_token(&h, &owner, json!({"kind": "agent", "name": "reader", "role": "viewer"})).await;
     let r = bearer(&h, "POST", "/api/v1/mcp", &v, Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))).await;
     assert!(r.json()["result"]["tools"].is_array());
     let r = bearer(&h, "POST", "/api/v1/mcp", &v, Some(mcp_call(2, "roe_get", json!({})))).await;
-    assert_eq!(r.json()["error"]["code"], -32001, "{}", r.body);
+    assert_eq!(r.json()["result"]["isError"], false, "{}", r.body);
+    let r =
+        bearer(&h, "POST", "/api/v1/mcp", &v, Some(mcp_call(3, "replay_send", json!({"url": "http://127.0.0.1:9/"}))))
+            .await;
+    assert_eq!(r.json()["result"]["isError"], true, "{}", r.body);
+    assert!(r.json()["result"]["content"][0]["text"].as_str().unwrap().starts_with("access denied:"), "{}", r.body);
     // A signed-in person reaches it too, with the browser layers, and is the person.
     let r = h.api(Some(&owner.cookie), "POST", "/api/v1/mcp", Some(mcp_call(7, "roe_get", json!({})))).await;
     assert_eq!(tool_json(&r)["you_are"], "human:owner");

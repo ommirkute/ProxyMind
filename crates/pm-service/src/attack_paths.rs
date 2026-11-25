@@ -118,6 +118,7 @@ impl Service {
     /// Records an attack path (2 to 12 steps). Steps that name a finding
     /// must name one that exists.
     pub fn attack_path_create(&self, actor: &Actor, p: NewAttackPath) -> Result<AttackPath> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let severity = p.severity.trim().to_ascii_lowercase();
         if !SEVERITIES.contains(&severity.as_str()) {
             return Err(ServiceError::Invalid(format!("severity must be one of {}", SEVERITIES.join(", "))));

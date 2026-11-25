@@ -15,7 +15,7 @@ use pm_policy::{Actor, ActorKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::access::{Perm, Principal};
+use crate::access::Perm;
 use crate::{
     ActiveFinding, ActiveScanRequest, ActiveScanResult, CrawlRequest, CrawlResult, Result, Service, ServiceError,
 };
@@ -205,6 +205,7 @@ impl Service {
     /// Starts a crawl-and-audit task in the background; poll it with
     /// `scan_task_status`.
     pub fn scan_task_start(self: &Arc<Self>, actor: &Actor, req: ScanTaskRequest) -> Result<ScanTaskView> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         self.scan_task_start_from(actor, req, None)
     }
 
@@ -572,13 +573,14 @@ impl Service {
             .cloned()
             .ok_or_else(|| ServiceError::NotFound(format!("scan task {id}")))?;
         // People see every task; agents and plugins only their own.
-        if !Principal::from_actor(actor).allows(Perm::RunsReadAll) && t.actor != actor.id() {
+        if !self.principal_of(actor).allows(Perm::RunsReadAll) && t.actor != actor.id() {
             return Err(ServiceError::NotFound(format!("scan task {id}")));
         }
         Ok(t)
     }
 
     pub fn scan_task_status(&self, actor: &Actor, id: &str) -> Result<ScanTaskView> {
+        self.require_actor(actor, Perm::RunsRead)?;
         let mut v = self.scan_task(actor, id)?.view.lock().clone();
         if actor.kind == ActorKind::Agent {
             for i in &mut v.issues {
@@ -590,6 +592,7 @@ impl Service {
 
     /// Stops the task after the operation being scanned.
     pub fn scan_task_cancel(&self, actor: &Actor, id: &str) -> Result<ScanTaskView> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let t = self.scan_task(actor, id)?;
         t.cancelled.store(true, Ordering::Relaxed);
         if t.view.lock().status == ScanTaskStatus::Paused {
@@ -602,6 +605,7 @@ impl Service {
     /// Pauses the task after the operation being scanned; resume continues
     /// with the operations not yet scanned.
     pub fn scan_task_pause(&self, actor: &Actor, id: &str) -> Result<ScanTaskView> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let t = self.scan_task(actor, id)?;
         if !t.view.lock().status.running() {
             return Err(ServiceError::Invalid(format!("scan task {id} isn't running")));
@@ -614,6 +618,7 @@ impl Service {
     /// Continues a paused, cancelled or failed task, skipping the operations it already scanned. It runs as the
     /// actor that started it, except that a person resuming a person's task runs it as themselves.
     pub fn scan_task_resume(self: &Arc<Self>, actor: &Actor, id: &str) -> Result<ScanTaskView> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let t = self.scan_task(actor, id)?;
         let status = t.view.lock().status;
         if status.running() || status == ScanTaskStatus::Done {
@@ -646,7 +651,10 @@ impl Service {
 
     /// Recent tasks, newest first (issues left out; see `scan_task_status`).
     pub fn scan_task_list(&self, actor: &Actor) -> Vec<ScanTaskView> {
-        let all = Principal::from_actor(actor).allows(Perm::RunsReadAll);
+        if self.require_actor(actor, Perm::RunsRead).is_err() {
+            return Vec::new();
+        }
+        let all = self.principal_of(actor).allows(Perm::RunsReadAll);
         self.scan_tasks
             .lock()
             .iter()

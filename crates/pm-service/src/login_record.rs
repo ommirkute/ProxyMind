@@ -450,11 +450,12 @@ impl Service {
     /// keeps what tells them apart. Scans then notice expired sessions that
     /// don't show up as a 401 or a redirect to a login page.
     pub async fn identity_learn_logged_out(&self, actor: &Actor, name: &str) -> Result<LoggedOutLearned> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut ident = self.load_identity(name)?;
         let health = ident.health.clone().ok_or_else(|| {
             ServiceError::Invalid(format!("{name} needs a health check first (record a login, or set one)"))
         })?;
-        let out = self.outgoing(parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
+        let out = self.outgoing(actor, parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
         if Tier::for_http_method(&out.method) != Tier::ActiveSafe {
             return Err(ServiceError::Invalid("health checks must use GET, HEAD or OPTIONS".into()));
         }

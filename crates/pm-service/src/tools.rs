@@ -1,5 +1,6 @@
 //! Codec (encode/decode), Diff and Token analyzer.
 
+use crate::access::Perm;
 use pm_policy::{Actor, ActorKind, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -108,6 +109,7 @@ impl Service {
     /// Compares two recorded exchanges: a semantic response diff and line
     /// diffs of the requests and responses (secrets hidden for agents).
     pub fn compare_exchanges(&self, actor: &Actor, a: i64, b: i64) -> Result<Value> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let get = |id: i64| -> Result<pm_store::Exchange> {
             self.store.read(|db| db.get_exchange(id))?.ok_or_else(|| ServiceError::NotFound(format!("exchange {id}")))
         };
@@ -144,6 +146,9 @@ impl Service {
     /// from the client's (`request_original`) to the one sent to the server; the response from the server's to the
     /// one delivered to the client. Empty when nothing changed. Redacted for agents.
     pub fn change_diffs(&self, actor: &Actor, ex: &pm_store::Exchange) -> Vec<Value> {
+        if self.require_actor(actor, Perm::HistoryRead).is_err() {
+            return Vec::new();
+        }
         let redact = |s: String| match self.redactor_for(actor) {
             Some(r) => r.redact(&s),
             None => s,
@@ -178,6 +183,7 @@ impl Service {
 
     /// Re-sends a token-issuing request and analyses the tokens it returns.
     pub async fn token_analyzer_run(&self, actor: &Actor, req: TokenAnalyzerRequest) -> Result<TokenAnalyzerResult> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let samples = req.samples.unwrap_or(100).clamp(10, 500);
         if !["cookie:", "header:", "json:", "between:"].iter().any(|p| req.locator.starts_with(p)) {
             return Err(ServiceError::Invalid(
@@ -188,9 +194,9 @@ impl Service {
             .store
             .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
-        let out = self.outgoing(endpoint, raw.as_bytes(), true)?;
+        let out = self.outgoing(actor, endpoint, raw.as_bytes(), true)?;
         // Many copies of a state-changing request (a login) is intrusive.
         let tier = Tier::for_http_request(&out.raw).0.max(Tier::ActiveSafe);
         let extra = json!({ "token_analyzer": { "samples": samples, "locator": req.locator } });

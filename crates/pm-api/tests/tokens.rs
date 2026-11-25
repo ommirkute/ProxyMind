@@ -278,9 +278,11 @@ async fn a_viewer_token_reads_and_a_tier_cap_stops_the_gate() {
     assert_eq!(h.bearer("GET", "/api/v1/exchanges", &viewer, None).await.status, 200);
     let r = h.bearer("POST", "/api/v1/findings", &viewer, Some(json!({}))).await;
     assert_eq!((r.status, r.code().as_str()), (403, "read_only_token"));
-    // A viewer's tools: listed, not called.
+    // A viewer's tools: the read ones are called (roles are per tool, ADR-0022 step 6), the others refused.
     let r = h.bearer("POST", "/api/v1/mcp", &viewer, Some(mcp(1, "roe_get", json!({})))).await;
-    assert_eq!(r.json()["error"]["code"], -32001);
+    assert_eq!(r.json()["result"]["isError"], false, "{}", r.body);
+    let r = h.bearer("POST", "/api/v1/mcp", &viewer, Some(mcp(2, "replay_send", json!({})))).await;
+    assert!(r.json()["result"]["content"][0]["text"].as_str().unwrap().starts_with("access denied:"), "{}", r.body);
     // A cap: the same request is allowed for an uncapped agent and denied, with the reason and an audit entry, for a
     // capped one. The cap is the gate's, so the CLI, MCP and REST all get it.
     let (capped, _) = h.make(json!({"kind": "agent", "name": "careful", "tier_cap": "passive"})).await;

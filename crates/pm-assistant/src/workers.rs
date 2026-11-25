@@ -165,6 +165,7 @@ impl Assistant {
     ) -> Result<(&'static str, String), String> {
         let svc = &self.service;
         let actor = worker_actor(scan, n);
+        svc.inherit_principal(&pm_service::scan_actor(scan), &actor);
         let target = svc.ai_scan_get(scan).map_err(|e| e.to_string())?.target;
         let system = format!(
             "{}\n\n{}",

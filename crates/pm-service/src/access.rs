@@ -3,13 +3,21 @@
 //!
 //! - [`Perm`] is one entry per kind of action; [`Perm::spec`] is the whole rule set in one `match`, readable in this
 //!   file (and rendered to `docs/access.md`, which a test keeps in sync).
-//! - [`Principal`] is who asks: an [`Actor`] plus a [`Role`]. In single-user mode (all there is today) every person is
-//!   the implicit owner and every other actor (agent, plugin, scanner, CI) has the role `Tester`, which is the ADR's
-//!   ceiling for machine credentials. Roles per project member come with ADR-0022 step 6.
+//! - [`Principal`] is who asks: an [`Actor`] plus a [`Role`] and, on a project server, the account, token, session
+//!   and address behind the request. In single-user mode every person is the implicit owner and every other actor
+//!   (agent, plugin, scanner, CI) has the role `Tester`, which is the ADR's ceiling for machine credentials.
+//! - **Who is this actor?** Service methods take an `&Actor`, so the server's adapters register what they know about
+//!   an actor for the life of the process ([`Service::register_principal`], called by the API's guard on every
+//!   authenticated request, after the session or token was checked against `server.db`). [`Service::principal_of`]
+//!   answers from that registry once [`Service::set_access_control`] is on (server mode): an actor nobody registered
+//!   is a `viewer`, never an owner (deny by default), and a non-person is never above `tester`. With access control
+//!   off (single-user mode) it is [`Principal::from_actor`], so nothing changes there.
 //! - `people_only` actions stay people-only whatever the role: an owner's agent is still an agent.
 //!
 //! Only authorization lives here. Choosing what an agent is *shown* (redaction, untrusted-content wrapping) is not an
 //! access decision and stays where the content is built; `tests/access.rs` keeps an explicit allow-list of those.
+
+use std::collections::HashMap;
 
 use pm_policy::audit::AuditContext;
 use pm_policy::{Actor, ActorKind};
@@ -26,6 +34,20 @@ pub enum Role {
 }
 
 impl Role {
+    /// Owner 3, tester 2, viewer 1: for "the lower of two roles".
+    pub const fn rank(self) -> u8 {
+        match self {
+            Role::Owner => 3,
+            Role::Tester => 2,
+            Role::Viewer => 1,
+        }
+    }
+
+    /// The lower of two roles.
+    pub const fn min(self, other: Role) -> Role {
+        if self.rank() <= other.rank() { self } else { other }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Role::Owner => "owner",
@@ -48,11 +70,15 @@ pub struct Principal {
     pub session_id: Option<String>,
     /// The client's IP address, when known.
     pub client_addr: Option<String>,
+    /// The role of the account behind this principal on the project: a person's own, a token's owner's. `role` is
+    /// lower for a token (its ceiling) and for every non-person (capped at tester); this is what says whose work an
+    /// action was, for the approval rules. `None` in single-user mode.
+    pub account_role: Option<Role>,
 }
 
 impl Principal {
     pub fn new(actor: Actor, role: Role) -> Self {
-        Self { actor, role, user_id: None, token_id: None, session_id: None, client_addr: None }
+        Self { actor, role, user_id: None, token_id: None, session_id: None, client_addr: None, account_role: None }
     }
 
     /// The same principal, seen from this address.
@@ -203,6 +229,53 @@ perms! {
     TokensManage,
     /// Create, list and revoke other people's tokens.
     TokensManageOthers,
+    /// Read recorded traffic: history, exchanges, search, the site map, WebSocket messages, streams, notes on them.
+    HistoryRead,
+    /// Read findings and passive scan issues, the issue library, proofs.
+    FindingsRead,
+    /// Read reports and the evidence the reports cite.
+    ReportsRead,
+    /// Read the application model, hypotheses, coverage, attack paths and what changed.
+    ModelRead,
+    /// See the state of scan tasks, fuzzer attacks, workflows and AI scans (`RunsReadAll` decides whose).
+    RunsRead,
+    /// Read the rules of engagement and what the principal may do under them.
+    RoeRead,
+    /// Public facts about the server and project that carry no project data (status, setup help, the CA certificate,
+    /// playbooks, the issue library).
+    Info,
+    /// Read the audit log and its checkpoints.
+    AuditRead,
+    /// See pending and decided approvals (they hold the exact parameters of the action asked).
+    ApprovalsRead,
+    /// List identities (names, roles and health; never their credentials).
+    IdentitiesRead,
+    /// Read settings: network, listeners, match-and-replace, recording, devices, session handling summaries.
+    ConfigRead,
+    /// Use the built-in assistant: read its chats, send it messages.
+    AssistantUse,
+    /// Send traffic to targets through the gate: replay, group, race, fuzz, scan, crawl, discover, workflows run,
+    /// stream and WebSocket replay, proofs, authorization checks, retests, AI-free sweeps.
+    SendTraffic,
+    /// Create an identity from the credentials in a recorded request, or set its health check from one: agents may,
+    /// because they never see the values.
+    IdentitiesCapture,
+    /// Create and edit findings.
+    FindingsWrite,
+    /// Create and edit hypotheses.
+    ModelWrite,
+    /// Write notes: annotations, the organizer, agent memory, attack paths.
+    NotesWrite,
+    /// Import traffic (HAR, cURL) into the project.
+    TrafficImport,
+    /// Export traffic (HAR, cURL, code) from the project.
+    TrafficExport,
+    /// Use the Collaborator (OAST): make payloads, read interactions and probes.
+    CollaboratorUse,
+    /// Change how this installation checks for updates and run the check.
+    UpdateSettings,
+    /// Manage the project's members and their roles.
+    MembersManage,
 }
 
 impl Perm {
@@ -368,6 +441,103 @@ impl Perm {
                 "Create, list and revoke other people's tokens",
                 "only an owner of the project can manage other people's tokens",
             ),
+            Perm::HistoryRead => rule(
+                ANYONE,
+                false,
+                "Read recorded traffic (viewers see it redacted, as agents do)",
+                "your role may not read recorded traffic",
+            ),
+            Perm::FindingsRead => {
+                rule(ANYONE, false, "Read findings, passive issues and proofs", "your role may not read findings")
+            }
+            Perm::ReportsRead => rule(ANYONE, false, "Read reports and evidence", "your role may not read reports"),
+            Perm::ModelRead => rule(
+                ANYONE,
+                false,
+                "Read the application model, hypotheses and coverage",
+                "your role may not read the model",
+            ),
+            Perm::RunsRead => rule(
+                ANYONE,
+                false,
+                "See the state of scan tasks, attacks, workflow runs and AI scans",
+                "your role may not see runs",
+            ),
+            Perm::RoeRead => {
+                rule(ANYONE, false, "Read the rules of engagement", "your role may not read the rules of engagement")
+            }
+            Perm::Info => {
+                rule(ANYONE, false, "Public facts: status, setup help, the CA certificate, playbooks", "refused")
+            }
+            Perm::AuditRead => {
+                rule(WORKERS, false, "Read the audit log and its checkpoints", "your role may not read the audit log")
+            }
+            Perm::ApprovalsRead => {
+                rule(WORKERS, false, "See approvals and the actions they cover", "your role may not see approvals")
+            }
+            Perm::IdentitiesRead => {
+                rule(WORKERS, false, "List identities (never their credentials)", "your role may not list identities")
+            }
+            Perm::ConfigRead => rule(
+                WORKERS,
+                false,
+                "Read network, listener, rule, recording and device settings",
+                "your role may not read settings",
+            ),
+            Perm::AssistantUse => rule(
+                WORKERS,
+                true,
+                "Use the built-in assistant: read its chats, send it messages",
+                "only people with a working role can use the assistant",
+            ),
+            Perm::SendTraffic => rule(
+                WORKERS,
+                false,
+                "Send traffic through the gate: replay, fuzz, scan, crawl, workflows, proofs, retests",
+                "your role may not send traffic to targets",
+            ),
+            Perm::IdentitiesCapture => rule(
+                WORKERS,
+                false,
+                "Capture an identity from a recorded request; set a health check from one",
+                "your role may not capture identities",
+            ),
+            Perm::FindingsWrite => {
+                rule(WORKERS, false, "Create and edit findings", "your role may not create or change findings")
+            }
+            Perm::ModelWrite => {
+                rule(WORKERS, false, "Create and edit hypotheses", "your role may not create or change hypotheses")
+            }
+            Perm::NotesWrite => rule(
+                WORKERS,
+                false,
+                "Write annotations, organizer items, agent memory and attack paths",
+                "your role may not write notes",
+            ),
+            Perm::TrafficImport => {
+                rule(WORKERS, false, "Import traffic (HAR, cURL)", "your role may not import traffic")
+            }
+            Perm::TrafficExport => {
+                rule(WORKERS, false, "Export traffic (HAR, cURL, code)", "your role may not export traffic")
+            }
+            Perm::CollaboratorUse => rule(
+                WORKERS,
+                false,
+                "Use the Collaborator: payloads, interactions, probes",
+                "your role may not use the Collaborator",
+            ),
+            Perm::UpdateSettings => rule(
+                OWNER,
+                true,
+                "Change update settings and check for updates",
+                "only an owner can change update settings",
+            ),
+            Perm::MembersManage => rule(
+                OWNER,
+                true,
+                "List members; change or remove their roles",
+                "only an owner of the project can manage its members",
+            ),
         }
     }
 }
@@ -397,21 +567,132 @@ impl Denial {
     }
 }
 
+/// What the server's adapters know about the actors that act in this process (see the module docs).
+#[derive(Default)]
+pub(crate) struct AccessState {
+    /// Server mode: roles come from the registry and an unknown actor is a viewer.
+    enabled: bool,
+    /// Actor id to what is known of it. Refreshed on every authenticated request.
+    principals: HashMap<String, Principal>,
+}
+
+tokio::task_local! {
+    /// The principal of the request being served (set by the API around a handler), so every audit record of the
+    /// request names the session or token and the address of exactly that request. Work spawned from a request
+    /// (scan tasks, fuzzer attacks) runs outside the scope and falls back to the registry.
+    static REQUEST: Principal;
+}
+
 impl Service {
+    /// Turns server-mode access control on or off. On: [`Service::principal_of`] answers from the registry (an actor
+    /// nobody registered is a viewer); off (single-user mode, the default): [`Principal::from_actor`].
+    pub fn set_access_control(&self, on: bool) {
+        self.access.write().enabled = on;
+    }
+
+    /// Whether server-mode access control is on.
+    pub fn access_control(&self) -> bool {
+        self.access.read().enabled
+    }
+
+    /// Records what is known of an actor for the life of the process: the role it acts with now, and the account,
+    /// token, session and address behind it. A non-person's role is capped at `tester`. Call it on every
+    /// authenticated request, after the session or token was checked: that is what makes a demotion take effect on
+    /// the next request.
+    pub fn register_principal(&self, principal: &Principal) {
+        self.access.write().principals.insert(principal.actor.id(), principal.clone());
+    }
+
+    /// Registers `child` (a worker the service starts on behalf of `parent`, such as an AI scan's) with the parent's
+    /// role, capped at tester, and the parent's account and token.
+    pub fn inherit_principal(&self, parent: &Actor, child: &Actor) {
+        if !self.access_control() {
+            return;
+        }
+        let mut p = self.principal_of(parent);
+        p.actor = child.clone();
+        self.register_principal(&p);
+    }
+
+    /// Background work that acts as a person who vouched for the project (scheduled scans, workflow triggers):
+    /// registered as a `tester` with no account, unless the actor is already known (a registration never gets
+    /// *more* from here than it has).
+    pub fn register_background(&self, actor: &Actor) {
+        let mut a = self.access.write();
+        if a.enabled && !a.principals.contains_key(&actor.id()) {
+            a.principals.insert(actor.id(), Principal::new(actor.clone(), Role::Tester));
+        }
+    }
+
+    /// A member's role changed or was removed (`None`): every registered actor of that account, and of tokens owned by
+    /// it, takes the new role at once, without waiting for its next request. Removal makes them viewers; the API
+    /// refuses their next request anyway.
+    pub fn principals_of_user_changed(&self, user_id: &str, role: Option<Role>) {
+        let mut a = self.access.write();
+        for p in a.principals.values_mut().filter(|p| p.user_id.as_deref() == Some(user_id)) {
+            p.role = role.map_or(Role::Viewer, |r| p.role.min(r));
+            p.account_role = Some(role.unwrap_or(Role::Viewer));
+        }
+    }
+
+    /// Who `actor` is for authorization. Single-user mode: [`Principal::from_actor`]. Server mode: what was
+    /// registered; an actor nobody registered is a viewer (deny by default), and a non-person is never above tester.
+    pub fn principal_of(&self, actor: &Actor) -> Principal {
+        let a = self.access.read();
+        // Single-user mode knows only the `pm3_` tokens that were used (their role ceiling must bite there too);
+        // every other actor is the implicit owner or the machine ceiling.
+        if !a.enabled && !a.principals.contains_key(&actor.id()) {
+            return Principal::from_actor(actor);
+        }
+        match a.principals.get(&actor.id()) {
+            Some(p) => {
+                let mut p = p.clone();
+                if p.actor.kind != ActorKind::Human {
+                    p.role = p.role.min(Role::Tester);
+                }
+                p
+            }
+            None => Principal::new(actor.clone(), Role::Viewer),
+        }
+    }
+
+    /// Whether `actor` acts as a viewer (a person or token that reads, with secrets hidden).
+    pub fn is_viewer(&self, actor: &Actor) -> bool {
+        self.principal_of(actor).role == Role::Viewer
+    }
+
+    /// Runs `fut` with `principal` as the request's principal (audit records written meanwhile carry it).
+    pub async fn in_request<F: std::future::Future>(&self, principal: Principal, fut: F) -> F::Output {
+        REQUEST.scope(principal, fut).await
+    }
+
+    /// The audit context for `actor`: the request in scope when it is theirs, else what was registered, else none.
+    pub(crate) fn audit_context_of(&self, actor: &str) -> Option<AuditContext> {
+        if let Ok(Some(c)) = REQUEST.try_with(|p| (p.actor.id() == actor).then(|| p.audit_context())) {
+            return Some(c);
+        }
+        let a = self.access.read();
+        if !a.enabled {
+            return None;
+        }
+        a.principals.get(actor).map(Principal::audit_context)
+    }
+
     /// Deny by default: `Ok` only when `principal` may take actions of kind `perm`. A refusal is
-    /// `ServiceError::Invalid` with the perm's message (as the scattered checks returned before ADR-0022).
+    /// `ServiceError::Invalid` with the perm's message in single-user mode (as the scattered checks returned before
+    /// ADR-0022) and `ServiceError::Forbidden` in server mode (a 403).
     pub fn require(&self, principal: &Principal, perm: Perm) -> Result<()> {
         self.require_with(principal, perm, Denial::default())
     }
 
-    /// [`Service::require`] for the single-user principal of `actor` ([`Principal::from_actor`]).
+    /// [`Service::require`] for `actor`, resolved by [`Service::principal_of`].
     pub fn require_actor(&self, actor: &Actor, perm: Perm) -> Result<()> {
-        self.require(&Principal::from_actor(actor), perm)
+        self.require(&self.principal_of(actor), perm)
     }
 
     /// [`Service::require_actor`] with a call-specific message and/or an audit entry for the refusal.
     pub fn require_actor_with(&self, actor: &Actor, perm: Perm, denial: Denial) -> Result<()> {
-        self.require_with(&Principal::from_actor(actor), perm, denial)
+        self.require_with(&self.principal_of(actor), perm, denial)
     }
 
     pub fn require_with(&self, principal: &Principal, perm: Perm, denial: Denial) -> Result<()> {
@@ -419,8 +700,292 @@ impl Service {
             return Ok(());
         }
         if let Some((action, detail)) = denial.audit {
-            let _ = self.audit(&principal.actor.id(), action, detail, "deny");
+            let _ = self.audit_principal(principal, action, detail, "deny");
         }
-        Err(ServiceError::Invalid(denial.message.unwrap_or_else(|| perm.spec().denial.to_string())))
+        let msg = denial.message.unwrap_or_else(|| perm.spec().denial.to_string());
+        // Server mode, and a single-user token whose role is a registered viewer ceiling, refuse with a 403; the
+        // rest of single-user mode keeps the `Invalid` refusal it always had.
+        let registered = self.access.read().principals.contains_key(&principal.actor.id());
+        Err(if self.access_control() || registered { ServiceError::Forbidden(msg) } else { ServiceError::Invalid(msg) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_policy::{ActionRequest, Policy, Roe, Target, Tier};
+    use pm_store::Store;
+    use serde_json::json;
+
+    fn service(roe_extra: &str) -> Service {
+        // A person's own active-intrusive requests need approval too, so that they can be decided.
+        let yaml = format!(
+            "version: 1\nscope:\n  include: [\"https://app.example.com/\"]\ntiers:\n  human:\n    active_intrusive: approve\n{roe_extra}"
+        );
+        let svc = Service::new(Store::open_in_memory().unwrap(), Policy::new(Roe::parse(&yaml).unwrap())).unwrap();
+        svc.set_access_control(true);
+        svc
+    }
+
+    fn actor(id: &str) -> Actor {
+        Actor::parse(id).unwrap()
+    }
+
+    /// Registers `id` as the request of account `user` (and `token`) with `role`.
+    fn register(svc: &Service, id: &str, role: Role, user: &str, token: Option<&str>) {
+        let mut p = Principal::new(actor(id), role);
+        p.account_role = Some(role);
+        p.user_id = Some(user.into());
+        p.token_id = token.map(Into::into);
+        p.session_id = token.is_none().then(|| "s0123456".into());
+        p.client_addr = Some("203.0.113.7".into());
+        svc.register_principal(&p);
+    }
+
+    fn denied(r: Result<()>) -> bool {
+        matches!(r, Err(ServiceError::Forbidden(_)))
+    }
+
+    #[test]
+    fn single_user_mode_is_unchanged() {
+        let svc = service("");
+        svc.set_access_control(false);
+        assert_eq!(svc.principal_of(&actor("human:anyone")).role, Role::Owner);
+        assert_eq!(svc.principal_of(&actor("agent:a")).role, Role::Tester);
+        svc.require_actor(&actor("human:anyone"), Perm::RoeWrite).unwrap();
+        // A refusal is the `Invalid` error it always was, not `Forbidden`.
+        let err = svc.require_actor(&actor("agent:a"), Perm::RoeWrite).unwrap_err();
+        assert!(matches!(err, ServiceError::Invalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_actor_nobody_registered_is_a_viewer_never_an_owner() {
+        let svc = service("");
+        for id in ["human:alice", "agent:claude", "ci:pipeline", "plugin:p"] {
+            let p = svc.principal_of(&actor(id));
+            assert_eq!(p.role, Role::Viewer, "{id}");
+            assert!(!p.allows(Perm::SendTraffic) && !p.allows(Perm::RoeWrite), "{id}");
+            assert!(p.allows(Perm::HistoryRead), "{id}");
+        }
+        assert!(denied(svc.require_actor(&actor("human:alice"), Perm::SendTraffic)));
+    }
+
+    #[test]
+    fn registered_roles_decide_what_is_allowed() {
+        let svc = service("");
+        register(&svc, "human:olga", Role::Owner, "u_o", None);
+        register(&svc, "human:tess", Role::Tester, "u_t", None);
+        register(&svc, "human:vic", Role::Viewer, "u_v", None);
+        let may = |who: &str, perm| svc.require_actor(&actor(who), perm).is_ok();
+        for perm in
+            [Perm::SendTraffic, Perm::FindingsWrite, Perm::NotesWrite, Perm::ApprovalsDecide, Perm::IdentitiesWrite]
+        {
+            assert!(may("human:olga", perm) && may("human:tess", perm), "{perm:?}");
+            assert!(!may("human:vic", perm), "{perm:?}");
+        }
+        for perm in
+            [Perm::RoeWrite, Perm::MembersManage, Perm::NetworkWrite, Perm::IntegrationsWrite, Perm::ModelKeysWrite]
+        {
+            assert!(may("human:olga", perm), "{perm:?}");
+            assert!(!may("human:tess", perm) && !may("human:vic", perm), "{perm:?}");
+        }
+        for perm in
+            [Perm::HistoryRead, Perm::FindingsRead, Perm::ReportsRead, Perm::ModelRead, Perm::RoeRead, Perm::Info]
+        {
+            assert!(may("human:vic", perm), "{perm:?}");
+        }
+        assert!(denied(svc.require_actor(&actor("human:vic"), Perm::RoeWrite)));
+    }
+
+    #[test]
+    fn a_non_person_is_never_above_tester_and_people_only_holds_for_an_owners_token() {
+        let svc = service("");
+        register(&svc, "agent:owners", Role::Owner, "u_o", Some("t_1"));
+        let p = svc.principal_of(&actor("agent:owners"));
+        assert_eq!(p.role, Role::Tester);
+        assert!(p.allows(Perm::SendTraffic));
+        for perm in [Perm::ApprovalsDecide, Perm::RoeWrite, Perm::MembersManage, Perm::TokensManage] {
+            assert!(!p.allows(perm), "{perm:?}");
+        }
+    }
+
+    #[test]
+    fn a_demotion_or_removal_takes_effect_at_once() {
+        let svc = service("");
+        register(&svc, "human:tess", Role::Tester, "u_t", None);
+        register(&svc, "agent:tess-bot", Role::Tester, "u_t", Some("t_9"));
+        register(&svc, "human:other", Role::Tester, "u_x", None);
+        assert!(svc.require_actor(&actor("human:tess"), Perm::SendTraffic).is_ok());
+        svc.principals_of_user_changed("u_t", Some(Role::Viewer));
+        assert!(denied(svc.require_actor(&actor("human:tess"), Perm::SendTraffic)));
+        assert!(denied(svc.require_actor(&actor("agent:tess-bot"), Perm::SendTraffic)), "their token too");
+        assert!(svc.require_actor(&actor("human:other"), Perm::SendTraffic).is_ok(), "nobody else");
+        // A promotion does not raise a registered role by itself; the next request registers the new one.
+        svc.principals_of_user_changed("u_t", Some(Role::Owner));
+        assert_eq!(svc.principal_of(&actor("human:tess")).role, Role::Viewer);
+        svc.principals_of_user_changed("u_x", None);
+        assert_eq!(svc.principal_of(&actor("human:other")).role, Role::Viewer);
+    }
+
+    #[test]
+    fn background_work_never_gets_more_than_tester_nor_overwrites_a_registration() {
+        let svc = service("");
+        svc.register_background(&actor("human:vouched"));
+        assert_eq!(svc.principal_of(&actor("human:vouched")).role, Role::Tester);
+        register(&svc, "human:vic", Role::Viewer, "u_v", None);
+        svc.register_background(&actor("human:vic"));
+        assert_eq!(svc.principal_of(&actor("human:vic")).role, Role::Viewer);
+    }
+
+    fn pending(svc: &Service, who: &str) -> String {
+        let req = ActionRequest {
+            actor: actor(who),
+            action: "replay_send".into(),
+            tier: Tier::ActiveIntrusive,
+            target: Some(Target::from_url("https://app.example.com/x").unwrap()),
+            summary: "send".into(),
+        };
+        match svc.authorize(req, &json!({ "raw": "POST /x" })).unwrap() {
+            crate::Authorization::PendingApproval { approval_id, .. } => approval_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_approval_records_who_asked() {
+        let svc = service("");
+        register(&svc, "agent:bot", Role::Tester, "u_t", Some("t_77"));
+        let id = pending(&svc, "agent:bot");
+        let row = svc.approval(&id).unwrap().unwrap();
+        assert_eq!(
+            (row.requested_user.as_deref(), row.requested_token.as_deref(), row.requested_role.as_deref()),
+            (Some("u_t"), Some("t_77"), Some("tester"))
+        );
+    }
+
+    #[test]
+    fn who_may_decide_which_approval() {
+        let svc = service("");
+        register(&svc, "human:olga", Role::Owner, "u_o", None);
+        register(&svc, "human:tess", Role::Tester, "u_t", None);
+        register(&svc, "human:tom", Role::Tester, "u_m", None);
+        register(&svc, "human:vic", Role::Viewer, "u_v", None);
+        register(&svc, "agent:tess-bot", Role::Tester, "u_t", Some("t_1"));
+        register(&svc, "agent:tom-bot", Role::Tester, "u_m", Some("t_2"));
+        register(&svc, "agent:olga-bot", Role::Owner, "u_o", Some("t_3"));
+        let decide = |who: &str, id: &str| svc.decide_approval(id, &actor(who), true);
+
+        let tess_asked = pending(&svc, "agent:tess-bot");
+        assert!(
+            matches!(decide("human:vic", &tess_asked), Err(ServiceError::Forbidden(_))),
+            "a viewer decides nothing"
+        );
+        assert!(matches!(decide("human:tom", &tess_asked), Err(ServiceError::Forbidden(_))), "not another tester's");
+        decide("human:tess", &tess_asked).unwrap();
+
+        let tom_asked = pending(&svc, "agent:tom-bot");
+        assert!(matches!(decide("human:tess", &tom_asked), Err(ServiceError::Forbidden(_))));
+        decide("human:olga", &tom_asked).unwrap();
+
+        // A tester cannot decide what an owner's token asked; an owner can.
+        let olga_asked = pending(&svc, "agent:olga-bot");
+        assert!(matches!(decide("human:tess", &olga_asked), Err(ServiceError::Forbidden(_))));
+        decide("human:olga", &olga_asked).unwrap();
+
+        // A person's own request: they may decide it themselves (a tester too).
+        let own = pending(&svc, "human:tess");
+        decide("human:tess", &own).unwrap();
+        // Refusals are audited as such.
+        assert!(svc.audit_list(200).unwrap().iter().any(|r| r.action == "approval_decide" && r.decision == "rejected"));
+    }
+
+    #[test]
+    fn the_roe_can_let_testers_decide_for_the_team() {
+        let svc = service("approvals:\n  testers_decide_team: true\n");
+        register(&svc, "human:tess", Role::Tester, "u_t", None);
+        register(&svc, "human:tom", Role::Tester, "u_m", None);
+        register(&svc, "human:olga", Role::Owner, "u_o", None);
+        register(&svc, "agent:tom-bot", Role::Tester, "u_m", Some("t_2"));
+        register(&svc, "agent:olga-bot", Role::Owner, "u_o", Some("t_3"));
+        let tom_asked = pending(&svc, "agent:tom-bot");
+        svc.decide_approval(&tom_asked, &actor("human:tess"), true).unwrap();
+        // Still not an owner's.
+        let olga_asked = pending(&svc, "agent:olga-bot");
+        assert!(svc.decide_approval(&olga_asked, &actor("human:tess"), true).is_err());
+    }
+
+    #[test]
+    fn four_eyes_need_another_owner() {
+        let svc = service("approvals:\n  require_other_person: true\n");
+        register(&svc, "human:olga", Role::Owner, "u_o", None);
+        register(&svc, "human:omar", Role::Owner, "u_p", None);
+        register(&svc, "agent:olga-bot", Role::Owner, "u_o", Some("t_3"));
+        let asked = pending(&svc, "agent:olga-bot");
+        let err = svc.decide_approval(&asked, &actor("human:olga"), true).unwrap_err();
+        assert!(matches!(err, ServiceError::Forbidden(_)), "{err:?}");
+        assert!(err.to_string().contains("different owner"), "{err}");
+        svc.decide_approval(&asked, &actor("human:omar"), true).unwrap();
+        // A person's own tiered request too.
+        let own = pending(&svc, "human:olga");
+        assert!(svc.decide_approval(&own, &actor("human:olga"), true).is_err());
+        svc.decide_approval(&own, &actor("human:omar"), false).unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_records_carry_the_account_and_the_request() {
+        let svc = service("");
+        register(&svc, "human:tess", Role::Tester, "u_t", None);
+        let _ = pending(&svc, "human:tess"); // outside any request: the registry's context
+        let log = svc.audit_list(10).unwrap();
+        assert_eq!(log[0].user_id.as_deref(), Some("u_t"));
+        assert_eq!(log[0].principal_kind.as_deref(), Some("session"));
+        assert_eq!(log[0].client_addr.as_deref(), Some("203.0.113.7"));
+
+        // Inside a request: that request's own session and address, not the registry's.
+        let mut p = Principal::new(actor("human:tess"), Role::Tester);
+        p.user_id = Some("u_t".into());
+        p.session_id = Some("feedface".into());
+        p.client_addr = Some("198.51.100.9".into());
+        svc.in_request(p, async {
+            let _ = pending(&svc, "human:tess");
+        })
+        .await;
+        let log = svc.audit_list(10).unwrap();
+        assert_eq!(
+            (log[0].session_id.as_deref(), log[0].client_addr.as_deref()),
+            (Some("feedface"), Some("198.51.100.9"))
+        );
+        // A request in scope says nothing about another actor's records.
+        let mut other = Principal::new(actor("human:tom"), Role::Tester);
+        other.session_id = Some("0badc0de".into());
+        svc.in_request(other, async {
+            let _ = pending(&svc, "human:tess");
+        })
+        .await;
+        assert_eq!(svc.audit_list(1).unwrap()[0].session_id.as_deref(), Some("s0123456"));
+        svc.audit_verify().unwrap();
+    }
+
+    #[test]
+    fn redactors_are_per_user_and_a_viewer_is_always_redacted() {
+        let svc = service("data:\n  redact_before_llm: false\n");
+        register(&svc, "human:vic", Role::Viewer, "u_v", None);
+        register(&svc, "human:vera", Role::Viewer, "u_w", None);
+        register(&svc, "human:olga", Role::Owner, "u_o", None);
+        register(&svc, "agent:vic-bot", Role::Tester, "u_v", Some("t_1"));
+        // Even with the ROE's redaction off, a viewer sees placeholders; an owner sees the real value.
+        assert!(svc.redacts_for(&actor("human:vic")));
+        assert!(!svc.redacts_for(&actor("human:olga")));
+        let (a, b) = (svc.redactor_of(&actor("human:vic")), svc.redactor_of(&actor("human:vera")));
+        let shown_a = a.redact("Cookie: session=aaaaaaaa1111");
+        let shown_b = b.redact("Cookie: session=bbbbbbbb2222");
+        assert_eq!(shown_a, shown_b.replace("bbbbbbbb2222", "aaaaaaaa1111"), "both are the first secret of their user");
+        assert!(shown_a.contains("{{secret:cookie_session_1}}"), "{shown_a}");
+        // The same placeholder means a different value for each, so one user cannot send another's secret.
+        assert_eq!(a.unredact(b"{{secret:cookie_session_1}}"), b"aaaaaaaa1111");
+        assert_eq!(b.unredact(b"{{secret:cookie_session_1}}"), b"bbbbbbbb2222");
+        // A token shares its owner's redactor.
+        assert!(std::ptr::eq(svc.redactor_of(&actor("agent:vic-bot")), a));
+        assert!(!std::ptr::eq(a, b));
     }
 }

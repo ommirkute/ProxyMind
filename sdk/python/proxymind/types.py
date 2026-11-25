@@ -188,6 +188,13 @@ class ApprovalRow(TypedDict):
     # The exact parameters (JSON text) the approval covers.
     params: str
     params_hash: str
+    # The role the requester acted with (`owner`, `tester`, `viewer`), when known.
+    requested_role: _t.Optional[str]
+    # The token (`t_...`) the request came with, if it came with one.
+    requested_token: _t.Optional[str]
+    # The account (`u_...`) behind the request that asked: the person, or the owner of the token. `None` in
+    # single-user mode.
+    requested_user: _t.Optional[str]
     status: str
     summary: str
     # URL the action targets, if any.
@@ -2457,6 +2464,30 @@ class MeResponse(TypedDict):
     role: _t.Optional[str]
     session: "SessionView"
     user: "UserView"
+
+
+class MemberRoleBody(TypedDict):
+    """Body of `PUT /auth/members/{user_id}`."""
+    # The role the member gets on the served project.
+    role: "RoleName"
+
+
+class MemberView(TypedDict):
+    """A member of the served project, as the Members panel shows them. Never holds a credential."""
+    # The account that made it (`u_…`), when known.
+    added_by: _t.Optional[str]
+    display_name: str
+    # `owner`, `tester` or `viewer`.
+    role: str
+    # When the membership was made (Unix seconds).
+    since: int
+    # `active` or `disabled`.
+    status: str
+    # Stable id (`u_…`).
+    user_id: str
+    username: str
+    # This is you.
+    you: bool
 
 
 class Memory(TypedDict):

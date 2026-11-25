@@ -12,8 +12,9 @@ use pm_service::*;
 
 use crate::auth_api::{
     EnrolBeginBody, EnrolConfirmBody, InviteAcceptBody, InviteCreateBody, InviteCreated, InviteView, LoginBody,
-    LoginResponse, MeResponse, OkResponse, PasswordBody, RecoveryCodesResponse, RevokeAllBody, RevokedResponse,
-    SecondFactorBody, SessionView, SetupBody, StateResponse, TotpConfirmBody, TotpEnrolmentResponse, UserView,
+    LoginResponse, MeResponse, MemberRoleBody, MemberView, OkResponse, PasswordBody, RecoveryCodesResponse,
+    RevokeAllBody, RevokedResponse, SecondFactorBody, SessionView, SetupBody, StateResponse, TotpConfirmBody,
+    TotpEnrolmentResponse, UserView,
 };
 use crate::contracts::{Operation, op};
 use crate::routes::{BytesQuery, EventsQuery};
@@ -313,6 +314,9 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/auth/users/{id}/disable", "auth_user_disable", "Server mode, server admins: disable an account and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
         op("post", "/auth/users/{id}/enable", "auth_user_enable", "Server mode, server admins: enable an account again. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
         op("post", "/auth/users/{id}/reset-second-factor", "auth_user_reset_second_factor", "Server mode, server admins: remove an account's second factor and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("get", "/auth/members", "auth_members", "Server mode, owners of the project: its members with their roles.").out::<Vec<MemberView>>(),
+        op("put", "/auth/members/{user_id}", "auth_member_set", "Server mode, owners of the project: give a member a role. A demotion ends their sessions and narrows their tokens; the last owner cannot be demoted. Needs a fresh sign-in.").body::<MemberRoleBody>().out::<OkResponse>(),
+        op("delete", "/auth/members/{user_id}", "auth_member_remove", "Server mode, owners of the project: remove a member, ending their sessions and revoking their tokens; the last owner cannot be removed. Needs a fresh sign-in.").out::<OkResponse>(),
         op("get", "/auth/invites", "auth_invites", "Server mode: invites (all for server admins, this project's for its owners).").out::<Vec<InviteView>>(),
         op("post", "/auth/invites", "auth_invite_create", "Server mode: invite someone to this project with a role. Needs a fresh sign-in. The token is shown once.").body::<InviteCreateBody>().out::<InviteCreated>(),
         op("delete", "/auth/invites/{id}", "auth_invite_revoke", "Server mode: revoke an unused invite. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),

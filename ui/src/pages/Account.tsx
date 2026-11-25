@@ -6,6 +6,7 @@ import { api, fmtDateTime, toast } from "../api";
 import type {
   InviteCreated,
   InviteView,
+  MemberView,
   OkResponse,
   RecoveryCodesResponse,
   RevokedResponse,
@@ -290,9 +291,90 @@ export function Admin() {
           <p>Who has an account on this server, and the links that let new people join the project.</p>
         </div>
       </div>
+      {isOwner && <Members selfId={auth.me.user.id} />}
       {isAdmin && <Users selfId={auth.me.user.id} />}
       <Invites />
     </div>
+  );
+}
+
+/** The project's members and their roles (owners). The server refuses to demote or remove the last owner. */
+function Members({ selfId }: { selfId: string }) {
+  const list = useLoad(() => api.get<MemberView[]>("/auth/members"), []);
+  const auth = useAuth();
+  const { busy, error, run } = useAction();
+  const setRole = (m: MemberView, role: RoleName) =>
+    void run(async () => {
+      if (role === m.role) return;
+      await api.put<OkResponse>(`/auth/members/${encodeURIComponent(m.user_id)}`, { role });
+      toast(`${m.username} is now ${role}`);
+      list.reload();
+      // Changing your own role changes what this page may show.
+      if (m.user_id === selfId) void auth?.refresh();
+    });
+  const remove = (m: MemberView) =>
+    void run(async () => {
+      if (!window.confirm(`Remove ${m.username} from the project? Their sessions end and their tokens stop working.`)) return;
+      await api.del<OkResponse>(`/auth/members/${encodeURIComponent(m.user_id)}`);
+      toast(`${m.username} removed`);
+      list.reload();
+    });
+  return (
+    <Panel title="Members">
+      <p className="small muted">
+        What each role may do is in <code>docs/access.md</code>: owners manage the project, testers send traffic and write
+        findings, viewers read the traffic with secrets hidden. A demotion ends the person's sessions at once; a promotion
+        shows at their next request.
+      </p>
+      <ErrorBox error={error ?? list.error} />
+      {(list.data ?? []).length === 0 ? (
+        <Empty>No members.</Empty>
+      ) : (
+        <table className="grid" data-testid="members-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Member since</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {(list.data ?? []).map((m) => (
+              <tr key={m.user_id} data-testid={`member-${m.username}`}>
+                <td>
+                  {m.username}
+                  {m.you && <span className="chip plain" style={{ marginLeft: 6 }}>you</span>}
+                </td>
+                <td>{m.display_name || "–"}</td>
+                <td>
+                  <select
+                    aria-label={`Role of ${m.username}`}
+                    value={m.role}
+                    disabled={busy}
+                    onChange={(e) => setRole(m, e.target.value as RoleName)}
+                    data-testid={`member-role-${m.username}`}
+                  >
+                    <option value="owner">owner</option>
+                    <option value="tester">tester</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                </td>
+                <td><span className={`chip ${m.status === "active" ? "ok" : "bad"}`}>{m.status}</span></td>
+                <td>{when(m.since)}</td>
+                <td>
+                  <button className="btn sm bad" disabled={busy} onClick={() => remove(m)} data-testid={`member-remove-${m.username}`}>
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
   );
 }
 

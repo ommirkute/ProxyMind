@@ -1,6 +1,7 @@
 //! gRPC and Protobuf bodies as editable text (roadmap 2.5). Pure decoding lives in `pm_http::protobuf`; per-message
 //! gzip in `pm_ai::body`. Nothing here sends traffic.
 
+use crate::access::Perm;
 use pm_http::protobuf::{BodyKind, ProtoError, base64_decode, base64_encode, encode_text};
 use pm_policy::{Actor, ActorKind};
 
@@ -20,6 +21,7 @@ fn kind_named(name: &str) -> Result<BodyKind> {
 impl Service {
     /// Decodes a gRPC or Protobuf body into text. For agents the text is redacted and wrapped as untrusted content.
     pub fn protobuf_decode(&self, actor: &Actor, req: &ProtobufDecodeRequest) -> Result<ProtobufDecoded> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let annotate = req.annotate.unwrap_or(true);
         let given = [req.exchange_id.is_some(), req.body_b64.is_some(), req.body_text.is_some()];
         if given.iter().filter(|g| **g).count() != 1 {

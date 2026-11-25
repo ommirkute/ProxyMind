@@ -153,6 +153,8 @@ pub struct TokenAuth {
     pub role: Role,
     /// The cap in force now: the token's own, narrowed to `passive` when the effective role is `viewer`.
     pub tier_cap: Option<String>,
+    /// The owner's current role on the project (`None` in single-user mode, where a token has no owner account).
+    pub owner_role: Option<Role>,
 }
 
 /// `pm3_<kind>_<64 hex>`.

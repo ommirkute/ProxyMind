@@ -101,6 +101,16 @@ impl Accounts {
         }
     }
 
+    /// Active owners of a project.
+    fn owner_count(conn: &Connection, project: &str) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT count(*) FROM memberships m JOIN users u ON u.id = m.user_id \
+             WHERE m.project_id = ?1 AND m.role = 'owner' AND u.status = 'active'",
+            [project],
+            |r| r.get(0),
+        )?)
+    }
+
     pub(crate) fn is_project_owner(conn: &Connection, user_id: &str, project: &str) -> Result<bool> {
         let role: Option<String> = conn
             .query_row(
@@ -539,6 +549,10 @@ impl Accounts {
                     |r| r.get(0),
                 )
                 .optional()?;
+            // Never demote the last owner: the project would have nobody who can manage it.
+            if old.as_deref() == Some("owner") && role != Role::Owner && Self::owner_count(tx, project_id)? <= 1 {
+                return Err(AccountError::LastOwner);
+            }
             tx.execute(
                 "INSERT INTO memberships (project_id, user_id, role, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT(project_id, user_id) DO UPDATE SET role = ?3",
@@ -563,6 +577,9 @@ impl Accounts {
             };
             if !allowed {
                 return Err(AccountError::NotAuthorised);
+            }
+            if Self::is_project_owner(tx, user_id, project_id)? && Self::owner_count(tx, project_id)? <= 1 {
+                return Err(AccountError::LastOwner);
             }
             let n =
                 tx.execute("DELETE FROM memberships WHERE project_id = ?1 AND user_id = ?2", [project_id, user_id])?;

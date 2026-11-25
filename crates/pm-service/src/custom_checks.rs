@@ -129,6 +129,7 @@ impl Service {
 
     /// Runs custom checks on a recorded request.
     pub async fn custom_scan(&self, actor: &Actor, req: CustomScanRequest) -> Result<CustomScanResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut checks: Vec<CustomCheck> = match &req.yaml {
             Some(y) => vec![custom::parse(y).map_err(ServiceError::Invalid)?],
             None => {
@@ -156,7 +157,7 @@ impl Service {
         }
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
         // Work on what the actor may see: secrets stay placeholders until sent.
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
         let limit = req.max_requests.unwrap_or(200).clamp(1, 2000);
         let mut planned = Vec::new();
         for c in &checks {
@@ -167,12 +168,12 @@ impl Service {
                 planned.push((c, p));
             }
         }
-        let mut baseline = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let mut baseline = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         baseline.hypothesis_id = req.hypothesis_id;
         let mut outs = Vec::with_capacity(planned.len());
         let mut tier = Tier::ActiveSafe;
         for (c, p) in planned {
-            let mut out = self.outgoing(endpoint.clone(), &p.raw, true)?;
+            let mut out = self.outgoing(actor, endpoint.clone(), &p.raw, true)?;
             out.hypothesis_id = req.hypothesis_id;
             tier = tier.max(Tier::for_http_request(&out.raw).0).max(Tier::for_http_method(&out.method));
             outs.push((c, p, out));

@@ -283,6 +283,10 @@ impl Service {
         decision: &str,
     ) -> Result<()> {
         let sec = self.audit_security.read().clone();
+        // No context given: the request in scope (set by the API around a handler) or what the server registered for
+        // this actor; in single-user mode `local`.
+        let derived = if ctx.is_none() { self.audit_context_of(actor) } else { None };
+        let ctx = ctx.or(derived.as_ref());
         // One write closure: the read of the last record and the append must not interleave with another audit.
         // Published after the write returned, i.e. after COMMIT.
         let seq = self.store.write(|store| {

@@ -22,6 +22,11 @@ export interface AuthCtx {
 export const AuthContext = createContext<AuthCtx | null>(null);
 /** The signed-in account in server mode; `null` in single-user mode. */
 export const useAuth = () => useContext(AuthContext);
+/** The role on this project: `owner` in single-user mode (a person there is the implicit owner). */
+export const useRole = (): "owner" | "tester" | "viewer" => {
+  const r = useContext(AuthContext)?.me.role;
+  return r === "tester" || r === "viewer" ? r : "owner";
+};
 
 // ---- small helpers ---------------------------------------------------------------------------------------------
 

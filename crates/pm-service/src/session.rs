@@ -729,7 +729,7 @@ impl Service {
             let vars = self.session.lock().vars.clone();
             let endpoint = parse_url_endpoint(&step.url)?;
             let raw = substitute(&step.request, &vars);
-            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+            let out = self.outgoing(&owner, endpoint.clone(), raw.as_bytes(), true)?;
             match self.gate_send(&owner, "session_macro", &out, None, true, None)? {
                 Authorization::Allowed { .. } => {}
                 other => {
@@ -750,7 +750,7 @@ impl Service {
                 cookies.retain(|(n, _)| n != &k);
                 cookies.push((k, v));
             }
-            let wire = set_cookies(&self.redactor.unredact(&out.raw), &cookies);
+            let wire = set_cookies(&self.redactor_of(&owner).unredact(&out.raw), &cookies);
             let sent = self.transmit(&owner, &out, wire, None, true, "macro").await?;
             run.exchange_ids.push(sent.exchange_id);
             let resp = sent.response.ok_or_else(|| {
@@ -820,7 +820,7 @@ impl Service {
         if !plan.always.is_empty() {
             self.run_macros(&cfg, &plan.always, None, actor).await;
         }
-        let base = self.redactor.unredact(&out.raw);
+        let base = self.redactor_of(actor).unredact(&out.raw);
         let prepare = |wire: Vec<u8>| if fix_cl { pm_http::fix_content_length(&wire) } else { wire };
         let started = Instant::now();
         let wire = prepare(self.session_apply(&plan, &base, &out.endpoint.host)?);

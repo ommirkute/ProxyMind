@@ -214,7 +214,7 @@ impl Service {
 
         let secrets: Vec<String> = opts.secrets.iter().filter(|s| s.len() >= 3).cloned().collect();
         let scrub = |s: &str| -> String {
-            let mut t = self.redactor.redact(s);
+            let mut t = self.redactor_of(&actor).redact(s);
             for secret in &secrets {
                 t = t.replace(secret.as_str(), "[redacted]");
             }
@@ -466,7 +466,7 @@ impl Service {
         let raw = format!(
             "GET {target} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: ProxyMind-CI\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         );
-        let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true).map_err(|e| e.to_string())?;
+        let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true).map_err(|e| e.to_string())?;
         match self.gate_send(actor, "ci_probe", &out, None, true, None).map_err(|e| e.to_string())? {
             Authorization::Allowed { .. } => {}
             Authorization::Denied { reasons } => {

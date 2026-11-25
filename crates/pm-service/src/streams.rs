@@ -7,6 +7,7 @@
 //! records the result as a new stream. It is a send like any other: scope, tier, approvals, rate limit and audit all
 //! apply (`stream_replay` is the action name).
 
+use crate::access::Perm;
 use std::time::{Duration, Instant};
 
 use pm_ai::{UNTRUSTED_NOTICE, prompt_injection_signals, wrap_untrusted};
@@ -164,6 +165,7 @@ impl Service {
 
     /// Streams, newest first (a read: always allowed, not audited).
     pub fn streams_list(&self, actor: &Actor, filter: &StreamFilter) -> Result<StreamPage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = filter.limit.unwrap_or(50).clamp(1, 500);
         let mut f = filter.clone();
         f.limit = Some(limit);
@@ -187,6 +189,7 @@ impl Service {
         limit: usize,
         max_chars: usize,
     ) -> Result<StreamDetail> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let row =
             self.store.read(|db| db.get_stream(id))?.ok_or_else(|| ServiceError::NotFound(format!("stream {id}")))?;
         let chunks = self.stream_chunks(actor, id, after, limit, max_chars)?;
@@ -202,6 +205,7 @@ impl Service {
         limit: usize,
         max_chars: usize,
     ) -> Result<StreamChunkPage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = limit.clamp(1, MAX_PAGE);
         let (rows, total) = self.store.read(|db| -> Result<_> {
             let s = db.get_stream(id)?.ok_or_else(|| ServiceError::NotFound(format!("stream {id}")))?;
@@ -220,6 +224,7 @@ impl Service {
     /// (connecting and listening only is active-safe; sending is at least active-intrusive, more when the bytes
     /// look destructive). The approval covers exactly the chunks and timings.
     pub async fn stream_replay(&self, actor: &Actor, req: StreamReplayRequest) -> Result<StreamReplayResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let orig = self
             .store
             .read(|db| db.get_stream(req.stream_id))?
@@ -232,7 +237,7 @@ impl Service {
             return Err(invalid("chunks are larger than 16 MB in total"));
         }
         for c in &chunks {
-            let unknown = self.redactor.unknown_placeholders(c);
+            let unknown = self.redactor_of(actor).unknown_placeholders(c);
             if !unknown.is_empty() {
                 return Err(invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
             }
@@ -279,7 +284,7 @@ impl Service {
             }
         }
         let plan = Plan {
-            chunks: chunks.iter().map(|c| self.redactor.unredact(c)).collect(),
+            chunks: chunks.iter().map(|c| self.redactor_of(actor).unredact(c)).collect(),
             delay: Duration::from_millis(delay_ms),
             read: Duration::from_millis(read_ms),
             max_response,

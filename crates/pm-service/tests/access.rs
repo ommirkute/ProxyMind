@@ -113,10 +113,23 @@ fn roles_narrow_and_never_widen() {
     assert_eq!(owner.len(), Perm::ALL.len());
     assert!(tester.iter().all(|n| owner.contains(n)));
     assert!(viewer.iter().all(|n| tester.contains(n)));
-    // ADR-0022 "Roles": a viewer reads and comments only (here: their own workspace and the run lists); a tester does
-    // everything a person does while testing but not what configures the project; the owner alone changes the ROE,
-    // the network side, integrations, model keys and trust.
-    assert_eq!(viewer, ["UiStateWrite", "RunsReadAll"]);
+    // ADR-0022 "Roles": a viewer reads (traffic with secrets hidden, findings, reports, the model, the ROE) and keeps
+    // their own workspace; a tester does everything a person does while testing but not what configures the project;
+    // the owner alone changes the ROE, the network side, integrations, model keys, trust, updates and members.
+    assert_eq!(
+        viewer,
+        [
+            "UiStateWrite",
+            "RunsReadAll",
+            "HistoryRead",
+            "FindingsRead",
+            "ReportsRead",
+            "ModelRead",
+            "RunsRead",
+            "RoeRead",
+            "Info"
+        ]
+    );
     let owner_only: Vec<&str> = owner.iter().copied().filter(|n| !tester.contains(n)).collect();
     assert_eq!(
         owner_only,
@@ -131,6 +144,8 @@ fn roles_narrow_and_never_widen() {
             "IntegrationsRead",
             "IntegrationsWrite",
             "TokensManageOthers",
+            "UpdateSettings",
+            "MembersManage",
         ]
     );
 }
@@ -188,10 +203,16 @@ const NOT_AUTHORIZATION: &[(&str, usize, &str)] = &[
     (
         "events.rs",
         1,
-        "what an agent is shown of an event (scope and redaction, ADR-0018); membership filtering comes with ADR-0022 step 6",
+        "what a non-person is shown of an event (scope and run ownership, ADR-0018); the topic and the role are \
+         `topic_perm` in this file's `Perm` table, and a viewer is redacted by role (`redacts_for`), not by kind",
     ),
     ("integration_events.rs", 1, "builds the service's own internal actor to read a task for a notification"),
-    ("lib.rs", 2, "redaction and untrusted-content wrapping for agents (`redacts_for`, `view_for`): presentation"),
+    (
+        "lib.rs",
+        2,
+        "redaction and untrusted-content wrapping for agents (`redacts_for`, `json_for`): presentation; a viewer, \
+         though a person, is redacted too, by role (`redacts_for` asks `principal_of`)",
+    ),
     ("protobuf.rs", 1, "redaction and untrusted wrapping of decoded text for agents: presentation"),
     ("roe.rs", 5, "the ROE's name-to-kind table for the tier lines (`human`, `agent`, ...): parsing, not a check"),
     ("scan.rs", 2, "untrusted-content wrapping of scan evidence for agents: presentation"),
@@ -292,6 +313,141 @@ fn every_perm_is_used() {
     assert!(unused.is_empty(), "no code requires these perms (remove them or use them): {unused:?}");
 }
 
+// ---- every public method asks first ---------------------------------------------------------------------------
+
+/// Public `Service` methods that take an `&Actor` or `&Principal` and do not begin with `self.require...`, each with the
+/// reason that is accepted. Everything else must ask before it touches the store, the gate or the network. A new entry
+/// needs a reason a reviewer accepts.
+const NO_REQUIRE: &[(&str, &str, &str)] = &[
+    ("access.rs", "register_principal", "the registry itself: records what the guard learned about an actor"),
+    ("access.rs", "inherit_principal", "the registry itself: a worker the service starts takes its parent's role"),
+    (
+        "access.rs",
+        "register_background",
+        "the registry itself: background work gets tester at most, never more than registered",
+    ),
+    ("access.rs", "principal_of", "the registry itself: answers who an actor is"),
+    ("access.rs", "is_viewer", "the registry itself: a presentation switch, grants nothing"),
+    ("access.rs", "require_with", "this is the check"),
+    (
+        "ai_scan.rs",
+        "ai_scan_tool",
+        "only the scan's own agent reaches it (`scan_of`), and it writes that scan's own log, phase and report",
+    ),
+    (
+        "approvals.rs",
+        "run_approved",
+        "the approval row binds actor, action and parameters; the role was checked when it was decided",
+    ),
+    (
+        "assistant.rs",
+        "audit_model_call",
+        "writes the audit record of a model call that already happened; reads no project data",
+    ),
+    ("audit_log.rs", "audit_principal", "writes an audit record for a principal whose action was already authorized"),
+    ("events.rs", "may_read_topic", "is the per-topic permission (`topic_perm`) the event stream asks"),
+    (
+        "events.rs",
+        "event_for",
+        "is the per-event filter: topic permission, scope for non-people, redaction, run ownership",
+    ),
+    ("lib.rs", "redacts_for", "presentation: whether content shown to this actor has secrets replaced"),
+    ("lib.rs", "json_for", "presentation: redacts and tags a result for this actor"),
+    ("trust.rs", "note_person_edit", "bookkeeping after an edit whose own method already asked for its permission"),
+    ("workflow_service.rs", "workflow_run_for", "presentation: hides variable values from non-people"),
+];
+
+/// The text up to the first thing that reads or changes project data, sends, or audits.
+fn before_first_touch(body: &str) -> &str {
+    const TOUCH: &[&str] = &[
+        "self.store",
+        "self.authorize",
+        ".await",
+        "self.gate",
+        "self.sender",
+        "self.audit",
+        "self.policy",
+        "self.redact",
+        "self.bus",
+        "self.plugins",
+    ];
+    let cut = TOUCH.iter().filter_map(|t| body.find(t)).min().unwrap_or(body.len());
+    &body[..cut]
+}
+
+/// `(file, method, asks_first)` for every public method of an `impl Service` block that takes an actor or principal.
+fn actor_methods() -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for (file, text) in service_sources() {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut in_service = false;
+        let mut i = 0;
+        while i < lines.len() {
+            let l = lines[i];
+            if l.starts_with("impl Service {") || l.starts_with("impl Service<") {
+                in_service = true;
+            } else if !l.is_empty() && !l.starts_with(' ') && !l.starts_with('}') && !l.starts_with("//") {
+                in_service = false;
+            }
+            let name = l
+                .strip_prefix("    pub async fn ")
+                .or_else(|| l.strip_prefix("    pub fn "))
+                .map(|r| r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>());
+            if let (true, Some(name)) = (in_service, name) {
+                let mut sig = l.to_string();
+                let mut j = i;
+                while !lines[j].trim_end().ends_with('{') && !lines[j].trim_end().ends_with(';') {
+                    j += 1;
+                    sig.push(' ');
+                    sig.push_str(lines[j].trim());
+                }
+                let takes_actor = ["&Actor", "&Principal", "&pm_policy::Actor", "&crate::access::Principal"]
+                    .iter()
+                    .any(|t| sig.contains(t));
+                if takes_actor {
+                    let mut body = String::new();
+                    let mut k = j + 1;
+                    while k < lines.len() && !lines[k].starts_with("    }") {
+                        if !lines[k].trim_start().starts_with("//") {
+                            body.push_str(lines[k]);
+                            body.push('\n');
+                        }
+                        k += 1;
+                    }
+                    let head = before_first_touch(&body);
+                    let asks = head.contains("self.require") || head.contains(".require_actor");
+                    out.push((file.clone(), name, asks));
+                }
+                i = j;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn every_public_service_method_that_takes_an_actor_asks_first() {
+    let methods = actor_methods();
+    assert!(methods.len() > 120, "the scan found only {} methods: has the source layout changed?", methods.len());
+    assert!(NO_REQUIRE.iter().all(|(_, _, why)| !why.is_empty()));
+    let unasked: BTreeSet<(String, String)> =
+        methods.iter().filter(|(_, _, asks)| !asks).map(|(f, n, _)| (f.clone(), n.clone())).collect();
+    let allowed: BTreeSet<(String, String)> =
+        NO_REQUIRE.iter().map(|(f, n, _)| (f.to_string(), n.to_string())).collect();
+    let missing: Vec<_> = unasked.difference(&allowed).collect();
+    assert!(
+        missing.is_empty(),
+        "these public `Service` methods take an actor but do not call `self.require...` before touching the store, \
+         the gate or the network (add `self.require_actor(actor, Perm::X)?;` as the first statement, or add them to \
+         NO_REQUIRE with a reason): {missing:?}"
+    );
+    let stale: Vec<_> = allowed.difference(&unasked).collect();
+    assert!(stale.is_empty(), "NO_REQUIRE lists methods that do ask (or no longer exist): {stale:?}");
+    let asking = methods.iter().filter(|(_, _, a)| *a).count();
+    assert!(asking >= 130, "only {asking} methods ask");
+}
+
 // ---- docs/access.md ------------------------------------------------------------------------------------------
 
 fn render() -> String {
@@ -301,18 +457,23 @@ fn render() -> String {
         "# Access table\n\n\
          <!-- Generated from `crates/pm-service/src/access.rs` by `crates/pm-service/tests/access.rs`. Do not edit by \
          hand: run `UPDATE_ACCESS_DOC=1 cargo test -p pm-service --test access`. -->\n\n\
-         Who may do what in `pm-service` (ADR-0022, migration step 1). Every action that only some principals may take \
-         has an entry here, and the service asks `Service::require` (or `Principal::allows` where the answer shapes a \
-         view, not a refusal) before it acts. The check is deny by default.\n\n\
-         - **Roles.** In single-user mode, which is all there is today, a person is the implicit `owner`; an agent, \
-         plugin, scanner or CI actor acts as `tester`, the ceiling the ADR gives machine credentials. Per-project \
-         roles for several people come with ADR-0022 step 6; the columns below already say what each will be allowed.\n\
-         - **People only** means that only an actor of kind `human` may, whatever the role: an owner's agent is still \
-         an agent.\n\
+         Who may do what in `pm-service` (ADR-0022, migration steps 1 and 6). Every public service method that takes an \
+         actor asks `Service::require` before it touches anything (a test fails when one does not), the API checks the \
+         same table for each route before the handler runs (`pm-api/src/route_perms.rs`) and the MCP server for each \
+         tool (`pm-mcp::tool_perm`). The check is deny by default.\n\n\
+         - **Roles.** On a project server a principal's role is the member's role on the project (`owner`, `tester`, \
+         `viewer`), or for a token the lower of its ceiling and its owner's current role. An actor the server did not \
+         register is a `viewer`, never an owner. In single-user mode, a person is the implicit `owner`; an agent, \
+         plugin, scanner or CI actor acts as `tester`, the ceiling the ADR gives machine credentials.\n\
+         - **People only** means that only an actor of kind `human` may, whatever the role: an owner's agent token is \
+         still an agent, and a non-person is never above `tester`.\n\
+         - **Viewers** read what the Owner/Tester/Viewer columns say they read, with secrets replaced by placeholders \
+         as agents see them; they cannot send, write or configure anything.\n\
          - Roles and `people_only` narrow what the policy gate allows; they never widen it. Traffic still goes \
-         through the gate (scope, tiers, windows, approvals).\n\
-         - What an agent is *shown* (redaction, untrusted-content wrapping, event filtering) is not an access decision; \
-         `tests/access.rs` lists those uses of the actor's kind with the reason for each.\n\n\
+         through the gate (scope, tiers, windows, approvals). Approvals have finer rules than this table (a tester \
+         decides only what their own tokens asked; see `docs/server-mode.md`).\n\
+         - What an agent or viewer is *shown* (redaction, untrusted-content wrapping, event filtering) is mostly not an \
+         access decision; `tests/access.rs` lists those uses of the actor's kind with the reason for each.\n\n\
          | Perm | Owner | Tester | Viewer | People only | Covers | Required by |\n\
          | --- | --- | --- | --- | --- | --- | --- |\n",
     );

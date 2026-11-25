@@ -62,6 +62,7 @@ impl Service {
     /// Saves a note about a host in scope. An AI scan's agents default to
     /// the scan's target host.
     pub fn memory_save(&self, actor: &Actor, host: Option<&str>, kind: &str, text: &str) -> Result<Memory> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let host = match host.map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()) {
             Some(h) => h,
             None => scan_of(actor)

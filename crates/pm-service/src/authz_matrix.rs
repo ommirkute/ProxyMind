@@ -4,6 +4,7 @@
 //! function-level checks, missing authentication) and, on request, proven
 //! with the differential oracle; proven ones become findings.
 
+use crate::access::Perm;
 use std::collections::BTreeMap;
 
 use pm_identity::ANONYMOUS;
@@ -76,6 +77,7 @@ impl Service {
     /// Builds the matrix (and proves flagged cells when asked). Every request
     /// goes through the rules of engagement like any authorization check.
     pub async fn authz_matrix(&self, actor: &Actor, req: AuthzMatrixRequest) -> Result<AuthzMatrix> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let model = self.model()?;
         let mut ids: Vec<(String, String)> =
             self.identity_list()?.into_iter().map(|i| (i.name, i.role)).filter(|(n, _)| n != ANONYMOUS).collect();

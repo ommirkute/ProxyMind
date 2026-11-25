@@ -70,6 +70,15 @@
         "redact_before_llm": { "type": "boolean", "default": true },
         "allow_cloud_models": { "type": "boolean", "default": false }
       }
+    },
+    "approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Who may decide pending approvals on a project server with several people (ADR-0022).",
+      "properties": {
+        "require_other_person": { "type": "boolean", "default": false, "description": "An owner cannot decide an approval asked by themselves or their own tokens." },
+        "testers_decide_team": { "type": "boolean", "default": false, "description": "A tester may decide approvals asked by other testers' tokens, not only their own." }
+      }
     }
   },
   "$defs": {

@@ -215,6 +215,8 @@ impl Service {
             row.insert(k.into(), v);
         }
         let id = self.store.write(|db| db.insert_row("ai_scans", &row))?;
+        // The scan's agent acts with what the person who started it has, never more than a tester.
+        self.inherit_principal(actor, &scan_actor(id));
         self.ai_scan_event(id);
         self.audit(
             &actor.id(),
@@ -334,6 +336,7 @@ impl Service {
 
     /// Asks a running scan to stop after its current step.
     pub fn ai_scan_stop(&self, actor: &Actor, id: i64) -> Result<AiScan> {
+        self.require_actor(actor, Perm::AiScanControl)?;
         let sc = self.ai_scan_get(id)?;
         if sc.status == "running" {
             self.ai_update(id, vec![("status", json!("stopping"))])?;

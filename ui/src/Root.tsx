@@ -50,10 +50,18 @@ export default function Root() {
   const loadMe = useCallback(async (): Promise<void> => {
     try {
       const me = await api.get<MeResponse>("/auth/me");
-      setStage(me.role == null ? { k: "notmember", me } : { k: "app", me });
+      // Unchanged answers keep the same object, so the periodic read below does not re-render the app.
+      setStage((prev) =>
+        prev.k === "app" && me.role != null && JSON.stringify(prev.me) === JSON.stringify(me)
+          ? prev
+          : me.role == null
+            ? { k: "notmember", me }
+            : { k: "app", me },
+      );
     } catch (e) {
       const status = (e as { status?: number }).status;
-      if (status === 401) setStage({ k: "signin", next: currentLocation() });
+      // `sessionEnded` may already have set the sign-in with its notice (a session lost while the app was shown).
+      if (status === 401) setStage((prev) => (prev.k === "signin" ? prev : { k: "signin", next: currentLocation() }));
       else setStage({ k: "error", message: errText(e) });
     }
   }, []);
@@ -76,6 +84,7 @@ export default function Root() {
     authHooks.serverMode = true;
     authHooks.onUnauthenticated = sessionEnded;
     authHooks.onNotMember = () => void loadMe();
+    authHooks.onForbidden = () => void loadMe();
     authHooks.reauthenticate = () => {
       reauthPromise.current ??= new Promise<boolean>((resolve) => {
         reauthDone.current = (ok) => {
@@ -89,6 +98,22 @@ export default function Root() {
       return reauthPromise.current;
     };
   }, [sessionEnded, loadMe]);
+
+  // The role can change under an open page (an owner promotes or demotes), and a removed member's session ends. No
+  // polling (ADR-0018): the event stream says so (`role`, or it drops), and coming back to the tab reads it again.
+  // A 401 then shows the sign-in.
+  const inApp = stage.k === "app";
+  useEffect(() => {
+    if (!inApp) return;
+    const again = () => void loadMe();
+    const visible = () => document.visibilityState === "visible" && again();
+    window.addEventListener("pm-role-changed", again);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      window.removeEventListener("pm-role-changed", again);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [inApp, loadMe]);
 
   // Mode detection, once.
   useEffect(() => {

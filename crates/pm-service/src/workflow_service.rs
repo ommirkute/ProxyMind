@@ -25,7 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::access::{Denial, Perm, Principal};
+use crate::access::{Denial, Perm};
 use crate::events::{Delivery, Event, Rate};
 use crate::workflow::{
     self, Current, Host, MAX_RUN_SECS, MAX_TRIGGER_RATE, MAX_WORKFLOWS, Resume, RunStatus, SendOutcome, SendRequest,
@@ -170,11 +170,13 @@ impl Service {
 
     /// The saved workflows. For agents, secrets typed into request templates are hidden.
     pub fn workflow_list(&self, actor: &Actor) -> Result<Vec<Workflow>> {
+        self.require_actor(actor, Perm::ModelRead)?;
         let list = self.store.read(load)?;
         Ok(list.into_iter().map(|w| self.workflow_view(actor, w)).collect())
     }
 
     pub fn workflow_summaries(&self, actor: &Actor) -> Result<Vec<WorkflowSummary>> {
+        self.require_actor(actor, Perm::ModelRead)?;
         let _ = actor;
         Ok(self
             .store
@@ -197,6 +199,7 @@ impl Service {
     }
 
     pub fn workflow_get(&self, actor: &Actor, key: &str) -> Result<Workflow> {
+        self.require_actor(actor, Perm::ModelRead)?;
         Ok(self.workflow_view(actor, self.workflow_find(key)?))
     }
 
@@ -368,7 +371,7 @@ impl Service {
             *v = if secretish(name) {
                 format!("[hidden: {} bytes]", v.len())
             } else {
-                let shown = if redact { self.redactor.redact(v) } else { v.clone() };
+                let shown = if redact { self.redactor_of(actor).redact(v) } else { v.clone() };
                 pm_ai::wrap_untrusted(&shown)
             };
         }
@@ -393,12 +396,13 @@ impl Service {
 
     /// Recent runs, newest first; of one workflow (id or name) or all.
     pub fn workflow_runs(&self, actor: &Actor, workflow: Option<&str>, limit: usize) -> Result<Vec<WorkflowRun>> {
+        self.require_actor(actor, Perm::RunsRead)?;
         let id = match workflow {
             Some(k) => Some(self.workflow_find(k)?.id),
             None => None,
         };
         let rows = self.store.read(|db| db.list_workflow_runs(id, limit.clamp(1, 200)))?;
-        let all_runs = Principal::from_actor(actor).allows(Perm::RunsReadAll);
+        let all_runs = self.principal_of(actor).allows(Perm::RunsReadAll);
         let mut out = Vec::new();
         for row in rows {
             let row = self.workflow_fix_stale(row);
@@ -411,10 +415,11 @@ impl Service {
     }
 
     pub fn workflow_run_get(&self, actor: &Actor, id: i64) -> Result<WorkflowRun> {
+        self.require_actor(actor, Perm::RunsRead)?;
         let row = self
             .store
             .read(|db| db.get_workflow_run(id))?
-            .filter(|r| Principal::from_actor(actor).allows(Perm::RunsReadAll) || r.actor == actor.id())
+            .filter(|r| self.principal_of(actor).allows(Perm::RunsReadAll) || r.actor == actor.id())
             .ok_or_else(|| ServiceError::NotFound(format!("workflow run {id}")))?;
         Ok(self.workflow_run_for(actor, row_to_run(&self.workflow_fix_stale(row))?))
     }
@@ -555,6 +560,7 @@ impl Service {
 
     /// Runs a workflow on request (API, MCP, CLI, UI). Every send is gated as `actor`.
     pub async fn workflow_run(&self, actor: &Actor, req: WorkflowRunRequest) -> Result<WorkflowRun> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let wf = self.workflow_find(&req.workflow)?;
         let run = self.workflow_execute(actor, &wf, req.exchange_id, req.approval_id, "manual").await?;
         Ok(self.workflow_run_for(actor, run))
@@ -651,7 +657,7 @@ impl Service {
             }
             // Runs as the person who trusted the project here, never as the name the file says enabled it.
             let Ok(actor) = self.run_as(&wf.trigger.enabled_by) else { continue };
-            if !Principal::from_actor(&actor).allows(Perm::WorkflowTriggers) || !self.trigger_admit(wf) {
+            if !self.principal_of(&actor).allows(Perm::WorkflowTriggers) || !self.trigger_admit(wf) {
                 continue;
             }
             let (svc, wf) = (self.clone(), wf.clone());
@@ -710,7 +716,7 @@ impl Host for ServiceHost<'_> {
     async fn send(&self, req: SendRequest) -> SendOutcome {
         let svc = self.svc;
         let failed = |error: String| SendOutcome::Failed { exchange_id: None, error };
-        let out = match svc.outgoing(req.endpoint.clone(), &req.raw, true) {
+        let out = match svc.outgoing(self.actor, req.endpoint.clone(), &req.raw, true) {
             Ok(o) => o,
             Err(e) => return failed(e.to_string()),
         };

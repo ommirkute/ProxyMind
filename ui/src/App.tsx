@@ -100,6 +100,12 @@ function accountGroup(admin: boolean): Group {
   };
 }
 
+/** What a viewer's role reaches (docs/access.md): reading. The server is the authority; this only avoids dead pages. */
+const VIEWER_PAGES = new Set<Page>([
+  "overview", "search", "findings", "evidence", "issues", "scans", "sitemap", "model", "engagement", "history",
+  "wshistory", "streams", "library", "about", "tools", "account",
+]);
+
 const groupOf = (groups: Group[], p: Page) => groups.find((g) => g.pages.some((x) => x.id === p)) ?? GROUPS[2];
 /** The sub-tab last opened in each group, so a top tab returns to it. */
 const lastIn: Record<string, Page> = {};
@@ -113,7 +119,19 @@ function parseHash(groups: Group[]): { page: Page; arg?: string } {
 export default function App() {
   const auth = useAuth();
   const admin = !!auth && (auth.me.user.server_admin || auth.me.role === "owner");
-  const groups = useMemo(() => (auth ? [...GROUPS, accountGroup(admin)] : GROUPS), [!!auth, admin]); // eslint-disable-line react-hooks/exhaustive-deps
+  const viewer = auth?.me.role === "viewer";
+  const groups = useMemo(() => {
+    const all = auth ? [...GROUPS, accountGroup(admin)] : GROUPS;
+    if (!viewer) return all;
+    return all
+      .map((g) => ({ ...g, pages: g.pages.filter((p) => VIEWER_PAGES.has(p.id)) }))
+      .filter((g) => g.pages.length > 0);
+  }, [!!auth, admin, viewer]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Controls that change the project carry `data-write`; a viewer does not see them (the server refuses them anyway).
+  useEffect(() => {
+    document.body.classList.toggle("viewer", viewer);
+    return () => document.body.classList.remove("viewer");
+  }, [viewer]);
   const [route, setRoute] = useState(() => parseHash(groups));
   const [status, setStatus] = useState<Status | null>(null);
   const [counters, setCounters] = useState<Counters | null>(null);

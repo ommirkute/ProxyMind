@@ -268,7 +268,7 @@ impl TokenFile {
             }
         }
         info.use_count = stored_count + written + self.uses.pending(&info.id);
-        Ok(TokenAuth { role: info.role, info, tier_cap })
+        Ok(TokenAuth { role: info.role, info, tier_cap, owner_role: None })
     }
 
     /// Every token, newest first, revoked and expired ones too.

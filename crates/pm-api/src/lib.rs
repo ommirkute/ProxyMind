@@ -24,10 +24,12 @@ mod contract_table;
 pub mod contracts;
 pub mod listen;
 mod mcp_api;
+mod route_perms;
 mod routes;
 pub mod server_mode;
 mod tokens_api;
 
+pub use route_perms::{RoutePerm, route_perm};
 pub use server_mode::{AuthContext, ConnInfo, Me, ServerMode, TokenContext, safe_next};
 
 use std::sync::Arc;
@@ -101,6 +103,8 @@ impl AppState {
     /// Turns on server mode: the install token stops working, sessions and memberships decide who a request is from.
     /// `actor` and `token` are then never consulted (the token is only a placeholder that nothing accepts).
     pub fn with_server_mode(mut self, server: ServerMode) -> Self {
+        // Roles come from memberships now: an actor the guard did not register is a viewer (deny by default).
+        self.service.set_access_control(true);
         self.server = Some(Arc::new(server));
         self
     }
@@ -158,11 +162,34 @@ pub fn load_or_create_token(path: &std::path::Path) -> anyhow::Result<String> {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .nest("/api/v1", routes::api())
+        .nest("/api/v1", routes::api().route_layer(middleware::from_fn_with_state(state.clone(), perm_layer)))
         .route("/auth", axum::routing::get(routes::auth))
         .fallback(static_asset)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
+}
+
+/// Server mode: the route's permission (`route_perms`), asked of the service before the handler runs. A route without
+/// an entry is refused. Not used in single-user mode, where the service alone holds agents to the access table.
+async fn perm_layer(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    if !st.service.access_control() {
+        return next.run(req).await;
+    }
+    // No `Me`: a public auth route, which the guard let through without a session.
+    let Some(me) = req.extensions().get::<Me>().cloned() else { return next.run(req).await };
+    let matched = req.extensions().get::<axum::extract::MatchedPath>().map(|m| m.as_str().to_string());
+    let template = matched.as_deref().map(|m| m.strip_prefix("/api/v1").unwrap_or(m));
+    let refuse = |msg: String| {
+        (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": msg, "code": "forbidden" }))).into_response()
+    };
+    match template.and_then(|t| route_perm(req.method().as_str(), t)) {
+        Some(RoutePerm::Open) => next.run(req).await,
+        Some(RoutePerm::Needs(perm)) => match st.service.require(&me.principal(), perm) {
+            Ok(()) => next.run(req).await,
+            Err(e) => refuse(e.to_string()),
+        },
+        None => refuse("access denied: this route has no permission rule".to_string()),
+    }
 }
 
 fn host_is_local(headers: &HeaderMap) -> bool {
@@ -306,8 +333,12 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
         let (token, method, path) = (token.to_string(), req.method().clone(), path.to_string());
         return match single_user_token(&st, &token, &method, &path).await {
             Ok(me) => {
+                // The token's account (none in single-user mode), id and tier go into every audit record it makes.
+                let principal = me.principal();
+                // So that a viewer token's ceiling holds in the service here too.
+                st.service.register_principal(&principal);
                 req.extensions_mut().insert(me);
-                let mut resp = next.run(req).await;
+                let mut resp = st.service.in_request(principal, next.run(req)).await;
                 add_security_headers(resp.headers_mut());
                 resp
             }

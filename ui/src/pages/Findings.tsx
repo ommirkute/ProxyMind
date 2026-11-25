@@ -28,7 +28,7 @@ export default function Findings() {
                   {label}
                 </a>
               ))}
-              <button className="btn primary" onClick={() => setCreating((c) => !c)}>New finding</button>
+              <button data-write className="btn primary" onClick={() => setCreating((c) => !c)}>New finding</button>
             </>
           }
         >
@@ -88,7 +88,7 @@ function NewFinding({ onDone }: { onDone: (id: number) => void }) {
       <textarea aria-label="Description" rows={3} placeholder="What is wrong, impact, how to reproduce" value={f.description} onChange={set("description")} style={{ marginTop: 6 }} />
       <div className="row" style={{ marginTop: 6 }}>
         <input aria-label="Evidence" className="grow" placeholder="Evidence exchange ids, e.g. 12, 15" value={f.evidence} onChange={set("evidence")} />
-        <button className="btn primary" disabled={!f.title || !f.evidence || action.busy} onClick={save}>Save</button>
+        <button data-write className="btn primary" disabled={!f.title || !f.evidence || action.busy} onClick={save}>Save</button>
       </div>
       <ErrorBox error={action.error} />
     </div>
@@ -167,11 +167,11 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
       {d.issue && <IssueCard issue={d.issue} />}
       <TrackerIssues id={id} links={d.issue_links ?? []} onDone={() => { f.reload(); onChange(); }} />
       <div className="row" style={{ marginTop: 8 }}>
-        <button className="btn" disabled={action.busy} onClick={retest} data-testid="retest">
+        <button data-write className="btn" disabled={action.busy} onClick={retest} data-testid="retest">
           {action.busy ? "Retesting…" : "Retest"}
         </button>
         {d.status !== "proven" && (
-          <button className="btn" disabled={action.busy} onClick={autoProve} data-testid="auto-prove" title="Pick the oracle that fits this issue's class and try to prove it">
+          <button data-write className="btn" disabled={action.busy} onClick={autoProve} data-testid="auto-prove" title="Pick the oracle that fits this issue's class and try to prove it">
             {action.busy ? "Proving…" : "Auto-prove"}
           </button>
         )}
@@ -195,7 +195,7 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
               <Chip value={p.proven ? "proven" : "not proven"} />
               <strong className="grow">{p.oracle}</strong>
               <span className="small muted">{p.confidence} confidence · #{p.proof_id}</span>
-              <button className="btn" disabled={action.busy} onClick={() => rerun(p.proof_id)}>Re-run</button>
+              <button data-write className="btn" disabled={action.busy} onClick={() => rerun(p.proof_id)}>Re-run</button>
             </div>
             <ul className="small">{p.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
             <div className="small muted">Requests: {p.exchange_ids.map((e) => <span key={e}><ExchangeLink id={e} /> </span>)}</div>
@@ -213,7 +213,7 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
           <option value="">choose identity…</option>
           {ids.data?.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
         </select>
-        <button className="btn primary" disabled={!attacker || !ex || action.busy} onClick={prove} data-testid="prove">
+        <button data-write className="btn primary" disabled={!attacker || !ex || action.busy} onClick={prove} data-testid="prove">
           {action.busy ? "Proving…" : "Prove"}
         </button>
       </div>
@@ -227,7 +227,7 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
         <div className="row">
           <input aria-label="XSS target" className="grow mono" placeholder="http://host:port" value={xssForm.url}
             onChange={(e) => setXss({ ...xssForm, url: e.target.value })} />
-          <button className="btn primary" disabled={!xssForm.url || !xssForm.raw || action.busy} onClick={proveXss} data-testid="prove-xss">
+          <button data-write className="btn primary" disabled={!xssForm.url || !xssForm.raw || action.busy} onClick={proveXss} data-testid="prove-xss">
             {action.busy ? "Proving…" : "Prove XSS"}
           </button>
         </div>
@@ -244,12 +244,12 @@ function FindingDetail({ id, onChange }: { id: number; onChange: () => void }) {
 
       <h3>Decision</h3>
       <div className="row">
-        <button className="btn" onClick={() => setStatus("confirmed")} disabled={action.busy}>Confirm</button>
-        <button className="btn" onClick={() => setStatus("false_positive")} disabled={action.busy}>False positive</button>
-        <button className="btn" onClick={() => setStatus("reported")} disabled={action.busy}>Reported</button>
-        <button className="btn" onClick={() => setStatus("fixed")} disabled={action.busy}>Fixed</button>
-        <button className="btn" onClick={() => setStatus("accepted_risk")} disabled={action.busy}>Accept risk</button>
-        <button className="btn" onClick={() => setStatus("suspected")} disabled={action.busy}>Back to suspected</button>
+        <button data-write className="btn" onClick={() => setStatus("confirmed")} disabled={action.busy}>Confirm</button>
+        <button data-write className="btn" onClick={() => setStatus("false_positive")} disabled={action.busy}>False positive</button>
+        <button data-write className="btn" onClick={() => setStatus("reported")} disabled={action.busy}>Reported</button>
+        <button data-write className="btn" onClick={() => setStatus("fixed")} disabled={action.busy}>Fixed</button>
+        <button data-write className="btn" onClick={() => setStatus("accepted_risk")} disabled={action.busy}>Accept risk</button>
+        <button data-write className="btn" onClick={() => setStatus("suspected")} disabled={action.busy}>Back to suspected</button>
       </div>
     </Panel>
   );
@@ -283,7 +283,7 @@ function TrackerIssues({ id, links, onDone }: { id: number; links: IssueLink[]; 
           <select aria-label="Tracker" value={chosen} onChange={(e) => setName(e.target.value)}>
             {trackers.map((t) => <option key={t.name} value={t.name}>{t.name} ({t.kind})</option>)}
           </select>
-          <button className="btn" disabled={action.busy || !chosen} onClick={send} data-testid="create-issue">
+          <button data-write className="btn" disabled={action.busy || !chosen} onClick={send} data-testid="create-issue">
             {action.busy ? "Sending…" : has ? "Update issue in…" : "Create issue in…"}
           </button>
           <span className="small muted">Text and requests are redacted before they leave.</span>
@@ -422,8 +422,8 @@ function TemplateEditor({ templates, reload }: { templates: ReportTemplate[]; re
       {saved.map((t) => (
         <div key={`${t.name}.${t.format}`} className="row small" style={{ marginTop: 4 }}>
           <strong>{t.name}</strong><span className="muted">{t.format}</span>
-          <button className="btn" onClick={() => copy(t)}>Edit</button>
-          <button className="btn" onClick={() => remove(t.name)}>Delete</button>
+          <button data-write className="btn" onClick={() => copy(t)}>Edit</button>
+          <button data-write className="btn" onClick={() => remove(t.name)}>Delete</button>
         </div>
       ))}
       <ErrorBox error={action.error} />
@@ -434,7 +434,7 @@ function TemplateEditor({ templates, reload }: { templates: ReportTemplate[]; re
           <option value="html">HTML</option>
         </select>
         <input aria-label="Template description" placeholder="description" className="grow" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-        <button className="btn primary" disabled={!form.name || !form.body || action.busy} onClick={save}>Save template</button>
+        <button data-write className="btn primary" disabled={!form.name || !form.body || action.busy} onClick={save}>Save template</button>
       </div>
       <textarea aria-label="Template body" className="mono" rows={8} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} style={{ width: "100%", marginTop: 6 }} />
     </details>
@@ -455,7 +455,7 @@ function Explain({ id, text, onDone }: { id: number; text: string; onDone: () =>
       <div className="row">
         <h3 style={{ margin: 0 }}>Explanation and fix</h3>
         <input aria-label="Framework" placeholder="framework (optional): Express, Django, Spring…" value={framework} onChange={(e) => setFramework(e.target.value)} style={{ width: 260 }} />
-        <button className="btn" onClick={() => void run()} disabled={action.busy} data-testid="explain">
+        <button data-write className="btn" onClick={() => void run()} disabled={action.busy} data-testid="explain">
           {action.busy ? "Writing…" : text ? "Rewrite" : "Explain & fix"}
         </button>
       </div>

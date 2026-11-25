@@ -97,7 +97,9 @@ fn old_project(file: &std::path::Path, n: usize) {
     }
     let c = rusqlite::Connection::open(file).unwrap();
     c.execute_batch(
-        "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version;
+        "ALTER TABLE approvals DROP COLUMN requested_user; ALTER TABLE approvals DROP COLUMN requested_token;
+         ALTER TABLE approvals DROP COLUMN requested_role;
+         DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version;
          ALTER TABLE audit_log DROP COLUMN principal_kind; ALTER TABLE audit_log DROP COLUMN user_id;
          ALTER TABLE audit_log DROP COLUMN token_id; ALTER TABLE audit_log DROP COLUMN project_id;
          ALTER TABLE audit_log DROP COLUMN session_id; ALTER TABLE audit_log DROP COLUMN client_addr;

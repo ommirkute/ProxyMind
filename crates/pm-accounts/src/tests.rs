@@ -1111,10 +1111,15 @@ fn memberships_demotion_ends_sessions() {
         matches!(e.acc.set_membership(&t.id, "other", &t.id, Role::Owner), Err(AccountError::NotAuthorised)),
         "owning p says nothing about another project"
     );
+    // The last owner of a project is never demoted or removed (ADR-0022 step 6); with a second owner it is allowed.
+    assert!(matches!(e.acc.set_membership(&o.id, "p", &t.id, Role::Viewer), Err(AccountError::LastOwner)));
+    assert!(matches!(e.acc.remove_membership(&o.id, "p", &t.id), Err(AccountError::LastOwner)));
+    assert!(e.acc.validate_session(id).is_ok(), "a refused demotion ends nothing");
+    e.acc.set_membership(&o.id, "p", &o.id, Role::Owner).unwrap();
     e.acc.set_membership(&o.id, "p", &t.id, Role::Viewer).unwrap();
     assert!(e.acc.validate_session(id).is_err());
     assert_eq!(e.acc.memberships_of_user(&t.id).unwrap()[0].role, Role::Viewer);
-    assert_eq!(e.acc.members_of_project("p").unwrap().len(), 1);
+    assert_eq!(e.acc.members_of_project("p").unwrap().len(), 2);
     let s = e.acc.create_session(&t.id, "test", &c()).unwrap();
     assert!(matches!(e.acc.remove_membership(&t.id, "p", &t.id), Err(AccountError::NotAuthorised)));
     e.acc.remove_membership(&o.id, "p", &t.id).unwrap();

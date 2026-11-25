@@ -23,6 +23,8 @@ export const authHooks: {
   serverMode: boolean;
   onUnauthenticated?: () => void;
   onNotMember?: () => void;
+  /** A 403 `forbidden`: the role may have changed since the page last read it. */
+  onForbidden?: () => void;
   reauthenticate?: () => Promise<boolean>;
 } = { serverMode: false };
 
@@ -45,6 +47,7 @@ function noteAuthFailure(e: ApiError) {
   if (!authHooks.serverMode) return;
   if (e.status === 401 && e.code === "unauthenticated") authHooks.onUnauthenticated?.();
   else if (e.status === 403 && e.code === "not_a_member") authHooks.onNotMember?.();
+  else if (e.status === 403 && e.code === "forbidden") authHooks.onForbidden?.();
 }
 
 async function call<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {

@@ -24,6 +24,8 @@ struct RawRoe {
     tiers: RawTiers,
     #[serde(default)]
     data: DataRules,
+    #[serde(default)]
+    approvals: ApprovalRules,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -127,6 +129,20 @@ fn yes() -> bool {
     true
 }
 
+/// Who may decide pending approvals on a project server (ADR-0022 step 6). Both options only matter when several
+/// people share a project (server mode); a single-user install has one person, who approves everything.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalRules {
+    /// Four eyes: an owner cannot decide an approval that was asked by themselves or by their own tokens; a
+    /// different owner must.
+    #[serde(default)]
+    pub require_other_person: bool,
+    /// A tester may also decide approvals asked by other testers' tokens (by default: only by their own tokens).
+    #[serde(default)]
+    pub testers_decide_team: bool,
+}
+
 impl Default for DataRules {
     fn default() -> Self {
         Self { redact_before_llm: true, allow_cloud_models: true }
@@ -144,6 +160,7 @@ pub struct Roe {
     pub windows: Vec<TimeWindow>,
     pub limits: Limits,
     pub data: DataRules,
+    pub approvals: ApprovalRules,
     tiers: RawTiers,
 }
 
@@ -202,6 +219,7 @@ impl Roe {
             windows,
             limits: raw.limits,
             data: raw.data,
+            approvals: raw.approvals,
             tiers: raw.tiers,
         })
     }

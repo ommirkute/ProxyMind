@@ -639,6 +639,30 @@
           "params_hash": {
             "type": "string"
           },
+          "requested_role": {
+            "default": null,
+            "description": "The role the requester acted with (`owner`, `tester`, `viewer`), when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_token": {
+            "default": null,
+            "description": "The token (`t_...`) the request came with, if it came with one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_user": {
+            "default": null,
+            "description": "The account (`u_...`) behind the request that asked: the person, or the owner of the token. `None` in\nsingle-user mode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -668,7 +692,10 @@
           "params_hash",
           "status",
           "decided_by",
-          "decided_ms"
+          "decided_ms",
+          "requested_user",
+          "requested_token",
+          "requested_role"
         ],
         "type": "object"
       },
@@ -7888,6 +7915,70 @@
           "role",
           "session",
           "fresh"
+        ],
+        "type": "object"
+      },
+      "MemberRoleBody": {
+        "additionalProperties": false,
+        "description": "Body of `PUT /auth/members/{user_id}`.",
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/RoleName",
+            "description": "The role the member gets on the served project."
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "MemberView": {
+        "description": "A member of the served project, as the Members panel shows them. Never holds a credential.",
+        "properties": {
+          "added_by": {
+            "description": "The account that made it (`u_…`), when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "description": "`owner`, `tester` or `viewer`.",
+            "type": "string"
+          },
+          "since": {
+            "description": "When the membership was made (Unix seconds).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "description": "`active` or `disabled`.",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "Stable id (`u_…`).",
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "you": {
+            "description": "This is you.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "user_id",
+          "username",
+          "display_name",
+          "role",
+          "status",
+          "since",
+          "added_by",
+          "you"
         ],
         "type": "object"
       },
@@ -17527,6 +17618,121 @@
           }
         },
         "summary": "Server mode: the signed-in account, its role on this project and its session."
+      }
+    },
+    "/api/v1/auth/members": {
+      "get": {
+        "operationId": "auth_members",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemberView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, owners of the project: its members with their roles."
+      }
+    },
+    "/api/v1/auth/members/{user_id}": {
+      "delete": {
+        "operationId": "auth_member_remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, owners of the project: remove a member, ending their sessions and revoking their tokens; the last owner cannot be removed. Needs a fresh sign-in."
+      },
+      "put": {
+        "operationId": "auth_member_set",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, owners of the project: give a member a role. A demotion ends their sessions and narrows their tokens; the last owner cannot be demoted. Needs a fresh sign-in."
       }
     },
     "/api/v1/auth/password": {

@@ -99,6 +99,7 @@ pub(crate) fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTre
 impl Service {
     /// Searches history (a `read` action: always allowed, not audited).
     pub fn history_search(&self, actor: &Actor, filter: &HistoryFilter) -> Result<ExchangePage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = filter.limit.unwrap_or(50).clamp(1, 500);
         let resolved;
         let filter = match filter.client.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
@@ -266,6 +267,7 @@ impl Service {
         highlight: Option<&str>,
         comment: Option<&str>,
     ) -> Result<ExchangeSummary> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let mut row = self.store.write(|store| -> Result<_> {
             if !store.annotate(id, highlight, comment).map_err(|e| ServiceError::Invalid(format!("{e:#}")))? {
                 return Err(ServiceError::NotFound(format!("exchange {id}")));
@@ -280,6 +282,7 @@ impl Service {
 
     /// One exchange as a view sized for a model or a UI.
     pub fn exchange_get(&self, actor: &Actor, id: i64, view: View, max_tokens: usize) -> Result<ExchangeView> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?
@@ -289,6 +292,7 @@ impl Service {
 
     /// Raw bytes of an exchange's request, with secrets replaced for agents.
     pub fn exchange_raw_request(&self, actor: &Actor, id: i64) -> Result<String> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?

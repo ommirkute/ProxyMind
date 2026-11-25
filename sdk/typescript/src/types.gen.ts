@@ -171,6 +171,15 @@ export interface ApprovalRow {
   /** The exact parameters (JSON text) the approval covers. */
   params: string;
   params_hash: string;
+  /** The role the requester acted with (`owner`, `tester`, `viewer`), when known. */
+  requested_role: string | null;
+  /** The token (`t_...`) the request came with, if it came with one. */
+  requested_token: string | null;
+  /**
+   * The account (`u_...`) behind the request that asked: the person, or the owner of the token. `None` in
+   * single-user mode.
+   */
+  requested_user: string | null;
   status: string;
   summary: string;
   /** URL the action targets, if any. */
@@ -2404,6 +2413,30 @@ export interface MeResponse {
   role: string | null;
   session: SessionView;
   user: UserView;
+}
+
+/** Body of `PUT /auth/members/{user_id}`. */
+export interface MemberRoleBody {
+  /** The role the member gets on the served project. */
+  role: RoleName;
+}
+
+/** A member of the served project, as the Members panel shows them. Never holds a credential. */
+export interface MemberView {
+  /** The account that made it (`u_…`), when known. */
+  added_by: string | null;
+  display_name: string;
+  /** `owner`, `tester` or `viewer`. */
+  role: string;
+  /** When the membership was made (Unix seconds). */
+  since: number;
+  /** `active` or `disabled`. */
+  status: string;
+  /** Stable id (`u_…`). */
+  user_id: string;
+  username: string;
+  /** This is you. */
+  you: boolean;
 }
 
 export interface Memory {

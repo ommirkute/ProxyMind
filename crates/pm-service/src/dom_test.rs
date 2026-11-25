@@ -2,6 +2,7 @@
 //! its recorded scripts, every network request blocked. Nothing is sent to
 //! the target, so this is a read (not gated); it needs a local Chromium.
 
+use crate::access::Perm;
 use pm_policy::Actor;
 use pm_scan::dom::{self, Flow, Markers};
 use pm_store::HistoryFilter;
@@ -63,6 +64,7 @@ impl Service {
 
     /// Seeds the page's sources with markers and reports which reach dangerous sinks.
     pub async fn dom_test(&self, actor: &Actor, req: DomTestRequest) -> Result<DomTestResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(req.exchange_id))?

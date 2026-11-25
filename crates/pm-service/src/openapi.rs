@@ -2,6 +2,7 @@
 //! example requests, keep the import in the project, and optionally send
 //! the safe (GET) examples so history and the app model learn them.
 
+use crate::access::Perm;
 use pm_policy::{Actor, Target, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -60,6 +61,7 @@ pub enum OpenApiImportResult {
 
 impl Service {
     pub async fn openapi_import(&self, actor: &Actor, req: OpenApiImportRequest) -> Result<OpenApiImportResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let (text, spec_url) = match (&req.spec, req.exchange_id) {
             (Some(t), None) => (t.clone(), None),
             (None, Some(id)) => {
@@ -113,7 +115,7 @@ impl Service {
             let gets: Vec<&pm_openapi::Operation> = operations.iter().filter(|o| o.method == "GET").collect();
             let first =
                 gets.first().ok_or_else(|| ServiceError::Invalid("the spec has no GET operations to send".into()))?;
-            let probe = self.outgoing(endpoint.clone(), first.example_request.as_bytes(), true)?;
+            let probe = self.outgoing(actor, endpoint.clone(), first.example_request.as_bytes(), true)?;
             let extra = json!({ "openapi_examples": gets.iter().map(|o| &o.path).collect::<Vec<_>>() });
             match self.gate_send_with(
                 actor,
@@ -136,7 +138,7 @@ impl Service {
                 }
             }
             for op in gets {
-                let out = self.outgoing(endpoint.clone(), op.example_request.as_bytes(), true)?;
+                let out = self.outgoing(actor, endpoint.clone(), op.example_request.as_bytes(), true)?;
                 let in_scope =
                     Target::from_parts(&out.endpoint.scheme, &out.endpoint.host, out.endpoint.port, &out.path)
                         .is_ok_and(|t| self.policy.scope_check(&t).is_ok());

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-pub use tools::{call as call_tool, tool_definitions};
+pub use tools::{call as call_tool, tool_definitions, tool_perm};
 
 /// Protocol versions this server can speak, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -92,6 +92,11 @@ impl McpServer {
                 "mimeType": "application/json",
             }]})),
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
+                Some("proxymind://roe")
+                    if self.service.require_actor(&self.actor, pm_service::access::Perm::RoeRead).is_err() =>
+                {
+                    Err((-32001, "access denied: your role may not read the rules of engagement".to_string()))
+                }
                 Some("proxymind://roe") => Ok(json!({ "contents": [{
                     "uri": "proxymind://roe",
                     "mimeType": "application/json",

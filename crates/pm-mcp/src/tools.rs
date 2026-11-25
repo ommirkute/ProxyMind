@@ -723,9 +723,87 @@ pub fn roe_summary(service: &Service, actor: &Actor) -> Value {
     summary
 }
 
+/// The permission each tool needs (ADR-0022 step 6): checked before the tool runs, for every caller (MCP over stdio,
+/// the server's MCP endpoint and the built-in assistant). `None` is a tool this table does not know, which `call`
+/// then refuses as unknown. A test keeps this table and `tool_definitions` in step.
+pub fn tool_perm(name: &str) -> Option<pm_service::access::Perm> {
+    use pm_service::access::Perm;
+    Some(match name {
+        "approval_status" => Perm::ApprovalsRead,
+        "collaborator_interactions" | "collaborator_payload" => Perm::CollaboratorUse,
+        "custom_checks" | "integration_list" | "plugin_list" | "project_trust_status" | "scan_profiles" => {
+            Perm::ConfigRead
+        }
+        "finding_list" | "proof_get" | "scan_issues" => Perm::FindingsRead,
+        "finding_create" | "finding_update" => Perm::FindingsWrite,
+        "compare_exchanges"
+        | "engage_analyze"
+        | "engage_clickjacking"
+        | "engage_comments"
+        | "engage_csrf_poc"
+        | "engage_js_endpoints"
+        | "engage_logic"
+        | "engage_references"
+        | "engage_scripts"
+        | "exchange_get"
+        | "exchange_raw_request"
+        | "history_grep"
+        | "history_search"
+        | "organizer_list"
+        | "protobuf_decode"
+        | "site_map"
+        | "stream_get"
+        | "stream_list"
+        | "token_analyzer_run"
+        | "traffic_triage"
+        | "ws_grep"
+        | "ws_messages" => Perm::HistoryRead,
+        "identity_capture" => Perm::IdentitiesCapture,
+        "identity_list" => Perm::IdentitiesRead,
+        "curl_parse" | "decode" | "issue_library" | "skill_get" | "skills_list" => Perm::Info,
+        "attack_path_list" | "authz_candidates" | "authz_results" | "coverage" | "hypothesis_list" | "memory_list"
+        | "model_changes" | "model_get" | "workflow_get" | "workflow_list" => Perm::ModelRead,
+        "hypothesis_create" | "hypothesis_update" => Perm::ModelWrite,
+        "attack_path_record" | "memory_save" | "organizer_add" | "organizer_update" => Perm::NotesWrite,
+        "plugin_check" => Perm::PluginsManage,
+        "roe_get" => Perm::RoeRead,
+        "authz_check"
+        | "authz_matrix"
+        | "crawl"
+        | "custom_scan"
+        | "discover_content"
+        | "dom_test"
+        | "finding_prove"
+        | "finding_retest"
+        | "fuzzer_run"
+        | "graphql_import"
+        | "identity_check"
+        | "identity_learn_logged_out"
+        | "openapi_import"
+        | "proof_run"
+        | "race_send"
+        | "recon_dns"
+        | "recon_wayback"
+        | "replay_group"
+        | "replay_send"
+        | "scan_active"
+        | "scan_task_start"
+        | "stream_replay"
+        | "workflow_run"
+        | "ws_send" => Perm::SendTraffic,
+        "import_har" => Perm::TrafficImport,
+        "scan_task_pause" | "scan_task_resume" => Perm::SendTraffic,
+        "scan_task_status" => Perm::RunsRead,
+        _ => return None,
+    })
+}
+
 /// Runs a tool. Every result passes the same filter (for agents: secrets
 /// redacted, evidence tagged as untrusted), for MCP and the built-in assistant.
 pub async fn call(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Value) -> Result<Value, String> {
+    if let Some(perm) = tool_perm(name) {
+        service.require_actor(actor, perm).map_err(|e| e.to_string())?;
+    }
     let v = run(service, actor, name, a).await?;
     Ok(service.json_for(actor, v))
 }
@@ -1156,4 +1234,21 @@ async fn run(service: &std::sync::Arc<Service>, actor: &Actor, name: &str, a: Va
 
 fn to_json<T: serde::Serialize>(v: T) -> Value {
     serde_json::to_value(v).unwrap_or_else(|e| json!({ "error": e.to_string() }))
+}
+
+#[cfg(test)]
+mod perm_tests {
+    use super::*;
+
+    /// Deny by default: a tool without a permission would run for anyone who can reach the endpoint.
+    #[test]
+    fn every_tool_has_a_permission() {
+        let missing: Vec<String> = tool_definitions()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .filter(|n| tool_perm(n).is_none())
+            .map(String::from)
+            .collect();
+        assert!(missing.is_empty(), "tools without an entry in `tool_perm`: {missing:?}");
+    }
 }

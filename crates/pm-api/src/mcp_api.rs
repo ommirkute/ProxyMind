@@ -6,14 +6,14 @@
 //!   tiers (and the token's cap), approvals, redaction and untrusted tagging are exactly the local MCP server's (the
 //!   same `pm_mcp::McpServer`, built per request around the same `Service`). A signed-in session or the install token
 //!   reaches it too and acts as that person.
-//! * **A viewer's token** (ceiling or owner's role) may `initialize`, list tools and read prompts, but `tools/call` is
-//!   refused: tools can send traffic and write findings, and the finer per-tool roles come with ADR-0022 step 6.
+//! * **Roles are per tool** (ADR-0022 step 6): `pm_mcp::tool_perm` names the permission each tool needs and `call`
+//!   asks the service before it runs. A viewer (session or token) may call the read tools and gets the same redacted
+//!   views an agent does; the tools that send traffic, write or configure are refused with `access denied: ...`.
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use pm_service::access::Role;
 use serde_json::{Value, json};
 
 use crate::AppState;
@@ -42,16 +42,9 @@ pub(crate) async fn mcp_endpoint(State(st): State<AppState>, me: Me, body: Bytes
     };
     // The actor is the request's own. Nothing in `msg` can change it.
     let server = pm_mcp::McpServer::new(st.service.clone(), me.actor.clone());
-    let viewer = me.token.is_some() && me.role() == Role::Viewer;
     let one = |m: Value| {
         let server = &server;
-        async move {
-            let id = m.get("id").cloned();
-            if viewer && m.get("method").and_then(Value::as_str) == Some("tools/call") {
-                return id.map(|id| rpc_error(id, -32001, "this token acts as a viewer and may not call tools"));
-            }
-            server.handle(m).await
-        }
+        async move { server.handle(m).await }
     };
     match msg {
         Value::Array(batch) => {

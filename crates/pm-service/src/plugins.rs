@@ -532,11 +532,11 @@ impl Service {
         let mut outs = Vec::with_capacity(probes.len());
         let mut tier = Tier::ActiveIntrusive;
         for p in &probes {
-            let out = self.outgoing(endpoint.clone(), p.raw.as_bytes(), true)?;
+            let out = self.outgoing(actor, endpoint.clone(), p.raw.as_bytes(), true)?;
             tier = tier.max(Tier::for_http_request(&out.raw).0);
             outs.push(out);
         }
-        let baseline = self.outgoing(endpoint.clone(), &ex.request, false)?;
+        let baseline = self.outgoing(actor, endpoint.clone(), &ex.request, false)?;
         let extra = json!({ "plugin_check": {
             "plugin": req.plugin, "version": plugin.manifest.version, "exchange_id": req.exchange_id,
             "requests": probes,

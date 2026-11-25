@@ -16,7 +16,7 @@ use pm_replay::Endpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::access::{Perm, Principal};
+use crate::access::Perm;
 use crate::events::{Event, Rate};
 use crate::replay::{Outgoing, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
@@ -287,12 +287,12 @@ impl Service {
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
         }
-        let mut baseline = self.outgoing(endpoint.clone(), template.baseline().as_bytes(), true)?;
+        let mut baseline = self.outgoing(actor, endpoint.clone(), template.baseline().as_bytes(), true)?;
         baseline.hypothesis_id = req.hypothesis_id;
         let mut outs = Vec::with_capacity(planned.len());
         let mut tier = Tier::ActiveIntrusive;
         for p in planned {
-            let mut out = self.outgoing(endpoint.clone(), p.raw.as_bytes(), true)?;
+            let mut out = self.outgoing(actor, endpoint.clone(), p.raw.as_bytes(), true)?;
             out.hypothesis_id = req.hypothesis_id;
             tier = tier.max(Tier::for_http_request(&out.raw).0);
             outs.push((p, out));
@@ -508,7 +508,8 @@ impl Service {
             if p.throttle_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(p.throttle_ms)).await;
             }
-            let mut out = match self.outgoing(r.endpoint.clone(), r.template.fill(&[&payload]).as_bytes(), true) {
+            let mut out = match self.outgoing(actor, r.endpoint.clone(), r.template.fill(&[&payload]).as_bytes(), true)
+            {
                 Ok(o) => o,
                 Err(e) => {
                     stop = Some(format!("request {}: {e}", i + 1));
@@ -575,6 +576,7 @@ impl Service {
 
     /// Runs an attack to the end and returns every result.
     pub async fn fuzzer_run(&self, actor: &Actor, req: FuzzerRequest) -> Result<FuzzerResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let p = match self.fuzzer_prepare(actor, &req)? {
             Ok(p) => p,
             Err(outcome) => return Ok(outcome),
@@ -594,6 +596,7 @@ impl Service {
 
     /// Starts an attack in the background; poll it with `fuzzer_status`.
     pub fn fuzzer_start(self: &Arc<Self>, actor: &Actor, req: FuzzerRequest) -> Result<FuzzerStart> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let p = match self.fuzzer_prepare(actor, &req)? {
             Ok(p) => p,
             Err(FuzzerResult::PendingApproval { approval_id, summary, reasons }) => {
@@ -618,7 +621,7 @@ impl Service {
             .cloned()
             .ok_or_else(|| ServiceError::NotFound(format!("attack {id}")))?;
         // People see every attack; agents and plugins only their own.
-        if !Principal::from_actor(actor).allows(Perm::RunsReadAll) && a.actor != actor.id() {
+        if !self.principal_of(actor).allows(Perm::RunsReadAll) && a.actor != actor.id() {
             return Err(ServiceError::NotFound(format!("attack {id}")));
         }
         Ok(a)
@@ -626,6 +629,7 @@ impl Service {
 
     /// An attack's progress, with results from `from` on (completion order).
     pub fn fuzzer_status(&self, actor: &Actor, id: &str, from: usize) -> Result<AttackView> {
+        self.require_actor(actor, Perm::RunsRead)?;
         let a = self.attack(actor, id)?;
         let st = a.state.lock();
         Ok(AttackView {
@@ -647,6 +651,7 @@ impl Service {
 
     /// pause, resume or cancel.
     pub fn fuzzer_control(&self, actor: &Actor, id: &str, action: &str) -> Result<AttackStatus> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let a = self.attack(actor, id)?;
         let mut st = a.state.lock();
         if !matches!(st.status, AttackStatus::Running | AttackStatus::Paused) {
@@ -675,7 +680,10 @@ impl Service {
 
     /// Recent attacks, newest first.
     pub fn fuzzer_list(&self, actor: &Actor) -> Vec<AttackSummary> {
-        let all = Principal::from_actor(actor).allows(Perm::RunsReadAll);
+        if self.require_actor(actor, Perm::RunsRead).is_err() {
+            return Vec::new();
+        }
+        let all = self.principal_of(actor).allows(Perm::RunsReadAll);
         self.attacks
             .lock()
             .iter()

@@ -4,6 +4,7 @@
 //! gate decision; it is audited and every row is tagged `source: import`.
 //! Exports for agents have secrets replaced, like every other agent view.
 
+use crate::access::Perm;
 use pm_policy::Actor;
 use pm_store::{HistoryFilter, NewExchange};
 use pm_tools::{curl, har};
@@ -57,6 +58,7 @@ pub struct ExportRequest {
 impl Service {
     /// Adds the exchanges of a HAR file to history. Sends nothing.
     pub fn traffic_import_har(&self, actor: &Actor, req: &ImportRequest) -> Result<ImportResult> {
+        self.require_actor(actor, Perm::TrafficImport)?;
         if req.har.len() > MAX_IMPORT_BYTES {
             return Err(ServiceError::Invalid(format!("HAR larger than {} MB", MAX_IMPORT_BYTES / 1024 / 1024)));
         }
@@ -103,6 +105,7 @@ impl Service {
 
     /// Exchanges as a HAR 1.2 document (newest first unless `ids` are given).
     pub fn traffic_export_har(&self, actor: &Actor, req: &ExportRequest) -> Result<Value> {
+        self.require_actor(actor, Perm::TrafficExport)?;
         let ids: Vec<i64> = match &req.ids {
             Some(ids) => ids.iter().take(MAX_EXPORT).copied().collect(),
             None => {
@@ -156,6 +159,7 @@ impl Service {
 
     /// A curl command that sends the same request as a recorded exchange.
     pub fn exchange_curl(&self, actor: &Actor, id: i64) -> Result<String> {
+        self.require_actor(actor, Perm::TrafficExport)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?
@@ -172,6 +176,7 @@ impl Service {
     /// A recorded request as a Python, JavaScript or PowerShell snippet
     /// (secrets replaced for agents). Sends nothing.
     pub fn exchange_code(&self, actor: &Actor, id: i64, lang: pm_tools::codegen::Lang) -> Result<String> {
+        self.require_actor(actor, Perm::TrafficExport)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?

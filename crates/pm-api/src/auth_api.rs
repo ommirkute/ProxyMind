@@ -79,6 +79,7 @@ impl From<AccountError> for AuthError {
             E::NoSuchUser => (StatusCode::NOT_FOUND, "no_such_user"),
             E::NotAuthorised => (StatusCode::FORBIDDEN, "not_authorised"),
             E::LastAdmin => (StatusCode::CONFLICT, "last_admin"),
+            E::LastOwner => (StatusCode::CONFLICT, "last_owner"),
             E::SecondFactorRequired => (StatusCode::CONFLICT, "second_factor_required"),
             E::AlreadyEnrolled => (StatusCode::CONFLICT, "already_enrolled"),
             E::NotEnrolling => (StatusCode::CONFLICT, "not_enrolling"),
@@ -365,6 +366,33 @@ impl From<RoleName> for Role {
             RoleName::Viewer => Role::Viewer,
         }
     }
+}
+
+/// A member of the served project, as the Members panel shows them. Never holds a credential.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct MemberView {
+    /// Stable id (`u_…`).
+    user_id: String,
+    username: String,
+    display_name: String,
+    /// `owner`, `tester` or `viewer`.
+    role: String,
+    /// `active` or `disabled`.
+    status: String,
+    /// When the membership was made (Unix seconds).
+    since: i64,
+    /// The account that made it (`u_…`), when known.
+    added_by: Option<String>,
+    /// This is you.
+    you: bool,
+}
+
+/// Body of `PUT /auth/members/{user_id}`.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MemberRoleBody {
+    /// The role the member gets on the served project.
+    role: RoleName,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -882,6 +910,10 @@ pub(crate) async fn auth_invite_create(
 ) -> AuthResult {
     let sm = server(&st)?;
     let c = signed_in(&me)?;
+    // Server administrators and the project's owners invite; nobody else.
+    if !c.user.server_admin && c.role != Some(Role::Owner) {
+        return Err(AuthError::new(StatusCode::FORBIDDEN, "not_authorised", "not authorised"));
+    }
     fresh(&sm, c)?;
     let hours = b.ttl_hours.unwrap_or(DEFAULT_INVITE_HOURS).clamp(1, 720);
     let (uid, project, role) = (c.user.id.clone(), sm.project_id.clone(), Role::from(b.role));
@@ -899,9 +931,83 @@ pub(crate) async fn auth_invite_create(
     Ok(reply(StatusCode::OK, &body, &[]))
 }
 
+/// Members management is the project's owner's: `MembersManage` (checked by the service, as for every action), then a
+/// fresh sign-in for anything that changes a role.
+fn members_perm(st: &AppState, me: &Me) -> Result<(), AuthError> {
+    st.service
+        .require(&me.principal(), pm_service::access::Perm::MembersManage)
+        .map_err(|e| AuthError::new(StatusCode::FORBIDDEN, "forbidden", e.to_string()))
+}
+
+pub(crate) async fn auth_members(State(st): State<AppState>, me: Me) -> AuthResult {
+    let sm = server(&st)?;
+    let c = signed_in(&me)?;
+    members_perm(&st, &me)?;
+    let project = sm.project_id.clone();
+    let (users, members) = sm
+        .run(move |a| -> Result<_, AccountError> { Ok((a.list_users()?, a.members_of_project(&project)?)) })
+        .await??;
+    let views: Vec<MemberView> = members
+        .iter()
+        .filter_map(|m| {
+            let u = users.iter().find(|u| u.id == m.user_id)?;
+            Some(MemberView {
+                user_id: u.id.clone(),
+                username: u.username.clone(),
+                display_name: u.display_name.clone(),
+                role: m.role.as_str().into(),
+                status: if u.status == UserStatus::Active { "active" } else { "disabled" }.into(),
+                since: m.created_at,
+                added_by: m.created_by.clone(),
+                you: u.id == c.user.id,
+            })
+        })
+        .collect();
+    Ok(reply(StatusCode::OK, &views, &[]))
+}
+
+/// Gives a member another role. A demotion ends their sessions and (through the effective role) narrows their tokens;
+/// a promotion shows at their next request. The last owner cannot be demoted.
+pub(crate) async fn auth_member_set(
+    State(st): State<AppState>,
+    me: Me,
+    Path(user_id): Path<String>,
+    Json(b): Json<MemberRoleBody>,
+) -> AuthResult {
+    let sm = server(&st)?;
+    let c = signed_in(&me)?;
+    members_perm(&st, &me)?;
+    fresh(&sm, c)?;
+    let (acting, project, role, target) =
+        (c.user.id.clone(), sm.project_id.clone(), Role::from(b.role), user_id.clone());
+    sm.run(move |a| a.set_membership(&acting, &project, &target, role)).await??;
+    // Actors of that account that are already registered take the role now, not at their next request.
+    st.service.principals_of_user_changed(&user_id, Some(pm_service_role(role)));
+    Ok(reply(StatusCode::OK, &OkResponse { ok: true }, &[]))
+}
+
+/// Removes a member: ends their sessions and revokes their tokens. The last owner cannot be removed.
+pub(crate) async fn auth_member_remove(State(st): State<AppState>, me: Me, Path(user_id): Path<String>) -> AuthResult {
+    let sm = server(&st)?;
+    let c = signed_in(&me)?;
+    members_perm(&st, &me)?;
+    fresh(&sm, c)?;
+    let (acting, project, target) = (c.user.id.clone(), sm.project_id.clone(), user_id.clone());
+    sm.run(move |a| a.remove_membership(&acting, &project, &target)).await??;
+    st.service.principals_of_user_changed(&user_id, None);
+    Ok(reply(StatusCode::OK, &OkResponse { ok: true }, &[]))
+}
+
+fn pm_service_role(r: Role) -> pm_service::access::Role {
+    crate::server_mode::access_role(r)
+}
+
 pub(crate) async fn auth_invite_revoke(State(st): State<AppState>, me: Me, Path(id): Path<String>) -> AuthResult {
     let sm = server(&st)?;
     let c = signed_in(&me)?;
+    if !c.user.server_admin && c.role != Some(Role::Owner) {
+        return Err(AuthError::new(StatusCode::FORBIDDEN, "not_authorised", "not authorised"));
+    }
     fresh(&sm, c)?;
     let acting = c.user.id.clone();
     sm.run(move |a| a.revoke_invite(&acting, &id)).await??;

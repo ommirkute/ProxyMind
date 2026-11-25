@@ -385,7 +385,7 @@ impl Service {
 
     /// Redacts text the way reports shown to agents are, then removes the integration's own secrets.
     pub(crate) fn scrub(&self, text: &str, secrets: &[String]) -> String {
-        scrub_with(&self.redactor.redact(text), secrets)
+        scrub_with(&self.redactor_scope("integrations").redact(text), secrets)
     }
 
     /// Sends `p`, retrying transport errors, 408, 429 and 5xx with a doubling wait when `retry` (at most the tuned
@@ -431,7 +431,7 @@ impl Service {
                         return Ok(Sent { status, body, attempts: attempt, host: host.clone() });
                     }
                     let text = String::from_utf8_lossy(&body[..body.len().min(2048)]).into_owned();
-                    let snippet: String = scrub_with(&self.redactor.redact(&text), secrets)
+                    let snippet: String = scrub_with(&self.redactor_scope("integrations").redact(&text), secrets)
                         .split_whitespace()
                         .collect::<Vec<_>>()
                         .join(" ")

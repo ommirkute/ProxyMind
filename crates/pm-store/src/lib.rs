@@ -494,6 +494,14 @@ BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
 CREATE TRIGGER audit_checkpoints_no_delete BEFORE DELETE ON audit_checkpoints
 BEGIN SELECT RAISE(ABORT, 'audit_checkpoints is append-only'); END;
 "#,
+    r#"
+-- Who asked (ADR-0022 step 6): the account behind the request and the token it came with, and the role it acted with.
+-- NULL for approvals made in single-user mode and before this migration. Decisions on a project server follow them:
+-- a tester decides only what their own tokens asked, and `approvals.require_other_person` compares them.
+ALTER TABLE approvals ADD COLUMN requested_user TEXT;
+ALTER TABLE approvals ADD COLUMN requested_token TEXT;
+ALTER TABLE approvals ADD COLUMN requested_role TEXT;
+"#,
 ];
 
 /// Most bytes of one message's text that go into the full-text index.
@@ -581,6 +589,16 @@ pub struct ApprovalRow {
     pub status: String,
     pub decided_by: Option<String>,
     pub decided_ms: Option<i64>,
+    /// The account (`u_...`) behind the request that asked: the person, or the owner of the token. `None` in
+    /// single-user mode.
+    #[serde(default)]
+    pub requested_user: Option<String>,
+    /// The token (`t_...`) the request came with, if it came with one.
+    #[serde(default)]
+    pub requested_token: Option<String>,
+    /// The role the requester acted with (`owner`, `tester`, `viewer`), when known.
+    #[serde(default)]
+    pub requested_role: Option<String>,
 }
 
 /// One audit log entry. Hashing and verification live in `pm-policy`.
@@ -1750,8 +1768,8 @@ impl Store {
     pub fn insert_approval(&mut self, a: &ApprovalRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO approvals (id, created_ms, actor, action, tier, target, summary, params, params_hash, status,
-                                    decided_by, decided_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                    decided_by, decided_ms, requested_user, requested_token, requested_role)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 a.id,
                 a.created_ms,
@@ -1764,14 +1782,17 @@ impl Store {
                 a.params_hash,
                 a.status,
                 a.decided_by,
-                a.decided_ms
+                a.decided_ms,
+                a.requested_user,
+                a.requested_token,
+                a.requested_role
             ],
         )?;
         Ok(())
     }
 
-    const APPROVAL_COLS: &'static str =
-        "id, created_ms, actor, action, tier, target, summary, params, params_hash, status, decided_by, decided_ms";
+    const APPROVAL_COLS: &'static str = "id, created_ms, actor, action, tier, target, summary, params, params_hash, status, decided_by, decided_ms, \
+         requested_user, requested_token, requested_role";
 
     fn approval_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
         Ok(ApprovalRow {
@@ -1787,6 +1808,9 @@ impl Store {
             status: r.get(9)?,
             decided_by: r.get(10)?,
             decided_ms: r.get(11)?,
+            requested_user: r.get(12)?,
+            requested_token: r.get(13)?,
+            requested_role: r.get(14)?,
         })
     }
 
@@ -2841,7 +2865,9 @@ mod tests {
             // Put the file back as the previous release left it: no column, no index, one version lower.
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                "ALTER TABLE approvals DROP COLUMN requested_user; ALTER TABLE approvals DROP COLUMN requested_token;
+                 ALTER TABLE approvals DROP COLUMN requested_role;
+                 DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
                  ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
                  ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
                  ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
@@ -2852,7 +2878,7 @@ mod tests {
                  ALTER TABLE findings DROP COLUMN issue_links; DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 6) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 7) as i64).unwrap();
             let has: i64 = conn
                 .query_row("SELECT count(*) FROM pragma_table_info('exchanges') WHERE name = 'client_addr'", [], |r| {
                     r.get(0)
@@ -2883,7 +2909,9 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
+                "ALTER TABLE approvals DROP COLUMN requested_user; ALTER TABLE approvals DROP COLUMN requested_token;
+                 ALTER TABLE approvals DROP COLUMN requested_role;
+                 DROP TABLE audit_checkpoints; ALTER TABLE audit_log DROP COLUMN version; ALTER TABLE audit_log DROP COLUMN principal_kind;
                  ALTER TABLE audit_log DROP COLUMN user_id; ALTER TABLE audit_log DROP COLUMN token_id;
                  ALTER TABLE audit_log DROP COLUMN project_id; ALTER TABLE audit_log DROP COLUMN session_id;
                  ALTER TABLE audit_log DROP COLUMN client_addr; ALTER TABLE audit_log DROP COLUMN mac;
@@ -2893,7 +2921,7 @@ mod tests {
                  DROP TABLE integration_deliveries;",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 5) as i64).unwrap();
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 6) as i64).unwrap();
         }
         let mut s = Store::open(&path).unwrap();
         let old = s.get_exchange(old_id).unwrap().unwrap();

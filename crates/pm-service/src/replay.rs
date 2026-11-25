@@ -1,6 +1,7 @@
 //! Sending requests (replays) through the policy gate, as
 //! recorded or as any test identity.
 
+use crate::access::Perm;
 use std::time::{Duration, Instant};
 
 use pm_ai::{ExchangeView, View, render_exchange};
@@ -143,9 +144,9 @@ pub(crate) struct Relogins {
 }
 
 impl Service {
-    pub(crate) fn outgoing(&self, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
+    pub(crate) fn outgoing(&self, actor: &Actor, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
         let raw = if normalize { crlf_head(raw) } else { raw.to_vec() };
-        let unknown = self.redactor.unknown_placeholders(&raw);
+        let unknown = self.redactor_of(actor).unknown_placeholders(&raw);
         if !unknown.is_empty() {
             return Err(ServiceError::Invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
         }
@@ -159,7 +160,7 @@ impl Service {
         Ok(Outgoing { endpoint, raw, method: head.method, path, hypothesis_id: None })
     }
 
-    pub(crate) fn outgoing_from_request(&self, req: &ReplayRequest) -> Result<Outgoing> {
+    pub(crate) fn outgoing_from_request(&self, actor: &Actor, req: &ReplayRequest) -> Result<Outgoing> {
         let (endpoint, base_raw) = match req.exchange_id {
             Some(id) => {
                 let ex = self
@@ -191,7 +192,7 @@ impl Service {
             raw.truncate(end);
             raw.extend_from_slice(&body);
         }
-        let mut out = self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
+        let mut out = self.outgoing(actor, endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
         out.hypothesis_id = req.hypothesis_id;
         Ok(out)
     }
@@ -269,7 +270,7 @@ impl Service {
         {
             return Ok(sent);
         }
-        let mut wire = self.redactor.unredact(&out.raw);
+        let mut wire = self.redactor_of(actor).unredact(&out.raw);
         if let Some(id) = identity {
             wire = pm_identity::apply(&wire, &id.auth);
         }
@@ -399,7 +400,8 @@ impl Service {
 
     /// Sends a request on behalf of `actor`, if the policy allows it.
     pub async fn replay_send(&self, actor: &Actor, req: ReplayRequest) -> Result<ReplayResult> {
-        let out = self.outgoing_from_request(&req)?;
+        self.require_actor(actor, Perm::SendTraffic)?;
+        let out = self.outgoing_from_request(actor, &req)?;
         let fix_cl = req.fix_content_length.unwrap_or(true);
         if let Some(name) = &req.identity {
             self.load_identity(name)?; // fail early on unknown identities

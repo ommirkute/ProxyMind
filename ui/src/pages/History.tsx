@@ -671,6 +671,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <span className="muted">Highlight</span>
         {[null, ...HIGHLIGHTS].map((c) => (
           <button
+            data-write
             key={c ?? "none"}
             className={`swatch ${c ? `hl-${c}` : "none"} ${s.highlight === c || (!s.highlight && !c) ? "on" : ""}`}
             aria-label={`Highlight ${c ?? "none"}`}
@@ -680,16 +681,16 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <CommentBox key={s.comment ?? ""} value={s.comment ?? ""} onSave={(c) => saveAnnotation(s.highlight, c)} />
       </div>
       <div className="row" style={{ marginTop: 10 }}>
-        <button className="btn" onClick={() => go("replay", id)}>Send to Replay</button>
+        <button data-write className="btn" onClick={() => go("replay", id)}>Send to Replay</button>
         {offersH3 && (
-          <button className="btn" data-testid="replay-http3" title="Opens Replay with this request written for HTTP/3, at the address the response's Alt-Svc offered" onClick={() => go("replay", `h3:${id}`)}>
+          <button data-write className="btn" data-testid="replay-http3" title="Opens Replay with this request written for HTTP/3, at the address the response's Alt-Svc offered" onClick={() => go("replay", `h3:${id}`)}>
             Send with HTTP/3
           </button>
         )}
-        <button className="btn" onClick={() => go("fuzzer", id)}>Send to Fuzzer</button>
-        <button className="btn" onClick={() => go("issues", id)}>Active scan</button>
-        <button className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
-        <button className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>
+        <button data-write className="btn" onClick={() => go("fuzzer", id)}>Send to Fuzzer</button>
+        <button data-write className="btn" onClick={() => go("issues", id)}>Active scan</button>
+        <button data-write className="btn" onClick={() => go("authz", id)}>Authorization check…</button>
+        <button data-write className="btn" onClick={() => setCapture((c) => ({ ...c, open: !c.open }))}>Capture identity…</button>
         <button className="btn" data-testid="copy-curl" onClick={copyCurl}>Copy as cURL</button>
       </div>
       {curl && <pre className="raw small" data-testid="curl-command" style={{ marginTop: 8 }}>{curl}</pre>}
@@ -697,7 +698,7 @@ function Detail({ id, live, onAnnotated }: { id: number; live?: ExchangeSummary;
         <div className="row" style={{ marginTop: 8 }}>
           <input aria-label="Identity name" placeholder="name, e.g. alice" value={capture.name} onChange={(e) => setCapture((c) => ({ ...c, name: e.target.value }))} />
           <input aria-label="Role" placeholder="role" value={capture.role} onChange={(e) => setCapture((c) => ({ ...c, role: e.target.value }))} style={{ width: 90 }} />
-          <button className="btn primary" disabled={!capture.name || action.busy} onClick={doCapture}>Capture</button>
+          <button data-write className="btn primary" disabled={!capture.name || action.busy} onClick={doCapture}>Capture</button>
         </div>
       )}
       <ErrorBox error={action.error} />
@@ -810,7 +811,7 @@ function WsReplay({ id }: { id: number }) {
   if (!open) {
     return (
       <div className="row" style={{ margin: "8px 0" }}>
-        <button className="btn" onClick={() => setOpen(true)}>Replay on a new connection…</button>
+        <button data-write className="btn" onClick={() => setOpen(true)}>Replay on a new connection…</button>
       </div>
     );
   }
@@ -830,7 +831,7 @@ function WsReplay({ id }: { id: number }) {
           <input aria-label="Wait (ms)" type="number" min={0} max={10000} step={250} value={wait} onChange={(e) => setWait(Number(e.target.value))} style={{ width: 80 }} /> ms
         </label>
         <span className="grow muted">A fresh connection with the same headers; ProxyMind answers pings and closes at the end.</span>
-        <button className="btn primary" data-testid="ws-replay-send" disabled={action.busy} onClick={send}>
+        <button data-write className="btn primary" data-testid="ws-replay-send" disabled={action.busy} onClick={send}>
           {action.busy ? "Running…" : "Open and send"}
         </button>
       </div>
@@ -907,7 +908,7 @@ function CommentBox({ value, onSave }: { value: string; onSave: (c: string) => v
   return (
     <form className="row grow" onSubmit={(e) => { e.preventDefault(); onSave(v); }}>
       <input className="grow" aria-label="Comment" placeholder="comment…" value={v} onChange={(e) => setV(e.target.value)} />
-      {v !== value && <button className="btn" data-testid="save-comment">Save</button>}
+      {v !== value && <button data-write className="btn" data-testid="save-comment">Save</button>}
     </form>
   );
 }
