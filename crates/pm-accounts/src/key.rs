@@ -27,6 +27,9 @@ pub enum KeyPurpose {
     AuditChain,
     /// HMAC-SHA256 of `pm3_` API tokens (ADR-0022 step 5). Reserved so the label is fixed now.
     ApiToken,
+    /// HMAC-SHA256 that makes the credential ids shown for a username that has no passkey (so asking for the
+    /// sign-in options of a name does not reveal whether the name exists).
+    PasskeyDecoy,
 }
 
 impl KeyPurpose {
@@ -39,6 +42,7 @@ impl KeyPurpose {
             KeyPurpose::Throttle => "proxymind/v1/throttle",
             KeyPurpose::AuditChain => "proxymind/v1/audit-chain",
             KeyPurpose::ApiToken => "proxymind/v1/api-token",
+            KeyPurpose::PasskeyDecoy => "proxymind/v1/passkey-decoy",
         }
     }
 }

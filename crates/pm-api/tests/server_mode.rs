@@ -379,7 +379,7 @@ struct Signed {
 // ---- the route matrix ----------------------------------------------------------------------------------------------
 
 /// The auth endpoints that work without a session. Every other route must be 401 without one.
-const PUBLIC: [(&str, &str); 7] = [
+const PUBLIC: [(&str, &str); 17] = [
     ("get", "/api/v1/auth/state"),
     ("post", "/api/v1/auth/setup"),
     ("post", "/api/v1/auth/login"),
@@ -387,6 +387,16 @@ const PUBLIC: [(&str, &str); 7] = [
     ("post", "/api/v1/auth/login/enrol"),
     ("post", "/api/v1/auth/login/enrol/confirm"),
     ("post", "/api/v1/auth/invite/accept"),
+    ("post", "/api/v1/auth/passkey/login/options"),
+    ("post", "/api/v1/auth/passkey/login"),
+    ("post", "/api/v1/auth/setup/passkey/options"),
+    ("post", "/api/v1/auth/setup/passkey"),
+    ("post", "/api/v1/auth/invite/passkey/options"),
+    ("post", "/api/v1/auth/invite/passkey"),
+    ("post", "/api/v1/auth/enrol-link/info"),
+    ("post", "/api/v1/auth/enrol-link/passkey/options"),
+    ("post", "/api/v1/auth/enrol-link/passkey"),
+    ("post", "/api/v1/auth/enrol-link/password"),
 ];
 
 fn concrete(path: &str) -> String {
@@ -506,12 +516,22 @@ async fn before_setup_only_the_setup_endpoints_answer() {
     let h = Harness::start(Kind::Plain).await;
     let r = h.api(None, "GET", "/api/v1/auth/state", None).await;
     assert_eq!(r.status, 200);
-    assert_eq!(r.json(), json!({"server_mode": true, "setup_required": true, "setup_allowed": true}));
+    // A loopback server without --public-url offers passkeys at `localhost`.
+    assert_eq!(
+        r.json(),
+        json!({
+            "server_mode": true, "setup_required": true, "setup_allowed": true,
+            "passkey_supported": true, "passkey_rp_id": "localhost", "passkey_note": null,
+            "passkey_required": false, "passkey_count": null
+        })
+    );
     for (m, p) in [
         ("GET", "/api/v1/status"),
         ("GET", "/api/v1/exchanges"),
         ("POST", "/api/v1/auth/login"),
         ("POST", "/api/v1/auth/invite/accept"),
+        ("POST", "/api/v1/auth/passkey/login/options"),
+        ("POST", "/api/v1/auth/enrol-link/info"),
         ("GET", "/api/v1/auth/me"),
     ] {
         let r = h.api(None, m, p, Some(json!({}))).await;
@@ -1433,6 +1453,41 @@ async fn no_password_secret_or_token_reaches_a_log_a_body_or_an_error() {
     secrets.push(("session id", alice.cookie.clone()));
     secrets.push(("totp secret", alice.secret.clone()));
     secrets.extend(alice.codes.iter().map(|c| ("recovery code", c.clone())));
+
+    // Passkeys (step 7): enrol and sign in. What stays with the authenticator (the public key as stored, the
+    // attestation, the signatures) and the sessions it makes appear in no answer, log line or audit entry.
+    {
+        use pm_accounts::webauthn::b64url_encode;
+        use pm_accounts::webauthn::soft::{SoftAuthenticator, Tweak};
+        let origin = format!("http://localhost:{}", h.port);
+        let r = h.api(Some(&alice.cookie), "POST", "/api/v1/auth/passkeys/options", None).await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        let mut auth = SoftAuthenticator::es256();
+        let reg = auth.create(&r.json()["options"], &origin, &Tweak::default());
+        secrets.push(("attestation object", reg.attestation_object.clone()));
+        let cose = auth.public_key_cose();
+        secrets.push(("passkey public key", b64url_encode(&cose)));
+        secrets.push(("passkey public key (hex)", cose.iter().map(|b| format!("{b:02x}")).collect()));
+        let r = h
+            .api(Some(&alice.cookie), "POST", "/api/v1/auth/passkeys", Some(json!({"name": "k", "response": reg})))
+            .await;
+        assert_eq!(r.status, 200, "{}", r.body);
+        bodies.push(("passkey added", r.body.clone()));
+        let renewed = r.set_cookie("pm_session").unwrap().1;
+        secrets.push(("session id", renewed.clone()));
+        bodies.push(("passkey list", h.api(Some(&renewed), "GET", "/api/v1/auth/passkeys", None).await.body));
+        for t in [Tweak::default(), Tweak { bad_signature: true, ..Tweak::default() }] {
+            let r = h.api(None, "POST", "/api/v1/auth/passkey/login/options", Some(json!({"username": "alice"}))).await;
+            bodies.push(("passkey login options", r.body.clone()));
+            let resp = auth.get(&r.json()["options"], &origin, &t);
+            secrets.push(("passkey signature", resp.signature.clone()));
+            let r = h.api(None, "POST", "/api/v1/auth/passkey/login", Some(json!({"response": resp}))).await;
+            bodies.push(("passkey login", r.body.clone()));
+            if let Some((_, id)) = r.set_cookie("pm_session") {
+                secrets.push(("session id", id));
+            }
+        }
+    }
 
     // A password change renews the session and answers without it.
     let c = h.relogin_for(&owner, secret_pw).await;

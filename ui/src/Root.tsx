@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import App from "./App";
 import { api, authHooks } from "./api";
-import type { LoginResponse, MeResponse, StateResponse } from "./api-types.gen";
+import type { EnrolLinkInfo, LoginResponse, MeResponse, StateResponse } from "./api-types.gen";
 import {
   AuthContext,
   AuthScreen,
@@ -20,6 +20,15 @@ import {
   type AuthCtx,
 } from "./authparts";
 import { ErrorBox, useAction } from "./components";
+import {
+  CredentialChoice,
+  PasskeyAdd,
+  PasskeyEnvContext,
+  PasskeySignIn,
+  registerWithPasskey,
+  usePasskeyUse,
+  type PasskeyEnv,
+} from "./passkeyparts";
 
 type Stage =
   | { k: "loading" }
@@ -27,15 +36,25 @@ type Stage =
   | { k: "error"; message: string }
   | { k: "setup"; state: StateResponse }
   | { k: "invite"; token: string }
+  | { k: "enrol"; token: string }
   | { k: "signin"; next: string; notice?: string }
   | { k: "notmember"; me: MeResponse }
+  /** The server requires a passkey and this account has none: the session may only add one. */
+  | { k: "passkeygate"; me: MeResponse }
   | { k: "app"; me: MeResponse };
 
-/** Reads the one-time tokens from the URL fragment (`#setup=…`, `#invite=…`). Nothing is stored. */
-function readFragmentTokens(): { setup: string | null; invite: string | null } {
+/** Reads the one-time tokens from the URL fragment (`#setup=…`, `#invite=…`, `#enrol=…`). Nothing is stored. */
+function readFragmentTokens(): { setup: string | null; invite: string | null; enrol: string | null } {
   const p = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  return { setup: p.get("setup") || null, invite: p.get("invite") || null };
+  return { setup: p.get("setup") || null, invite: p.get("invite") || null, enrol: p.get("enrol") || null };
 }
+
+const envOf = (s: StateResponse): PasskeyEnv => ({
+  supported: s.passkey_supported,
+  rpId: s.passkey_rp_id,
+  note: s.passkey_note,
+  required: s.passkey_required,
+});
 
 /** Takes a token out of the address bar and the history entry (it is never sent to the server by the browser). */
 function clearFragment() {
@@ -44,19 +63,24 @@ function clearFragment() {
 
 export default function Root() {
   const [stage, setStage] = useState<Stage>({ k: "loading" });
-  const tokens = useRef<{ setup: string | null; invite: string | null } | null>(null);
+  const tokens = useRef<{ setup: string | null; invite: string | null; enrol: string | null } | null>(null);
   tokens.current ??= readFragmentTokens();
+  const [env, setEnv] = useState<PasskeyEnv>({ supported: false, rpId: null, note: null, required: false });
 
   const loadMe = useCallback(async (): Promise<void> => {
     try {
       const me = await api.get<MeResponse>("/auth/me");
+      // What the server says about passkeys can change under an open page (an administrator turns the rule on).
+      api.get<StateResponse>("/auth/state").then((s) => setEnv(envOf(s)), () => {});
       // Unchanged answers keep the same object, so the periodic read below does not re-render the app.
       setStage((prev) =>
-        prev.k === "app" && me.role != null && JSON.stringify(prev.me) === JSON.stringify(me)
+        prev.k === "app" && me.role != null && !me.passkey_enrolment_required && JSON.stringify(prev.me) === JSON.stringify(me)
           ? prev
-          : me.role == null
-            ? { k: "notmember", me }
-            : { k: "app", me },
+          : me.passkey_enrolment_required
+            ? { k: "passkeygate", me }
+            : me.role == null
+              ? { k: "notmember", me }
+              : { k: "app", me },
       );
     } catch (e) {
       const status = (e as { status?: number }).status;
@@ -75,7 +99,7 @@ export default function Root() {
   const sessionEnded = useCallback(() => {
     reauthDone.current?.(false);
     setStage((s) =>
-      s.k === "app" || s.k === "notmember"
+      s.k === "app" || s.k === "notmember" || s.k === "passkeygate"
         ? { k: "signin", next: currentLocation(), notice: "Your session ended. Sign in again to continue." }
         : s,
     );
@@ -128,10 +152,12 @@ export default function Root() {
       if (cancelled) return;
       if (!state?.server_mode) return setStage({ k: "single" });
       installHooks();
-      const { setup, invite } = tokens.current!;
-      if (setup || invite) clearFragment();
+      setEnv(envOf(state));
+      const { setup, invite, enrol } = tokens.current!;
+      if (setup || invite || enrol) clearFragment();
       if (state.setup_required) return setStage({ k: "setup", state });
       if (invite) return setStage({ k: "invite", token: invite });
+      if (enrol) return setStage({ k: "enrol", token: enrol });
       await loadMe();
     })();
     return () => {
@@ -162,6 +188,9 @@ export default function Root() {
     [stage, loadMe, logout, sessionEnded],
   );
 
+  return <PasskeyEnvContext.Provider value={env}>{screen()}</PasskeyEnvContext.Provider>;
+
+  function screen() {
   switch (stage.k) {
     case "loading":
       return null;
@@ -181,6 +210,8 @@ export default function Root() {
       return <SetupScreen state={stage.state} token={tokens.current!.setup} onDone={enter} />;
     case "invite":
       return <InviteScreen token={stage.token} onDone={enter} />;
+    case "enrol":
+      return <EnrolLinkScreen token={stage.token} onDone={enter} />;
     case "signin":
       return <SignInScreen key={stage.notice ?? "plain"} next={stage.next} notice={stage.notice} onDone={enter} />;
     case "notmember":
@@ -199,6 +230,23 @@ export default function Root() {
           </div>
         </AuthScreen>
       );
+    case "passkeygate":
+      return (
+        <>
+          <AuthScreen>
+            <h2>Add a passkey to continue</h2>
+            <p data-testid="passkey-gate">
+              This server requires a passkey for every account. You signed in with a password and an authenticator app so
+              that you can add one now; nothing else is open to you until you have.
+            </p>
+            <PasskeyAdd primary label="Add a passkey" onAdded={() => void loadMe()} />
+            <div className="auth-actions">
+              <button className="btn ghost" data-testid="sign-out" onClick={() => void logout()}>Sign out</button>
+            </div>
+          </AuthScreen>
+          {reauth && <ReauthDialog me={stage.me} onResult={(ok) => reauthDone.current?.(ok)} refresh={loadMe} />}
+        </>
+      );
     case "app":
       return (
         <AuthContext.Provider value={ctx}>
@@ -206,6 +254,7 @@ export default function Root() {
           {reauth && <ReauthDialog me={stage.me} onResult={(ok) => reauthDone.current?.(ok)} refresh={loadMe} />}
         </AuthContext.Provider>
       );
+  }
   }
 }
 
@@ -228,7 +277,12 @@ function SignInScreen({ next, notice, onDone }: { next: string; notice?: string;
           }}
         />
       ) : (
-        <PasswordForm next={next} notice={message} onResponse={setFirst} />
+        <>
+          <PasswordForm next={next} notice={message} onResponse={setFirst} />
+          <div className="auth-or">
+            <PasskeySignIn next={next} onResponse={setFirst} />
+          </div>
+        </>
       )}
     </AuthScreen>
   );
@@ -238,6 +292,8 @@ function SetupScreen({ state, token, onDone }: { state: StateResponse; token: st
   const [pasted, setPasted] = useState("");
   const [first, setFirst] = useState<LoginResponse | null>(null);
   const { busy, error, run } = useAction();
+  const use = usePasskeyUse();
+  const [mode, setMode] = useState<"passkey" | "password">(use.usable ? "passkey" : "password");
   // The token from the link, or one pasted from the console (the whole URL or just the token).
   const given = token ?? (pasted.includes("#setup=") ? pasted.split("#setup=")[1] : pasted).trim();
   const [claimed, setClaimed] = useState(false);
@@ -286,14 +342,28 @@ function SetupScreen({ state, token, onDone }: { state: StateResponse; token: st
     <AuthScreen>
       <h2>Create the owner account</h2>
       <p>
-        You are the first person here. This account becomes the server administrator and the owner of the project. You will
-        add an authenticator app next.
+        You are the first person here. This account becomes the server administrator and the owner of the project.
       </p>
+      <CredentialChoice mode={mode} onMode={setMode} />
       <NewAccountForm
-        submitLabel="Create account"
+        withPassword={mode === "password"}
+        submitLabel={mode === "passkey" ? "Create account with a passkey" : "Create account"}
         busy={busy}
         error={error}
-        onSubmit={(v) => void run(async () => setFirst(await api.post<LoginResponse>("/auth/setup", { setup_token: given, ...v })))}
+        onSubmit={(v) =>
+          void run(async () =>
+            setFirst(
+              mode === "passkey"
+                ? await registerWithPasskey(
+                    "/auth/setup/passkey/options",
+                    { setup_token: given, username: v.username, display_name: v.display_name },
+                    "/auth/setup/passkey",
+                    {},
+                  )
+                : await api.post<LoginResponse>("/auth/setup", { setup_token: given, ...v }),
+            ),
+          )
+        }
       />
     </AuthScreen>
   );
@@ -302,6 +372,8 @@ function SetupScreen({ state, token, onDone }: { state: StateResponse; token: st
 function InviteScreen({ token, onDone }: { token: string; onDone: (r: LoginResponse) => void }) {
   const [first, setFirst] = useState<LoginResponse | null>(null);
   const { busy, error, run } = useAction();
+  const use = usePasskeyUse();
+  const [mode, setMode] = useState<"passkey" | "password">(use.usable ? "passkey" : "password");
   if (first) {
     return (
       <AuthScreen wide>
@@ -312,13 +384,105 @@ function InviteScreen({ token, onDone }: { token: string; onDone: (r: LoginRespo
   return (
     <AuthScreen>
       <h2>Join this project</h2>
-      <p>You have been invited. Choose a username and password; you will add an authenticator app next.</p>
+      <p>You have been invited. Choose a username and how you will sign in.</p>
+      <CredentialChoice mode={mode} onMode={setMode} />
       <NewAccountForm
-        submitLabel="Create account"
+        withPassword={mode === "password"}
+        submitLabel={mode === "passkey" ? "Create account with a passkey" : "Create account"}
         busy={busy}
         error={error}
-        onSubmit={(v) => void run(async () => setFirst(await api.post<LoginResponse>("/auth/invite/accept", { invite: token, ...v })))}
+        onSubmit={(v) =>
+          void run(async () =>
+            setFirst(
+              mode === "passkey"
+                ? await registerWithPasskey(
+                    "/auth/invite/passkey/options",
+                    { invite: token, username: v.username, display_name: v.display_name },
+                    "/auth/invite/passkey",
+                    {},
+                  )
+                : await api.post<LoginResponse>("/auth/invite/accept", { invite: token, ...v }),
+            ),
+          )
+        }
       />
+    </AuthScreen>
+  );
+}
+
+/** `#enrol=<token>`: an owner's one-time link for someone who lost every way to sign in. It replaces them all. */
+function EnrolLinkScreen({ token, onDone }: { token: string; onDone: (r: LoginResponse) => void }) {
+  const [info, setInfo] = useState<EnrolLinkInfo | null>(null);
+  const [bad, setBad] = useState<string | null>(null);
+  const [first, setFirst] = useState<LoginResponse | null>(null);
+  const use = usePasskeyUse();
+  const [mode, setMode] = useState<"passkey" | "password">(use.usable ? "passkey" : "password");
+  const [name, setName] = useState("");
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [local, setLocal] = useState<string | null>(null);
+  const { busy, error, run } = useAction();
+  const asked = useRef(false);
+  useEffect(() => {
+    if (asked.current) return;
+    asked.current = true;
+    api.post<EnrolLinkInfo>("/auth/enrol-link/info", { token }).then(setInfo).catch((e) => setBad(errText(e)));
+  }, [token]);
+  if (first) {
+    return (
+      <AuthScreen wide>
+        <Steps first={first} onDone={onDone} onRestart={() => window.location.reload()} />
+      </AuthScreen>
+    );
+  }
+  if (bad) {
+    return (
+      <AuthScreen>
+        <h2>This link does not work</h2>
+        <p data-testid="enrol-link-bad">{bad} Ask a project owner for a new enrolment link.</p>
+        <div className="auth-actions">
+          <button className="btn primary" onClick={() => { window.history.replaceState(null, "", "/"); window.location.reload(); }}>Go to sign-in</button>
+        </div>
+      </AuthScreen>
+    );
+  }
+  if (!info) return null;
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setLocal(null);
+    if (mode === "password" && pw !== pw2) return setLocal("The two passwords are not the same.");
+    void run(async () =>
+      setFirst(
+        mode === "passkey"
+          ? await registerWithPasskey("/auth/enrol-link/passkey/options", { token }, "/auth/enrol-link/passkey", { name: name.trim() || undefined })
+          : await api.post<LoginResponse>("/auth/enrol-link/password", { token, new_password: pw }),
+      ),
+    );
+  };
+  return (
+    <AuthScreen>
+      <h2>Recover your account</h2>
+      <p data-testid="enrol-link-who">
+        This link is for <b>{info.display_name || info.username}</b> ({info.username}). It <b>replaces</b> how you sign in:
+        your old passkeys, password and authenticator stop working, and you choose a new way now.
+      </p>
+      <CredentialChoice mode={mode} onMode={setMode} />
+      <form onSubmit={submit}>
+        {mode === "passkey" ? (
+          <Field label="Passkey name (optional)" value={name} onChange={setName} testid="passkey-name" />
+        ) : (
+          <>
+            <Field label="New password" type="password" value={pw} onChange={setPw} autoComplete="new-password" testid="auth-password" hint="At least 12 characters." required />
+            <Field label="Confirm new password" type="password" value={pw2} onChange={setPw2} autoComplete="new-password" testid="auth-password2" required />
+          </>
+        )}
+        <ErrorBox error={local ?? error} />
+        <div className="auth-actions">
+          <button className="btn primary" type="submit" disabled={busy} data-testid="auth-submit">
+            {mode === "passkey" ? "Create a passkey and sign in" : "Set password"}
+          </button>
+        </div>
+      </form>
     </AuthScreen>
   );
 }
@@ -346,7 +510,12 @@ function ReauthDialog({ me, onResult, refresh }: { me: MeResponse; onResult: (ok
             }}
           />
         ) : (
-          <PasswordForm fixedUser={me.user.username} notice={message} onResponse={setFirst} submitLabel="Sign in again" />
+          <>
+            <PasswordForm fixedUser={me.user.username} notice={message} onResponse={setFirst} submitLabel="Sign in again" />
+            <div className="auth-or">
+              <PasskeySignIn username={me.user.username} onResponse={setFirst} label="Use a passkey instead" />
+            </div>
+          </>
         )}
         <div className="auth-actions">
           <button className="btn ghost" data-testid="reauth-cancel" onClick={() => onResult(false)}>Cancel</button>

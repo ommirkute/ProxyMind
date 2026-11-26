@@ -627,6 +627,114 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
 7. **Passkeys.** Decide the library or the in-house verifier (OpenSSL check first), enrolment, login, counter checks,
    recovery by link and by `reset-owner`. Test: WebAuthn vectors, a cloned authenticator is refused, host-name change
    behaviour documented.
+
+   *Done 2026-11-25.* Passkeys work in server mode: enrol, sign in (with a username and without), rename, remove, setup and
+   invites with a passkey, recovery by a one-time enrolment link, and the server-wide "require a passkey" setting. How to
+   use them is `docs/server-mode.md` ("Passkeys"). Where things are: `pm-accounts/src/webauthn/` (`cbor.rs`, `cose.rs`,
+   `mod.rs`: the verifier; `soft.rs`: a software authenticator for tests), `pm-accounts/src/passkeys.rs` (ceremonies,
+   storage, counter, enrolment links, the setting), `pm-accounts` migration 3, `pm-api/src/passkey_api.rs` (the routes),
+   `pm-api/src/{server_mode,auth_api,listen}.rs` (the guard's restricted session, the state endpoint, the RP id),
+   `ui/src/{passkeys.ts,passkeyparts.tsx,Root.tsx,pages/Account.tsx}`, and the browser test `ui/tests/e2e-server.mjs`
+   (Chromium's virtual authenticator). Decisions and deviations, on purpose:
+   - **Library: our own verifier, with ring.** The OpenSSL check came first. `webauthn-rs` (`webauthn-rs-core` 0.6.2) no
+     longer needs OpenSSL (`cargo tree` shows none; it moved to RustCrypto), so that was not the reason. It brings 231
+     crates, 96 of them not yet in this workspace's lock file, among them a second cryptography stack (the
+     release-candidate `rsa` 0.10.0-rc.19, `p256`, `ecdsa`, `aes`) next to ring, plus x509 and attestation-statement
+     code for attestation this server never asks for (`attestation: "none"`). ADR-0003 prefers rustls and ring, and ring
+     already verifies what WebAuthn needs: ES256 (ECDSA P-256, DER signatures), Ed25519 and RS256. What is left is a
+     strict CBOR decoder (bounded depth 8 and 256 entries per container, definite lengths only, no tags, floats or
+     duplicate keys, no trailing bytes, a declared length larger than the input is refused before any allocation), COSE
+     key parsing and the checks of the specification: about 700 lines with tests, no new dependency, nothing for
+     `cargo deny` to look at and no change to `desktop/Cargo.lock`. The cost is ours to maintain; the allow-list is three
+     algorithms and the verifier never looks at an attestation statement.
+   - **Checks, in order** (registration and assertion): `clientDataJSON` `type`, the challenge (constant-time compare),
+     `origin` exactly one of the server's origins, no `crossOrigin: true` and no `topOrigin`; `rpIdHash` equals SHA-256 of
+     the RP id; user present and user verified both set (a sign-in without user verification is refused, always); backup
+     state implies backup eligibility; for a registration the credential data and a COSE key in the allow-list, the
+     credential id 16 to 1023 bytes and the id the browser reports equal to the attested one; extension data is parsed
+     when its flag is set and nothing may trail when it is not; for an assertion the signature over `authenticatorData ||
+     SHA-256(clientDataJSON)`. Tests: three captured real ceremonies (a Yubico key's ES256 assertion, a YubiKey 5 Bio's
+     Ed25519 registration, Edge on macOS's ES256 registration with user verification; sources in the test file's header),
+     RFC 8032's first vector, a software authenticator for ES256, Ed25519 and RS256, one test per refusal (origin, RP id,
+     challenge, type, user presence, user verification, cross-origin, top origin, signature, trailing bytes, an algorithm
+     outside the allow-list), and random and mutated bytes into the CBOR decoder and the verifier.
+   - **Challenges** are 32 bytes from the OS, kept in memory for five minutes, **single use** (taken out of the table before the
+     response is read, so a failed attempt uses its challenge up) and **bound to who asked**: an enrolment to the user and
+     the session that began it, a setup, invite or enrolment-link registration to its token and chosen username, a
+     sign-in to the name it claimed. The table is capped (4096; the oldest go) because anyone may ask for sign-in options.
+     A restart loses open ceremonies: one retry.
+   - **RP id and origin.** The RP id is the host name of the public origin `listen::plan()` computes (`ListenPlan::passkey_rp`);
+     the accepted origins are the allowed origins on that name or below it. An IP address is no RP id: a server whose public
+     URL is an IP address has no passkeys (the state endpoint says why). The one exception is a loopback-only server
+     without `--public-url`, which offers `localhost`. The UI offers passkeys only on a page whose host is the RP id or
+     below it. Renaming the server invalidates every passkey: keep an owner with a password and an authenticator, or plan
+     the name first.
+   - **Storage.** `credentials` kind `passkey`: `external_id` the credential id (unique across the server), `secret` the
+     COSE key as registered, `counter`, `label` the name, `meta` JSON (transports, AAGUID, backup flags, algorithm). The
+     only migration (3) adds `enrolment_links` and `server_settings`. At most ten passkeys per account.
+   - **Counter.** If either the stored or the new counter is non-zero, the new one must be greater; otherwise the sign-in
+     is refused like any failure and the security log gets `passkey_clone_suspected` (credential row id, both counts). A
+     counter that is always zero is allowed. The stored counter does not move on a refusal.
+   - **No username leak.** Sign-in options with a username for a name that is unknown, disabled or has no passkey carry
+     one to three decoy credential ids from an HMAC of the name under a key derived from the server key (`PasskeyDecoy`),
+     so the same name always gets the same answer and its shape is the real one's. Residual: an account with more than
+     three passkeys shows a count no decoy has, and a real id is as long as the authenticator makes it. Without a
+     username the list is empty and nothing is revealed. Every refusal (unknown credential, another user's credential,
+     a user handle that is not the credential's owner's, a bad signature, a clone, a disabled account) is the same
+     `invalid credentials`, after the same throttle and security-log bookkeeping as a password failure (the account counter
+     is shared with the password step).
+   - **A passkey is a complete sign-in** (`auth_method` `passkey`, a fresh session like any other) and **counts as the owner's
+     second factor**. A password sign-in for an account that has a passkey and no authenticator is refused with a named error
+     (`passkey_required`) instead of offering to enrol one, so a stolen password cannot add a factor to such an account; an
+     authenticator may be turned off by an account that has a passkey. Passkeys are not offered as a second step after a
+     password: they replace both.
+   - **Require a passkey** (`PUT /auth/settings/passkey-required`, server administrator, fresh sign-in, audited, and the
+     administrator needs a passkey of their own so the setting cannot lock them out). The rule when on: every account must have a
+     passkey. An account without one signs in with password and authenticator as before, but the session is
+     **restricted**: the guard answers 403 `passkey_enrolment_required` to everything except `GET /auth/me`, `POST
+     /auth/logout` and the passkey endpoints, and the UI shows only "Add a passkey to continue". An account that has a
+     passkey cannot sign in by password at all (so the password cannot be phished into a session), and its last passkey
+     cannot be removed. Recovery codes are part of the password route, so they stop working for such an account too: an
+     owner issues an enrolment link. Tokens are machine credentials and are not affected.
+   - **Removing** a passkey needs a fresh sign-in, ends the account's other sessions (the session making the request gets a
+     new id), and is refused when it would leave the account unable to sign in or without a second factor: the last
+     passkey of an account without a password and authenticator (`last_passkey`), of an owner or administrator who has a
+     password but no authenticator (`second_factor_required`), or while the server requires passkeys (`last_passkey`).
+   - **Setup, invites and recovery.** The setup page and an invite offer a passkey (recommended) or a password; with a passkey the
+     account has no password at all, and the setup token or invite is used up only when the registration verifies (a failed
+     one leaves it usable). `proxymind server reset-owner` is unchanged: its setup URL's page offers a passkey too. A
+     **one-time enrolment link** (`POST /auth/users/{id}/enrolment-link`; `#enrol=<token>`, 256 bits, valid one hour, single use,
+     stored as an HMAC, a newer link replaces an unused one) is the recovery for someone who lost every way in, including a
+     passkey-only user who lost their device. Who may issue one: a server administrator for any other account; an owner
+     of the served project for a tester or viewer of it, never for a peer owner or an administrator (a project owner must not
+     be able to take over a peer's or an administrator's account), never for oneself; always with a fresh sign-in.
+     **Issuing it ends the user's sessions and revokes their tokens** (deviation: the text above says tokens' use is
+     suspended until they sign in again; a suspension would need a new state, and a revoked token stays revoked, so they make new ones).
+     **Redeeming it replaces how the account signs in**: the password, authenticator, recovery codes and every passkey are
+     removed, and the person registers a new passkey (signed in at once) or chooses a new password (then enrols an
+     authenticator, as after an invite). The links printed for invites and enrolment links use the origin the issuer's
+     browser used when it is one of the server's own, so the link opens on the host name passkeys belong to.
+   - **Routes** (all under `/api/v1/auth`; the access matrix lists them): `POST /passkey/login/options`, `POST /passkey/login`,
+     `POST /setup/passkey/options`, `POST /setup/passkey`, `POST /invite/passkey/options`, `POST /invite/passkey`,
+     `POST /enrol-link/info`, `POST /enrol-link/passkey/options`, `POST /enrol-link/passkey`, `POST /enrol-link/password`
+     (public, with the same CSRF layers and throttling as the password sign-in), `GET /passkeys`, `POST /passkeys/options`,
+     `POST /passkeys`, `PUT /passkeys/{id}`, `DELETE /passkeys/{id}`, `PUT /settings/passkey-required`, `POST
+     /users/{id}/enrolment-link`. `GET /state` gains `passkey_supported`, `passkey_rp_id`, `passkey_note`, `passkey_required`
+     and, with a live session, `passkey_count`; `GET /me` gains `passkey_count` and `passkey_enrolment_required`.
+   - **Tests.** `pm-accounts`: 42 new (19 verifier, CBOR and base64url; 23 for the flows: every algorithm, single use and expiry of
+     challenges, binding to user and session, each registration refusal, uniqueness of credential ids across accounts, another user's
+     credential, a counter going backwards (refused and audited) and zero counters, throttling shared with passwords, decoys, disabled
+     accounts, rename and the removal rules, the require setting, setup and invites with a passkey, the enrolment link and who may
+     issue it, bounds, and no key material in the security log); `pm-api`: `tests/passkeys.rs` (11, over a real socket: enrolment, both
+     sign-in modes, indistinguishable refusals, throttling and clones, the owner's last second factor, the require rule with the restricted
+     session, setup, invites, enrolment links, the CSRF layers and size limits, and no key, signature, link or session id in any answer,
+     log or audit entry), the secrets test of `server_mode.rs` extended with a passkey flow, unit tests for the RP id, the link origin and the
+     restricted routes; the access matrix; `ui/tests/e2e-server.mjs` with Chromium's virtual authenticator (add, sign in, rename, remove,
+     the require rule and the gate, an enrolment link, setup with a passkey on a second server); `ui/tests/passkeys.test.mjs`.
+   - **Not done.** Attestation is not requested and not verified (no allow-list of authenticator models); no browser autofill
+     ("conditional UI") on the username field; no list or revoke of unused enrolment links (a new one replaces the old; they
+     expire in an hour) and no `proxymind` command to issue one on the server host (`reset-owner` is the console path); the host
+     name cannot be changed without re-enrolling; tokens ignore the require rule; passkeys are not offered as a second factor after a password.
 8. **OIDC.** Provider configuration (owner only), PKCE, discovery, JWKS caching and rotation, claim mapping with the
    owner-never-from-claims rule, optional email linking and auto-create by domain. Test with an in-process fake provider
    (as the HTTP/3 work has an in-process server): wrong `iss`, `aud`, `nonce`, expired token, mix-up, replayed `code`,

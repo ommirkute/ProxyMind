@@ -24,6 +24,7 @@ mod contract_table;
 pub mod contracts;
 pub mod listen;
 mod mcp_api;
+mod passkey_api;
 mod route_perms;
 mod routes;
 pub mod server_mode;
@@ -361,7 +362,9 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
         let mut resp = axum::Json(serde_json::json!({
             "server_mode": false,
             "setup_required": false,
-            "setup_allowed": false
+            "setup_allowed": false,
+            "passkey_supported": false,
+            "passkey_required": false
         }))
         .into_response();
         add_security_headers(resp.headers_mut());

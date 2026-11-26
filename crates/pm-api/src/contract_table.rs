@@ -17,6 +17,12 @@ use crate::auth_api::{
     TotpEnrolmentResponse, UserView,
 };
 use crate::contracts::{Operation, op};
+use crate::passkey_api::{
+    EnrolLinkBody, EnrolLinkInfo, EnrolLinkPasskeyBody, EnrolLinkPasswordBody, EnrolmentLinkCreated,
+    InvitePasskeyOptionsBody, LoginOptionsBody, NewAccountPasskeyBody, PasskeyAddBody, PasskeyAdded, PasskeyLoginBody,
+    PasskeyOptionsResponse, PasskeyRenameBody, PasskeyRequiredBody, PasskeyRequiredResponse, PasskeyView,
+    SetupPasskeyOptionsBody,
+};
 use crate::routes::{BytesQuery, EventsQuery};
 use crate::tokens_api::{TokenCreateBody, TokenCreated, TokenView, TokensQuery};
 
@@ -320,5 +326,22 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/auth/invites", "auth_invites", "Server mode: invites (all for server admins, this project's for its owners).").out::<Vec<InviteView>>(),
         op("post", "/auth/invites", "auth_invite_create", "Server mode: invite someone to this project with a role. Needs a fresh sign-in. The token is shown once.").body::<InviteCreateBody>().out::<InviteCreated>(),
         op("delete", "/auth/invites/{id}", "auth_invite_revoke", "Server mode: revoke an unused invite. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/passkey/login/options", "passkey_login_options", "Server mode: the options for signing in with a passkey. With a username they list that account's passkeys (decoys for a name that has none); without, the authenticator offers its own.").body::<LoginOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/passkey/login", "passkey_login", "Server mode: sign in with a passkey (user verification required). Throttled and audited like a password sign-in; sets the session cookie.").body::<PasskeyLoginBody>().out::<LoginResponse>(),
+        op("post", "/auth/setup/passkey/options", "setup_passkey_options", "Server mode: first step of setup with a passkey: the options. Nothing is made and the setup token is not used yet.").body::<SetupPasskeyOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/setup/passkey", "setup_passkey", "Server mode: finish setup with a passkey: creates the first owner (no password) and signs in.").body::<NewAccountPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/invite/passkey/options", "invite_passkey_options", "Server mode: first step of accepting an invite with a passkey: the options.").body::<InvitePasskeyOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/invite/passkey", "invite_passkey", "Server mode: finish accepting an invite with a passkey (no password) and sign in.").body::<NewAccountPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/enrol-link/info", "enrol_link_info", "Server mode: whom a one-time enrolment link is for, if it is still valid.").body::<EnrolLinkBody>().out::<EnrolLinkInfo>(),
+        op("post", "/auth/enrol-link/passkey/options", "enrol_link_passkey_options", "Server mode: first step of redeeming an enrolment link with a passkey: the options.").body::<EnrolLinkBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/enrol-link/passkey", "enrol_link_passkey", "Server mode: redeem an enrolment link with a passkey. Every earlier way to sign in is removed; signs in.").body::<EnrolLinkPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/enrol-link/password", "enrol_link_password", "Server mode: redeem an enrolment link with a new password. Every earlier way to sign in is removed; answers `enrolment_required` (an authenticator follows).").body::<EnrolLinkPasswordBody>().out::<LoginResponse>(),
+        op("get", "/auth/passkeys", "passkeys_list", "Server mode: the signed-in account's passkeys (name, created, last used; no key material).").out::<Vec<PasskeyView>>(),
+        op("post", "/auth/passkeys", "passkeys_add", "Server mode: add a passkey (finish an enrolment). Needs a fresh sign-in; gives the session a new id.").body::<PasskeyAddBody>().out::<PasskeyAdded>(),
+        op("post", "/auth/passkeys/options", "passkeys_options", "Server mode: the options for adding a passkey, bound to this account and session. Needs a fresh sign-in.").out::<PasskeyOptionsResponse>(),
+        op("put", "/auth/passkeys/{id}", "passkey_rename", "Server mode: rename a passkey.").body::<PasskeyRenameBody>().id_is_string().out::<OkResponse>(),
+        op("delete", "/auth/passkeys/{id}", "passkey_remove", "Server mode: remove a passkey and end the account's other sessions. Needs a fresh sign-in; refused for the last second factor of an account that needs one, or the last passkey while the server requires one.").id_is_string().out::<OkResponse>(),
+        op("put", "/auth/settings/passkey-required", "passkey_required_set", "Server mode, server admins: require every account to have a passkey, or stop requiring it. Needs a fresh sign-in and, to turn it on, a passkey on the administrator's own account.").body::<PasskeyRequiredBody>().out::<PasskeyRequiredResponse>(),
+        op("post", "/auth/users/{id}/enrolment-link", "user_enrolment_link", "Server mode, server admins and project owners: a one-time link (an hour) that replaces how someone signs in; ends their sessions and revokes their tokens. Needs a fresh sign-in. The token is shown once.").id_is_string().out::<EnrolmentLinkCreated>(),
     ]
 }

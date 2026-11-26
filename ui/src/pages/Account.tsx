@@ -4,19 +4,24 @@
 import { useState, type FormEvent } from "react";
 import { api, fmtDateTime, toast } from "../api";
 import type {
+  EnrolmentLinkCreated,
   InviteCreated,
   InviteView,
   MemberView,
   OkResponse,
+  PasskeyRequiredResponse,
+  PasskeyView,
   RecoveryCodesResponse,
   RevokedResponse,
   RoleName,
   SessionView,
+  StateResponse,
   TotpEnrolmentResponse,
   UserView,
 } from "../api-types.gen";
 import { CopyButton, Field, RecoveryCodesView, TotpSecret, useAuth } from "../authparts";
 import { Empty, ErrorBox, Panel, useAction, useLoad } from "../components";
+import { PasskeyAdd, usePasskeyUse } from "../passkeyparts";
 import { TokensPanel } from "./Tokens";
 
 const when = (secs: number | null | undefined) => (secs ? fmtDateTime(secs * 1000) : "never");
@@ -52,6 +57,7 @@ export default function Account() {
       </Panel>
       <Sessions reloadKey={tick} />
       {me.role && me.role !== "viewer" && <TokensPanel serverMode isOwner={me.role === "owner"} />}
+      <Passkeys onChanged={() => setTick((t) => t + 1)} />
       <Password onChanged={() => setTick((t) => t + 1)} />
       <Authenticator />
       <RecoveryCodes />
@@ -137,6 +143,104 @@ function Sessions({ reloadKey }: { reloadKey: number }) {
           </tbody>
         </table>
       )}
+    </Panel>
+  );
+}
+
+// ---- passkeys --------------------------------------------------------------------------------------------------
+
+/** The account's passkeys: add, rename, remove. Adding and removing need a fresh sign-in (api.ts asks for it). */
+function Passkeys({ onChanged }: { onChanged: () => void }) {
+  const auth = useAuth()!;
+  const use = usePasskeyUse();
+  const list = useLoad(() => api.get<PasskeyView[]>("/auth/passkeys"), []);
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const { busy, error, run } = useAction();
+  const rows = list.data ?? [];
+  const changed = () => {
+    list.reload();
+    void auth.refresh();
+    onChanged();
+  };
+  const rename = (e: FormEvent) => {
+    e.preventDefault();
+    if (!renaming) return;
+    void run(async () => {
+      await api.put<OkResponse>(`/auth/passkeys/${encodeURIComponent(renaming.id)}`, { name: renaming.name });
+      setRenaming(null);
+      toast("Passkey renamed");
+      list.reload();
+    });
+  };
+  const remove = (p: PasskeyView) =>
+    void run(async () => {
+      if (!window.confirm(`Remove the passkey “${p.name}”? You will be signed out of your other sessions.`)) return;
+      await api.del<OkResponse>(`/auth/passkeys/${encodeURIComponent(p.id)}`);
+      toast("Passkey removed. Your other sessions were signed out.");
+      changed();
+    });
+  return (
+    <Panel title="Passkeys">
+      <p className="small muted">
+        A passkey signs you in with your device's fingerprint, face, PIN or a security key, and cannot be phished. Add one
+        for each device you use; a password and authenticator app stay as a fallback.
+        {use.rpId && <> They are bound to the host name <span className="mono" data-testid="passkey-rp">{use.rpId}</span>: if the
+        server's name changes, they stop working.</>}
+      </p>
+      <ErrorBox error={error ?? list.error} />
+      {rows.length === 0 ? (
+        <Empty>No passkeys yet.</Empty>
+      ) : (
+        <table className="grid" data-testid="passkeys-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Added</th>
+              <th>Last used</th>
+              <th>Kind</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.id} data-testid="passkey-row">
+                <td>
+                  {renaming?.id === p.id ? (
+                    <form onSubmit={rename} className="row">
+                      <input
+                        aria-label="Passkey name"
+                        value={renaming.name}
+                        onChange={(e) => setRenaming({ id: p.id, name: e.target.value })}
+                        autoFocus
+                        data-testid="passkey-rename-input"
+                      />
+                      <button className="btn sm primary" type="submit" disabled={busy} data-testid="passkey-rename-save">Save</button>
+                      <button className="btn sm ghost" type="button" onClick={() => setRenaming(null)}>Cancel</button>
+                    </form>
+                  ) : (
+                    <span data-testid="passkey-name-cell">{p.name}</span>
+                  )}
+                </td>
+                <td>{when(p.created_at)}</td>
+                <td>{when(p.last_used_at)}</td>
+                <td>
+                  {p.transports.length ? p.transports.join(", ") : "–"}
+                  {p.backup_state && <span className="chip plain" style={{ marginLeft: 6 }}>synced</span>}
+                </td>
+                <td>
+                  <div className="row">
+                    <button className="btn sm" disabled={busy} onClick={() => setRenaming({ id: p.id, name: p.name })} data-testid="passkey-rename">Rename</button>
+                    <button className="btn sm bad" disabled={busy} onClick={() => remove(p)} data-testid="passkey-remove">Remove</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div style={{ marginTop: 12 }}>
+        <PasskeyAdd onAdded={() => { toast("Passkey added"); changed(); }} />
+      </div>
     </Panel>
   );
 }
@@ -291,9 +395,62 @@ export function Admin() {
           <p>Who has an account on this server, and the links that let new people join the project.</p>
         </div>
       </div>
+      {isAdmin && <PasskeyRule />}
       {isOwner && <Members selfId={auth.me.user.id} />}
       {isAdmin && <Users selfId={auth.me.user.id} />}
       <Invites />
+    </div>
+  );
+}
+
+/** "Require a passkey" (server administrators). Turning it on needs a passkey on your own account. */
+function PasskeyRule() {
+  const auth = useAuth()!;
+  const state = useLoad(() => api.get<StateResponse>("/auth/state"), []);
+  const { busy, error, run } = useAction();
+  const on = state.data?.passkey_required ?? false;
+  const set = (required: boolean) =>
+    void run(async () => {
+      await api.put<PasskeyRequiredResponse>("/auth/settings/passkey-required", { required });
+      toast(required ? "Passkeys are now required" : "Passkeys are no longer required");
+      state.reload();
+      void auth.refresh();
+    });
+  return (
+    <Panel title="Passkeys on this server">
+      <p className="small muted" data-testid="passkey-rule-text">
+        With this on, every account must have a passkey. An account that has none can still sign in with its password and
+        authenticator, but only to add one; an account that has one can sign in with it alone (a password is refused).
+        You need a passkey on your own account first. Tokens for agents and CI are not affected.
+      </p>
+      <ErrorBox error={error ?? state.error} />
+      <label className="row" style={{ gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={busy || state.loading}
+          onChange={(e) => set(e.target.checked)}
+          data-testid="passkey-required-toggle"
+        />
+        <span>Require a passkey for every account</span>
+      </label>
+    </Panel>
+  );
+}
+
+/** A recovery link for someone who lost every way to sign in: shown once, with a copy button. */
+function RecoveryLink({ created, onHide }: { created: EnrolmentLinkCreated; onHide: () => void }) {
+  return (
+    <div className="notice" data-testid="enrol-link-created">
+      <p style={{ marginTop: 0 }}>
+        <b>Recovery link for {created.username}</b>, valid until {when(created.expires_at)}. It replaces how they sign in,
+        and their sessions and tokens were ended. The link is shown <b>only now</b>: send it to them.
+      </p>
+      <div className="row">
+        <input aria-label="Recovery link" className="grow mono" readOnly value={created.url} onFocus={(e) => e.currentTarget.select()} data-testid="enrol-link-url" />
+        <CopyButton text={created.url} label="Copy link" testid="enrol-link-copy" />
+        <button className="btn ghost sm" onClick={onHide}>Hide</button>
+      </div>
     </div>
   );
 }
@@ -303,6 +460,12 @@ function Members({ selfId }: { selfId: string }) {
   const list = useLoad(() => api.get<MemberView[]>("/auth/members"), []);
   const auth = useAuth();
   const { busy, error, run } = useAction();
+  const [link, setLink] = useState<EnrolmentLinkCreated | null>(null);
+  const recover = (m: MemberView) =>
+    void run(async () => {
+      if (!window.confirm(`Make a recovery link for ${m.username}? Their sessions end, their tokens are revoked, and the link replaces how they sign in.`)) return;
+      setLink(await api.post<EnrolmentLinkCreated>(`/auth/users/${encodeURIComponent(m.user_id)}/enrolment-link`));
+    });
   const setRole = (m: MemberView, role: RoleName) =>
     void run(async () => {
       if (role === m.role) return;
@@ -327,6 +490,7 @@ function Members({ selfId }: { selfId: string }) {
         shows at their next request.
       </p>
       <ErrorBox error={error ?? list.error} />
+      {link && <RecoveryLink created={link} onHide={() => setLink(null)} />}
       {(list.data ?? []).length === 0 ? (
         <Empty>No members.</Empty>
       ) : (
@@ -365,9 +529,16 @@ function Members({ selfId }: { selfId: string }) {
                 <td><span className={`chip ${m.status === "active" ? "ok" : "bad"}`}>{m.status}</span></td>
                 <td>{when(m.since)}</td>
                 <td>
-                  <button className="btn sm bad" disabled={busy} onClick={() => remove(m)} data-testid={`member-remove-${m.username}`}>
-                    Remove
-                  </button>
+                  <div className="row">
+                    {!m.you && m.role !== "owner" && (
+                      <button className="btn sm" disabled={busy} onClick={() => recover(m)} data-testid={`member-recover-${m.username}`}>
+                        Recovery link
+                      </button>
+                    )}
+                    <button className="btn sm bad" disabled={busy} onClick={() => remove(m)} data-testid={`member-remove-${m.username}`}>
+                      Remove
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -381,6 +552,12 @@ function Members({ selfId }: { selfId: string }) {
 function Users({ selfId }: { selfId: string }) {
   const list = useLoad(() => api.get<UserView[]>("/auth/users"), []);
   const { busy, error, run } = useAction();
+  const [link, setLink] = useState<EnrolmentLinkCreated | null>(null);
+  const recover = (u: UserView) =>
+    void run(async () => {
+      if (!window.confirm(`Make a recovery link for ${u.username}? Their sessions end, their tokens are revoked, and the link replaces how they sign in.`)) return;
+      setLink(await api.post<EnrolmentLinkCreated>(`/auth/users/${encodeURIComponent(u.id)}/enrolment-link`));
+    });
   const act = (u: UserView, what: "disable" | "enable" | "reset-second-factor", done: string) =>
     void run(async () => {
       if (what === "reset-second-factor" && !window.confirm(`Remove ${u.username}'s second factor and end their sessions? They set up a new one at their next sign-in.`)) return;
@@ -391,6 +568,7 @@ function Users({ selfId }: { selfId: string }) {
   return (
     <Panel title="Users">
       <ErrorBox error={error ?? list.error} />
+      {link && <RecoveryLink created={link} onHide={() => setLink(null)} />}
       {(list.data ?? []).length === 0 ? (
         <Empty>No users.</Empty>
       ) : (
@@ -426,6 +604,7 @@ function Users({ selfId }: { selfId: string }) {
                         <button className="btn sm ok" disabled={busy} onClick={() => act(u, "enable", "enabled")}>Enable</button>
                       )}
                       <button className="btn sm" disabled={busy} onClick={() => act(u, "reset-second-factor", "second factor reset")}>Reset second factor</button>
+                      <button className="btn sm" disabled={busy} onClick={() => recover(u)} data-testid={`user-recover-${u.username}`}>Recovery link</button>
                     </div>
                   )}
                 </td>

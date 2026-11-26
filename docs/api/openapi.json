@@ -719,6 +719,40 @@
         ],
         "type": "object"
       },
+      "AssertionBody": {
+        "additionalProperties": false,
+        "description": "The response of `navigator.credentials.get()`, binary fields as base64url.",
+        "properties": {
+          "authenticator_data": {
+            "type": "string"
+          },
+          "client_data_json": {
+            "type": "string"
+          },
+          "id": {
+            "description": "The credential id.",
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "user_handle": {
+            "default": null,
+            "description": "The user handle, when the authenticator returned one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "client_data_json",
+          "authenticator_data",
+          "signature"
+        ],
+        "type": "object"
+      },
       "AssertionResult": {
         "properties": {
           "message": {
@@ -3691,6 +3725,118 @@
         "required": [
           "pending",
           "code"
+        ],
+        "type": "object"
+      },
+      "EnrolLinkBody": {
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "description": "The token from the enrolment link (`#enrol=<token>`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "EnrolLinkInfo": {
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "display_name",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "EnrolLinkPasskeyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/RegistrationBody"
+          }
+        },
+        "required": [
+          "response"
+        ],
+        "type": "object"
+      },
+      "EnrolLinkPasswordBody": {
+        "additionalProperties": false,
+        "properties": {
+          "new_password": {
+            "type": "string"
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "new_password"
+        ],
+        "type": "object"
+      },
+      "EnrolmentLinkCreated": {
+        "properties": {
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "token": {
+            "description": "The link's secret. Shown once; only its HMAC is stored.",
+            "type": "string"
+          },
+          "url": {
+            "description": "`<origin>/#enrol=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is in\nthe fragment, which browsers never send to a server.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The account the link is for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "token",
+          "url",
+          "username",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -6875,7 +7021,7 @@
             "type": "string"
           },
           "url": {
-            "description": "`<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server.",
+            "description": "`<origin>/#invite=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is\nin the fragment, which browsers never send to a server.",
             "type": "string"
           }
         },
@@ -6885,6 +7031,30 @@
           "url",
           "role",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "InvitePasskeyOptionsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invite": {
+            "description": "The token from the invite link.",
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite",
+          "username"
         ],
         "type": "object"
       },
@@ -7507,6 +7677,20 @@
         ],
         "type": "object"
       },
+      "LoginOptionsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "username": {
+            "default": null,
+            "description": "Sign in as this account (its passkeys are offered). Leave out to sign in without a username: the authenticator\noffers its own passkeys for this server.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "LoginRecording": {
         "description": "What a recording produced (names only; values stay in the identity).",
         "properties": {
@@ -7891,6 +8075,16 @@
             "description": "Signed in within the last 10 minutes: sensitive actions are allowed.",
             "type": "boolean"
           },
+          "passkey_count": {
+            "description": "How many passkeys the account has.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "passkey_enrolment_required": {
+            "description": "The server requires a passkey and this account has none: the session may only enrol one.",
+            "type": "boolean"
+          },
           "project_id": {
             "type": "string"
           },
@@ -7914,7 +8108,9 @@
           "project_id",
           "role",
           "session",
-          "fresh"
+          "fresh",
+          "passkey_count",
+          "passkey_enrolment_required"
         ],
         "type": "object"
       },
@@ -8287,6 +8483,33 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "NewAccountPasskeyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "default": null,
+            "description": "What to call the passkey (default \"Passkey 1\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/RegistrationBody"
+          }
+        },
+        "required": [
+          "response"
+        ],
         "type": "object"
       },
       "NewAttackPath": {
@@ -9064,6 +9287,151 @@
           "response_body"
         ],
         "type": "string"
+      },
+      "PasskeyAddBody": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "default": null,
+            "description": "What to call the passkey (default \"Passkey N\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/RegistrationBody"
+          }
+        },
+        "required": [
+          "response"
+        ],
+        "type": "object"
+      },
+      "PasskeyAdded": {
+        "properties": {
+          "passkey": {
+            "$ref": "#/components/schemas/PasskeyView"
+          }
+        },
+        "required": [
+          "passkey"
+        ],
+        "type": "object"
+      },
+      "PasskeyLoginBody": {
+        "additionalProperties": false,
+        "properties": {
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/AssertionBody"
+          }
+        },
+        "required": [
+          "response"
+        ],
+        "type": "object"
+      },
+      "PasskeyOptionsResponse": {
+        "description": "The options to pass to `navigator.credentials.create()` or `.get()` (WebAuthn's JSON form).",
+        "properties": {
+          "options": {
+            "description": "`PublicKeyCredentialCreationOptionsJSON` or `PublicKeyCredentialRequestOptionsJSON`; the challenge is single\nuse and lives five minutes."
+          }
+        },
+        "required": [
+          "options"
+        ],
+        "type": "object"
+      },
+      "PasskeyRenameBody": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "PasskeyRequiredBody": {
+        "additionalProperties": false,
+        "properties": {
+          "required": {
+            "description": "Require every account to have a passkey.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "required"
+        ],
+        "type": "object"
+      },
+      "PasskeyRequiredResponse": {
+        "properties": {
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "required"
+        ],
+        "type": "object"
+      },
+      "PasskeyView": {
+        "description": "A passkey as the Account page lists it. Never holds key material.",
+        "properties": {
+          "backup_eligible": {
+            "description": "The passkey can be backed up (synced); `backup_state` says whether it is.",
+            "type": "boolean"
+          },
+          "backup_state": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Pass this to rename or remove it.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "transports": {
+            "description": "`internal`, `usb`, `nfc`, `ble`, `hybrid`, `smart-card`, as the authenticator reported them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "last_used_at",
+          "transports",
+          "backup_eligible",
+          "backup_state"
+        ],
+        "type": "object"
       },
       "PasswordBody": {
         "additionalProperties": false,
@@ -10691,6 +11059,36 @@
           "first",
           "extract",
           "count"
+        ],
+        "type": "object"
+      },
+      "RegistrationBody": {
+        "additionalProperties": false,
+        "description": "The response of `navigator.credentials.create()`, binary fields as base64url.",
+        "properties": {
+          "attestation_object": {
+            "type": "string"
+          },
+          "client_data_json": {
+            "type": "string"
+          },
+          "id": {
+            "description": "The credential id.",
+            "type": "string"
+          },
+          "transports": {
+            "default": [],
+            "description": "`getTransports()` of the response, when the browser has it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "client_data_json",
+          "attestation_object"
         ],
         "type": "object"
       },
@@ -12824,6 +13222,30 @@
         ],
         "type": "object"
       },
+      "SetupPasskeyOptionsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "setup_token": {
+            "description": "The token from the setup URL.",
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "setup_token",
+          "username"
+        ],
+        "type": "object"
+      },
       "Severity": {
         "enum": [
           "info",
@@ -13073,6 +13495,37 @@
       },
       "StateResponse": {
         "properties": {
+          "passkey_count": {
+            "description": "How many passkeys the signed-in account has (present only when the request carries a valid session).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "passkey_note": {
+            "description": "Why passkeys are unavailable, when they are.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "passkey_required": {
+            "description": "The server requires every account to have a passkey.",
+            "type": "boolean"
+          },
+          "passkey_rp_id": {
+            "description": "The relying party id passkeys are bound to: the server's host name. A browser must be at an address with that\nhost name (or below it) for a passkey to work.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "passkey_supported": {
+            "description": "Passkeys can be used on this server: it has a host name to bind them to (see `passkey_note` when not).",
+            "type": "boolean"
+          },
           "server_mode": {
             "type": "boolean"
           },
@@ -13088,7 +13541,12 @@
         "required": [
           "server_mode",
           "setup_required",
-          "setup_allowed"
+          "setup_allowed",
+          "passkey_supported",
+          "passkey_rp_id",
+          "passkey_note",
+          "passkey_required",
+          "passkey_count"
         ],
         "type": "object"
       },
@@ -17269,6 +17727,158 @@
         "summary": "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints."
       }
     },
+    "/api/v1/auth/enrol-link/info": {
+      "post": {
+        "operationId": "enrol_link_info",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrolLinkInfo"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: whom a one-time enrolment link is for, if it is still valid."
+      }
+    },
+    "/api/v1/auth/enrol-link/passkey": {
+      "post": {
+        "operationId": "enrol_link_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolLinkPasskeyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: redeem an enrolment link with a passkey. Every earlier way to sign in is removed; signs in."
+      }
+    },
+    "/api/v1/auth/enrol-link/passkey/options": {
+      "post": {
+        "operationId": "enrol_link_passkey_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: first step of redeeming an enrolment link with a passkey: the options."
+      }
+    },
+    "/api/v1/auth/enrol-link/password": {
+      "post": {
+        "operationId": "enrol_link_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrolLinkPasswordBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: redeem an enrolment link with a new password. Every earlier way to sign in is removed; answers `enrolment_required` (an authenticator follows)."
+      }
+    },
     "/api/v1/auth/invite/accept": {
       "post": {
         "operationId": "auth_invite_accept",
@@ -17305,6 +17915,82 @@
           }
         },
         "summary": "Server mode: accept an invite (choose a username and password); continues like the password step."
+      }
+    },
+    "/api/v1/auth/invite/passkey": {
+      "post": {
+        "operationId": "invite_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewAccountPasskeyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: finish accepting an invite with a passkey (no password) and sign in."
+      }
+    },
+    "/api/v1/auth/invite/passkey/options": {
+      "post": {
+        "operationId": "invite_passkey_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitePasskeyOptionsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: first step of accepting an invite with a passkey: the options."
       }
     },
     "/api/v1/auth/invites": {
@@ -17735,6 +18421,261 @@
         "summary": "Server mode, owners of the project: give a member a role. A demotion ends their sessions and narrows their tokens; the last owner cannot be demoted. Needs a fresh sign-in."
       }
     },
+    "/api/v1/auth/passkey/login": {
+      "post": {
+        "operationId": "passkey_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyLoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: sign in with a passkey (user verification required). Throttled and audited like a password sign-in; sets the session cookie."
+      }
+    },
+    "/api/v1/auth/passkey/login/options": {
+      "post": {
+        "operationId": "passkey_login_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginOptionsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the options for signing in with a passkey. With a username they list that account's passkeys (decoys for a name that has none); without, the authenticator offers its own."
+      }
+    },
+    "/api/v1/auth/passkeys": {
+      "get": {
+        "operationId": "passkeys_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PasskeyView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the signed-in account's passkeys (name, created, last used; no key material)."
+      },
+      "post": {
+        "operationId": "passkeys_add",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyAddBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyAdded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: add a passkey (finish an enrolment). Needs a fresh sign-in; gives the session a new id."
+      }
+    },
+    "/api/v1/auth/passkeys/options": {
+      "post": {
+        "operationId": "passkeys_options",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the options for adding a passkey, bound to this account and session. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/passkeys/{id}": {
+      "delete": {
+        "operationId": "passkey_remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: remove a passkey and end the account's other sessions. Needs a fresh sign-in; refused for the last second factor of an account that needs one, or the last passkey while the server requires one."
+      },
+      "put": {
+        "operationId": "passkey_rename",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyRenameBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: rename a passkey."
+      }
+    },
     "/api/v1/auth/password": {
       "post": {
         "operationId": "auth_password",
@@ -17908,6 +18849,44 @@
         "summary": "Server mode: end one of the user's sessions by its reference."
       }
     },
+    "/api/v1/auth/settings/passkey-required": {
+      "put": {
+        "operationId": "passkey_required_set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasskeyRequiredBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyRequiredResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: require every account to have a passkey, or stop requiring it. Needs a fresh sign-in and, to turn it on, a passkey on the administrator's own account."
+      }
+    },
     "/api/v1/auth/setup": {
       "post": {
         "operationId": "auth_setup",
@@ -17944,6 +18923,82 @@
           }
         },
         "summary": "Server mode: claim the first owner account with the one-time setup token. Answers like the password step (`enrolment_required`)."
+      }
+    },
+    "/api/v1/auth/setup/passkey": {
+      "post": {
+        "operationId": "setup_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewAccountPasskeyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: finish setup with a passkey: creates the first owner (no password) and signs in."
+      }
+    },
+    "/api/v1/auth/setup/passkey/options": {
+      "post": {
+        "operationId": "setup_passkey_options",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupPasskeyOptionsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyOptionsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: first step of setup with a passkey: the options. Nothing is made and the setup token is not used yet."
       }
     },
     "/api/v1/auth/state": {
@@ -18173,6 +19228,44 @@
           }
         },
         "summary": "Server mode, server admins: enable an account again. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/users/{id}/enrolment-link": {
+      "post": {
+        "operationId": "user_enrolment_link",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrolmentLinkCreated"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins and project owners: a one-time link (an hour) that replaces how someone signs in; ends their sessions and revokes their tokens. Needs a fresh sign-in. The token is shown once."
       }
     },
     "/api/v1/auth/users/{id}/reset-second-factor": {

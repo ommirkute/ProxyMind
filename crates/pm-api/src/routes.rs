@@ -36,6 +36,12 @@ use crate::auth_api::{
     auth_user_disable, auth_user_enable, auth_user_reset_second_factor, auth_users,
 };
 use crate::mcp_api::{MCP_BODY_LIMIT, mcp_endpoint};
+use crate::passkey_api::{
+    PASSKEY_BODY_LIMIT, enrol_link_info, enrol_link_passkey, enrol_link_passkey_options, enrol_link_password,
+    invite_passkey, invite_passkey_options, passkey_login, passkey_login_options, passkey_remove, passkey_rename,
+    passkey_required_set, passkeys_add, passkeys_list, passkeys_options, setup_passkey, setup_passkey_options,
+    user_enrolment_link,
+};
 use crate::server_mode::Me;
 use crate::tokens_api::{token_create, token_revoke, tokens_list};
 use pm_service::access::Role;
@@ -333,6 +339,58 @@ pub fn api() -> Router<AppState> {
         .route("/auth/users/{id}/reset-second-factor", post(auth_user_reset_second_factor))
         .route("/auth/invites", get(auth_invites).post(auth_invite_create))
         .route("/auth/invites/{id}", axum::routing::delete(auth_invite_revoke))
+        // Passkeys (ADR-0022 step 7).
+        .route(
+            "/auth/passkey/login/options",
+            post(passkey_login_options).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/passkey/login",
+            post(passkey_login).layer(axum::extract::DefaultBodyLimit::max(PASSKEY_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/setup/passkey/options",
+            post(setup_passkey_options).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/setup/passkey",
+            post(setup_passkey).layer(axum::extract::DefaultBodyLimit::max(PASSKEY_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/invite/passkey/options",
+            post(invite_passkey_options).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/invite/passkey",
+            post(invite_passkey).layer(axum::extract::DefaultBodyLimit::max(PASSKEY_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/enrol-link/info",
+            post(enrol_link_info).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/enrol-link/passkey/options",
+            post(enrol_link_passkey_options).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/enrol-link/passkey",
+            post(enrol_link_passkey).layer(axum::extract::DefaultBodyLimit::max(PASSKEY_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/enrol-link/password",
+            post(enrol_link_password).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/passkeys",
+            get(passkeys_list).post(passkeys_add).layer(axum::extract::DefaultBodyLimit::max(PASSKEY_BODY_LIMIT)),
+        )
+        .route("/auth/passkeys/options", post(passkeys_options))
+        .route("/auth/passkeys/{id}", axum::routing::put(passkey_rename).delete(passkey_remove))
+        .route(
+            "/auth/settings/passkey-required",
+            axum::routing::put(passkey_required_set).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/auth/users/{id}/enrolment-link", post(user_enrolment_link))
 }
 
 #[derive(Deserialize)]

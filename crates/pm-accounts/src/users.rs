@@ -58,6 +58,16 @@ pub(crate) fn normalise_username(s: &str) -> Result<String> {
     Ok(t)
 }
 
+/// What a new account is made from (the password route and the passkey route differ only in `phc` and `id`).
+pub(crate) struct NewAccount<'a> {
+    pub username: &'a str,
+    pub display_name: &'a str,
+    /// A fixed id, when something (a passkey's user handle) was made from it before the account existed.
+    pub id: Option<String>,
+    /// The password hash; `None` for an account that has no password.
+    pub phc: Option<&'a str>,
+}
+
 fn is_constraint(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation)
 }
@@ -144,16 +154,22 @@ impl Accounts {
 
     // ---- creating accounts -----------------------------------------------------------------------------------
 
-    fn insert_user(
+    /// `phc` is `None` for an account that has no password (a passkey-only account); `id` is `Some` when the id was
+    /// fixed before the account existed (a passkey's user handle is made from it).
+    pub(crate) fn insert_user(
         &self,
         tx: &Transaction<'_>,
         username: &str,
         display_name: &str,
         server_admin: bool,
-        phc: &str,
+        phc: Option<&str>,
+        id: Option<String>,
     ) -> Result<User> {
         let now = self.now();
-        let id = new_id("u_")?;
+        let id = match id {
+            Some(id) => id,
+            None => new_id("u_")?,
+        };
         let display = match clip(display_name.trim(), 100) {
             d if d.is_empty() => username.to_string(),
             d => d,
@@ -164,10 +180,12 @@ impl Accounts {
             rusqlite::params![id, username, display, i64::from(server_admin), now],
         )
         .map_err(|e| if is_constraint(&e) { AccountError::UsernameTaken } else { e.into() })?;
-        tx.execute(
-            "INSERT INTO credentials (id, user_id, kind, secret, created_at) VALUES (?1, ?2, 'password', ?3, ?4)",
-            rusqlite::params![new_id("c_")?, id, phc.as_bytes(), now],
-        )?;
+        if let Some(phc) = phc {
+            tx.execute(
+                "INSERT INTO credentials (id, user_id, kind, secret, created_at) VALUES (?1, ?2, 'password', ?3, ?4)",
+                rusqlite::params![new_id("c_")?, id, phc.as_bytes(), now],
+            )?;
+        }
         Ok(User {
             id,
             username: username.to_string(),
@@ -205,7 +223,7 @@ impl Accounts {
         })
     }
 
-    fn setup_token_usable(&self, conn: &Connection, token: &str) -> Result<bool> {
+    pub(crate) fn setup_token_usable(&self, conn: &Connection, token: &str) -> Result<bool> {
         let row: Option<(i64, Option<i64>)> = conn
             .query_row(
                 "SELECT expires_at, used_at FROM setup_tokens WHERE token_hash = ?1",
@@ -239,29 +257,42 @@ impl Accounts {
         let phc = self.hash_password(password)?;
         let hash = Self::mac(&self.keys.token, setup_token.as_bytes());
         self.tx(|tx| {
-            let (kind, expires_at, used): (String, i64, Option<i64>) = tx
-                .query_row("SELECT kind, expires_at, used_at FROM setup_tokens WHERE token_hash = ?1", [&hash], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })
-                .optional()?
-                .ok_or(AccountError::InvalidSetupToken)?;
-            if used.is_some() || expires_at <= self.now() {
-                return Err(AccountError::InvalidSetupToken);
-            }
-            if kind == "bootstrap" && owner_exists(tx)? {
-                return Err(AccountError::OwnerExists);
-            }
-            let burned = tx.execute(
-                "UPDATE setup_tokens SET used_at = ?1 WHERE token_hash = ?2 AND used_at IS NULL",
-                rusqlite::params![self.now(), hash],
-            )?;
-            if burned != 1 {
-                return Err(AccountError::InvalidSetupToken);
-            }
-            let user = self.insert_user(tx, &username, display_name, true, &phc)?;
-            self.audit(tx, "owner_created", Some(&user.id), "anonymous", client.addr.as_deref(), &kind)?;
-            Ok(user)
+            let acct = NewAccount { username: &username, display_name, id: None, phc: Some(&phc) };
+            self.finish_setup_in(tx, &hash, acct, client)
         })
+    }
+
+    /// Burns the setup token (`hash`) and creates the first owner, in the caller's transaction. Shared by the password
+    /// and passkey routes: same checks, same audit entry.
+    pub(crate) fn finish_setup_in(
+        &self,
+        tx: &Transaction<'_>,
+        hash: &[u8],
+        acct: NewAccount<'_>,
+        client: &ClientInfo,
+    ) -> Result<User> {
+        let (kind, expires_at, used): (String, i64, Option<i64>) = tx
+            .query_row("SELECT kind, expires_at, used_at FROM setup_tokens WHERE token_hash = ?1", [hash], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()?
+            .ok_or(AccountError::InvalidSetupToken)?;
+        if used.is_some() || expires_at <= self.now() {
+            return Err(AccountError::InvalidSetupToken);
+        }
+        if kind == "bootstrap" && owner_exists(tx)? {
+            return Err(AccountError::OwnerExists);
+        }
+        let burned = tx.execute(
+            "UPDATE setup_tokens SET used_at = ?1 WHERE token_hash = ?2 AND used_at IS NULL",
+            rusqlite::params![self.now(), hash],
+        )?;
+        if burned != 1 {
+            return Err(AccountError::InvalidSetupToken);
+        }
+        let user = self.insert_user(tx, acct.username, acct.display_name, true, acct.phc, acct.id)?;
+        self.audit(tx, "owner_created", Some(&user.id), "anonymous", client.addr.as_deref(), &kind)?;
+        Ok(user)
     }
 
     /// Local-console recovery (`proxymind server reset-owner`): ends every session and pending sign-in, voids earlier
@@ -370,7 +401,7 @@ impl Accounts {
         })
     }
 
-    fn invite_usable(&self, conn: &Connection, token: &str) -> Result<bool> {
+    pub(crate) fn invite_usable(&self, conn: &Connection, token: &str) -> Result<bool> {
         let row: Option<(i64, Option<i64>, Option<i64>)> = conn
             .query_row(
                 "SELECT expires_at, used_at, revoked_at FROM invites WHERE token_hash = ?1",
@@ -402,40 +433,53 @@ impl Accounts {
         let phc = self.hash_password(password)?;
         let hash = Self::mac(&self.keys.token, invite_token.as_bytes());
         self.tx(|tx| {
-            let (id, role, project, creator): (String, String, Option<String>, String) = tx
-                .query_row(
-                    "SELECT id, role, project_id, created_by FROM invites WHERE token_hash = ?1 \
-                     AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?2",
-                    rusqlite::params![hash, self.now()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?
-                .ok_or(AccountError::InvalidInvite)?;
-            if !find_user(tx, &creator)?.is_some_and(|u| u.status == UserStatus::Active) {
-                return Err(AccountError::InvalidInvite);
-            }
-            let user = self.insert_user(tx, &username, display_name, false, &phc)?;
-            tx.execute(
-                "UPDATE invites SET used_at = ?1, used_by = ?2 WHERE id = ?3",
-                rusqlite::params![self.now(), user.id, id],
-            )?;
-            if let Some(project) = project {
-                tx.execute(
-                    "INSERT INTO memberships (project_id, user_id, role, created_at, created_by) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![project, user.id, role, self.now(), creator],
-                )?;
-            }
-            self.audit(
-                tx,
-                "user_created",
-                Some(&user.id),
-                "anonymous",
-                client.addr.as_deref(),
-                &format!("invite {id}"),
-            )?;
-            Ok(user)
+            let acct = NewAccount { username: &username, display_name, id: None, phc: Some(&phc) };
+            self.finish_invite_in(tx, &hash, acct, client)
         })
+    }
+
+    /// Burns the invite (`hash`), creates the user with the invite's membership and records it, in the caller's
+    /// transaction. Shared by the password and passkey routes.
+    pub(crate) fn finish_invite_in(
+        &self,
+        tx: &Transaction<'_>,
+        hash: &[u8],
+        acct: NewAccount<'_>,
+        client: &ClientInfo,
+    ) -> Result<User> {
+        let (invite_id, role, project, creator): (String, String, Option<String>, String) = tx
+            .query_row(
+                "SELECT id, role, project_id, created_by FROM invites WHERE token_hash = ?1 \
+                 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?2",
+                rusqlite::params![hash, self.now()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .ok_or(AccountError::InvalidInvite)?;
+        if !find_user(tx, &creator)?.is_some_and(|u| u.status == UserStatus::Active) {
+            return Err(AccountError::InvalidInvite);
+        }
+        let user = self.insert_user(tx, acct.username, acct.display_name, false, acct.phc, acct.id)?;
+        tx.execute(
+            "UPDATE invites SET used_at = ?1, used_by = ?2 WHERE id = ?3",
+            rusqlite::params![self.now(), user.id, invite_id],
+        )?;
+        if let Some(project) = project {
+            tx.execute(
+                "INSERT INTO memberships (project_id, user_id, role, created_at, created_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![project, user.id, role, self.now(), creator],
+            )?;
+        }
+        self.audit(
+            tx,
+            "user_created",
+            Some(&user.id),
+            "anonymous",
+            client.addr.as_deref(),
+            &format!("invite {invite_id}"),
+        )?;
+        Ok(user)
     }
 
     // ---- passwords -------------------------------------------------------------------------------------------

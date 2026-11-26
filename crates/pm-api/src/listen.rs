@@ -226,6 +226,49 @@ pub fn plan(input: &ListenInput<'_>) -> Result<ListenPlan, ListenError> {
 }
 
 impl ListenPlan {
+    /// The relying party for passkeys (ADR-0022 step 7): the **host name of the public origin** is the RP id, and the
+    /// origins a browser may report are the allowed origins whose host is that name (or a subdomain of it).
+    ///
+    /// A WebAuthn RP id must be a domain name, never an IP address, so a plan whose public origin is an IP address
+    /// has no passkeys, with one exception: a loopback-only server started without `--public-url` offers
+    /// `localhost` (browsers treat it as a secure context), so a first look works at `http://localhost:7777`.
+    /// `Err` says why there is none and what to change.
+    pub fn passkey_rp(&self) -> Result<pm_accounts::webauthn::RelyingParty, String> {
+        use url::Host;
+        let host_of = |origin: &str| -> Option<Host<String>> {
+            url::Url::parse(origin).ok().and_then(|u| u.host().map(|h| h.to_owned()))
+        };
+        let id = match host_of(&self.public_origin) {
+            Some(Host::Domain(d)) => d.to_ascii_lowercase(),
+            _ => {
+                let has_localhost = self
+                    .allowed_origins
+                    .iter()
+                    .any(|o| matches!(host_of(o), Some(Host::Domain(d)) if d.eq_ignore_ascii_case("localhost")));
+                if has_localhost {
+                    "localhost".to_string()
+                } else {
+                    return Err("passkeys need a host name, not an IP address: start the server with --public-url \
+                         https://<a host name>"
+                        .into());
+                }
+            }
+        };
+        let origins: Vec<String> = self
+            .allowed_origins
+            .iter()
+            .filter(|o| match host_of(o) {
+                Some(Host::Domain(d)) => {
+                    let d = d.to_ascii_lowercase();
+                    d == id || d.ends_with(&format!(".{id}"))
+                }
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        Ok(pm_accounts::webauthn::RelyingParty { id, name: "ProxyMind".into(), origins })
+    }
+
     /// The names a self-signed certificate must cover: every allowed host, and the address bound when it is a
     /// specific one.
     pub fn certificate_names(&self, listen: SocketAddr) -> Vec<String> {
@@ -358,6 +401,54 @@ mod tests {
             public_url: url,
             extra_hosts: &[],
         }
+    }
+
+    #[test]
+    fn passkey_rp_follows_the_public_host_name() {
+        let own = |url: &str| {
+            plan(&ListenInput {
+                listen: "0.0.0.0:443".parse().unwrap(),
+                tls: TlsKind::Own,
+                behind_proxy: false,
+                trusted_proxies: &[],
+                public_url: Some(url),
+                extra_hosts: &["pm.internal".to_string(), "sub.pm.example.com".to_string()],
+            })
+            .unwrap()
+        };
+        let rp = own("https://PM.Example.com:8443").passkey_rp().unwrap();
+        assert_eq!(rp.id, "pm.example.com");
+        // Only origins on that name or below it can have produced the id's hash.
+        assert_eq!(
+            rp.origins,
+            vec!["https://pm.example.com:8443".to_string(), "https://sub.pm.example.com:8443".to_string()]
+        );
+        // An IP address is no RP id.
+        let err = own("https://10.0.0.5").passkey_rp().unwrap_err();
+        assert!(err.contains("host name"), "{err}");
+        // Loopback without a public URL offers localhost; an IP public URL on loopback does not.
+        let lo = plan(&ListenInput {
+            listen: "127.0.0.1:7777".parse().unwrap(),
+            tls: TlsKind::None,
+            behind_proxy: false,
+            trusted_proxies: &[],
+            public_url: None,
+            extra_hosts: &[],
+        })
+        .unwrap();
+        let rp = lo.passkey_rp().unwrap();
+        assert_eq!(rp.id, "localhost");
+        assert_eq!(rp.origins, vec!["http://localhost:7777".to_string()]);
+        let named = plan(&ListenInput {
+            listen: "127.0.0.1:7777".parse().unwrap(),
+            tls: TlsKind::None,
+            behind_proxy: false,
+            trusted_proxies: &[],
+            public_url: Some("http://localhost:7777"),
+            extra_hosts: &[],
+        })
+        .unwrap();
+        assert_eq!(named.passkey_rp().unwrap().id, "localhost");
     }
 
     #[test]

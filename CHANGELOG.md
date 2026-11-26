@@ -7,6 +7,22 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Passkeys on the project server** (ADR-0022 step 7, roadmap 3.1). Sign in with a passkey (WebAuthn: fingerprint, face, PIN or a
+  security key; user verification always required) instead of a password and authenticator app, which stays as the fallback. The
+  verifier is our own, on ring, with a strict bounded CBOR decoder (ES256, EdDSA and RS256; no OpenSSL and no new dependency: the
+  `webauthn-rs` tree would add 96 crates and a second crypto stack), tested with captured real ceremonies, RFC vectors and a
+  software authenticator for every refusal. Account → Passkeys adds, renames and removes them (removing ends your other sessions;
+  an owner's last second factor is protected); the sign-in page has "Sign in with a passkey", with or without a username (options
+  for names without a passkey carry decoy ids, so they do not reveal accounts); the setup page and invites offer a passkey
+  (an account with no password at all), and `reset-owner`'s setup URL does too. The RP id is the host name of `--public-url` (never an
+  IP address; loopback-only servers offer `localhost`); renaming the server invalidates passkeys (documented). A counter that does not
+  grow is refused and written to the security log as a possible clone. **Require a passkey** (Users & invites, administrators): accounts
+  without one may sign in by password and authenticator only to add one, accounts with one cannot use a password. **Enrolment links**:
+  an owner or administrator makes a one-time link (an hour, shown once, `#enrol=…`) for someone who lost every way in, a passkey-only
+  user included; it ends their sessions and tokens and replaces how they sign in. New routes under `/api/v1/auth` (passkey login,
+  setup/invite/enrolment-link with a passkey, `passkeys`, `settings/passkey-required`, `users/{id}/enrolment-link`), `GET /auth/state`
+  and `/me` say what the UI needs, `pm-accounts` migration 3, an access-matrix update, a browser test with Chromium's virtual
+  authenticator. See `docs/server-mode.md` ("Passkeys"). Not done: attestation, browser autofill, listing unused links, OIDC (step 8).
 - **Roles and memberships on the project server** (ADR-0022 step 6, roadmap 3.2, threat model F-5 half and F-7). Owner,
   tester and viewer are now enforced: every public service method that takes an actor asks for a permission first (56
   permissions in `docs/access.md`, a source-scan test fails on a method that does not), the API checks each route and

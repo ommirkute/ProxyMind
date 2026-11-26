@@ -1,12 +1,12 @@
 # Running a project server (accounts, sessions, TLS)
 
 `proxymind ui` is for one person on one machine. `proxymind serve --accounts` is the same web UI and API for a small
-team: people sign in with a password and an authenticator app, a browser holds a session instead of the install token,
+team: people sign in with a passkey, or a password and an authenticator app, a browser holds a session instead of the install token,
 and the server listens on a network address over TLS. The design is ADR-0022; this page is how to run it and what is
 not finished.
 
 **What is finished.** Roles are enforced (ADR-0022 step 6): owner, tester and viewer decide what a person, and what each of
-their tokens, may do ("Roles and members" below). **Not finished:** passkeys and OIDC (steps 7 and 8), the per-host binding
+their tokens, may do ("Roles and members" below), and passkeys work ("Passkeys" below, step 7). **Not finished:** OIDC (step 8), the per-host binding
 of secret placeholders (a placeholder is per user now, but still unredacts toward any in-scope host), and the server's signed
 checkpoint schedule. Run it for a small team you trust with the project's data; the security review of step 9 is still to come.
 
@@ -97,6 +97,8 @@ browsers never send to a server. Setup is served only over TLS (or behind a trus
 loopback, to a peer on the same machine; otherwise the setup endpoint answers 403. Setup creates the account (password of
 at least 12 characters), makes it **server admin and owner of the served project**, and goes straight into TOTP
 enrolment: there is no session until an authenticator is confirmed. The recovery codes shown at that moment are shown once.
+**Or with a passkey instead** (recommended, see "Passkeys"): the setup page asks for a username and a passkey, creates an
+owner with no password at all, and signs in; nothing is made and the setup token is not used until the passkey registers.
 
 In the browser, open that URL: the web UI shows the setup screen (see "The web UI" below). Invited people do the same through an invite (`POST /api/v1/auth/invites`, or the link
 `https://pm.example.com/#invite=<token>`): choose a username and password, enrol an authenticator, sign in.
@@ -109,7 +111,8 @@ proxymind server reset-owner --server-home ~/.proxymind/server --public-url http
 
 Run on the server host as the user that owns the server home (write access to it is the same authority as the data). It ends
 every session, voids older setup tokens, writes a `local_console` entry to the security log and prints a new setup URL that
-creates a new owner (disable the old account afterwards). It works while the server runs.
+creates a new owner, with a password and authenticator or with a passkey (disable the old account afterwards). It works
+while the server runs.
 
 ## What the server enforces
 
@@ -135,6 +138,57 @@ creates a new owner (disable the old account afterwards). It works while the ser
   the process log or into an error message (a test greps for them).
 - **Not accepted in server mode:** the install token (`/auth?token=` is 404, `Authorization: Bearer <install token>` is 401).
   What replaces it for scripts, CI and agents is a `pm3_` token (next section).
+
+## Passkeys
+
+A **passkey** (WebAuthn) is the recommended way in: the browser asks the person's device (fingerprint, face, PIN, a
+security key, a phone) to sign a challenge for this server, so there is no shared secret to phish or leak. User
+verification is always required, so a passkey sign-in is **a complete sign-in on its own** and counts as the owner's required
+second factor. Password plus authenticator app stays as the fallback for devices without passkeys; both are allowed from the
+start, and an owner can **require** passkeys (below). ADR-0022 step 7 has the design.
+
+- **Add one:** Account → Passkeys → "Add a passkey" (a name is optional; it asks for a fresh sign-in). Add one per device; at
+  most ten per account. List, rename and remove are on the same panel. Removing one ends your other sessions.
+- **Sign in:** the sign-in page has "Sign in with a passkey". With no username typed, the browser offers the passkeys it holds
+  for this server (usernameless); the re-authentication dialog uses the signed-in account's own.
+- **Setup and invites** offer a passkey (recommended) or a password; with a passkey the account has no password.
+- **The host name is the RP id.** A passkey belongs to the server's host name, the host of `--public-url` (`pm.example.com`), never
+  an IP address: a server whose public URL is an IP address has no passkeys, and the sign-in page says so. A loopback-only
+  server started without `--public-url` offers `localhost`, so a first look works at `http://localhost:7777` but not at
+  `http://127.0.0.1:7777`. The page must be at that host name (or below it) to add or use a passkey. **Renaming the server
+  invalidates every passkey.** Plan the name before people enrol, or keep an owner with a password and an authenticator so the
+  server can be re-enrolled, and issue enrolment links (below) after a rename.
+- **What the server checks** (`clientDataJSON` type, the single-use five-minute challenge bound to who asked, the exact origin,
+  the RP id hash, user presence and verification, the signature; ES256, EdDSA and RS256 only; attestation is not requested and not
+  verified) is in ADR-0022's step 7 note. The signature **counter** must grow: if it does not (and either count is non-zero) the
+  sign-in is refused like any failure and the security log says `passkey_clone_suspected`; authenticators that always report zero
+  are fine.
+- **Throttling and audit** are the password sign-in's: the same account and address counters, one `invalid credentials` answer for
+  every refusal, every success and failure in the security log (a credential id, key or signature is never written).
+- **Usernames are not revealed.** The options for a name that has no passkey (unknown, disabled, or none enrolled) list stable
+  decoy credential ids, so asking does not tell. (An account with more than three passkeys shows a count a decoy does not.)
+- **Require a passkey** (Users & invites → "Passkeys on this server"; server administrators, fresh sign-in, audited; you need a passkey
+  yourself first). The rule: **every account must have a passkey.** An account without one can still sign in with its password
+  and authenticator, but only to add one: the session is *restricted*, the server answers 403 `passkey_enrolment_required` to
+  everything except who-am-I, sign-out and the passkey endpoints, and the app shows only "Add a passkey to continue". An account
+  with a passkey **cannot sign in with a password** (403 `passkey_required` after the right password, so a phished password
+  gets no session) and cannot remove its last passkey. Recovery codes are part of the password route, so they stop working for
+  such an account too. `pm3_` tokens are machine credentials and are not affected.
+- **Without the rule,** an account that has a passkey and no authenticator also cannot finish a password sign-in (a password alone is never
+  enough, and a password holder is not offered to enrol an authenticator); one that has both may use either. An authenticator
+  can be turned off by an account that has a passkey.
+- **The owner always needs a second factor.** A passkey is one; so is an authenticator. Removing the last one of an owner or
+  administrator who has a password is refused (409 `second_factor_required`), as is removing the last passkey of a passkey-only account (409 `last_passkey`).
+- **Recovery.** Recovery codes work for accounts that have a password and authenticator. Someone who lost every way in, a passkey-only
+  user who lost their device included, is recovered by an **enrolment link**: an owner (Members → "Recovery link", for a tester or
+  viewer; an administrator, in Users, for anyone else) makes a one-time link `…/#enrol=<token>` that lives an hour and works once
+  (a fresh sign-in is needed; the link is shown once). **Making it ends the person's sessions and revokes their tokens; using it replaces how
+  they sign in**: their passkeys, password, authenticator and recovery codes are removed and they register a new passkey (signed
+  in at once) or choose a new password (then enrol an authenticator). A project owner cannot issue one for a peer owner or an
+  administrator, nor for themselves. If the last owner is locked out, `proxymind server reset-owner` (above) prints a setup URL for a new
+  owner, who can enrol a passkey.
+- **Browsers.** Passkeys need a secure context: HTTPS, or `localhost`. Chromium, Firefox and Safari work; an authenticator that cannot do
+  user verification (a security key with no PIN set) is refused with a message.
 
 ## Roles and members
 
@@ -181,20 +235,25 @@ single-user mode that does not answer 200 and nothing changes (no extra screen, 
   type the secret, then a code), then save the ten recovery codes, which are shown once with copy and download. The
   token is taken out of the address bar as soon as it is read. Without the token the page says the link is printed on
   the server console (and lets you paste it); where setup is not served (no TLS and not the server's own machine) it says so.
-- **Sign-in:** username and password, then the code from the authenticator app, or "Use a recovery code". An account without
+- **Sign-in:** "Sign in with a passkey" (usernameless), or username and password, then the code from the authenticator app, or "Use a recovery code". An account without
   an authenticator goes through the enrolment first. A wrong password, unknown user and wrong code all show the same
   text; a throttled attempt shows the server's message with the wait.
-- **Invite** (`/#invite=<token>`): choose username, display name and password, then the same enrolment and recovery codes.
+- **Invite** (`/#invite=<token>`): choose username and display name, then a passkey (recommended) or a password (then the same
+  enrolment and recovery codes).
+- **Enrolment link** (`/#enrol=<token>`): says whose account it recovers and that it replaces how they sign in; then a new passkey or
+  a new password. The token is taken out of the address bar.
+- **Add a passkey to continue:** what an account without a passkey sees after signing in while passkeys are required.
 - **Session lost:** when the server answers 401 (session expired, signed out elsewhere, password changed) the app is
   replaced by the sign-in with "Your session ended", and after signing in you are back on the page you were on.
 - **Fresh sign-in:** actions that need one (invites, users, password, authenticator, recovery codes) open a "Confirm it's
   you" dialog (password, then code); the action is then repeated once. Cancelling leaves it undone.
 - **Not a member:** a signed-in account with no role in the served project gets a screen saying so, with a sign-out button.
 - **Account** (navigation entry "Account", server mode only): who you are (user, actor, role, project), your sessions
-  (this one is marked; sign one out, or sign out everywhere else), change password, set up a new authenticator or turn it
+  (this one is marked; sign one out, or sign out everywhere else), passkeys (add, rename, remove), change password, set up a new authenticator or turn it
   off (some accounts must keep one), new recovery codes, sign out.
-- **Users & invites** (server administrators and project owners): users with disable, enable and reset second factor
-  (administrators); invites with role and expiry, the link shown once with a copy button, the list and revoke.
+- **Users & invites** (server administrators and project owners): "Passkeys on this server" (the require rule; administrators), members
+  with roles and a recovery link (owners), users with disable, enable, reset second factor and a recovery link (administrators);
+  invites with role and expiry, the link shown once with a copy button, the list and revoke.
 
 Nothing secret is written to browser storage or the console. `next` is followed only if it is a path on this origin.
 `POST /auth/login/enrol` and `POST /auth/totp/begin` also return `qr_svg`, the authenticator URI as an SVG QR code (the UI
@@ -207,20 +266,27 @@ state-changing call needs the CSRF headers above. Errors are `{"error": "<text>"
 
 | Endpoint | Session | What it does |
 | --- | --- | --- |
-| `GET /state` | no | `{server_mode, setup_required, setup_allowed}` |
+| `GET /state` | no | `{server_mode, setup_required, setup_allowed, passkey_supported, passkey_rp_id, passkey_note, passkey_required, passkey_count?}` (`passkey_count` only with a live session cookie) |
 | `POST /setup` `{setup_token, username, display_name?, password, next?}` | no | First owner; answers like `login` (`enrolment_required`). |
 | `POST /login` `{username, password, next?}` | no | `{step, pending?, expires_at?, user?, recovery_codes?, next}` with `step` = `authenticated` (cookie set), `second_factor_required` or `enrolment_required`. |
 | `POST /login/second-factor` `{pending, code, next?}` | no | TOTP code or recovery code (`ABCD-EFGH-IJKL-MNOP`); `authenticated` and the cookie. |
 | `POST /login/enrol` `{pending}` | no | `{secret_base32, otpauth_uri, qr_svg}`, once. |
 | `POST /login/enrol/confirm` `{pending, code, next?}` | no | Confirms, sets the cookie, returns `recovery_codes` once. |
 | `POST /invite/accept` `{invite, username, display_name?, password, next?}` | no | Creates the account, continues like `login`. |
-| `GET /me` | yes | `{user, actor, project_id, role, session, fresh}` |
+| `GET /me` | yes | `{user, actor, project_id, role, session, fresh, passkey_count, passkey_enrolment_required}` |
 | `POST /logout` | yes | Ends this session. |
 | `GET /sessions`, `DELETE /sessions/{reference}`, `POST /sessions/revoke-all` `{keep_current?}` | yes | List, end one, "sign out everywhere". |
 | `POST /password` `{current, new_password}` | fresh | Ends other sessions, renews this one. |
 | `POST /totp/begin`, `POST /totp/confirm` `{code}`, `POST /totp/disable`, `POST /recovery-codes` | fresh | Authenticator and recovery codes. |
 | `GET /users`, `POST /users/{id}/disable`, `/enable`, `/reset-second-factor` | admin (+fresh) | Account administration. |
 | `GET /invites`, `POST /invites` `{role, ttl_hours?}`, `DELETE /invites/{id}` | admin or project owner (+fresh) | Invites; the token is returned once, with `url` = `<origin>/#invite=<token>`. |
+| `POST /passkey/login/options` `{username?}`, `POST /passkey/login` `{response, next?}` | no | Sign in with a passkey (options, then the assertion); sets the cookie. |
+| `POST /setup/passkey/options` `{setup_token, username, display_name?}`, `POST /setup/passkey` `{name?, response, next?}` | no | First owner with a passkey (no password); signs in. |
+| `POST /invite/passkey/options` `{invite, username, display_name?}`, `POST /invite/passkey` `{name?, response, next?}` | no | Accept an invite with a passkey; signs in. |
+| `POST /enrol-link/info` `{token}`, `POST /enrol-link/passkey/options` `{token}`, `POST /enrol-link/passkey` `{name?, response, next?}`, `POST /enrol-link/password` `{token, new_password, next?}` | no | Redeem a one-time enrolment link: whom it is for, a new passkey (signs in) or a new password (`enrolment_required`). |
+| `GET /passkeys`; `POST /passkeys/options`, `POST /passkeys` `{name?, response}`; `PUT /passkeys/{id}` `{name}`; `DELETE /passkeys/{id}` | yes (adding and removing: fresh) | List (no key material), add, rename and remove the signed-in account's passkeys. Adding and removing give the session a new id; removing ends the other sessions. |
+| `PUT /settings/passkey-required` `{required}` | admin (+fresh) | Require a passkey of every account, or stop. |
+| `POST /users/{id}/enrolment-link` | admin or project owner (+fresh) | A one-time recovery link (an hour); ends the person's sessions and revokes their tokens. The token is returned once, with `url` = `<origin>/#enrol=<token>`. |
 
 `next` is a path on this server: it must start with exactly one `/`, hold only visible ASCII and no backslash, else the answer
 says `/`.
@@ -306,5 +372,7 @@ token's: `--actor` means nothing here.
   can still send it to any in-scope host (threat model F-5, left for the security review).
 - REST reads by an agent token of routes without an actor (findings, the model) are not redacted; a viewer's are.
 - Export, delete and seal of the project are file operations, not service methods yet (3.3); "viewers comment" waits for 3.4.
-- Step-up is "sign in again"; there is no password-only re-check endpoint.
+- Step-up is "sign in again" (with a passkey or a password and code); there is no password-only re-check endpoint.
+- Passkeys: attestation is not requested or verified, there is no browser autofill for the username field, and unused enrolment links
+  cannot be listed or revoked (a newer one replaces them; they expire in an hour).
 - The server's audit checkpoints (signed, hourly) are not scheduled yet.

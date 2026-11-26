@@ -10,7 +10,11 @@
 //!   Unknown users cost the same: a dummy hash is verified and the failure looks identical.
 //! * **Second factor:** TOTP (RFC 6238; secret encrypted with ChaCha20-Poly1305, user id as associated data, a used
 //!   step is never accepted twice) or a single-use recovery code. Owners, server admins and testers must have one
-//!   (viewers too unless [`Config::allow_password_only_viewers`]); passkeys (step 7) will be a third kind of credential.
+//!   (viewers too unless [`Config::allow_password_only_viewers`]); a passkey is a complete sign-in of its own and
+//!   counts as the second factor.
+//! * **Passkeys (step 7):** WebAuthn verified in-house with ring (`webauthn`: a strict CBOR decoder, COSE keys, the
+//!   checks of the specification), stored in `credentials`; single-use five-minute challenges; a sign counter that must
+//!   not go backwards; recovery by a one-time enrolment link; a server setting that requires them (`passkeys`).
 //! * **Sessions:** random 256-bit ids returned once, stored as HMAC-SHA256; idle 8 h and absolute 7 d by default;
 //!   rotation invalidates the old id; revocation takes effect at the next validation.
 //! * **Throttling:** per account (by the claimed handle, so unknown names are throttled the same) and per address,
@@ -33,6 +37,7 @@ mod key;
 mod login;
 mod migrations;
 mod model;
+mod passkeys;
 mod password;
 mod sessions;
 mod store;
@@ -43,7 +48,10 @@ mod tokens;
 mod totp;
 mod users;
 mod util;
+pub mod webauthn;
 
+#[cfg(test)]
+mod passkey_tests;
 #[cfg(test)]
 mod tests;
 
@@ -53,6 +61,10 @@ pub use key::{KeyPurpose, ServerKey};
 pub use model::{
     ClientInfo, InviteInfo, LoginStep, LoginSuccess, Membership, NewInvite, NewSession, Role, SecurityEvent,
     SessionInfo, SetupToken, TotpEnrolment, User, UserStatus,
+};
+pub use passkeys::{
+    AssertionResponse, EnrolmentTarget, MAX_PASSKEYS, NewEnrolmentLink, PasskeyInfo, RegistrationResponse,
+    counter_allows, user_handle,
 };
 pub use password::{Argon2Cost, check_policy as check_password_policy};
 pub use store::{Accounts, Config};

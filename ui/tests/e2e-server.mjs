@@ -4,7 +4,10 @@
 //
 // Covers setup, TOTP enrolment, recovery codes, invites, sign-out, wrong passwords, sign-in with a code and with a
 // recovery code, the account page, sessions, a lost session (401) and the re-authentication dialog (403
-// fresh_login_required). TOTP codes are computed here (RFC 6238); the server refuses a code for a step it has already
+// fresh_login_required). The last sections are passkeys (ADR-0022 step 7), with Chromium's virtual authenticator
+// (CDP `WebAuthn.addVirtualAuthenticator`: ctap2, internal, resident keys, user verification): add, sign in, rename,
+// remove, the "require a passkey" rule, an enrolment link and setup with a passkey. WebAuthn needs a secure context
+// and a host name for its RP id, so those sections use http://localhost:PORT. TOTP codes are computed here (RFC 6238); the server refuses a code for a step it has already
 // seen, so `nextCode` never repeats a step for one secret and waits for the clock when it has to.
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
@@ -50,7 +53,7 @@ async function section(name, body) {
   } catch (e) {
     failures++;
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    console.log(`  ✗ ${name} stopped: ${String(e?.message ?? e).split("\n")[0]} (screenshots failed-${slug}-N.png)`);
+    console.log(`  ✗ ${name} stopped: ${String(e?.message ?? e).split("\n").slice(0, 4).join(" / ")} (screenshots failed-${slug}-N.png)`);
     for (const [i, p] of pages.entries()) await p.screenshot({ path: join(SHOTS, `failed-${slug}-${i}.png`), fullPage: true }).catch(() => {});
   }
 }
@@ -613,6 +616,225 @@ try {
     await page.getByTestId("sign-out").click();
     await page.getByRole("heading", { name: "Sign in" }).waitFor();
     check(true, "with a way to sign out");
+  });
+
+  // ---- passkeys (ADR-0022 step 7): Chromium's virtual authenticator (CDP WebAuthn domain) plays the device ----------
+  // A passkey belongs to a host name, and the server run here has no --public-url, so its RP id is `localhost`: these
+  // sections use http://localhost:PORT (a secure context), not the 127.0.0.1 address of the sections above.
+  const lbase = `http://localhost:${port}`;
+  /** A fresh browser context whose WebAuthn requests are answered by a virtual platform authenticator. */
+  const withAuthenticator = async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const p = await newPage(ctx);
+    const cdp = await ctx.newCDPSession(p);
+    await cdp.send("WebAuthn.enable");
+    const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true,
+      },
+    });
+    return { ctx, page: p, cdp, authenticatorId, credentials: async () => (await cdp.send("WebAuthn.getCredentials", { authenticatorId })).credentials };
+  };
+  const meOf = (p) => p.evaluate(async () => (await fetch("/api/v1/auth/me")).json());
+  const statusOf = (p, path = "/api/v1/status") => p.evaluate(async (u) => (await fetch(u)).status, path);
+  const adminTab = async (p) => {
+    await go(p, "account");
+    await p.getByTestId("account-page").waitFor();
+    await p.getByRole("button", { name: "Users & invites" }).click();
+    await p.getByTestId("admin-page").waitFor();
+  };
+  const owner2 = { pw: PW3 };
+  let ownerDevice = null;
+  let tessDevice = null;
+
+  await section("Passkeys: add one, sign in with it, rename it, remove it", async () => {
+    // At 127.0.0.1 a passkey cannot work (the RP id is localhost): the sign-in page offers none, the account page says why.
+    const wrong = await newPage(await browser.newContext());
+    await wrong.goto(base);
+    await wrong.getByRole("heading", { name: "Sign in" }).waitFor();
+    check((await wrong.getByTestId("passkey-signin").count()) === 0, "at 127.0.0.1 the sign-in page offers no passkey (they are bound to localhost)");
+    await wrong.close();
+    pages.pop();
+
+    ownerDevice = await withAuthenticator();
+    const pk = ownerDevice.page;
+    await pk.goto(lbase);
+    await pk.getByRole("heading", { name: "Sign in" }).waitFor();
+    await pk.getByTestId("passkey-signin").waitFor();
+    check(true, "at localhost the sign-in page offers \"Sign in with a passkey\"");
+    await pk.screenshot({ path: join(SHOTS, "server-11-passkey-signin.png") });
+    await typePassword(pk, "owner", owner2.pw);
+    await verifyTotp(pk, owner.secret);
+    await appLoaded(pk);
+    await pk.getByTestId("tab-account").click();
+    await pk.getByTestId("account-page").waitFor();
+    check((await pk.getByTestId("passkey-rp").textContent()).trim() === "localhost", "the account page names the host name passkeys are bound to");
+
+    await pk.getByTestId("passkey-name").fill("Test authenticator");
+    await pk.getByTestId("passkey-add").click();
+    await pk.getByTestId("passkey-row").waitFor();
+    check((await pk.getByTestId("passkey-name-cell").textContent()) === "Test authenticator", "a passkey is added and listed under its name");
+    const creds = await ownerDevice.credentials();
+    check(creds.length === 1 && creds[0].rpId === "localhost" && creds[0].isResidentCredential, "the authenticator holds a discoverable credential for localhost");
+    await pk.screenshot({ path: join(SHOTS, "server-12-passkeys.png") });
+    const stored = await pk.evaluate(() => JSON.stringify([{ ...localStorage }, { ...sessionStorage }]));
+    check(!stored.includes(creds[0].credentialId), "no credential id is in browser storage");
+
+    // Sign out and in again with the passkey: no username, no password.
+    await pk.getByTestId("account-sign-out").click();
+    await pk.getByRole("heading", { name: "Sign in" }).waitFor();
+    await pk.getByTestId("passkey-signin").click();
+    await appLoaded(pk);
+    const me = await meOf(pk);
+    check(me.user.username === "owner" && me.session.auth_method === "passkey" && me.passkey_count === 1, "the passkey signs in as the owner (session method passkey)");
+    check((await ownerDevice.credentials())[0].signCount >= 1, "the authenticator's counter moved");
+
+    // Rename.
+    await pk.getByTestId("tab-account").click();
+    await pk.getByTestId("passkey-rename").click();
+    await pk.getByTestId("passkey-rename-input").fill("Work laptop");
+    await pk.getByTestId("passkey-rename-save").click();
+    await pk.getByText("Work laptop").waitFor();
+    check(true, "a passkey can be renamed");
+
+    // Remove (the owner still has a password and an authenticator, so this is allowed), then it no longer signs in.
+    pk.once("dialog", (d) => void d.accept());
+    await pk.getByTestId("passkey-remove").click();
+    await pk.getByText("No passkeys yet.").waitFor();
+    check(true, "removing the passkey empties the list");
+    await pk.getByTestId("account-sign-out").click();
+    await pk.getByRole("heading", { name: "Sign in" }).waitFor();
+    await pk.getByTestId("passkey-signin").click();
+    await pk.getByRole("alert").waitFor();
+    check((await pk.getByRole("alert").textContent()).includes("invalid credentials"), "the removed passkey is refused, with the plain message");
+  });
+
+  await section("Require a passkey: accounts without one are sent to add one", async () => {
+    const pk = ownerDevice.page;
+    // The password still works while the rule is off; add a passkey again, then turn the rule on.
+    await pk.reload();
+    await typePassword(pk, "owner", owner2.pw);
+    await verifyTotp(pk, owner.secret);
+    await appLoaded(pk);
+    await pk.getByTestId("tab-account").click();
+    await pk.getByTestId("passkey-add").click();
+    await pk.getByTestId("passkey-row").waitFor();
+    await adminTab(pk);
+    check((await pk.getByTestId("passkey-rule-text").textContent()).includes("every account must have a passkey"), "the admin page explains the rule");
+    await pk.getByTestId("passkey-required-toggle").click();
+    await pk.getByText("Passkeys are now required").waitFor();
+    check(true, "the administrator requires a passkey");
+    await pk.screenshot({ path: join(SHOTS, "server-13-require-passkey.png") });
+
+    // tess has a password and an authenticator but no passkey: she may only add one.
+    tessDevice = await withAuthenticator();
+    const tp = tessDevice.page;
+    await tp.goto(lbase);
+    await typePassword(tp, "tess", PW2);
+    await verifyTotp(tp, tess.secret);
+    await tp.getByTestId("passkey-gate").waitFor();
+    check(true, "an account without a passkey is sent to add one after signing in");
+    check((await statusOf(tp)) === 403 && (await statusOf(tp, "/api/v1/auth/sessions")) === 403, "and the server refuses everything else to that session (403)");
+    await tp.screenshot({ path: join(SHOTS, "server-14-passkey-gate.png") });
+    await tp.getByTestId("passkey-add").click();
+    await appLoaded(tp);
+    check((await statusOf(tp)) === 200, "once a passkey is added the session works normally");
+
+    // The owner has a passkey: a password sign-in is refused with the reason, the passkey works.
+    await go(pk, "account");
+    await pk.getByTestId("account-page").waitFor();
+    await pk.getByTestId("account-sign-out").click();
+    await pk.getByRole("heading", { name: "Sign in" }).waitFor();
+    await typePassword(pk, "owner", owner2.pw);
+    await pk.getByRole("alert").waitFor();
+    check((await pk.getByRole("alert").textContent()).includes("signs in with a passkey"), "with passkeys required, an account that has one cannot sign in by password");
+    await pk.getByTestId("passkey-signin").click();
+    await appLoaded(pk);
+    check(true, "the passkey signs in");
+  });
+
+  await section("Enrolment link: recover an account with a new passkey", async () => {
+    const pk = ownerDevice.page;
+    await adminTab(pk);
+    pk.once("dialog", (d) => void d.accept());
+    await pk.getByTestId("member-recover-tess").click();
+    await pk.getByTestId("enrol-link-url").waitFor();
+    const url = await pk.getByTestId("enrol-link-url").inputValue();
+    check(url.startsWith(`${lbase}/#enrol=pmenr_`), "the owner gets a one-time link on the address they used");
+    check((await statusOf(tessDevice.page)) === 401, "making it ended tess's sessions");
+    await pk.screenshot({ path: join(SHOTS, "server-15-recovery-link.png") });
+
+    const rc = await withAuthenticator();
+    await rc.page.goto(url);
+    await rc.page.getByTestId("enrol-link-who").waitFor();
+    check((await rc.page.getByTestId("enrol-link-who").textContent()).includes("tess"), "the link's page says whose account it recovers");
+    check(!rc.page.url().includes("pmenr_"), "and takes the token out of the address bar");
+    await rc.page.getByTestId("passkey-name").fill("Replacement phone");
+    await rc.page.getByTestId("auth-submit").click();
+    await appLoaded(rc.page);
+    const me = await meOf(rc.page);
+    check(me.user.username === "tess" && me.session.auth_method === "passkey" && me.passkey_count === 1, "a new passkey recovers the account and signs in");
+    // The old passkey is gone, and the link is spent.
+    await tessDevice.page.goto(lbase);
+    await tessDevice.page.getByTestId("passkey-signin").click();
+    await tessDevice.page.getByRole("alert").waitFor();
+    check(true, "tess's old passkey no longer signs in");
+    const again = await newPage(await browser.newContext());
+    await again.goto(url);
+    await again.getByTestId("enrol-link-bad").waitFor();
+    check(true, "the link works once");
+    await again.close();
+    pages.pop();
+    await rc.page.getByTestId("tab-account").click();
+    await rc.page.getByTestId("passkey-row").waitFor();
+    check((await rc.page.getByTestId("passkey-name-cell").textContent()) === "Replacement phone", "tess's list holds only the new passkey");
+  });
+
+  await section("Setup with a passkey on a new server", async () => {
+    const dir2 = mkdtempSync(join(tmpdir(), "pm-ui-e2e-server2-"));
+    const project2 = join(dir2, "server.pmproj");
+    const port2 = await freePort();
+    writeFileSync(join(dir2, "roe.yaml"), `version: 1\nscope:\n  include: ["http://127.0.0.1:9/"]\n`);
+    execFileSync(BIN, ["-p", project2, "--home", join(dir2, "home"), "roe", "use", join(dir2, "roe.yaml")], { encoding: "utf8" });
+    const server2 = spawn(
+      BIN,
+      ["-p", project2, "--home", join(dir2, "home"), "serve", "--accounts", "--server-home", join(dir2, "server"), "--listen", `127.0.0.1:${port2}`],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    children.push(server2);
+    let out2 = "";
+    let setup2 = "";
+    server2.stdout.on("data", (d) => {
+      out2 += String(d);
+      const m = out2.match(/(http:\/\/\S+#setup=\S+)/);
+      if (m) setup2 = m[1];
+    });
+    server2.stderr.on("data", () => {});
+    for (let i = 0; i < 300 && !setup2; i++) await sleep(100);
+    if (!setup2) throw new Error("the second server did not print a setup URL");
+    const dev = await withAuthenticator();
+    await dev.page.goto(setup2.replace("127.0.0.1", "localhost"));
+    await dev.page.getByRole("heading", { name: "Create the owner account" }).waitFor();
+    check(await dev.page.getByTestId("choice-passkey").isChecked(), "setup offers a passkey first");
+    check((await dev.page.getByTestId("auth-password").count()) === 0, "and asks for no password with it");
+    await dev.page.screenshot({ path: join(SHOTS, "server-16-setup-passkey.png") });
+    await dev.page.getByLabel("Username", { exact: true }).fill("solo");
+    await buttonNamed(dev.page, "Create account with a passkey").click();
+    await appLoaded(dev.page);
+    const me = await meOf(dev.page);
+    check(me.user.username === "solo" && me.user.server_admin && me.role === "owner" && me.passkey_count === 1, "the owner is made with a passkey and nothing else (no authenticator app, no recovery codes)");
+    await dev.page.getByTestId("tab-account").click();
+    await dev.page.getByTestId("account-sign-out").click();
+    await dev.page.getByRole("heading", { name: "Sign in" }).waitFor();
+    await dev.page.getByTestId("passkey-signin").click();
+    await appLoaded(dev.page);
+    check(true, "and it signs in with that passkey");
+    server2.kill();
   });
 
   const leaked = consoleText.filter((t) => [PW, PW2, PW3, owner.secret, tess.secret, ...owner.codes, ...tess.codes].some((s) => s && t.includes(s)));

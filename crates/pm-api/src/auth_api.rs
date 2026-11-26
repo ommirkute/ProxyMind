@@ -83,6 +83,11 @@ impl From<AccountError> for AuthError {
             E::SecondFactorRequired => (StatusCode::CONFLICT, "second_factor_required"),
             E::AlreadyEnrolled => (StatusCode::CONFLICT, "already_enrolled"),
             E::NotEnrolling => (StatusCode::CONFLICT, "not_enrolling"),
+            E::PasskeyRefused(_) => (StatusCode::BAD_REQUEST, "passkey_refused"),
+            E::PasskeyRequired => (StatusCode::FORBIDDEN, "passkey_required"),
+            E::LastPasskey => (StatusCode::CONFLICT, "last_passkey"),
+            E::NoSuchPasskey => (StatusCode::NOT_FOUND, "no_such_passkey"),
+            E::InvalidEnrolmentLink => (StatusCode::BAD_REQUEST, "invalid_enrolment_link"),
             E::Decrypt
             | E::ServerKey(_)
             | E::TokenStore(_)
@@ -149,7 +154,7 @@ fn admin(c: &AuthContext) -> Result<(), AuthError> {
     }
 }
 
-fn limit(fields: &[(&str, usize)]) -> Result<(), AuthError> {
+pub(crate) fn limit(fields: &[(&str, usize)]) -> Result<(), AuthError> {
     for (value, max) in fields {
         if value.len() > *max {
             return Err(AuthError::new(StatusCode::BAD_REQUEST, "too_long", "a value is too long"));
@@ -273,6 +278,17 @@ pub(crate) struct StateResponse {
     setup_required: bool,
     /// Setup is served here (TLS, or the machine the server runs on).
     setup_allowed: bool,
+    /// Passkeys can be used on this server: it has a host name to bind them to (see `passkey_note` when not).
+    passkey_supported: bool,
+    /// The relying party id passkeys are bound to: the server's host name. A browser must be at an address with that
+    /// host name (or below it) for a passkey to work.
+    passkey_rp_id: Option<String>,
+    /// Why passkeys are unavailable, when they are.
+    passkey_note: Option<String>,
+    /// The server requires every account to have a passkey.
+    passkey_required: bool,
+    /// How many passkeys the signed-in account has (present only when the request carries a valid session).
+    passkey_count: Option<usize>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -286,6 +302,10 @@ pub(crate) struct MeResponse {
     session: SessionView,
     /// Signed in within the last 10 minutes: sensitive actions are allowed.
     fresh: bool,
+    /// How many passkeys the account has.
+    passkey_count: usize,
+    /// The server requires a passkey and this account has none: the session may only enrol one.
+    passkey_enrolment_required: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -319,6 +339,12 @@ pub(crate) struct OkResponse {
     ok: bool,
 }
 
+impl OkResponse {
+    pub(crate) fn yes() -> Self {
+        Self { ok: true }
+    }
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct RevokedResponse {
     /// How many sessions ended.
@@ -343,7 +369,8 @@ pub(crate) struct InviteCreated {
     id: String,
     /// The invite secret. Shown once; only its HMAC is stored.
     token: String,
-    /// `<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server.
+    /// `<origin>/#invite=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is
+    /// in the fragment, which browsers never send to a server.
     url: String,
     role: String,
     expires_at: i64,
@@ -508,7 +535,7 @@ async fn retire_presented(sm: &Arc<ServerMode>, headers: &HeaderMap, user_id: &s
         .await;
 }
 
-async fn signed_in_response(
+pub(crate) async fn signed_in_response(
     sm: &Arc<ServerMode>,
     headers: &HeaderMap,
     ok: LoginSuccess,
@@ -533,7 +560,12 @@ async fn signed_in_response(
     Ok(reply(StatusCode::OK, &body, &[cookie]))
 }
 
-async fn step_response(sm: &Arc<ServerMode>, headers: &HeaderMap, step: LoginStep, next: String) -> AuthResult {
+pub(crate) async fn step_response(
+    sm: &Arc<ServerMode>,
+    headers: &HeaderMap,
+    step: LoginStep,
+    next: String,
+) -> AuthResult {
     match step {
         LoginStep::Authenticated(ok) => signed_in_response(sm, headers, *ok, None, next).await,
         LoginStep::SecondFactorRequired { pending, expires_at } => Ok(reply(
@@ -563,12 +595,35 @@ async fn step_response(sm: &Arc<ServerMode>, headers: &HeaderMap, step: LoginSte
     }
 }
 
-pub(crate) async fn auth_state(State(st): State<AppState>, conn: ConnInfo) -> AuthResult {
+pub(crate) async fn auth_state(State(st): State<AppState>, conn: ConnInfo, headers: HeaderMap) -> AuthResult {
     let sm = server(&st)?;
-    let set_up = sm.run(|a| a.has_server_admin()).await??;
+    // A request that carries a live session also learns how many passkeys that account has.
+    let cookie = cookie_value(&headers, sm.cookie_name());
+    let (set_up, required, count) = sm
+        .run(move |a| -> Result<(bool, bool, Option<usize>), AccountError> {
+            let count = match cookie.as_deref().map(|id| a.validate_session(id)) {
+                Some(Ok(info)) => Some(a.passkey_count(&info.user_id)?),
+                _ => None,
+            };
+            Ok((a.has_server_admin()?, a.passkey_required()?, count))
+        })
+        .await??;
+    let (rp_id, note) = match &sm.passkey_rp {
+        Ok(rp) => (Some(rp.id.clone()), None),
+        Err(why) => (None, Some(why.clone())),
+    };
     Ok(reply(
         StatusCode::OK,
-        &StateResponse { server_mode: true, setup_required: !set_up, setup_allowed: conn.setup_allowed },
+        &StateResponse {
+            server_mode: true,
+            setup_required: !set_up,
+            setup_allowed: conn.setup_allowed,
+            passkey_supported: rp_id.is_some(),
+            passkey_rp_id: rp_id,
+            passkey_note: note,
+            passkey_required: required,
+            passkey_count: count,
+        },
         &[],
     ))
 }
@@ -687,6 +742,8 @@ pub(crate) async fn auth_me(State(st): State<AppState>, me: Me) -> AuthResult {
             role: c.role.map(|r| r.as_str().to_string()),
             session: SessionView::of(&c.session, &c.session.reference),
             fresh: sm.fresh(&c.session),
+            passkey_count: c.passkeys,
+            passkey_enrolment_required: c.passkey_enrolment_required(),
         },
         &[],
     ))
@@ -906,6 +963,7 @@ pub(crate) async fn auth_invites(State(st): State<AppState>, me: Me) -> AuthResu
 pub(crate) async fn auth_invite_create(
     State(st): State<AppState>,
     me: Me,
+    headers: HeaderMap,
     Json(b): Json<InviteCreateBody>,
 ) -> AuthResult {
     let sm = server(&st)?;
@@ -923,7 +981,7 @@ pub(crate) async fn auth_invite_create(
     let token = invite.token.expose().to_string();
     let body = InviteCreated {
         id: invite.id.clone(),
-        url: format!("{}/#invite={token}", sm.plan.public_origin),
+        url: format!("{}/#invite={token}", sm.link_origin(&headers)),
         token,
         role: role.as_str().into(),
         expires_at: invite.expires_at,

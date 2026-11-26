@@ -209,6 +209,20 @@ class Arg(TypedDict):
     type: str
 
 
+class _AssertionBodyRequired(TypedDict):
+    authenticator_data: str
+    client_data_json: str
+    # The credential id.
+    id: str
+    signature: str
+
+
+class AssertionBody(_AssertionBodyRequired, total=False):
+    """The response of `navigator.credentials.get()`, binary fields as base64url."""
+    # The user handle, when the authenticator returned one.
+    user_handle: _t.Optional[str]
+
+
 class AssertionResult(TypedDict):
     message: str
     ok: bool
@@ -1154,6 +1168,47 @@ class _EnrolConfirmBodyRequired(TypedDict):
 
 class EnrolConfirmBody(_EnrolConfirmBodyRequired, total=False):
     next: _t.Optional[str]
+
+
+class EnrolLinkBody(TypedDict):
+    # The token from the enrolment link (`#enrol=<token>`).
+    token: str
+
+
+class EnrolLinkInfo(TypedDict):
+    display_name: str
+    expires_at: int
+    username: str
+
+
+class _EnrolLinkPasskeyBodyRequired(TypedDict):
+    response: "RegistrationBody"
+
+
+class EnrolLinkPasskeyBody(_EnrolLinkPasskeyBodyRequired, total=False):
+    name: _t.Optional[str]
+    next: _t.Optional[str]
+
+
+class _EnrolLinkPasswordBodyRequired(TypedDict):
+    new_password: str
+    token: str
+
+
+class EnrolLinkPasswordBody(_EnrolLinkPasswordBodyRequired, total=False):
+    next: _t.Optional[str]
+
+
+class EnrolmentLinkCreated(TypedDict):
+    expires_at: int
+    id: str
+    # The link's secret. Shown once; only its HMAC is stored.
+    token: str
+    # `<origin>/#enrol=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is in
+    # the fragment, which browsers never send to a server.
+    url: str
+    # The account the link is for.
+    username: str
 
 
 class EventsQuery(TypedDict, total=False):
@@ -2130,8 +2185,19 @@ class InviteCreated(TypedDict):
     role: str
     # The invite secret. Shown once; only its HMAC is stored.
     token: str
-    # `<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server.
+    # `<origin>/#invite=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is
+    # in the fragment, which browsers never send to a server.
     url: str
+
+
+class _InvitePasskeyOptionsBodyRequired(TypedDict):
+    # The token from the invite link.
+    invite: str
+    username: str
+
+
+class InvitePasskeyOptionsBody(_InvitePasskeyOptionsBodyRequired, total=False):
+    display_name: _t.Optional[str]
 
 
 class InviteView(TypedDict):
@@ -2347,6 +2413,12 @@ class LoginBody(_LoginBodyRequired, total=False):
     next: _t.Optional[str]
 
 
+class LoginOptionsBody(TypedDict, total=False):
+    # Sign in as this account (its passkeys are offered). Leave out to sign in without a username: the authenticator
+    # offers its own passkeys for this server.
+    username: _t.Optional[str]
+
+
 class LoginRecording(TypedDict):
     """What a recording produced (names only; values stay in the identity)."""
     cookies: _t.List[str]
@@ -2459,6 +2531,10 @@ class MeResponse(TypedDict):
     actor: str
     # Signed in within the last 10 minutes: sensitive actions are allowed.
     fresh: bool
+    # How many passkeys the account has.
+    passkey_count: int
+    # The server requires a passkey and this account has none: the session may only enrol one.
+    passkey_enrolment_required: bool
     project_id: str
     # The user's role on the served project; absent for a server admin who is not a member.
     role: _t.Optional[str]
@@ -2580,6 +2656,16 @@ class NetConfig(TypedDict, total=False):
     # Where outgoing connections go, by target host. The first rule whose `match` fits the host wins; a host
     # that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
     upstream_rules: _t.List["UpstreamRule"]
+
+
+class _NewAccountPasskeyBodyRequired(TypedDict):
+    response: "RegistrationBody"
+
+
+class NewAccountPasskeyBody(_NewAccountPasskeyBodyRequired, total=False):
+    # What to call the passkey (default "Passkey 1").
+    name: _t.Optional[str]
+    next: _t.Optional[str]
 
 
 class NewAttackPath(TypedDict):
@@ -2820,6 +2906,61 @@ class ParamSummary(TypedDict):
 ParamWhere = _t.Literal["query", "body", "json", "cookie", "multipart"]
 
 Part = _t.Literal["request_first_line", "request_header", "request_body", "response_first_line", "response_header", "response_body"]
+
+class _PasskeyAddBodyRequired(TypedDict):
+    response: "RegistrationBody"
+
+
+class PasskeyAddBody(_PasskeyAddBodyRequired, total=False):
+    # What to call the passkey (default "Passkey N").
+    name: _t.Optional[str]
+
+
+class PasskeyAdded(TypedDict):
+    passkey: "PasskeyView"
+
+
+class _PasskeyLoginBodyRequired(TypedDict):
+    response: "AssertionBody"
+
+
+class PasskeyLoginBody(_PasskeyLoginBodyRequired, total=False):
+    next: _t.Optional[str]
+
+
+class PasskeyOptionsResponse(TypedDict):
+    """The options to pass to `navigator.credentials.create()` or `.get()` (WebAuthn's JSON form)."""
+    # `PublicKeyCredentialCreationOptionsJSON` or `PublicKeyCredentialRequestOptionsJSON`; the challenge is single
+    # use and lives five minutes.
+    options: _t.Any
+
+
+class PasskeyRenameBody(TypedDict):
+    name: str
+
+
+class PasskeyRequiredBody(TypedDict):
+    # Require every account to have a passkey.
+    required: bool
+
+
+class PasskeyRequiredResponse(TypedDict):
+    required: bool
+
+
+class PasskeyView(TypedDict):
+    """A passkey as the Account page lists it. Never holds key material."""
+    # The passkey can be backed up (synced); `backup_state` says whether it is.
+    backup_eligible: bool
+    backup_state: bool
+    created_at: int
+    # Pass this to rename or remove it.
+    id: str
+    last_used_at: _t.Optional[int]
+    name: str
+    # `internal`, `usb`, `nfc`, `ble`, `hybrid`, `smart-card`, as the authenticator reported them.
+    transports: _t.List[str]
+
 
 class PasswordBody(TypedDict):
     current: str
@@ -3320,6 +3461,19 @@ class RecursiveGrep(TypedDict):
     count: int
     extract: "Extract"
     first: str
+
+
+class _RegistrationBodyRequired(TypedDict):
+    attestation_object: str
+    client_data_json: str
+    # The credential id.
+    id: str
+
+
+class RegistrationBody(_RegistrationBodyRequired, total=False):
+    """The response of `navigator.credentials.create()`, binary fields as base64url."""
+    # `getTransports()` of the response, when the browser has it.
+    transports: _t.List[str]
 
 
 class RegressionExport(TypedDict):
@@ -4006,6 +4160,16 @@ class SetupBody(_SetupBodyRequired, total=False):
     next: _t.Optional[str]
 
 
+class _SetupPasskeyOptionsBodyRequired(TypedDict):
+    # The token from the setup URL.
+    setup_token: str
+    username: str
+
+
+class SetupPasskeyOptionsBody(_SetupPasskeyOptionsBodyRequired, total=False):
+    display_name: _t.Optional[str]
+
+
 Severity = _t.Literal["info", "low", "medium", "high"]
 
 # Which message of the current exchange a test or extraction looks at.
@@ -4088,6 +4252,17 @@ class Snippet(TypedDict):
 
 
 class StateResponse(TypedDict):
+    # How many passkeys the signed-in account has (present only when the request carries a valid session).
+    passkey_count: _t.Optional[int]
+    # Why passkeys are unavailable, when they are.
+    passkey_note: _t.Optional[str]
+    # The server requires every account to have a passkey.
+    passkey_required: bool
+    # The relying party id passkeys are bound to: the server's host name. A browser must be at an address with that
+    # host name (or below it) for a passkey to work.
+    passkey_rp_id: _t.Optional[str]
+    # Passkeys can be used on this server: it has a host name to bind them to (see `passkey_note` when not).
+    passkey_supported: bool
     server_mode: bool
     # Setup is served here (TLS, or the machine the server runs on).
     setup_allowed: bool

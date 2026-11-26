@@ -196,6 +196,7 @@ async fn rest_rows(server: &Server) -> Vec<(String, [bool; 6])> {
         // Empty input, except where the handler reads the body before it asks about the role (invites, tokens).
         let body = match (method.as_str(), op.path.as_str()) {
             ("POST", "/api/v1/auth/invites") => Some(json!({ "role": "viewer" })),
+            ("PUT", "/api/v1/auth/settings/passkey-required") => Some(json!({ "required": false })),
             ("POST", "/api/v1/tokens") => Some(json!({ "kind": "agent", "name": "matrix-made" })),
             ("GET" | "DELETE", _) => None,
             _ => Some(json!({})),

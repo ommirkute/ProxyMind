@@ -93,10 +93,22 @@ impl Accounts {
                 self.audit(tx, "password_rehashed", Some(&user.id), &format!("user:{}", user.id), None, "")
             })?;
         }
-        let (has_totp, needs_factor) = {
+        let (has_totp, needs_factor, has_passkey, passkey_required) = {
             let conn = self.conn();
-            (self.totp_enabled(&conn, &user.id)?, self.requires_second_factor(&conn, &user.id)?)
+            (
+                self.totp_enabled(&conn, &user.id)?,
+                self.requires_second_factor(&conn, &user.id)?,
+                self.has_passkey(&conn, &user.id)?,
+                self.passkey_required_in(&conn)?,
+            )
         };
+        // A passkey is the account's way in (ADR-0022 step 7). With the server's "require a passkey" on, a password
+        // sign-in is refused for an account that has one; without it, an account that has a passkey and no
+        // authenticator cannot be completed by password alone either ("a password alone is never enough"), and must
+        // not be offered the chance to enrol one with just the password.
+        if has_passkey && (passkey_required || (!has_totp && needs_factor)) {
+            return Err(AccountError::PasskeyRequired);
+        }
         if has_totp {
             let (pending, expires_at) = self.create_pending(&user.id, "second_factor", client)?;
             return Ok(LoginStep::SecondFactorRequired { pending, expires_at });
@@ -109,7 +121,13 @@ impl Accounts {
         Ok(LoginStep::Authenticated(Box::new(success)))
     }
 
-    fn complete_login(&self, tx: &Connection, user: User, method: &str, client: &ClientInfo) -> Result<LoginSuccess> {
+    pub(crate) fn complete_login(
+        &self,
+        tx: &Connection,
+        user: User,
+        method: &str,
+        client: &ClientInfo,
+    ) -> Result<LoginSuccess> {
         let now = self.now();
         let session = self.insert_session(
             tx,
@@ -130,7 +148,7 @@ impl Accounts {
 
     // ---- pending sign-ins ------------------------------------------------------------------------------------
 
-    fn create_pending(&self, user_id: &str, purpose: &str, client: &ClientInfo) -> Result<(Secret, i64)> {
+    pub(crate) fn create_pending(&self, user_id: &str, purpose: &str, client: &ClientInfo) -> Result<(Secret, i64)> {
         let now = self.now();
         let expires_at = now.saturating_add(secs(self.cfg.pending_ttl));
         let token = hex(&random::<32>()?);
@@ -314,7 +332,8 @@ impl Accounts {
     /// factor; an administrator removes one with [`reset_second_factor`](Self::reset_second_factor) instead.
     pub fn totp_disable(&self, user_id: &str) -> Result<()> {
         self.tx(|tx| {
-            if self.requires_second_factor(tx, user_id)? {
+            // A passkey counts as the second factor: an account that has one may drop the authenticator.
+            if self.requires_second_factor(tx, user_id)? && !self.has_passkey(tx, user_id)? {
                 return Err(AccountError::SecondFactorRequired);
             }
             self.remove_second_factor(tx, user_id, user_id, "totp_disabled")

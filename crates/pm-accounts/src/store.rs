@@ -91,6 +91,7 @@ pub(crate) struct Keys {
     pub(crate) api_token: hmac::Key,
     pub(crate) throttle: hmac::Key,
     pub(crate) audit: hmac::Key,
+    pub(crate) decoy: hmac::Key,
 }
 
 pub(crate) fn secs(d: Duration) -> i64 {
@@ -108,6 +109,9 @@ pub struct Accounts {
     pub(crate) dummy_hash: String,
     dummy_verifications: AtomicU64,
     pub(crate) token_uses: crate::token::UseTracker,
+    /// Open passkey ceremonies (challenge issued, response not yet seen). In memory on purpose: a challenge lives
+    /// five minutes and is single use, so a restart losing them costs one retry.
+    pub(crate) ceremonies: crate::passkeys::Ceremonies,
 }
 
 impl Accounts {
@@ -149,6 +153,7 @@ impl Accounts {
             api_token: mac(KeyPurpose::ApiToken),
             throttle: mac(KeyPurpose::Throttle),
             audit: mac(KeyPurpose::AuditChain),
+            decoy: mac(KeyPurpose::PasskeyDecoy),
         };
         let gate = Gate::new(cfg.hash_slots);
         // A hash of a random password at the current cost, verified when the user does not exist.
@@ -163,6 +168,7 @@ impl Accounts {
             dummy_hash,
             dummy_verifications: AtomicU64::new(0),
             token_uses: Default::default(),
+            ceremonies: Default::default(),
         };
         accounts.purge_expired()?;
         Ok(accounts)

@@ -55,11 +55,14 @@ pub struct ServerMode {
     /// would not, and it is the id `pm-accounts` memberships and invites already use.
     pub project_id: String,
     pub plan: ListenPlan,
+    /// The relying party for passkeys, or why there is none (an IP-address public URL). Decided once from the plan.
+    pub passkey_rp: Result<pm_accounts::webauthn::RelyingParty, String>,
 }
 
 impl ServerMode {
     pub fn new(accounts: Arc<Accounts>, clock: Arc<dyn Clock>, project_id: String, plan: ListenPlan) -> Self {
-        Self { accounts, clock, project_id, plan }
+        let passkey_rp = plan.passkey_rp();
+        Self { accounts, clock, project_id, plan, passkey_rp }
     }
 
     /// TLS here, or a proxy that terminates it: cookies are `Secure` and named `__Host-pm_session`.
@@ -71,6 +74,18 @@ impl ServerMode {
     /// listen plan refuses plain HTTP anywhere else).
     pub fn cookie_name(&self) -> &'static str {
         if self.cookie_secure() { "__Host-pm_session" } else { "pm_session" }
+    }
+
+    /// The origin to print in a link for a person to open (an invite, an enrolment link): the one the request came
+    /// from when it is one of this server's own, else the public origin. A browser sends the address the person typed,
+    /// so the link then opens at the same host name; that matters for passkeys, which belong to a host name.
+    pub(crate) fn link_origin(&self, headers: &HeaderMap) -> String {
+        headers
+            .get(header::ORIGIN)
+            .and_then(|o| o.to_str().ok())
+            .and_then(normalise_origin)
+            .filter(|o| self.plan.allowed_origins.contains(o))
+            .unwrap_or_else(|| self.plan.public_origin.clone())
     }
 
     /// Runs a call into `pm-accounts` on a blocking thread (hashing a password takes a while; SQLite blocks).
@@ -167,9 +182,18 @@ pub struct AuthContext {
     session_id: String,
     /// The user's role on the served project, `None` for a server admin who is not a member.
     pub role: Option<pm_accounts::Role>,
+    /// How many passkeys the account has.
+    pub passkeys: usize,
+    /// The server requires a passkey from every account ("require a passkey" is on).
+    pub passkey_required: bool,
 }
 
 impl AuthContext {
+    /// A session of an account that must enrol a passkey and has none: it may do only that (see [`restricted_allows`]).
+    pub fn passkey_enrolment_required(&self) -> bool {
+        self.passkey_required && self.passkeys == 0
+    }
+
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -437,6 +461,13 @@ pub fn safe_next(raw: Option<&str>) -> String {
 
 const STATE: &str = "/api/v1/auth/state";
 const SETUP: &str = "/api/v1/auth/setup";
+const SETUP_PASSKEY: &str = "/api/v1/auth/setup/passkey";
+const SETUP_PASSKEY_OPTIONS: &str = "/api/v1/auth/setup/passkey/options";
+
+/// The endpoints of setup: with a password, or with a passkey (options, then the registration).
+fn is_setup_path(path: &str) -> bool {
+    matches!(path, SETUP | SETUP_PASSKEY | SETUP_PASSKEY_OPTIONS)
+}
 
 /// Auth endpoints that work without a session. Everything else under `/api/` needs one.
 pub(crate) fn is_public(method: &Method, path: &str) -> bool {
@@ -449,6 +480,29 @@ pub(crate) fn is_public(method: &Method, path: &str) -> bool {
             | ("POST", "/api/v1/auth/login/enrol")
             | ("POST", "/api/v1/auth/login/enrol/confirm")
             | ("POST", "/api/v1/auth/invite/accept")
+            | ("POST", "/api/v1/auth/passkey/login/options")
+            | ("POST", "/api/v1/auth/passkey/login")
+            | ("POST", "/api/v1/auth/setup/passkey/options")
+            | ("POST", "/api/v1/auth/setup/passkey")
+            | ("POST", "/api/v1/auth/invite/passkey/options")
+            | ("POST", "/api/v1/auth/invite/passkey")
+            | ("POST", "/api/v1/auth/enrol-link/info")
+            | ("POST", "/api/v1/auth/enrol-link/passkey/options")
+            | ("POST", "/api/v1/auth/enrol-link/passkey")
+            | ("POST", "/api/v1/auth/enrol-link/password")
+    )
+}
+
+/// What a session that must enrol a passkey and has none may still call: see who it is, sign out, and the passkey
+/// endpoints (list, options, add). Nothing else on the API, so a password and authenticator get a person to the
+/// enrolment page and no further.
+pub(crate) fn restricted_allows(method: &Method, path: &str) -> bool {
+    matches!(
+        (method.as_str(), path),
+        ("GET", "/api/v1/auth/me")
+            | ("POST", "/api/v1/auth/logout")
+            | ("GET" | "POST", "/api/v1/auth/passkeys")
+            | ("POST", "/api/v1/auth/passkeys/options")
     )
 }
 
@@ -503,14 +557,14 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
         Ok(Ok(v)) => v,
         _ => return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
     };
-    if path == SETUP && !conn.setup_allowed {
+    if is_setup_path(&path) && !conn.setup_allowed {
         return deny(
             StatusCode::FORBIDDEN,
             "setup_insecure",
             "setup is served only over TLS or from the machine the server runs on",
         );
     }
-    if !set_up && path != STATE && path != SETUP {
+    if !set_up && path != STATE && !is_setup_path(&path) {
         return deny(
             StatusCode::SERVICE_UNAVAILABLE,
             "setup_required",
@@ -542,17 +596,18 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
     let now = sm.clock.now();
     let id = session_id.clone();
     let looked_up = sm
-        .run(move |a| -> Result<(SessionInfo, User, Vec<Membership>), AccountError> {
+        .run(move |a| -> Result<(SessionInfo, User, Vec<Membership>, usize, bool), AccountError> {
             let mut info = a.validate_session(&id)?;
             if now.saturating_sub(info.last_seen_at) >= TOUCH_EVERY {
                 info = a.touch_session(&id)?;
             }
             let user = a.get_user(&info.user_id)?.ok_or(AccountError::SessionInvalid)?;
             let memberships = a.memberships_of_user(&user.id)?;
-            Ok((info, user, memberships))
+            let (passkeys, required) = (a.passkey_count(&user.id)?, a.passkey_required()?);
+            Ok((info, user, memberships, passkeys, required))
         })
         .await;
-    let (session, user, memberships) = match looked_up {
+    let (session, user, memberships, passkeys, passkey_required) = match looked_up {
         Ok(Ok(x)) => x,
         Ok(Err(AccountError::SessionInvalid)) => {
             let mut r = deny(StatusCode::UNAUTHORIZED, "unauthenticated", "not signed in");
@@ -564,13 +619,21 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
         _ => return deny(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"),
     };
     let role = memberships.iter().find(|m| m.project_id == sm.project_id).map(|m| m.role);
+    // "Require a passkey": an account that has none signed in with a password and authenticator only to enrol one.
+    if passkey_required && passkeys == 0 && !restricted_allows(req.method(), &path) {
+        return deny(
+            StatusCode::FORBIDDEN,
+            "passkey_enrolment_required",
+            "this server requires a passkey: add one on the Account page before using anything else",
+        );
+    }
     if role.is_none() && !path.starts_with(API_PREFIX) {
         return deny(StatusCode::FORBIDDEN, "not_a_member", "you are not a member of this project");
     }
     let me = Me {
         actor: actor_for(&user),
         addr: conn.client_ip.map(|i| i.to_string()),
-        auth: Some(Arc::new(AuthContext { user, session, session_id, role })),
+        auth: Some(Arc::new(AuthContext { user, session, session_id, role, passkeys, passkey_required })),
         token: None,
     };
     run_as(service, me, req, next).await
@@ -903,6 +966,49 @@ mod tests {
         );
         assert!(proxied.cookie_secure() && proxied.cookie_name() == "__Host-pm_session");
         assert!(!plain.cookie_secure() && plain.cookie_name() == "pm_session");
+    }
+
+    #[test]
+    fn links_use_the_origin_the_issuer_used_when_it_is_the_servers_own() {
+        use crate::listen::{ListenInput, TlsKind};
+        let sm = server(ListenInput {
+            listen: "127.0.0.1:7777".parse().unwrap(),
+            tls: TlsKind::None,
+            behind_proxy: false,
+            trusted_proxies: &[],
+            public_url: None,
+            extra_hosts: &[],
+        });
+        assert_eq!(sm.plan.public_origin, "http://127.0.0.1:7777");
+        let from = |o: &str| sm.link_origin(&headers(&[("origin", o)]));
+        assert_eq!(from("http://localhost:7777"), "http://localhost:7777");
+        assert_eq!(from("HTTP://LOCALHOST:7777"), "http://localhost:7777");
+        assert_eq!(from("http://127.0.0.1:7777"), "http://127.0.0.1:7777");
+        // Not one of the server's own origins, or none at all: the public one.
+        assert_eq!(from("https://evil.example"), "http://127.0.0.1:7777");
+        assert_eq!(from("null"), "http://127.0.0.1:7777");
+        assert_eq!(sm.link_origin(&headers(&[])), "http://127.0.0.1:7777");
+    }
+
+    #[test]
+    fn restricted_sessions_may_only_enrol_a_passkey() {
+        for (m, p, ok) in [
+            ("GET", "/api/v1/auth/me", true),
+            ("POST", "/api/v1/auth/logout", true),
+            ("GET", "/api/v1/auth/passkeys", true),
+            ("POST", "/api/v1/auth/passkeys", true),
+            ("POST", "/api/v1/auth/passkeys/options", true),
+            ("DELETE", "/api/v1/auth/passkeys/c_1", false),
+            ("PUT", "/api/v1/auth/passkeys/c_1", false),
+            ("GET", "/api/v1/status", false),
+            ("GET", "/api/v1/auth/sessions", false),
+            ("POST", "/api/v1/auth/password", false),
+            ("POST", "/api/v1/auth/totp/disable", false),
+            ("GET", "/api/v1/auth/users", false),
+            ("GET", "/api/v1/mcp", false),
+        ] {
+            assert_eq!(restricted_allows(&Method::from_bytes(m.as_bytes()).unwrap(), p), ok, "{m} {p}");
+        }
     }
 
     #[test]

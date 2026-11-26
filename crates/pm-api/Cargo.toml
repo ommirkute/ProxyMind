@@ -30,4 +30,5 @@ url = "2.5.9"
 workspace = true
 
 [dev-dependencies]
+pm-accounts = { version = "0.2.0", path = "../pm-accounts", features = ["test-support"] }
 pm-demo = { path = "../pm-demo" }

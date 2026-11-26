@@ -198,11 +198,13 @@ export function RecoveryCodesView({ codes, onDone, doneLabel = "I've saved them"
 }
 
 /** Username, display name and passwords: the form of the setup and the invite screens. */
-export function NewAccountForm({ submitLabel, onSubmit, busy, error }: {
+export function NewAccountForm({ submitLabel, onSubmit, busy, error, withPassword = true }: {
   submitLabel: string;
   onSubmit: (v: { username: string; display_name: string; password: string }) => void;
   busy: boolean;
   error: string | null;
+  /** Without a password (a passkey will be the credential) the two password fields are left out. */
+  withPassword?: boolean;
 }) {
   const [username, setUsername] = useState("");
   const [display, setDisplay] = useState("");
@@ -211,7 +213,7 @@ export function NewAccountForm({ submitLabel, onSubmit, busy, error }: {
   const [local, setLocal] = useState<string | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (pw !== pw2) return setLocal("The two passwords are not the same.");
+    if (withPassword && pw !== pw2) return setLocal("The two passwords are not the same.");
     setLocal(null);
     onSubmit({ username: username.trim(), display_name: display.trim(), password: pw });
   };
@@ -219,8 +221,12 @@ export function NewAccountForm({ submitLabel, onSubmit, busy, error }: {
     <form onSubmit={submit}>
       <Field label="Username" value={username} onChange={setUsername} autoComplete="username" testid="auth-username" autoFocus required />
       <Field label="Display name (optional)" value={display} onChange={setDisplay} autoComplete="name" testid="auth-display-name" />
-      <Field label="Password" type="password" value={pw} onChange={setPw} autoComplete="new-password" testid="auth-password" hint="At least 12 characters." required />
-      <Field label="Confirm password" type="password" value={pw2} onChange={setPw2} autoComplete="new-password" testid="auth-password2" required />
+      {withPassword && (
+        <>
+          <Field label="Password" type="password" value={pw} onChange={setPw} autoComplete="new-password" testid="auth-password" hint="At least 12 characters." required />
+          <Field label="Confirm password" type="password" value={pw2} onChange={setPw2} autoComplete="new-password" testid="auth-password2" required />
+        </>
+      )}
       <ErrorBox error={local ?? error} />
       <div className="auth-actions">
         <button className="btn primary" type="submit" disabled={busy} data-testid="auth-submit">{submitLabel}</button>

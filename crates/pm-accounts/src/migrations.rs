@@ -1,9 +1,10 @@
 //! `server.db` schema. Append-only: never edit a released entry (tracked in `user_version`).
 //!
 //! Tables ADR-0022 lists that later steps add as new entries: `oidc_providers` (step 8) and `checkpoints`. `tokens`
-//! is the second entry (step 5). Passkeys (step 7) need no schema change: a `credentials` row of kind `passkey` with the credential id
-//! in `external_id`, the COSE public key in `secret`, the signature counter in `counter` and transports, AAGUID and
-//! name in `meta` / `label`. OIDC links use kind `oidc` with `(iss, sub)` in `external_id`.
+//! is the second entry (step 5); `enrolment_links` and `server_settings` the third (step 7). A passkey needs no schema
+//! of its own: a `credentials` row of kind `passkey` with the credential id in `external_id`, the COSE public key in
+//! `secret`, the signature counter in `counter`, the user's name for it in `label` and transports, AAGUID and backup
+//! flags in `meta`. OIDC links use kind `oidc` with `(iss, sub)` in `external_id`.
 
 pub(crate) const MIGRATIONS: &[&str] = &[
     r#"
@@ -142,6 +143,29 @@ CREATE TABLE tokens (
 );
 CREATE INDEX tokens_user ON tokens(user_id);
 CREATE INDEX tokens_project ON tokens(project_id);
+"#,
+    // Passkeys (step 7). Passkey credentials themselves need no schema (a `credentials` row of kind `passkey`); this
+    // adds the one-time enrolment links an owner issues for recovery, and the server-wide settings ("require a
+    // passkey").
+    r#"
+CREATE TABLE enrolment_links (
+    id         TEXT PRIMARY KEY,
+    token_hash BLOB NOT NULL UNIQUE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER,
+    revoked_at INTEGER
+);
+CREATE INDEX enrolment_links_user ON enrolment_links(user_id);
+
+CREATE TABLE server_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+);
 "#,
 ];
 

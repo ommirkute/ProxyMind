@@ -194,6 +194,17 @@ export interface Arg {
   type: string;
 }
 
+/** The response of `navigator.credentials.get()`, binary fields as base64url. */
+export interface AssertionBody {
+  authenticator_data: string;
+  client_data_json: string;
+  /** The credential id. */
+  id: string;
+  signature: string;
+  /** The user handle, when the authenticator returned one. */
+  user_handle?: string | null;
+}
+
 export interface AssertionResult {
   message: string;
   ok: boolean;
@@ -1087,6 +1098,43 @@ export interface EnrolConfirmBody {
   code: string;
   next?: string | null;
   pending: string;
+}
+
+export interface EnrolLinkBody {
+  /** The token from the enrolment link (`#enrol=<token>`). */
+  token: string;
+}
+
+export interface EnrolLinkInfo {
+  display_name: string;
+  expires_at: number;
+  username: string;
+}
+
+export interface EnrolLinkPasskeyBody {
+  name?: string | null;
+  next?: string | null;
+  response: RegistrationBody;
+}
+
+export interface EnrolLinkPasswordBody {
+  new_password: string;
+  next?: string | null;
+  token: string;
+}
+
+export interface EnrolmentLinkCreated {
+  expires_at: number;
+  id: string;
+  /** The link's secret. Shown once; only its HMAC is stored. */
+  token: string;
+  /**
+   * `<origin>/#enrol=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is in
+   * the fragment, which browsers never send to a server.
+   */
+  url: string;
+  /** The account the link is for. */
+  username: string;
 }
 
 /** Query of `GET /events`. */
@@ -2083,8 +2131,18 @@ export interface InviteCreated {
   role: string;
   /** The invite secret. Shown once; only its HMAC is stored. */
   token: string;
-  /** `<public origin>/#invite=<token>`; the token is in the fragment, which browsers never send to a server. */
+  /**
+   * `<origin>/#invite=<token>` (the origin the issuer's browser used, when it is one of the server's); the token is
+   * in the fragment, which browsers never send to a server.
+   */
   url: string;
+}
+
+export interface InvitePasskeyOptionsBody {
+  display_name?: string | null;
+  /** The token from the invite link. */
+  invite: string;
+  username: string;
 }
 
 export interface InviteView {
@@ -2303,6 +2361,14 @@ export interface LoginBody {
   username: string;
 }
 
+export interface LoginOptionsBody {
+  /**
+   * Sign in as this account (its passkeys are offered). Leave out to sign in without a username: the authenticator
+   * offers its own passkeys for this server.
+   */
+  username?: string | null;
+}
+
 /** What a recording produced (names only; values stay in the identity). */
 export interface LoginRecording {
   cookies: string[];
@@ -2408,6 +2474,10 @@ export interface MeResponse {
   actor: string;
   /** Signed in within the last 10 minutes: sensitive actions are allowed. */
   fresh: boolean;
+  /** How many passkeys the account has. */
+  passkey_count: number;
+  /** The server requires a passkey and this account has none: the session may only enrol one. */
+  passkey_enrolment_required: boolean;
   project_id: string;
   /** The user's role on the served project; absent for a server admin who is not a member. */
   role: string | null;
@@ -2545,6 +2615,13 @@ export interface NetConfig {
    * that fits no rule is reached directly. Used by the proxy, Replay, the scanner, the fuzzer and agents.
    */
   upstream_rules?: UpstreamRule[];
+}
+
+export interface NewAccountPasskeyBody {
+  /** What to call the passkey (default "Passkey 1"). */
+  name?: string | null;
+  next?: string | null;
+  response: RegistrationBody;
 }
 
 export interface NewAttackPath {
@@ -2770,6 +2847,57 @@ export type Part =
   | "response_first_line"
   | "response_header"
   | "response_body";
+
+export interface PasskeyAddBody {
+  /** What to call the passkey (default "Passkey N"). */
+  name?: string | null;
+  response: RegistrationBody;
+}
+
+export interface PasskeyAdded {
+  passkey: PasskeyView;
+}
+
+export interface PasskeyLoginBody {
+  next?: string | null;
+  response: AssertionBody;
+}
+
+/** The options to pass to `navigator.credentials.create()` or `.get()` (WebAuthn's JSON form). */
+export interface PasskeyOptionsResponse {
+  /**
+   * `PublicKeyCredentialCreationOptionsJSON` or `PublicKeyCredentialRequestOptionsJSON`; the challenge is single
+   * use and lives five minutes.
+   */
+  options: unknown;
+}
+
+export interface PasskeyRenameBody {
+  name: string;
+}
+
+export interface PasskeyRequiredBody {
+  /** Require every account to have a passkey. */
+  required: boolean;
+}
+
+export interface PasskeyRequiredResponse {
+  required: boolean;
+}
+
+/** A passkey as the Account page lists it. Never holds key material. */
+export interface PasskeyView {
+  /** The passkey can be backed up (synced); `backup_state` says whether it is. */
+  backup_eligible: boolean;
+  backup_state: boolean;
+  created_at: number;
+  /** Pass this to rename or remove it. */
+  id: string;
+  last_used_at: number | null;
+  name: string;
+  /** `internal`, `usb`, `nfc`, `ble`, `hybrid`, `smart-card`, as the authenticator reported them. */
+  transports: string[];
+}
 
 export interface PasswordBody {
   current: string;
@@ -3313,6 +3441,16 @@ export interface RecursiveGrep {
   count: number;
   extract: Extract;
   first: string;
+}
+
+/** The response of `navigator.credentials.create()`, binary fields as base64url. */
+export interface RegistrationBody {
+  attestation_object: string;
+  client_data_json: string;
+  /** The credential id. */
+  id: string;
+  /** `getTransports()` of the response, when the browser has it. */
+  transports?: string[];
 }
 
 export interface RegressionExport {
@@ -4005,6 +4143,13 @@ export interface SetupBody {
   username: string;
 }
 
+export interface SetupPasskeyOptionsBody {
+  display_name?: string | null;
+  /** The token from the setup URL. */
+  setup_token: string;
+  username: string;
+}
+
 export type Severity = "info" | "low" | "medium" | "high";
 
 /** Which message of the current exchange a test or extraction looks at. */
@@ -4085,6 +4230,19 @@ export interface Snippet {
 }
 
 export interface StateResponse {
+  /** How many passkeys the signed-in account has (present only when the request carries a valid session). */
+  passkey_count: number | null;
+  /** Why passkeys are unavailable, when they are. */
+  passkey_note: string | null;
+  /** The server requires every account to have a passkey. */
+  passkey_required: boolean;
+  /**
+   * The relying party id passkeys are bound to: the server's host name. A browser must be at an address with that
+   * host name (or below it) for a passkey to work.
+   */
+  passkey_rp_id: string | null;
+  /** Passkeys can be used on this server: it has a host name to bind them to (see `passkey_note` when not). */
+  passkey_supported: boolean;
   server_mode: boolean;
   /** Setup is served here (TLS, or the machine the server runs on). */
   setup_allowed: boolean;

@@ -248,6 +248,23 @@ What each kind of caller may do on a project server (ADR-0022 step 6, `docs/acce
 | `GET /auth/invites` | allow | deny | deny | deny | deny | deny |
 | `POST /auth/invites` | allow | deny | deny | deny | deny | deny |
 | `DELETE /auth/invites/{id}` | allow | deny | deny | deny | deny | deny |
+| `POST /auth/passkey/login/options` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/passkey/login` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/setup/passkey/options` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/setup/passkey` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/invite/passkey/options` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/invite/passkey` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/enrol-link/info` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/enrol-link/passkey/options` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/enrol-link/passkey` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/enrol-link/password` | allow | allow | allow | allow | allow | allow |
+| `GET /auth/passkeys` | allow | allow | allow | deny | deny | deny |
+| `POST /auth/passkeys` | allow | allow | allow | deny | deny | deny |
+| `POST /auth/passkeys/options` | allow | allow | allow | deny | deny | deny |
+| `PUT /auth/passkeys/{id}` | allow | allow | allow | deny | deny | deny |
+| `DELETE /auth/passkeys/{id}` | allow | allow | allow | deny | deny | deny |
+| `PUT /auth/settings/passkey-required` | allow | deny | deny | deny | deny | deny |
+| `POST /auth/users/{id}/enrolment-link` | allow | deny | deny | deny | deny | deny |
 
 ## MCP tools
 
