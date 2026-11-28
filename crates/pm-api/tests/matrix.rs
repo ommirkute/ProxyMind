@@ -198,6 +198,10 @@ async fn rest_rows(server: &Server) -> Vec<(String, [bool; 6])> {
             ("POST", "/api/v1/auth/invites") => Some(json!({ "role": "viewer" })),
             ("PUT", "/api/v1/auth/settings/passkey-required") => Some(json!({ "required": false })),
             ("POST", "/api/v1/tokens") => Some(json!({ "kind": "agent", "name": "matrix-made" })),
+            // A body that parses and then fails validation (the issuer), so the role is what decides and nothing is made.
+            ("POST" | "PUT", "/api/v1/auth/oidc/providers" | "/api/v1/auth/oidc/providers/{id}") => {
+                Some(json!({ "name": "matrix", "issuer": "not a url", "client_id": "matrix" }))
+            }
             ("GET" | "DELETE", _) => None,
             _ => Some(json!({})),
         };
@@ -294,7 +298,9 @@ async fn the_access_matrix_matches_the_committed_table() {
     for (name, a) in &rest {
         if a[5] {
             assert!(
-                name.starts_with("GET /auth/state") || name.starts_with("POST /auth/"),
+                name.starts_with("GET /auth/state")
+                    || name.starts_with("POST /auth/")
+                    || name.starts_with("GET /auth/oidc/"),
                 "{name} is open to anonymous clients"
             );
         }

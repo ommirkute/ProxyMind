@@ -17,6 +17,10 @@ use crate::auth_api::{
     TotpEnrolmentResponse, UserView,
 };
 use crate::contracts::{Operation, op};
+use crate::oidc_api::{
+    OidcCallbackQuery, OidcIdentityView, OidcInviteBody, OidcLinkBody, OidcProviderBody, OidcProviderView,
+    OidcStartQuery, OidcStartResponse, OidcTestResponse,
+};
 use crate::passkey_api::{
     EnrolLinkBody, EnrolLinkInfo, EnrolLinkPasskeyBody, EnrolLinkPasswordBody, EnrolmentLinkCreated,
     InvitePasskeyOptionsBody, LoginOptionsBody, NewAccountPasskeyBody, PasskeyAddBody, PasskeyAdded, PasskeyLoginBody,
@@ -343,5 +347,16 @@ pub fn operations() -> Vec<Operation> {
         op("delete", "/auth/passkeys/{id}", "passkey_remove", "Server mode: remove a passkey and end the account's other sessions. Needs a fresh sign-in; refused for the last second factor of an account that needs one, or the last passkey while the server requires one.").id_is_string().out::<OkResponse>(),
         op("put", "/auth/settings/passkey-required", "passkey_required_set", "Server mode, server admins: require every account to have a passkey, or stop requiring it. Needs a fresh sign-in and, to turn it on, a passkey on the administrator's own account.").body::<PasskeyRequiredBody>().out::<PasskeyRequiredResponse>(),
         op("post", "/auth/users/{id}/enrolment-link", "user_enrolment_link", "Server mode, server admins and project owners: a one-time link (an hour) that replaces how someone signs in; ends their sessions and revokes their tokens. Needs a fresh sign-in. The token is shown once.").id_is_string().out::<EnrolmentLinkCreated>(),
+        op("get", "/auth/oidc/callback", "oidc_callback", "Server mode: where an identity provider sends the browser back. Checks the state cookie and the `state`, the `iss` parameter, the code exchange (PKCE) and the ID token, then signs in, links or refuses; answers a redirect, to `next` (with a session cookie) or with `oidc_error=<code>`. Public.").query::<OidcCallbackQuery>().json("A 302 redirect; no body."),
+        op("get", "/auth/oidc/identities", "oidc_identities", "Server mode: the identities linked to the signed-in account (provider, email as shown, when linked and last used).").out::<Vec<OidcIdentityView>>(),
+        op("delete", "/auth/oidc/identities/{id}", "oidc_identity_remove", "Server mode: unlink an identity. Needs a fresh sign-in; refused for the last way to sign in; ends the other sessions.").id_is_string().out::<OkResponse>(),
+        op("get", "/auth/oidc/providers", "oidc_providers", "Server mode, server admins: the configured identity providers. The client secret is shown as `********`, never returned.").out::<Vec<OidcProviderView>>(),
+        op("post", "/auth/oidc/providers", "oidc_provider_create", "Server mode, server admins: add an identity provider. Needs a fresh sign-in that was not made through a provider. A group may map to tester or viewer, never owner.").body::<OidcProviderBody>().out::<OidcProviderView>(),
+        op("put", "/auth/oidc/providers/{id}", "oidc_provider_update", "Server mode, server admins: change an identity provider (leave the secret out or send `********` to keep it). Needs a fresh sign-in that was not made through a provider.").body::<OidcProviderBody>().id_is_string().out::<OidcProviderView>(),
+        op("delete", "/auth/oidc/providers/{id}", "oidc_provider_delete", "Server mode, server admins: delete an identity provider and unlink the identities made through it. Needs a fresh sign-in that was not made through a provider.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/oidc/providers/{id}/test", "oidc_provider_test", "Server mode, server admins: fetch the provider's discovery document and keys now and say what was found (endpoints, keys, `iss` parameter support). Audited.").id_is_string().out::<OidcTestResponse>(),
+        op("get", "/auth/oidc/{provider}/start", "oidc_start", "Server mode: begin signing in with an identity provider (authorization code with PKCE S256): sets the short-lived state cookie and redirects to the provider. Public.").query::<OidcStartQuery>().json("A 302 redirect to the provider; no body."),
+        op("post", "/auth/oidc/{provider}/link", "oidc_link", "Server mode: begin linking an identity to the signed-in account. Needs a fresh sign-in. Sets the state cookie; answers the provider's URL.").body::<OidcLinkBody>().out::<OidcStartResponse>(),
+        op("post", "/auth/oidc/{provider}/invite", "oidc_invite", "Server mode: begin redeeming an invite by signing in with an identity provider (not for an owner invite). Sets the state cookie; answers the provider's URL. Public.").body::<OidcInviteBody>().out::<OidcStartResponse>(),
     ]
 }

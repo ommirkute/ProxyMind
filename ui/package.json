@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test:unit": "node --experimental-strip-types tests/transforms.test.mjs && node --experimental-strip-types tests/altsvc.test.mjs && node --experimental-strip-types tests/passkeys.test.mjs",
+    "test:unit": "node --experimental-strip-types tests/transforms.test.mjs && node --experimental-strip-types tests/altsvc.test.mjs && node --experimental-strip-types tests/passkeys.test.mjs && node --experimental-strip-types tests/oidc.test.mjs",
     "test:e2e": "node tests/e2e.mjs && node tests/e2e-server.mjs"
   },
   "dependencies": {

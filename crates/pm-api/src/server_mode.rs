@@ -57,12 +57,14 @@ pub struct ServerMode {
     pub plan: ListenPlan,
     /// The relying party for passkeys, or why there is none (an IP-address public URL). Decided once from the plan.
     pub passkey_rp: Result<pm_accounts::webauthn::RelyingParty, String>,
+    /// What is remembered about OIDC providers (discovery, keys) and the client that talks to them.
+    pub(crate) oidc: crate::oidc_http::OidcRuntime,
 }
 
 impl ServerMode {
     pub fn new(accounts: Arc<Accounts>, clock: Arc<dyn Clock>, project_id: String, plan: ListenPlan) -> Self {
         let passkey_rp = plan.passkey_rp();
-        Self { accounts, clock, project_id, plan, passkey_rp }
+        Self { accounts, clock, project_id, plan, passkey_rp, oidc: Default::default() }
     }
 
     /// TLS here, or a proxy that terminates it: cookies are `Secure` and named `__Host-pm_session`.
@@ -191,7 +193,8 @@ pub struct AuthContext {
 impl AuthContext {
     /// A session of an account that must enrol a passkey and has none: it may do only that (see [`restricted_allows`]).
     pub fn passkey_enrolment_required(&self) -> bool {
-        self.passkey_required && self.passkeys == 0
+        // A sign-in through an identity provider has the provider's assurance and is not asked for a passkey.
+        self.passkey_required && self.passkeys == 0 && self.session.auth_method != "oidc"
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -471,26 +474,40 @@ fn is_setup_path(path: &str) -> bool {
 
 /// Auth endpoints that work without a session. Everything else under `/api/` needs one.
 pub(crate) fn is_public(method: &Method, path: &str) -> bool {
-    matches!(
-        (method.as_str(), path),
-        ("GET", STATE)
-            | ("POST", SETUP)
-            | ("POST", "/api/v1/auth/login")
-            | ("POST", "/api/v1/auth/login/second-factor")
-            | ("POST", "/api/v1/auth/login/enrol")
-            | ("POST", "/api/v1/auth/login/enrol/confirm")
-            | ("POST", "/api/v1/auth/invite/accept")
-            | ("POST", "/api/v1/auth/passkey/login/options")
-            | ("POST", "/api/v1/auth/passkey/login")
-            | ("POST", "/api/v1/auth/setup/passkey/options")
-            | ("POST", "/api/v1/auth/setup/passkey")
-            | ("POST", "/api/v1/auth/invite/passkey/options")
-            | ("POST", "/api/v1/auth/invite/passkey")
-            | ("POST", "/api/v1/auth/enrol-link/info")
-            | ("POST", "/api/v1/auth/enrol-link/passkey/options")
-            | ("POST", "/api/v1/auth/enrol-link/passkey")
-            | ("POST", "/api/v1/auth/enrol-link/password")
-    )
+    is_oidc_public(method, path)
+        || matches!(
+            (method.as_str(), path),
+            ("GET", STATE)
+                | ("POST", SETUP)
+                | ("POST", "/api/v1/auth/login")
+                | ("POST", "/api/v1/auth/login/second-factor")
+                | ("POST", "/api/v1/auth/login/enrol")
+                | ("POST", "/api/v1/auth/login/enrol/confirm")
+                | ("POST", "/api/v1/auth/invite/accept")
+                | ("POST", "/api/v1/auth/passkey/login/options")
+                | ("POST", "/api/v1/auth/passkey/login")
+                | ("POST", "/api/v1/auth/setup/passkey/options")
+                | ("POST", "/api/v1/auth/setup/passkey")
+                | ("POST", "/api/v1/auth/invite/passkey/options")
+                | ("POST", "/api/v1/auth/invite/passkey")
+                | ("POST", "/api/v1/auth/enrol-link/info")
+                | ("POST", "/api/v1/auth/enrol-link/passkey/options")
+                | ("POST", "/api/v1/auth/enrol-link/passkey")
+                | ("POST", "/api/v1/auth/enrol-link/password")
+        )
+}
+
+/// The OIDC sign-in routes that work without a session: starting a sign-in (`GET /auth/oidc/{provider}/start`), the
+/// provider's redirect back (`GET /auth/oidc/callback`) and redeeming an invite with a provider (`POST
+/// /auth/oidc/{provider}/invite`).
+fn is_oidc_public(method: &Method, path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/v1/auth/oidc/") else { return false };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match (method.as_str(), parts.as_slice()) {
+        ("GET", ["callback"]) => true,
+        ("GET", [p, "start"]) | ("POST", [p, "invite"]) => !p.is_empty(),
+        _ => false,
+    }
 }
 
 /// What a session that must enrol a passkey and has none may still call: see who it is, sign out, and the passkey
@@ -620,7 +637,7 @@ async fn gate(sm: &Arc<ServerMode>, service: &Service, conn: ConnInfo, mut req: 
     };
     let role = memberships.iter().find(|m| m.project_id == sm.project_id).map(|m| m.role);
     // "Require a passkey": an account that has none signed in with a password and authenticator only to enrol one.
-    if passkey_required && passkeys == 0 && !restricted_allows(req.method(), &path) {
+    if passkey_required && passkeys == 0 && session.auth_method != "oidc" && !restricted_allows(req.method(), &path) {
         return deny(
             StatusCode::FORBIDDEN,
             "passkey_enrolment_required",
@@ -768,6 +785,33 @@ mod tests {
         let long = format!("/{}", "a".repeat(3000));
         assert_eq!(safe_next(Some(&long)), "/");
         assert_eq!(safe_next(Some("  /padded  ")), "/padded");
+    }
+
+    #[test]
+    fn only_the_oidc_sign_in_routes_are_public() {
+        let get = Method::GET;
+        let post = Method::POST;
+        for (m, p) in [
+            (&get, "/api/v1/auth/oidc/callback"),
+            (&get, "/api/v1/auth/oidc/op_1234/start"),
+            (&post, "/api/v1/auth/oidc/op_1234/invite"),
+        ] {
+            assert!(is_public(m, p), "{m} {p}");
+        }
+        for (m, p) in [
+            (&post, "/api/v1/auth/oidc/callback"),
+            (&get, "/api/v1/auth/oidc/op_1234/invite"),
+            (&post, "/api/v1/auth/oidc/op_1234/start"),
+            (&post, "/api/v1/auth/oidc/op_1234/link"),
+            (&get, "/api/v1/auth/oidc/providers"),
+            (&get, "/api/v1/auth/oidc/identities"),
+            (&get, "/api/v1/auth/oidc//start"),
+            (&get, "/api/v1/auth/oidc/a/b/start"),
+            (&get, "/api/v1/auth/oidc/callback/extra"),
+            (&get, "/api/v1/auth/oidc"),
+        ] {
+            assert!(!is_public(m, p), "{m} {p}");
+        }
     }
 
     #[test]

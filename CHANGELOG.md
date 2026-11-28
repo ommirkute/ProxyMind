@@ -7,6 +7,22 @@ version may change project files, APIs and the CLI.
 
 ### Added
 
+- **Sign in with an identity provider (OIDC) on the project server** (ADR-0022 step 8, roadmap 3.1). Any OpenID Connect provider
+  (Keycloak, Entra ID, Google, GitLab, Okta, Authentik) can be configured by a server administrator (Users & invites → Identity
+  providers, with a Test button; the client secret is sealed under a key derived from the server key and shown as `********`) and
+  appears as "Sign in with …" on the sign-in page, on invites and on the re-authentication dialog. Authorization code flow with PKCE
+  S256, a fixed `redirect_uri`, discovery from the issuer (which must match exactly), ID tokens verified with ring (RS256, ES256,
+  EdDSA; never `none` or `HS*`; keys only from the discovery document, cached, refetched once per 30 s for an unknown key id), the
+  `iss` response parameter (RFC 9207), `aud`, `azp`, `exp`, `iat`, `nonce` and optional `acr`/`amr`. State, nonce and verifier are
+  server-side behind a ten-minute single-use `SameSite=Lax` state cookie; errors redirect with a fixed code and echo nothing from
+  the provider. A person is `(iss, sub)`; joining is by invite (an invite can be redeemed through the provider; an owner invite
+  cannot), with optional, off-by-default auto-create for listed email domains (viewer) and linking by verified email (never for owners
+  or administrators). A group claim can give tester or viewer, never owner or administrator; an owner or administrator can use a
+  provider only with a local passkey or password and authenticator, and provider settings need a fresh local sign-in. Account page:
+  link and unlink identities (the last way to sign in cannot be removed). New routes under `/api/v1/auth/oidc`, `GET /auth/state`
+  lists the enabled providers, `pm-accounts` migration 4, an access-matrix update, an in-process fake provider for the tests and an
+  OIDC section in the browser test. No new dependency. See `docs/server-mode.md`. Not done: SAML, SCIM, back-channel logout, refresh
+  tokens and userinfo.
 - **Passkeys on the project server** (ADR-0022 step 7, roadmap 3.1). Sign in with a passkey (WebAuthn: fingerprint, face, PIN or a
   security key; user verification always required) instead of a password and authenticator app, which stays as the fallback. The
   verifier is our own, on ring, with a strict bounded CBOR decoder (ES256, EdDSA and RS256; no OpenSSL and no new dependency: the

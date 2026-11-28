@@ -7,14 +7,18 @@
 // fresh_login_required). The last sections are passkeys (ADR-0022 step 7), with Chromium's virtual authenticator
 // (CDP `WebAuthn.addVirtualAuthenticator`: ctap2, internal, resident keys, user verification): add, sign in, rename,
 // remove, the "require a passkey" rule, an enrolment link and setup with a passkey. WebAuthn needs a secure context
-// and a host name for its RP id, so those sections use http://localhost:PORT. TOTP codes are computed here (RFC 6238); the server refuses a code for a step it has already
+// and a host name for its RP id, so those sections use http://localhost:PORT. The section before them is OIDC sign-in
+// (ADR-0022 step 8) against a small fake provider written in this file (node:http, ES256 with node:crypto): the
+// administrator configures it, an invite is redeemed through it, a linked person signs in with it, an unknown identity
+// is refused, and an owner links and unlinks an identity. TOTP codes are computed here (RFC 6238); the server refuses a code for a step it has already
 // seen, so `nextCode` never repeats a step for one secret and waits for the clock when it has to.
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
-import { createHmac } from "node:crypto";
+import { createHmac, createHash, generateKeyPairSync, randomBytes, sign as cryptoSign } from "node:crypto";
+import http from "node:http";
 import { chromium } from "playwright-core";
 
 const BIN = process.env.PROXYMIND ?? new URL("../../target/debug/proxymind", import.meta.url).pathname;
@@ -96,6 +100,88 @@ async function nextCode(secret) {
   const step = Math.max(want, stepNow());
   lastStep.set(secret, step);
   return totpAt(secret, step);
+}
+
+
+// ---- a fake OpenID Connect provider -----------------------------------------------------------------------------
+// Discovery, a key set, an authorize endpoint that sends the browser straight back (the person always approves), and a
+// token endpoint that checks the client's credentials, the redirect URI, PKCE S256 and that a code is used once.
+
+const b64u = (b) => Buffer.from(b).toString("base64url");
+function startFakeProvider({ port, redirectUri, clientId, clientSecret }) {
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "e2e-1", use: "sig", alg: "ES256" };
+  const issuer = `http://127.0.0.1:${port}`;
+  const codes = new Map();
+  const idp = { issuer, grant: { sub: "sub-nobody", email: "nobody@corp.example", name: "Nobody", groups: [] }, tokens: 0, bad: [] };
+  const json = (res, status, body) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  idp.server = http.createServer((req, res) => {
+    const url = new URL(req.url, issuer);
+    if (url.pathname === "/.well-known/openid-configuration") {
+      return json(res, 200, {
+        issuer,
+        authorization_endpoint: `${issuer}/authorize`,
+        token_endpoint: `${issuer}/token`,
+        jwks_uri: `${issuer}/jwks`,
+        response_types_supported: ["code"],
+        code_challenge_methods_supported: ["S256"],
+        id_token_signing_alg_values_supported: ["ES256"],
+        token_endpoint_auth_methods_supported: ["client_secret_basic"],
+        authorization_response_iss_parameter_supported: true,
+      });
+    }
+    if (url.pathname === "/jwks") return json(res, 200, { keys: [jwk] });
+    if (url.pathname === "/authorize") {
+      const q = url.searchParams;
+      if (q.get("redirect_uri") !== redirectUri || q.get("client_id") !== clientId || q.get("code_challenge_method") !== "S256" || q.get("response_type") !== "code") {
+        idp.bad.push(`authorize: ${url.search}`);
+        res.writeHead(400);
+        return res.end("bad request");
+      }
+      const code = b64u(randomBytes(18));
+      codes.set(code, { challenge: q.get("code_challenge"), nonce: q.get("nonce"), grant: { ...idp.grant }, used: false });
+      const back = new URL(redirectUri);
+      back.searchParams.set("code", code);
+      back.searchParams.set("state", q.get("state"));
+      back.searchParams.set("iss", issuer);
+      res.writeHead(302, { location: back.toString() });
+      return res.end();
+    }
+    if (url.pathname === "/token" && req.method === "POST") {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        const f = new URLSearchParams(body);
+        const basic = (req.headers.authorization ?? "").replace(/^Basic /, "");
+        const [id, secret] = Buffer.from(basic, "base64").toString().split(":").map(decodeURIComponent);
+        if (id !== clientId || secret !== clientSecret) return json(res, 401, { error: "invalid_client" });
+        const rec = codes.get(f.get("code"));
+        if (!rec || rec.used || f.get("redirect_uri") !== redirectUri) return json(res, 400, { error: "invalid_grant" });
+        rec.used = true;
+        if (b64u(createHash("sha256").update(f.get("code_verifier") ?? "").digest()) !== rec.challenge) {
+          idp.bad.push("token: PKCE verifier does not match");
+          return json(res, 400, { error: "invalid_grant" });
+        }
+        const now = Math.floor(Date.now() / 1000);
+        const header = { alg: "ES256", typ: "JWT", kid: "e2e-1" };
+        const claims = {
+          iss: issuer, sub: rec.grant.sub, aud: clientId, iat: now, exp: now + 300, nonce: rec.nonce,
+          email: rec.grant.email, email_verified: true, name: rec.grant.name, preferred_username: rec.grant.username, groups: rec.grant.groups,
+        };
+        const input = `${b64u(JSON.stringify(header))}.${b64u(JSON.stringify(claims))}`;
+        const sig = cryptoSign("sha256", Buffer.from(input), { key: privateKey, dsaEncoding: "ieee-p1363" });
+        idp.tokens++;
+        json(res, 200, { access_token: "not-used", token_type: "Bearer", id_token: `${input}.${b64u(sig)}` });
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise((resolve) => idp.server.listen(port, "127.0.0.1", () => resolve(idp)));
 }
 
 // ---- helpers for the screens --------------------------------------------------------------------------------------
@@ -253,6 +339,7 @@ try {
     check((await page.getByTestId("session-current").count()) === 1, "the current session is marked");
     await page.getByRole("button", { name: "Users & invites" }).click();
     await page.getByTestId("admin-page").waitFor();
+    await page.getByTestId("user-owner").waitFor();
     check((await page.getByTestId("user-owner").count()) === 1, "the admin page lists the users");
 
     // a first invite that is revoked again (it is the only one, so the Revoke button is unambiguous)
@@ -652,6 +739,109 @@ try {
   let ownerDevice = null;
   let tessDevice = null;
 
+  await section("OIDC sign-in: configure a provider, redeem an invite through it, sign in, link and unlink", async () => {
+    const clientSecret = "e2e-client-secret-7c1f0b2d9a";
+    const idpPort = await freePort();
+    const callback = `${base}/api/v1/auth/oidc/callback`;
+    const idp = await startFakeProvider({ port: idpPort, redirectUri: callback, clientId: "pm-e2e", clientSecret });
+    children.push({ kill: () => idp.server.close() });
+
+    // The owner (password and authenticator, at 127.0.0.1) configures the provider.
+    const op = await newPage(await browser.newContext({ viewport: { width: 1440, height: 900 } }));
+    const opConsole = [];
+    op.on("console", (m) => opConsole.push(m.text()));
+    await op.goto(base);
+    await typePassword(op, "owner", owner2.pw);
+    await verifyTotp(op, owner.secret);
+    await appLoaded(op);
+    await adminTab(op);
+    await op.getByTestId("oidc-add").click();
+    await op.getByTestId("oidc-name").fill("Corp SSO");
+    await op.getByTestId("oidc-issuer").fill(idp.issuer);
+    await op.getByTestId("oidc-client-id").fill("pm-e2e");
+    await op.getByTestId("oidc-client-secret").fill(clientSecret);
+    await op.getByTestId("oidc-group-claim").fill("groups");
+    await op.getByTestId("oidc-group-roles").fill("pm-owners = owner");
+    await op.getByTestId("oidc-save").click();
+    await op.getByRole("alert").waitFor();
+    check(/never owner/.test(await op.getByRole("alert").textContent()), "a group cannot be mapped to owner (the form says so)");
+    await op.getByTestId("oidc-group-roles").fill("pm-testers = tester");
+    await op.getByTestId("oidc-save").click();
+    await op.getByTestId("oidc-provider-row").waitFor();
+    check((await op.getByTestId("oidc-secret-cell").textContent()) === "********", "the client secret is shown masked");
+    check((await op.getByTestId("oidc-redirect-uri").textContent()).trim() === callback, "the page says which redirect URI to register");
+    await op.getByTestId("oidc-test").click();
+    await op.getByTestId("oidc-test-result").waitFor();
+    check(/answers as ProxyMind needs/.test(await op.getByTestId("oidc-test-result").textContent()), "the test fetches discovery and keys and reports them");
+    await op.screenshot({ path: join(SHOTS, "server-oidc-1-admin.png") });
+    const apiText = await op.evaluate(async () => (await fetch("/api/v1/auth/oidc/providers")).text());
+    check(!apiText.includes(clientSecret), "the provider list from the API holds no client secret");
+
+    // An invite redeemed by signing in with the provider.
+    await op.getByTestId("invite-role").selectOption("viewer");
+    await op.getByTestId("invite-create").click();
+    await op.getByTestId("invite-url").waitFor();
+    const ivyInvite = await op.getByTestId("invite-url").inputValue();
+    idp.grant = { sub: "sub-ivy", email: "ivy@corp.example", name: "Ivy Invited", username: "ivy", groups: [] };
+    const ip = await newPage(await browser.newContext({ viewport: { width: 1440, height: 900 } }));
+    await ip.goto(ivyInvite);
+    await ip.getByRole("heading", { name: "Join this project" }).waitFor();
+    await ip.locator('[data-testid^="oidc-invite-"]').click();
+    await appLoaded(ip);
+    const ivy = await meOf(ip);
+    check(ivy.user.username === "ivy" && ivy.role === "viewer" && ivy.session.auth_method === "oidc", "the invite is redeemed through the provider: a viewer, session method oidc");
+    check(!ip.url().includes("code=") && !ip.url().includes("state="), "the address bar holds no code or state afterwards");
+    await ip.getByTestId("tab-account").click();
+    await ip.getByTestId("identity-row").waitFor();
+    check((await ip.getByTestId("identity-email").textContent()) === "ivy@corp.example" && (await ip.getByTestId("identity-provider").textContent()) === "Corp SSO", "her Account page lists the linked identity");
+    await ip.screenshot({ path: join(SHOTS, "server-oidc-2-identity.png") });
+    // It is her only way in: unlinking is refused.
+    ip.once("dialog", (d) => void d.accept());
+    await ip.getByTestId("identity-unlink").click();
+    await ip.getByRole("alert").waitFor();
+    check(/last way to sign in/.test(await ip.getByRole("alert").textContent()), "the last way to sign in cannot be unlinked");
+
+    // Signed out, the sign-in page offers the provider and a linked person gets in with it.
+    await ip.getByTestId("account-sign-out").click();
+    await ip.getByRole("heading", { name: "Sign in" }).waitFor();
+    await ip.locator('[data-testid^="oidc-signin-"]').waitFor();
+    check((await ip.locator('[data-testid^="oidc-signin-"]').textContent()).includes("Sign in with Corp SSO"), "the sign-in page offers \"Sign in with Corp SSO\"");
+    await ip.screenshot({ path: join(SHOTS, "server-oidc-3-signin.png") });
+    await ip.locator('[data-testid^="oidc-signin-"]').click();
+    await appLoaded(ip);
+    check((await meOf(ip)).user.username === "ivy", "a linked person signs in through the provider");
+
+    // An identity nobody linked is refused, with the way forward.
+    idp.grant = { sub: "sub-nobody", email: "nobody@corp.example", name: "Nobody", groups: [] };
+    const np = await newPage(await browser.newContext());
+    await np.goto(base);
+    await np.locator('[data-testid^="oidc-signin-"]').click();
+    await np.getByTestId("auth-notice").waitFor();
+    check(/ask a project owner for an invite/i.test(await np.getByTestId("auth-notice").textContent()), "an unknown identity is refused: ask an owner for an invite");
+    check(!np.url().includes("oidc_error"), "and the error code is taken out of the address bar");
+    await np.close();
+    pages.pop();
+
+    // The owner links an identity from the Account page (a round trip bound to the session), then unlinks it.
+    idp.grant = { sub: "sub-owner", email: "olivia@corp.example", name: "Olivia", groups: [] };
+    await go(op, "account");
+    await op.getByTestId("account-page").waitFor();
+    await op.locator('[data-testid^="oidc-link-"]').click();
+    await appLoaded(op);
+    await go(op, "account");
+    await op.getByTestId("identity-row").waitFor();
+    check((await op.getByTestId("identity-email").textContent()) === "olivia@corp.example", "the owner's identity is linked from the Account page");
+    await op.screenshot({ path: join(SHOTS, "server-oidc-4-linked.png") });
+    op.once("dialog", (d) => void d.accept());
+    await op.getByTestId("identity-unlink").click();
+    await op.getByText("Identity unlinked").waitFor();
+    check((await op.getByTestId("identity-row").count()) === 0, "and unlinked again (the owner keeps a password and an authenticator)");
+    check(idp.bad.length === 0, `the provider saw only well-formed requests: the exact redirect URI and PKCE S256${idp.bad.length ? " (" + idp.bad.join("; ") + ")" : ""}`);
+    check(idp.tokens >= 3, "the provider issued tokens for each round trip");
+    const everything = [...opConsole, ...consoleText, await op.content(), await ip.content()].join("\n");
+    check(!everything.includes(clientSecret), "the client secret appears neither in the console nor in the pages");
+  });
+
   await section("Passkeys: add one, sign in with it, rename it, remove it", async () => {
     // At 127.0.0.1 a passkey cannot work (the RP id is localhost): the sign-in page offers none, the account page says why.
     const wrong = await newPage(await browser.newContext());
@@ -699,7 +889,7 @@ try {
     await pk.getByTestId("passkey-rename").click();
     await pk.getByTestId("passkey-rename-input").fill("Work laptop");
     await pk.getByTestId("passkey-rename-save").click();
-    await pk.getByText("Work laptop").waitFor();
+    await pk.getByTestId("passkey-name-cell").getByText("Work laptop").waitFor();
     check(true, "a passkey can be renamed");
 
     // Remove (the owner still has a password and an authenticator, so this is allowed), then it no longer signs in.

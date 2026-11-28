@@ -64,6 +64,17 @@ pub enum AccountError {
     NoSuchPasskey,
     #[error("invalid or expired enrolment link")]
     InvalidEnrolmentLink,
+    /// An OIDC sign-in, link or provider setting was refused. The text is a fixed machine-readable code (`no_account`,
+    /// `not_permitted`, `owner_needs_local_factor`, ...); the security log has the reason.
+    #[error("sign-in with an identity provider refused: {0}")]
+    OidcRefused(&'static str),
+    #[error("no such identity provider")]
+    NoSuchProvider,
+    #[error("no such linked identity")]
+    NoSuchIdentity,
+    /// Unlinking would leave the account with no way to sign in.
+    #[error("this is the last way to sign in to this account; add a passkey or a password first")]
+    LastSignIn,
     /// A presented `pm3_` token is unknown, revoked, expired, or its owner is disabled or no longer a member:
     /// deliberately the same for all of them (the security log says which).
     #[error("the token is not valid")]

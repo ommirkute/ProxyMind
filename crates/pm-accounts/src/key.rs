@@ -30,6 +30,8 @@ pub enum KeyPurpose {
     /// HMAC-SHA256 that makes the credential ids shown for a username that has no passkey (so asking for the
     /// sign-in options of a name does not reveal whether the name exists).
     PasskeyDecoy,
+    /// ChaCha20-Poly1305 key for OIDC client secrets at rest (ADR-0022 step 8; the provider id is the associated data).
+    OidcSecret,
 }
 
 impl KeyPurpose {
@@ -43,6 +45,7 @@ impl KeyPurpose {
             KeyPurpose::AuditChain => "proxymind/v1/audit-chain",
             KeyPurpose::ApiToken => "proxymind/v1/api-token",
             KeyPurpose::PasskeyDecoy => "proxymind/v1/passkey-decoy",
+            KeyPurpose::OidcSecret => "proxymind/v1/oidc-secret",
         }
     }
 }

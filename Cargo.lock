@@ -1427,6 +1427,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -1456,7 +1457,9 @@ dependencies = [
  "pm-assistant",
  "pm-core",
  "pm-demo",
+ "pm-http",
  "pm-mcp",
+ "pm-replay",
  "pm-service",
  "pm-tls",
  "ring",

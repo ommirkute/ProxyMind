@@ -1773,6 +1773,19 @@ class GroupItemResult(_GroupItemResultRequired, total=False):
     name: _t.Optional[str]
 
 
+class GroupMapping(TypedDict):
+    # `tester` or `viewer`. Never `owner`.
+    role: str
+    # The value in the group claim.
+    value: str
+
+
+class GroupMappingBody(TypedDict):
+    # `tester` or `viewer`; `owner` is refused.
+    role: str
+    value: str
+
+
 GroupMode = _t.Literal["sequence", "parallel"]
 
 class _GroupRequestRequired(TypedDict):
@@ -2728,6 +2741,136 @@ class NoiseMask(TypedDict):
     json_paths: _t.List[str]
     # Words that vary in text/HTML bodies.
     words: _t.List[str]
+
+
+class OidcCallbackQuery(TypedDict, total=False):
+    """What the provider sends back to the callback."""
+    code: _t.Optional[str]
+    error: _t.Optional[str]
+    error_description: _t.Optional[str]
+    # RFC 9207: the issuer that answered.
+    iss: _t.Optional[str]
+    state: _t.Optional[str]
+
+
+class OidcIdentityView(TypedDict):
+    """An identity linked to the signed-in account."""
+    created_at: int
+    # As the provider last said; display only.
+    email: _t.Optional[str]
+    # Pass this to unlink it.
+    id: str
+    last_used_at: _t.Optional[int]
+    # How it was linked: `self`, `email`, `invite` or `auto`.
+    linked_by: str
+    name: _t.Optional[str]
+    provider_id: str
+    provider_name: str
+
+
+class _OidcInviteBodyRequired(TypedDict):
+    # The token from the invite link.
+    invite: str
+
+
+class OidcInviteBody(_OidcInviteBodyRequired, total=False):
+    next: _t.Optional[str]
+
+
+class OidcLinkBody(TypedDict, total=False):
+    # Where to land afterwards; only a path on this origin is kept.
+    next: _t.Optional[str]
+
+
+class _OidcProviderBodyRequired(TypedDict):
+    client_id: str
+    # Exactly the issuer string of the provider (what its tokens carry as `iss`).
+    issuer: str
+    # Shown on the sign-in button.
+    name: str
+
+
+class OidcProviderBody(_OidcProviderBodyRequired, total=False):
+    """Body of `POST /auth/oidc/providers` and `PUT /auth/oidc/providers/{id}`."""
+    # Domains whose verified emails may create an account (a viewer). Empty: nobody (the default).
+    auto_create_domains: _t.List[str]
+    # The client secret. Left out or `********` keeps the stored one (on a change); an empty string removes it (a
+    # public client).
+    client_secret: _t.Optional[str]
+    # Link an existing local account whose handle is the verified email (never an owner or administrator).
+    email_linking: bool
+    enabled: bool
+    # The claim that lists the user's groups (for example `groups`).
+    group_claim: _t.Optional[str]
+    # Group values and the role they give on this project: `tester` or `viewer`.
+    group_roles: _t.List["GroupMappingBody"]
+    # The ID token's `acr` must be one of these.
+    required_acr: _t.List[str]
+    # The ID token's `amr` must contain all of these.
+    required_amr: _t.List[str]
+    # Scopes besides `openid` (default `profile`, `email`).
+    scopes: _t.Optional[_t.List[str]]
+
+
+class OidcProviderPublic(TypedDict):
+    """What the sign-in page lists."""
+    id: str
+    # The text of the "Sign in with …" button.
+    name: str
+
+
+class OidcProviderView(TypedDict):
+    """A configured provider. The client secret is never returned: `client_secret` is `********` when one is stored."""
+    auto_create_domains: _t.List[str]
+    client_id: str
+    # `********` when a client secret is stored, absent for a public client.
+    client_secret: _t.Optional[str]
+    created_at: int
+    email_linking: bool
+    enabled: bool
+    group_claim: _t.Optional[str]
+    group_roles: _t.List["GroupMapping"]
+    id: str
+    issuer: str
+    name: str
+    # The redirect URI to register with the provider: this server's public origin and the fixed callback path.
+    redirect_uri: str
+    required_acr: _t.List[str]
+    required_amr: _t.List[str]
+    # Scopes besides `openid`.
+    scopes: _t.List[str]
+    updated_at: int
+
+
+class OidcStartQuery(TypedDict, total=False):
+    # Where to land afterwards; only a path on this origin is kept.
+    next: _t.Optional[str]
+
+
+class OidcStartResponse(TypedDict):
+    """Where to send the browser to continue a link or an invite."""
+    # The provider's authorization URL. The state cookie is set by this answer.
+    url: str
+
+
+class OidcTestResponse(TypedDict):
+    """The result of an administrator's test of a provider's configuration."""
+    # The signing algorithms those keys are for.
+    algorithms: _t.List[str]
+    authorization_endpoint: _t.Optional[str]
+    # The provider says it sends the `iss` response parameter (RFC 9207); then ProxyMind requires it.
+    iss_parameter_supported: bool
+    issuer: _t.Optional[str]
+    jwks_uri: _t.Optional[str]
+    # How many usable signing keys the provider's key set has.
+    key_count: _t.Optional[int]
+    ok: bool
+    # What went wrong, or notes (the first problem stops the test).
+    problems: _t.List[str]
+    redirect_uri: str
+    # `client_secret_basic` or `client_secret_post`.
+    token_auth: _t.Optional[str]
+    token_endpoint: _t.Optional[str]
 
 
 class OkResponse(TypedDict):
@@ -4252,6 +4395,8 @@ class Snippet(TypedDict):
 
 
 class StateResponse(TypedDict):
+    # The identity providers people can sign in with (enabled ones; id and button text only).
+    oidc_providers: _t.List["OidcProviderPublic"]
     # How many passkeys the signed-in account has (present only when the request carries a valid session).
     passkey_count: _t.Optional[int]
     # Why passkeys are unavailable, when they are.

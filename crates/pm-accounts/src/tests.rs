@@ -207,7 +207,10 @@ fn migrations_apply_to_an_empty_database_and_are_idempotent() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(tables, 13, "the 11 of the first two migrations, then enrolment_links and server_settings");
+    assert_eq!(
+        tables, 14,
+        "the 11 of the first two migrations, enrolment_links and server_settings, then oidc_providers"
+    );
     // Applying again to a migrated connection changes nothing.
     crate::migrations::apply(&mut acc.conn()).unwrap();
     drop(acc);

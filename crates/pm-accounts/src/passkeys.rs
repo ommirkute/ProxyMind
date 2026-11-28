@@ -930,10 +930,11 @@ impl Accounts {
         Ok(creation_options(rp, &challenge, &handle, &user.username, &user.display_name, &[], self.timeout_ms()))
     }
 
-    /// Removes how an account signed in before (password, authenticator, recovery codes, passkeys), for a link.
+    /// Removes how an account signed in before (password, authenticator, recovery codes, passkeys, linked identity-provider
+    /// accounts: a recovery must also cut off whoever got in through one), for a link.
     fn wipe_sign_in(&self, tx: &Transaction<'_>, user_id: &str) -> Result<()> {
         tx.execute(
-            "DELETE FROM credentials WHERE user_id = ?1 AND kind IN ('password', 'totp', 'passkey')",
+            "DELETE FROM credentials WHERE user_id = ?1 AND kind IN ('password', 'totp', 'passkey', 'oidc')",
             [user_id],
         )?;
         tx.execute("DELETE FROM recovery_codes WHERE user_id = ?1", [user_id])?;

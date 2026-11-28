@@ -701,6 +701,8 @@ iframe.render { width: 100%; min-height: 420px; border: 1px solid var(--border);
 .field input, .field select { width: 100%; height: 36px; }
 .field > small { font-size: 12px; }
 .auth-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+.auth-or { margin-top: 12px; }
+.oidc-buttons { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .signin-card .notice { margin: 0 0 12px; }
 .signin-card .notice p { color: inherit; }
 .totp-secret { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin: 12px 0; }

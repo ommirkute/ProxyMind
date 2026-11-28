@@ -1683,6 +1683,19 @@ export interface GroupItemResult {
   status: number | null;
 }
 
+export interface GroupMapping {
+  /** `tester` or `viewer`. Never `owner`. */
+  role: string;
+  /** The value in the group claim. */
+  value: string;
+}
+
+export interface GroupMappingBody {
+  /** `tester` or `viewer`; `owner` is refused. */
+  role: string;
+  value: string;
+}
+
 export type GroupMode =
   /** One after another, each waiting for the previous response. */
   | "sequence"
@@ -2678,6 +2691,132 @@ export interface NoiseMask {
   json_paths: string[];
   /** Words that vary in text/HTML bodies. */
   words: string[];
+}
+
+/** What the provider sends back to the callback. */
+export interface OidcCallbackQuery {
+  code?: string | null;
+  error?: string | null;
+  error_description?: string | null;
+  /** RFC 9207: the issuer that answered. */
+  iss?: string | null;
+  state?: string | null;
+}
+
+/** An identity linked to the signed-in account. */
+export interface OidcIdentityView {
+  created_at: number;
+  /** As the provider last said; display only. */
+  email: string | null;
+  /** Pass this to unlink it. */
+  id: string;
+  last_used_at: number | null;
+  /** How it was linked: `self`, `email`, `invite` or `auto`. */
+  linked_by: string;
+  name: string | null;
+  provider_id: string;
+  provider_name: string;
+}
+
+export interface OidcInviteBody {
+  /** The token from the invite link. */
+  invite: string;
+  next?: string | null;
+}
+
+export interface OidcLinkBody {
+  /** Where to land afterwards; only a path on this origin is kept. */
+  next?: string | null;
+}
+
+/** Body of `POST /auth/oidc/providers` and `PUT /auth/oidc/providers/{id}`. */
+export interface OidcProviderBody {
+  /** Domains whose verified emails may create an account (a viewer). Empty: nobody (the default). */
+  auto_create_domains?: string[];
+  client_id: string;
+  /**
+   * The client secret. Left out or `********` keeps the stored one (on a change); an empty string removes it (a
+   * public client).
+   */
+  client_secret?: string | null;
+  /** Link an existing local account whose handle is the verified email (never an owner or administrator). */
+  email_linking?: boolean;
+  enabled?: boolean;
+  /** The claim that lists the user's groups (for example `groups`). */
+  group_claim?: string | null;
+  /** Group values and the role they give on this project: `tester` or `viewer`. */
+  group_roles?: GroupMappingBody[];
+  /** Exactly the issuer string of the provider (what its tokens carry as `iss`). */
+  issuer: string;
+  /** Shown on the sign-in button. */
+  name: string;
+  /** The ID token's `acr` must be one of these. */
+  required_acr?: string[];
+  /** The ID token's `amr` must contain all of these. */
+  required_amr?: string[];
+  /** Scopes besides `openid` (default `profile`, `email`). */
+  scopes?: string[] | null;
+}
+
+/** What the sign-in page lists. */
+export interface OidcProviderPublic {
+  id: string;
+  /** The text of the "Sign in with …" button. */
+  name: string;
+}
+
+/** A configured provider. The client secret is never returned: `client_secret` is `********` when one is stored. */
+export interface OidcProviderView {
+  auto_create_domains: string[];
+  client_id: string;
+  /** `********` when a client secret is stored, absent for a public client. */
+  client_secret: string | null;
+  created_at: number;
+  email_linking: boolean;
+  enabled: boolean;
+  group_claim: string | null;
+  group_roles: GroupMapping[];
+  id: string;
+  issuer: string;
+  name: string;
+  /** The redirect URI to register with the provider: this server's public origin and the fixed callback path. */
+  redirect_uri: string;
+  required_acr: string[];
+  required_amr: string[];
+  /** Scopes besides `openid`. */
+  scopes: string[];
+  updated_at: number;
+}
+
+export interface OidcStartQuery {
+  /** Where to land afterwards; only a path on this origin is kept. */
+  next?: string | null;
+}
+
+/** Where to send the browser to continue a link or an invite. */
+export interface OidcStartResponse {
+  /** The provider's authorization URL. The state cookie is set by this answer. */
+  url: string;
+}
+
+/** The result of an administrator's test of a provider's configuration. */
+export interface OidcTestResponse {
+  /** The signing algorithms those keys are for. */
+  algorithms: string[];
+  authorization_endpoint: string | null;
+  /** The provider says it sends the `iss` response parameter (RFC 9207); then ProxyMind requires it. */
+  iss_parameter_supported: boolean;
+  issuer: string | null;
+  jwks_uri: string | null;
+  /** How many usable signing keys the provider's key set has. */
+  key_count: number | null;
+  ok: boolean;
+  /** What went wrong, or notes (the first problem stops the test). */
+  problems: string[];
+  redirect_uri: string;
+  /** `client_secret_basic` or `client_secret_post`. */
+  token_auth: string | null;
+  token_endpoint: string | null;
 }
 
 export interface OkResponse {
@@ -4230,6 +4369,8 @@ export interface Snippet {
 }
 
 export interface StateResponse {
+  /** The identity providers people can sign in with (enabled ones; id and button text only). */
+  oidc_providers: OidcProviderPublic[];
   /** How many passkeys the signed-in account has (present only when the request carries a valid session). */
   passkey_count: number | null;
   /** Why passkeys are unavailable, when they are. */

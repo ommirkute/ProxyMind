@@ -84,6 +84,8 @@ impl Config {
 
 pub(crate) struct Keys {
     totp: LessSafeKey,
+    /// Encrypts OIDC client secrets (a key of its own, derived from the server key).
+    oidc: LessSafeKey,
     pub(crate) session: hmac::Key,
     pub(crate) recovery: hmac::Key,
     pub(crate) token: hmac::Key,
@@ -112,6 +114,8 @@ pub struct Accounts {
     /// Open passkey ceremonies (challenge issued, response not yet seen). In memory on purpose: a challenge lives
     /// five minutes and is single use, so a restart losing them costs one retry.
     pub(crate) ceremonies: crate::passkeys::Ceremonies,
+    /// Open OIDC sign-ins (sent to the provider, not yet back). In memory for the same reason.
+    pub(crate) oidc_pending: crate::oidc::PendingStore,
 }
 
 impl Accounts {
@@ -145,8 +149,11 @@ impl Accounts {
         let mac = |p: KeyPurpose| hmac::Key::new(hmac::HMAC_SHA256, &key.derive(p));
         let totp_key = UnboundKey::new(&CHACHA20_POLY1305, &key.derive(KeyPurpose::TotpEncryption))
             .map_err(|_| AccountError::Internal("cannot build the TOTP encryption key".into()))?;
+        let oidc_key = UnboundKey::new(&CHACHA20_POLY1305, &key.derive(KeyPurpose::OidcSecret))
+            .map_err(|_| AccountError::Internal("cannot build the OIDC encryption key".into()))?;
         let keys = Keys {
             totp: LessSafeKey::new(totp_key),
+            oidc: LessSafeKey::new(oidc_key),
             session: mac(KeyPurpose::SessionId),
             recovery: mac(KeyPurpose::RecoveryCode),
             token: mac(KeyPurpose::OneTimeToken),
@@ -169,6 +176,7 @@ impl Accounts {
             dummy_verifications: AtomicU64::new(0),
             token_uses: Default::default(),
             ceremonies: Default::default(),
+            oidc_pending: Default::default(),
         };
         accounts.purge_expired()?;
         Ok(accounts)
@@ -228,26 +236,20 @@ impl Accounts {
 
     /// `nonce || ciphertext || tag`, bound to `aad`.
     pub(crate) fn seal_secret(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-        let nonce_bytes = random::<12>()?;
-        let mut buf = plaintext.to_vec();
-        self.keys
-            .totp
-            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce_bytes), Aad::from(aad), &mut buf)
-            .map_err(|_| AccountError::Internal("encryption failed".into()))?;
-        let mut out = nonce_bytes.to_vec();
-        out.extend_from_slice(&buf);
-        Ok(out)
+        seal(&self.keys.totp, plaintext, aad)
     }
 
     pub(crate) fn open_secret(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-        if sealed.len() < 12 + CHACHA20_POLY1305.tag_len() {
-            return Err(AccountError::Decrypt);
-        }
-        let (nonce, rest) = sealed.split_at(12);
-        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| AccountError::Decrypt)?;
-        let mut buf = rest.to_vec();
-        let plain = self.keys.totp.open_in_place(nonce, Aad::from(aad), &mut buf).map_err(|_| AccountError::Decrypt)?;
-        Ok(plain.to_vec())
+        open(&self.keys.totp, sealed, aad)
+    }
+
+    /// Like [`seal_secret`](Self::seal_secret), under the OIDC key.
+    pub(crate) fn seal_oidc(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        seal(&self.keys.oidc, plaintext, aad)
+    }
+
+    pub(crate) fn open_oidc(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        open(&self.keys.oidc, sealed, aad)
     }
 
     /// Deletes what can no longer matter: expired pending sign-ins, setup tokens and throttle rows, and sessions that
@@ -272,4 +274,25 @@ impl Accounts {
             Ok(())
         })
     }
+}
+
+fn seal(key: &LessSafeKey, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    let nonce_bytes = random::<12>()?;
+    let mut buf = plaintext.to_vec();
+    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce_bytes), Aad::from(aad), &mut buf)
+        .map_err(|_| AccountError::Internal("encryption failed".into()))?;
+    let mut out = nonce_bytes.to_vec();
+    out.extend_from_slice(&buf);
+    Ok(out)
+}
+
+fn open(key: &LessSafeKey, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    if sealed.len() < 12 + CHACHA20_POLY1305.tag_len() {
+        return Err(AccountError::Decrypt);
+    }
+    let (nonce, rest) = sealed.split_at(12);
+    let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| AccountError::Decrypt)?;
+    let mut buf = rest.to_vec();
+    let plain = key.open_in_place(nonce, Aad::from(aad), &mut buf).map_err(|_| AccountError::Decrypt)?;
+    Ok(plain.to_vec())
 }

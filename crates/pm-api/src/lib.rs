@@ -24,6 +24,8 @@ mod contract_table;
 pub mod contracts;
 pub mod listen;
 mod mcp_api;
+mod oidc_api;
+mod oidc_http;
 mod passkey_api;
 mod route_perms;
 mod routes;
@@ -364,7 +366,8 @@ async fn guard(State(st): State<AppState>, mut req: Request, next: Next) -> Resp
             "setup_required": false,
             "setup_allowed": false,
             "passkey_supported": false,
-            "passkey_required": false
+            "passkey_required": false,
+            "oidc_providers": []
         }))
         .into_response();
         add_security_headers(resp.headers_mut());

@@ -21,6 +21,7 @@ import type {
 } from "../api-types.gen";
 import { CopyButton, Field, RecoveryCodesView, TotpSecret, useAuth } from "../authparts";
 import { Empty, ErrorBox, Panel, useAction, useLoad } from "../components";
+import { LinkedIdentities, OidcProviders } from "../oidcparts";
 import { PasskeyAdd, usePasskeyUse } from "../passkeyparts";
 import { TokensPanel } from "./Tokens";
 
@@ -58,6 +59,7 @@ export default function Account() {
       <Sessions reloadKey={tick} />
       {me.role && me.role !== "viewer" && <TokensPanel serverMode isOwner={me.role === "owner"} />}
       <Passkeys onChanged={() => setTick((t) => t + 1)} />
+      <LinkedIdentities />
       <Password onChanged={() => setTick((t) => t + 1)} />
       <Authenticator />
       <RecoveryCodes />
@@ -396,6 +398,7 @@ export function Admin() {
         </div>
       </div>
       {isAdmin && <PasskeyRule />}
+      {isAdmin && <OidcProviders />}
       {isOwner && <Members selfId={auth.me.user.id} />}
       {isAdmin && <Users selfId={auth.me.user.id} />}
       <Invites />

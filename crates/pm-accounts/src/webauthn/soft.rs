@@ -33,6 +33,11 @@ const RSA_TEST_KEY_B64: &str = concat!(
     "UfXfPmCo1XGSvWZKWkJdpErLuTyOj2/kYwZoLXH0Xv1ea6jSOiMt",
 );
 
+/// The test RSA key as PKCS#1 DER, for tests of crates above this one that need an RS256 signer (a fake OIDC provider).
+pub fn rsa_test_key_der() -> Vec<u8> {
+    base64_std(RSA_TEST_KEY_B64)
+}
+
 enum Key {
     Es(EcdsaKeyPair),
     Ed(Ed25519KeyPair),

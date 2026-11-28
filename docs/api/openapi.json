@@ -5689,6 +5689,40 @@
         ],
         "type": "object"
       },
+      "GroupMapping": {
+        "properties": {
+          "role": {
+            "description": "`tester` or `viewer`. Never `owner`.",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value in the group claim.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "role"
+        ],
+        "type": "object"
+      },
+      "GroupMappingBody": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "description": "`tester` or `viewer`; `owner` is refused.",
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "role"
+        ],
+        "type": "object"
+      },
       "GroupMode": {
         "oneOf": [
           {
@@ -8713,6 +8747,450 @@
           "json_paths",
           "words",
           "headers"
+        ],
+        "type": "object"
+      },
+      "OidcCallbackQuery": {
+        "description": "What the provider sends back to the callback.",
+        "properties": {
+          "code": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_description": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "iss": {
+            "default": null,
+            "description": "RFC 9207: the issuer that answered.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OidcIdentityView": {
+        "description": "An identity linked to the signed-in account.",
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "email": {
+            "description": "As the provider last said; display only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Pass this to unlink it.",
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "linked_by": {
+            "description": "How it was linked: `self`, `email`, `invite` or `auto`.",
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider_id",
+          "provider_name",
+          "email",
+          "name",
+          "linked_by",
+          "created_at",
+          "last_used_at"
+        ],
+        "type": "object"
+      },
+      "OidcInviteBody": {
+        "additionalProperties": false,
+        "properties": {
+          "invite": {
+            "description": "The token from the invite link.",
+            "type": "string"
+          },
+          "next": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "invite"
+        ],
+        "type": "object"
+      },
+      "OidcLinkBody": {
+        "additionalProperties": false,
+        "properties": {
+          "next": {
+            "default": null,
+            "description": "Where to land afterwards; only a path on this origin is kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OidcProviderBody": {
+        "additionalProperties": false,
+        "description": "Body of `POST /auth/oidc/providers` and `PUT /auth/oidc/providers/{id}`.",
+        "properties": {
+          "auto_create_domains": {
+            "default": [],
+            "description": "Domains whose verified emails may create an account (a viewer). Empty: nobody (the default).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "default": null,
+            "description": "The client secret. Left out or `********` keeps the stored one (on a change); an empty string removes it (a\npublic client).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email_linking": {
+            "default": false,
+            "description": "Link an existing local account whose handle is the verified email (never an owner or administrator).",
+            "type": "boolean"
+          },
+          "enabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "group_claim": {
+            "default": null,
+            "description": "The claim that lists the user's groups (for example `groups`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group_roles": {
+            "description": "Group values and the role they give on this project: `tester` or `viewer`.",
+            "items": {
+              "$ref": "#/components/schemas/GroupMappingBody"
+            },
+            "type": "array"
+          },
+          "issuer": {
+            "description": "Exactly the issuer string of the provider (what its tokens carry as `iss`).",
+            "type": "string"
+          },
+          "name": {
+            "description": "Shown on the sign-in button.",
+            "type": "string"
+          },
+          "required_acr": {
+            "default": [],
+            "description": "The ID token's `acr` must be one of these.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_amr": {
+            "default": [],
+            "description": "The ID token's `amr` must contain all of these.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scopes": {
+            "default": null,
+            "description": "Scopes besides `openid` (default `profile`, `email`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "issuer",
+          "client_id"
+        ],
+        "type": "object"
+      },
+      "OidcProviderPublic": {
+        "description": "What the sign-in page lists.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The text of the \"Sign in with …\" button.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "OidcProviderView": {
+        "description": "A configured provider. The client secret is never returned: `client_secret` is `********` when one is stored.",
+        "properties": {
+          "auto_create_domains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "`********` when a client secret is stored, absent for a public client.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "email_linking": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "group_claim": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group_roles": {
+            "items": {
+              "$ref": "#/components/schemas/GroupMapping"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "description": "The redirect URI to register with the provider: this server's public origin and the fixed callback path.",
+            "type": "string"
+          },
+          "required_acr": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_amr": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scopes": {
+            "description": "Scopes besides `openid`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "issuer",
+          "client_id",
+          "client_secret",
+          "scopes",
+          "group_claim",
+          "group_roles",
+          "auto_create_domains",
+          "email_linking",
+          "required_acr",
+          "required_amr",
+          "enabled",
+          "redirect_uri",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "OidcStartQuery": {
+        "properties": {
+          "next": {
+            "default": null,
+            "description": "Where to land afterwards; only a path on this origin is kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "OidcStartResponse": {
+        "description": "Where to send the browser to continue a link or an invite.",
+        "properties": {
+          "url": {
+            "description": "The provider's authorization URL. The state cookie is set by this answer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "OidcTestResponse": {
+        "description": "The result of an administrator's test of a provider's configuration.",
+        "properties": {
+          "algorithms": {
+            "description": "The signing algorithms those keys are for.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "authorization_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "iss_parameter_supported": {
+            "description": "The provider says it sends the `iss` response parameter (RFC 9207); then ProxyMind requires it.",
+            "type": "boolean"
+          },
+          "issuer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "jwks_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key_count": {
+            "description": "How many usable signing keys the provider's key set has.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "problems": {
+            "description": "What went wrong, or notes (the first problem stops the test).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "token_auth": {
+            "description": "`client_secret_basic` or `client_secret_post`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "problems",
+          "issuer",
+          "authorization_endpoint",
+          "token_endpoint",
+          "jwks_uri",
+          "key_count",
+          "algorithms",
+          "iss_parameter_supported",
+          "token_auth",
+          "redirect_uri"
         ],
         "type": "object"
       },
@@ -13495,6 +13973,13 @@
       },
       "StateResponse": {
         "properties": {
+          "oidc_providers": {
+            "description": "The identity providers people can sign in with (enabled ones; id and button text only).",
+            "items": {
+              "$ref": "#/components/schemas/OidcProviderPublic"
+            },
+            "type": "array"
+          },
           "passkey_count": {
             "description": "How many passkeys the signed-in account has (present only when the request carries a valid session).",
             "format": "uint",
@@ -13546,7 +14031,8 @@
           "passkey_rp_id",
           "passkey_note",
           "passkey_required",
-          "passkey_count"
+          "passkey_count",
+          "oidc_providers"
         ],
         "type": "object"
       },
@@ -18419,6 +18905,504 @@
           }
         },
         "summary": "Server mode, owners of the project: give a member a role. A demotion ends their sessions and narrows their tokens; the last owner cannot be demoted. Needs a fresh sign-in."
+      }
+    },
+    "/api/v1/auth/oidc/callback": {
+      "get": {
+        "operationId": "oidc_callback",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "RFC 9207: the issuer that answered.",
+            "in": "query",
+            "name": "iss",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "error_description",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A 302 redirect; no body.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: where an identity provider sends the browser back. Checks the state cookie and the `state`, the `iss` parameter, the code exchange (PKCE) and the ID token, then signs in, links or refuses; answers a redirect, to `next` (with a session cookie) or with `oidc_error=<code>`. Public."
+      }
+    },
+    "/api/v1/auth/oidc/identities": {
+      "get": {
+        "operationId": "oidc_identities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OidcIdentityView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: the identities linked to the signed-in account (provider, email as shown, when linked and last used)."
+      }
+    },
+    "/api/v1/auth/oidc/identities/{id}": {
+      "delete": {
+        "operationId": "oidc_identity_remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: unlink an identity. Needs a fresh sign-in; refused for the last way to sign in; ends the other sessions."
+      }
+    },
+    "/api/v1/auth/oidc/providers": {
+      "get": {
+        "operationId": "oidc_providers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OidcProviderView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: the configured identity providers. The client secret is shown as `********`, never returned."
+      },
+      "post": {
+        "operationId": "oidc_provider_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcProviderBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcProviderView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: add an identity provider. Needs a fresh sign-in that was not made through a provider. A group may map to tester or viewer, never owner."
+      }
+    },
+    "/api/v1/auth/oidc/providers/{id}": {
+      "delete": {
+        "operationId": "oidc_provider_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: delete an identity provider and unlink the identities made through it. Needs a fresh sign-in that was not made through a provider."
+      },
+      "put": {
+        "operationId": "oidc_provider_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcProviderBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcProviderView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: change an identity provider (leave the secret out or send `********` to keep it). Needs a fresh sign-in that was not made through a provider."
+      }
+    },
+    "/api/v1/auth/oidc/providers/{id}/test": {
+      "post": {
+        "operationId": "oidc_provider_test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcTestResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode, server admins: fetch the provider's discovery document and keys now and say what was found (endpoints, keys, `iss` parameter support). Audited."
+      }
+    },
+    "/api/v1/auth/oidc/{provider}/invite": {
+      "post": {
+        "operationId": "oidc_invite",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcInviteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStartResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: begin redeeming an invite by signing in with an identity provider (not for an owner invite). Sets the state cookie; answers the provider's URL. Public."
+      }
+    },
+    "/api/v1/auth/oidc/{provider}/link": {
+      "post": {
+        "operationId": "oidc_link",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcLinkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStartResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: begin linking an identity to the signed-in account. Needs a fresh sign-in. Sets the state cookie; answers the provider's URL."
+      }
+    },
+    "/api/v1/auth/oidc/{provider}/start": {
+      "get": {
+        "operationId": "oidc_start",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Where to land afterwards; only a path on this origin is kept.",
+            "in": "query",
+            "name": "next",
+            "required": false,
+            "schema": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "A 302 redirect to the provider; no body.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "An error: 400 invalid input, 403 refused by policy, 404 not found, 409 approval needed, 5xx failure."
+          }
+        },
+        "summary": "Server mode: begin signing in with an identity provider (authorization code with PKCE S256): sets the short-lived state cookie and redirects to the provider. Public."
       }
     },
     "/api/v1/auth/passkey/login": {

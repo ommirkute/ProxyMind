@@ -60,6 +60,11 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 pub struct Secret(pub(crate) String);
 
 impl Secret {
+    /// Wraps a value that must not be logged (a client secret on its way in).
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     /// The value to hand to the person or client. Do not log it.
     pub fn expose(&self) -> &str {
         &self.0

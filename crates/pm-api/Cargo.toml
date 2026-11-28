@@ -15,7 +15,9 @@ futures-util = "0.3.34"
 pm-accounts = { version = "0.2.0", path = "../pm-accounts" }
 pm-assistant = { version = "0.2.0", path = "../pm-assistant" }
 pm-core = { version = "0.2.0", path = "../pm-core" }
+pm-http = { version = "0.2.0", path = "../pm-http" }
 pm-mcp = { version = "0.2.0", path = "../pm-mcp" }
+pm-replay = { version = "0.2.0", path = "../pm-replay" }
 pm-service = { version = "0.2.0", path = "../pm-service" }
 pm-tls = { version = "0.2.0", path = "../pm-tls" }
 ring = "0.17.14"

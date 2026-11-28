@@ -265,6 +265,17 @@ What each kind of caller may do on a project server (ADR-0022 step 6, `docs/acce
 | `DELETE /auth/passkeys/{id}` | allow | allow | allow | deny | deny | deny |
 | `PUT /auth/settings/passkey-required` | allow | deny | deny | deny | deny | deny |
 | `POST /auth/users/{id}/enrolment-link` | allow | deny | deny | deny | deny | deny |
+| `GET /auth/oidc/callback` | allow | allow | allow | allow | allow | allow |
+| `GET /auth/oidc/identities` | allow | allow | allow | deny | deny | deny |
+| `DELETE /auth/oidc/identities/{id}` | allow | allow | allow | deny | deny | deny |
+| `GET /auth/oidc/providers` | allow | deny | deny | deny | deny | deny |
+| `POST /auth/oidc/providers` | allow | deny | deny | deny | deny | deny |
+| `PUT /auth/oidc/providers/{id}` | allow | deny | deny | deny | deny | deny |
+| `DELETE /auth/oidc/providers/{id}` | allow | deny | deny | deny | deny | deny |
+| `POST /auth/oidc/providers/{id}/test` | allow | deny | deny | deny | deny | deny |
+| `GET /auth/oidc/{provider}/start` | allow | allow | allow | allow | allow | allow |
+| `POST /auth/oidc/{provider}/link` | allow | allow | allow | deny | deny | deny |
+| `POST /auth/oidc/{provider}/invite` | allow | allow | allow | allow | allow | allow |
 
 ## MCP tools
 

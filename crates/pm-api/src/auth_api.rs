@@ -88,6 +88,11 @@ impl From<AccountError> for AuthError {
             E::LastPasskey => (StatusCode::CONFLICT, "last_passkey"),
             E::NoSuchPasskey => (StatusCode::NOT_FOUND, "no_such_passkey"),
             E::InvalidEnrolmentLink => (StatusCode::BAD_REQUEST, "invalid_enrolment_link"),
+            // The code of an OIDC refusal is one of a fixed list of words (`no_account`, `not_permitted`, ...).
+            E::OidcRefused(code) => (StatusCode::FORBIDDEN, *code),
+            E::NoSuchProvider => (StatusCode::NOT_FOUND, "no_such_provider"),
+            E::NoSuchIdentity => (StatusCode::NOT_FOUND, "no_such_identity"),
+            E::LastSignIn => (StatusCode::CONFLICT, "last_sign_in"),
             E::Decrypt
             | E::ServerKey(_)
             | E::TokenStore(_)
@@ -289,6 +294,8 @@ pub(crate) struct StateResponse {
     passkey_required: bool,
     /// How many passkeys the signed-in account has (present only when the request carries a valid session).
     passkey_count: Option<usize>,
+    /// The identity providers people can sign in with (enabled ones; id and button text only).
+    oidc_providers: Vec<crate::oidc_api::OidcProviderPublic>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -612,6 +619,7 @@ pub(crate) async fn auth_state(State(st): State<AppState>, conn: ConnInfo, heade
         Ok(rp) => (Some(rp.id.clone()), None),
         Err(why) => (None, Some(why.clone())),
     };
+    let oidc_providers = crate::oidc_api::public_providers(&sm).await;
     Ok(reply(
         StatusCode::OK,
         &StateResponse {
@@ -623,6 +631,7 @@ pub(crate) async fn auth_state(State(st): State<AppState>, conn: ConnInfo, heade
             passkey_note: note,
             passkey_required: required,
             passkey_count: count,
+            oidc_providers,
         },
         &[],
     ))

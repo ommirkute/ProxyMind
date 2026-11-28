@@ -1,6 +1,6 @@
 //! `server.db` schema. Append-only: never edit a released entry (tracked in `user_version`).
 //!
-//! Tables ADR-0022 lists that later steps add as new entries: `oidc_providers` (step 8) and `checkpoints`. `tokens`
+//! Tables ADR-0022 lists that later steps add as new entries: `oidc_providers` (the fourth entry, step 8) and `checkpoints`. `tokens`
 //! is the second entry (step 5); `enrolment_links` and `server_settings` the third (step 7). A passkey needs no schema
 //! of its own: a `credentials` row of kind `passkey` with the credential id in `external_id`, the COSE public key in
 //! `secret`, the signature counter in `counter`, the user's name for it in `label` and transports, AAGUID and backup
@@ -165,6 +165,29 @@ CREATE TABLE server_settings (
     value      TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
     updated_by TEXT
+);
+"#,
+    // OIDC (step 8). Linked identities need no schema (a `credentials` row of kind `oidc`, `external_id` = issuer, a
+    // newline and `sub`); this adds the providers the server admin configures. The client secret is sealed
+    // (ChaCha20-Poly1305 under the OIDC key, the provider id as associated data) and never returned by the API.
+    r#"
+CREATE TABLE oidc_providers (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    issuer              TEXT NOT NULL UNIQUE,
+    client_id           TEXT NOT NULL,
+    client_secret       BLOB,
+    scopes              TEXT NOT NULL,
+    group_claim         TEXT,
+    role_map            TEXT NOT NULL,
+    auto_create_domains TEXT NOT NULL,
+    email_linking       INTEGER NOT NULL DEFAULT 0,
+    required_acr        TEXT NOT NULL,
+    required_amr        TEXT NOT NULL,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    updated_by          TEXT
 );
 "#,
 ];

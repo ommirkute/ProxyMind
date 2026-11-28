@@ -739,6 +739,94 @@ Each step ships on its own and keeps `pm-service`'s public API unchanged (ADR-00
    owner-never-from-claims rule, optional email linking and auto-create by domain. Test with an in-process fake provider
    (as the HTTP/3 work has an in-process server): wrong `iss`, `aud`, `nonce`, expired token, mix-up, replayed `code`,
    open redirect, a claim asking for owner.
+
+   *Done 2026-11-28.* A server can offer "Sign in with <provider>" for any OpenID Connect provider; how to set one up (Keycloak, Entra
+   ID, Google, GitLab) is `docs/server-mode.md` ("Signing in with an identity provider"). Where things are: `pm-accounts/src/oidc/`
+   (`jwt.rs`: JWKS and ID-token verification; `discovery.rs`: discovery, PKCE, the authorization URL, the RFC 9207 check; `providers.rs`:
+   configuration; `flow.rs`: the sign-in, linking, provisioning, group claims, unlinking), `pm-accounts` migration 4 (`oidc_providers`),
+   `pm-api/src/{oidc_api,oidc_http}.rs` (routes; fetching and caching), `pm-api/src/{server_mode,auth_api,routes,contract_table}.rs`,
+   `ui/src/{oidc.ts,oidcparts.tsx,Root.tsx,pages/Account.tsx}`, the fake provider `pm-api/tests/common/mod.rs` and the browser test
+   `ui/tests/e2e-server.mjs`. Decisions and deviations, on purpose:
+   - **Where the fetching lives.** `pm-accounts` stays pure and synchronous: it has no HTTP client and no async. Everything that
+     *decides* takes bytes and returns a verdict (`parse_discovery`, `parse_jwks`, `verify_id_token`, `oidc_complete`), so it is tested
+     without a network; the three requests (discovery, key set, token) are `pm-api`'s (`oidc_http.rs`), which already owns the async
+     side and the reverse-proxy facts. An injected fetcher trait in `pm-accounts` would have had to be async. The client is
+     `pm_replay::Sender` with verification on (rustls and the public web roots; never the interception CA; no switch to turn it
+     off) used only for its connector, so the request and a bounded reader are ours: 15 s in all, 512 KiB, no redirects, `200` only,
+     `https` (or `http` to loopback), link-local and, for plain http, non-loopback addresses refused on the *resolved* addresses.
+     No new dependency (`url` was already in the workspace); `desktop/Cargo.lock` lists it for `pm-accounts` and `pm-http` and
+     `pm-replay` for `pm-api`.
+   - **State, nonce, PKCE.** `GET /auth/oidc/{provider}/start` makes a random `state`, `nonce` and PKCE verifier (S256 only) and a random
+     *binding*; the server keeps them in memory (like passkey challenges: a restart costs one retry, a verifier never touches the
+     disk; at most 4096 open, the oldest go first) under the HMAC of the binding, ten minutes. The binding is the **state cookie**:
+     `HttpOnly`, `SameSite=Lax` (it must travel on the top-level redirect back; the session cookie stays `Strict`), `Path=/`, `Max-Age=600`,
+     `__Host-pm_oidc` with `Secure` over TLS or behind a proxy, `pm_oidc` on loopback. The callback takes the record out **before** it
+     compares the `state` (one try, whatever the outcome) and clears the cookie in every answer. `redirect_uri` is the public origin and
+     one fixed path, never taken from a request; `next` goes through `safe_next`; errors redirect to `<next>?oidc_error=<code>` from a
+     fixed list, so nothing from the provider is ever echoed. A flow begun on another of the server's host names is redirected to the
+     public one first (the cookie is host-only).
+   - **The callback is a `GET` that changes state** (F-11 assumed none does): the provider can only redirect the browser to it. What
+     replaces the CSRF layers is the state cookie above, so a callback replayed or delivered to another browser (login CSRF) finds no
+     record. Linking cannot use the session cookie either (`Strict` is not sent on the redirect back): the link is bound to the session
+     by its reference, checked still live and still within the ten-minute freshness window when the provider answers.
+   - **Algorithms and keys.** `RS256` (2048 to 8192 bits), `ES256` (raw `r || s`) and `EdDSA` through ring. `none`, every `HS*`, `PS*`,
+     `RS384`... are refused before any key is looked at; a key's type fixes its algorithm (a JWK that names another is not used), so the
+     token's `alg` only selects among keys of that algorithm and an RSA key can never be asked to verify an HMAC; `crit` makes a token
+     invalid; `jku`, `x5u`, `jwk` and `x5c` are never followed or trusted (a test points `jku` at a counting endpoint). Claims: `iss`
+     exactly, `aud` contains the client id, `azp` (when present, or with several audiences) is the client id, `exp` and `iat` required
+     (60 s skew, `iat` not in the future, `nbf` honoured), `nonce` equal, `sub` present, optional `acr` (any of) and `amr` (all of).
+     The RFC 9207 `iss` parameter must equal the issuer when present and is required when discovery announces it. Discovery must name
+     exactly the configured issuer, offer the code flow and S256 if it lists them, and give acceptable endpoints.
+   - **Caching and rotation.** Discovery and keys are cached an hour each, per provider. A token whose `kid` is unknown makes the key set
+     be fetched again, **at most once per 30 seconds per provider** (claimed atomically, so concurrent forged tokens cannot all fetch);
+     within the interval the token is simply refused. Changing a provider forgets its cache.
+   - **Who may sign in, and the owner rule.** Identity is `(iss, sub)`, stored as the `external_id` of a `credentials` row of kind `oidc`
+     (`iss`, a newline, `sub`); email and name are display data in `meta`. **An account that is a server administrator or an owner of a
+     project can link and use a provider only if it also has a local way in** (a passkey, or a password with an authenticator): both
+     the start of a link and every sign-in refuse otherwise (`owner_needs_local_factor`), so the owner role never depends on a
+     provider and the local credential stays the break-glass path; email linking never applies to such accounts; an owner *invite*
+     cannot be redeemed through a provider; provider settings need a fresh sign-in that was not itself made through a provider. What
+     this does not do: a compromised provider can still sign in as an owner who chose to link an identity there. Linking is the owner's
+     own decision (a fresh sign-in, audited), and the claims below cannot create or raise such an account. Sessions made through a
+     provider have method `oidc`, are exempt from "require a passkey" (the provider's assurance is used, optionally an `acr`/`amr`), and
+     are otherwise ordinary.
+   - **Provisioning.** Unknown identity: (1) with *Link by email* on (off by default), a verified email equal to exactly one active
+     non-privileged account's **username** links it (local accounts have no email field; usernames may contain `@`, so use the email as
+     the username); a second subject for the same provider on that account is refused; (2) with *Auto-create* on for the email's exact
+     domain (off by default, no wildcards, verified email), a new passwordless account is made with the **viewer** role (never more on
+     the first sign-in; a taken username is `account_exists`, never taken over); (3) else `no_account`: "ask an owner for an invite".
+     An **invite** can be redeemed by signing in (`POST /auth/oidc/{provider}/invite`): the account gets the invite's role, a username from
+     `preferred_username` or the email (a number added while taken), the identity is linked, and the invite is used up only when the
+     whole thing succeeds; an identity that already has an account does not burn one.
+   - **Group claims.** One configurable claim, values mapped to `tester` or `viewer`; the mapping cannot hold `owner` (refused when
+     saved, dropped when read, never produced when applied) and nothing can make a server administrator. Applied at each sign-in:
+     owners and administrators untouched; a membership a person made is only raised; one the provider made (`created_by` `oidc:<id>`:
+     auto-create, or raised by a claim) follows the claim and drops to viewer when no group matches; no membership is ever created or
+     removed by a claim for an existing account. Demotion ends the other sessions; every change is audited (`oidc_role_set`).
+   - **Storage and secrets.** `oidc_providers` (migration 4): the client secret is sealed with ChaCha20-Poly1305 under the key
+     `KeyPurpose::OidcSecret` (HKDF from the server key; the provider id as associated data), masked `********` in every answer (on
+     `PUT` the mask or an absent field keeps it, `""` removes it), absent from the security log and from every log line; codes,
+     verifiers and tokens exist only in a request and in memory. One issuer per provider (an identity is `(iss, sub)`); changing an
+     issuer, or deleting a provider, unlinks the identities made through it. Throttling: an address that fails (refused identity, bad
+     token, bad state) is slowed like a failed password; `start` and the callback are throttled per address.
+   - **Routes** (all under `/api/v1/auth`): `GET /oidc/{provider}/start`, `GET /oidc/callback`, `POST /oidc/{provider}/link`,
+     `POST /oidc/{provider}/invite`, `GET /oidc/identities`, `DELETE /oidc/identities/{id}`, `GET`/`POST /oidc/providers`,
+     `PUT`/`DELETE /oidc/providers/{id}`, `POST /oidc/providers/{id}/test`; `GET /state` lists the enabled providers (id and name only).
+   - **Tests.** `pm-accounts`: 36 new (11 for tokens and keys: every algorithm, `none`, `HS*` with the key bytes, a wrong or foreign key, each
+     claim, `acr`/`amr`, garbage; 7 for discovery, PKCE (RFC 7636 vector) and the `iss` parameter; 18 for providers and the flow, an enrolment link included); `pm-api`:
+     `tests/oidc.rs` (20, over a real socket, against an in-process provider in `tests/common/mod.rs` that checks the exact `redirect_uri`,
+     PKCE S256, client authentication and single-use codes: both algorithms, wrong `iss` in the token, in discovery and in the response
+     parameter, wrong and missing `nonce`, `aud`, `azp`, expired, `iat` in the future, `alg: none`, HS256 with the client secret, unknown
+     `kid` (one refetch, then rate limited) and rotation, `jku` never fetched, replayed and foreign state, a code used twice, open-redirect
+     attempts, a fixed `redirect_uri`, group claims asking for owner or admin, auto-create off and on, email linking off and on,
+     disabled accounts, link and unlink with their session binding, invites, the provider API, and no client secret, code, verifier or
+     token in any answer, log line or audit entry), 7 unit tests, the secrets test of `server_mode.rs` extended with an OIDC flow, the
+     access matrix, `ui/tests/oidc.test.mjs` and an OIDC section of `ui/tests/e2e-server.mjs` (a fake provider in the script: configure,
+     redeem an invite through it, sign in, refused unknown identity, link and unlink).
+   - **Not done.** SAML, SCIM and back-channel logout (out of scope); refresh tokens, userinfo and the access token are not used; a
+     provider's later group changes apply at the next sign-in, not to a live session; no per-provider "require MFA" beyond `acr`/`amr`;
+     no allow-list of IP ranges for providers; no UI to list unused invites redeemable through a provider; Entra's `_claim_names`
+     (more than 200 groups) is not followed (use app roles).
 9. **Security review for the gate** (below), and update `docs/threat-model.md`: close or accept each finding with the
    owner's name and date.
 

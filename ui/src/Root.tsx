@@ -5,8 +5,8 @@
 //    signed-in member of the served project.
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import App from "./App";
-import { api, authHooks } from "./api";
-import type { EnrolLinkInfo, LoginResponse, MeResponse, StateResponse } from "./api-types.gen";
+import { api, authHooks, toast } from "./api";
+import type { EnrolLinkInfo, LoginResponse, MeResponse, OidcProviderPublic, StateResponse } from "./api-types.gen";
 import {
   AuthContext,
   AuthScreen,
@@ -20,6 +20,8 @@ import {
   type AuthCtx,
 } from "./authparts";
 import { ErrorBox, useAction } from "./components";
+import { oidcErrorText, splitOidcNotice } from "./oidc";
+import { OidcButtons, OidcContext } from "./oidcparts";
 import {
   CredentialChoice,
   PasskeyAdd,
@@ -56,6 +58,16 @@ const envOf = (s: StateResponse): PasskeyEnv => ({
   required: s.passkey_required,
 });
 
+/**
+ * What a sign-in with an identity provider left in the address bar (`?oidc_error=<code>` or `?oidc_linked=1`, set by the
+ * server's redirect), taken out of it at once so a reload does not show it again.
+ */
+function takeOidcNotice(): { error: string | null; linked: boolean } {
+  const { error, linked, rest } = splitOidcNotice(window.location.search);
+  if (error || linked) window.history.replaceState(null, "", window.location.pathname + rest + window.location.hash);
+  return { error, linked };
+}
+
 /** Takes a token out of the address bar and the history entry (it is never sent to the server by the browser). */
 function clearFragment() {
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -66,12 +78,17 @@ export default function Root() {
   const tokens = useRef<{ setup: string | null; invite: string | null; enrol: string | null } | null>(null);
   tokens.current ??= readFragmentTokens();
   const [env, setEnv] = useState<PasskeyEnv>({ supported: false, rpId: null, note: null, required: false });
+  const [providers, setProviders] = useState<OidcProviderPublic[]>([]);
+  const oidcNotice = useRef<{ error: string | null; linked: boolean } | null>(null);
+  oidcNotice.current ??= takeOidcNotice();
+  /** The sentence for a refused sign-in with a provider, shown on the sign-in screen once. */
+  const oidcMessage = useRef<string | null>(oidcNotice.current.error ? oidcErrorText(oidcNotice.current.error) : null);
 
   const loadMe = useCallback(async (): Promise<void> => {
     try {
       const me = await api.get<MeResponse>("/auth/me");
       // What the server says about passkeys can change under an open page (an administrator turns the rule on).
-      api.get<StateResponse>("/auth/state").then((s) => setEnv(envOf(s)), () => {});
+      api.get<StateResponse>("/auth/state").then((s) => { setEnv(envOf(s)); setProviders(s.oidc_providers ?? []); }, () => {});
       // Unchanged answers keep the same object, so the periodic read below does not re-render the app.
       setStage((prev) =>
         prev.k === "app" && me.role != null && !me.passkey_enrolment_required && JSON.stringify(prev.me) === JSON.stringify(me)
@@ -85,7 +102,11 @@ export default function Root() {
     } catch (e) {
       const status = (e as { status?: number }).status;
       // `sessionEnded` may already have set the sign-in with its notice (a session lost while the app was shown).
-      if (status === 401) setStage((prev) => (prev.k === "signin" ? prev : { k: "signin", next: currentLocation() }));
+      if (status === 401) {
+        const notice = oidcMessage.current ?? undefined;
+        oidcMessage.current = null;
+        setStage((prev) => (prev.k === "signin" ? prev : { k: "signin", next: currentLocation(), notice }));
+      }
       else setStage({ k: "error", message: errText(e) });
     }
   }, []);
@@ -153,6 +174,7 @@ export default function Root() {
       if (!state?.server_mode) return setStage({ k: "single" });
       installHooks();
       setEnv(envOf(state));
+      setProviders(state.oidc_providers ?? []);
       const { setup, invite, enrol } = tokens.current!;
       if (setup || invite || enrol) clearFragment();
       if (state.setup_required) return setStage({ k: "setup", state });
@@ -188,7 +210,21 @@ export default function Root() {
     [stage, loadMe, logout, sessionEnded],
   );
 
-  return <PasskeyEnvContext.Provider value={env}>{screen()}</PasskeyEnvContext.Provider>;
+  // A provider's answer shows up where the person is: refused on the sign-in screen (above), or as a note in the app.
+  const inAppNow = stage.k === "app";
+  useEffect(() => {
+    const n = oidcNotice.current;
+    if (!inAppNow || !n || (!n.error && !n.linked)) return;
+    oidcNotice.current = { error: null, linked: false };
+    if (n.error) toast(oidcErrorText(n.error), "bad");
+    else toast("Identity linked");
+  }, [inAppNow]);
+
+  return (
+    <PasskeyEnvContext.Provider value={env}>
+      <OidcContext.Provider value={providers}>{screen()}</OidcContext.Provider>
+    </PasskeyEnvContext.Provider>
+  );
 
   function screen() {
   switch (stage.k) {
@@ -281,6 +317,9 @@ function SignInScreen({ next, notice, onDone }: { next: string; notice?: string;
           <PasswordForm next={next} notice={message} onResponse={setFirst} />
           <div className="auth-or">
             <PasskeySignIn next={next} onResponse={setFirst} />
+          </div>
+          <div className="auth-or">
+            <OidcButtons next={next} />
           </div>
         </>
       )}
@@ -406,6 +445,10 @@ function InviteScreen({ token, onDone }: { token: string; onDone: (r: LoginRespo
           )
         }
       />
+      <div className="auth-or" style={{ marginTop: 12 }}>
+        <p className="small muted" style={{ margin: "0 0 6px" }}>Or join with your organisation's identity provider:</p>
+        <OidcButtons next="/" invite={token} />
+      </div>
     </AuthScreen>
   );
 }
@@ -514,6 +557,9 @@ function ReauthDialog({ me, onResult, refresh }: { me: MeResponse; onResult: (ok
             <PasswordForm fixedUser={me.user.username} notice={message} onResponse={setFirst} submitLabel="Sign in again" />
             <div className="auth-or">
               <PasskeySignIn username={me.user.username} onResponse={setFirst} label="Use a passkey instead" />
+            </div>
+            <div className="auth-or">
+              <OidcButtons next={currentLocation()} again />
             </div>
           </>
         )}

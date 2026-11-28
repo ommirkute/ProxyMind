@@ -15,6 +15,8 @@
 //! * **Passkeys (step 7):** WebAuthn verified in-house with ring (`webauthn`: a strict CBOR decoder, COSE keys, the
 //!   checks of the specification), stored in `credentials`; single-use five-minute challenges; a sign counter that must
 //!   not go backwards; recovery by a one-time enrolment link; a server setting that requires them (`passkeys`).
+//! * **OIDC (step 8):** sign in with an OpenID Connect provider (`oidc`): discovery, PKCE, ID-token verification with
+//!   ring, identities as `(iss, sub)`, linking, auto-create and group claims; the HTTP itself is `pm-api`'s.
 //! * **Sessions:** random 256-bit ids returned once, stored as HMAC-SHA256; idle 8 h and absolute 7 d by default;
 //!   rotation invalidates the old id; revocation takes effect at the next validation.
 //! * **Throttling:** per account (by the claimed handle, so unknown names are throttled the same) and per address,
@@ -37,6 +39,7 @@ mod key;
 mod login;
 mod migrations;
 mod model;
+pub mod oidc;
 mod passkeys;
 mod password;
 mod sessions;
@@ -50,6 +53,8 @@ mod users;
 mod util;
 pub mod webauthn;
 
+#[cfg(test)]
+mod oidc_tests;
 #[cfg(test)]
 mod passkey_tests;
 #[cfg(test)]

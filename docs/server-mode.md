@@ -190,6 +190,96 @@ start, and an owner can **require** passkeys (below). ADR-0022 step 7 has the de
 - **Browsers.** Passkeys need a secure context: HTTPS, or `localhost`. Chromium, Firefox and Safari work; an authenticator that cannot do
   user verification (a security key with no PIN set) is refused with a message.
 
+## Signing in with an identity provider (OIDC)
+
+A server can also let people sign in with an OpenID Connect provider (Keycloak, Entra ID, Google, GitLab, Okta, Authentik,
+anything that follows the standard). Local accounts stay the base: they are the break-glass path when a provider is down or
+compromised, and the owner role never depends on a provider. SAML, SCIM and back-channel logout are not supported (put an OIDC
+bridge such as Keycloak in front of SAML).
+
+**How it works.** The browser is sent to the provider with the authorization code flow and PKCE (S256), comes back to one fixed
+address, and ProxyMind verifies the ID token: its signature with the provider's published keys (RS256, ES256 or EdDSA; never
+`none`, never `HS*`), the issuer exactly, the audience, `azp`, `exp`, `iat`, and the `nonce` it stored for this sign-in. It also
+checks the `iss` response parameter (RFC 9207) against mix-up attacks. Keys come only from the `jwks_uri` of the provider's
+discovery document, never from anything inside a token. A person is identified by the pair **(issuer, subject)**; the email and
+name are shown on the Account page and used for nothing else.
+
+**Configure a provider** (server administrators, Users & invites → Identity providers; a sign-in within ten minutes made with a
+password, authenticator or passkey, not through a provider; every change is in the security log):
+
+1. At the provider, register ProxyMind as a *confidential web client* (or a public one with PKCE only) with the **redirect URI**
+   shown on that page: your public origin plus `/api/v1/auth/oidc/callback`, for example
+   `https://proxymind.example.com/api/v1/auth/oidc/callback`. Providers compare it exactly, so use the `--public-url` host name
+   and sign in from that address.
+2. Enter the display name, the **issuer** (exactly as the provider writes it; ProxyMind reads `<issuer>/.well-known/openid-configuration`
+   and refuses a document whose `issuer` differs), the client id and secret (the secret is stored encrypted under a key derived
+   from the server key, shown as `********`, never returned by the API, never logged), and the scopes (`openid` is always sent;
+   `profile email` by default).
+3. Press **Test**: it fetches the discovery document and the keys and says what it found.
+
+| Provider | Issuer | Scopes and groups |
+| --- | --- | --- |
+| Keycloak | `https://KEYCLOAK/realms/REALM` | Add a "Group Membership" mapper to the client (token claim name `groups`, full path off) and use group claim `groups`. |
+| Microsoft Entra ID | `https://login.microsoftonline.com/TENANT-ID/v2.0` (the single-tenant issuer, not `common`) | Register a web app, add the redirect URI, create a client secret. Groups: set `groupMembershipClaims` in the app manifest and use group claim `groups` with the groups' **object ids** as values (a user in more than 200 groups gets no `groups` claim: use app roles and claim `roles`). `email` is not always verified in Entra: leave email linking off. |
+| Google | `https://accounts.google.com` | Scopes `profile email`. No groups. Google sets `email_verified`; a Workspace domain works for auto-create (`example.com`). |
+| GitLab (gitlab.com or self-managed) | `https://gitlab.com` or your instance | Scopes `read_user` in addition to `profile email`; group claim `groups_direct` (the groups the user belongs to directly) or `groups`. |
+
+**Who may join.** By invite, as always: an invite link also has "Sign in with …" buttons, which create the account (with the
+invite's role, a username taken from the provider's `preferred_username` or the email) and link the identity. An **owner** invite
+cannot be redeemed this way: an owner needs a local way in (a passkey, or a password and authenticator). Two optional settings,
+both off by default:
+
+- **Auto-create** for listed email domains (exact domains, no wildcards or sub-domains; the provider must say the email is
+  verified): a new account is made on first sign-in with the **viewer** role.
+- **Link by email**: a person with no linked identity whose verified email equals an existing account's username is linked to it
+  (local accounts have no email field, so give the account the email as its username). Never for an owner or an administrator.
+  Audited as `oidc_identity_linked` with the way it was linked.
+
+Anyone else is refused with "ask an owner for an invite". Refusals count against the client address like other failed sign-ins.
+
+**Group claims to roles.** Name the claim that lists the user's groups and map group values to **tester** or **viewer** (one per
+line, `group = role`). The mapping cannot say `owner`, and a claim can never make anyone a server administrator. At each
+sign-in: an owner or server administrator is left alone; a role a person gave is only ever raised by a claim, never lowered; a
+role the provider made (auto-create, or one a claim raised) follows the claim and falls back to viewer when no group matches any
+more; a claim never adds a membership for someone who has none. Demotions end the account's other sessions.
+
+**Owners and administrators.** An owner or server administrator can link and use a provider only if the account also has a passkey
+(or a password with an authenticator): sign-in and linking are refused otherwise (`owner_needs_local_factor`). Local MFA is not
+asked of provider sign-ins; the provider's assurance is used, and a provider may carry a required `acr` (any of) or `amr` (all of).
+A session made through a provider is not held to "require a passkey", and cannot change provider settings. Redeeming an **enrolment link** (recovery) also unlinks every provider account, like it removes passkeys and passwords, so a recovery cuts off whoever got in that way. If the provider is
+compromised it can sign in as anyone who linked an identity there, up to the roles they hold: that is why an owner should link
+one only if they accept it, and why provider settings need a local sign-in.
+
+**Account page.** Signed-in people see the identities linked to their account (provider, email as shown, how it was linked, when,
+last use), can link another one (a sign-in within ten minutes; the round trip is bound to that session) and unlink one (also
+fresh; refused when it is the last way to sign in; it ends the other sessions).
+
+**Routes** (all under `/api/v1/auth`; `GET /state` lists the enabled providers as `{id, name}`):
+
+| Endpoint | Session | What it does |
+| --- | --- | --- |
+| `GET /oidc/{provider}/start?next=` | no | Sets the state cookie and redirects to the provider. `next` must be a path on this server. |
+| `GET /oidc/callback` | no (state cookie) | Where the provider sends the browser back; signs in, links or refuses, and redirects to `next` or to `?oidc_error=<code>`. |
+| `POST /oidc/{provider}/link` `{next?}` | fresh | Starts linking an identity to the signed-in account; answers `{url}` and sets the state cookie. |
+| `POST /oidc/{provider}/invite` `{invite, next?}` | no | Starts redeeming an invite through the provider; answers `{url}`. |
+| `GET /oidc/identities`, `DELETE /oidc/identities/{id}` | yes (unlink: fresh) | The account's linked identities; unlink. |
+| `GET/POST /oidc/providers`, `PUT/DELETE /oidc/providers/{id}`, `POST /oidc/providers/{id}/test` | admin (+fresh, not through a provider) | Provider configuration. The secret is `********` in every answer; on `PUT`, leave it out or send `********` to keep it, send `""` to remove it. |
+
+**The callback is a GET that changes state** (it signs someone in), because the provider can only redirect the browser to it. It
+is protected by the **state cookie** (`pm_oidc`, `__Host-pm_oidc` over TLS; `HttpOnly`, `SameSite=Lax` because it must travel on
+that cross-site redirect, ten minutes, single use) holding a random binding to a server-side record of the `state`, `nonce` and
+PKCE verifier; the record is removed before the `state` is even compared, so a callback replayed or carried from another
+browser finds nothing. The session cookie stays `Strict`, so it is not sent on the redirect back and a link is bound to its
+session by reference instead. The server must be reached at its public address (the state cookie is host-only); the start route
+redirects there from another allowed name.
+
+**Network.** Discovery, the key set and the token request go out from the server over HTTPS with certificate verification
+against the public web roots (never the interception CA; no switch turns it off), through the project's upstream-proxy
+settings. `http` is accepted only for a provider on this machine (`localhost`, `127.0.0.1`, `::1`). Each fetch has a 15 s
+deadline, reads at most 512 KiB and does not follow redirects; link-local addresses (cloud metadata) are refused. Discovery and
+keys are cached for an hour; a token signed with an unknown key id makes the key set be fetched again, at most once every 30
+seconds, so rotation works and forged tokens cannot make the server hammer the provider.
+
 ## Roles and members
 
 A member has one role on the project. The whole table is `docs/access.md`; the effect of it on every route and tool is
@@ -235,11 +325,12 @@ single-user mode that does not answer 200 and nothing changes (no extra screen, 
   type the secret, then a code), then save the ten recovery codes, which are shown once with copy and download. The
   token is taken out of the address bar as soon as it is read. Without the token the page says the link is printed on
   the server console (and lets you paste it); where setup is not served (no TLS and not the server's own machine) it says so.
-- **Sign-in:** "Sign in with a passkey" (usernameless), or username and password, then the code from the authenticator app, or "Use a recovery code". An account without
+- **Sign-in:** "Sign in with <provider>" buttons when providers are configured (a refusal comes back as a sentence on the sign-in
+  screen, never as text from the provider), "Sign in with a passkey" (usernameless), or username and password, then the code from the authenticator app, or "Use a recovery code". An account without
   an authenticator goes through the enrolment first. A wrong password, unknown user and wrong code all show the same
   text; a throttled attempt shows the server's message with the wait.
 - **Invite** (`/#invite=<token>`): choose username and display name, then a passkey (recommended) or a password (then the same
-  enrolment and recovery codes).
+  enrolment and recovery codes), or join with a provider's "Sign in with …" button (not for an owner invite).
 - **Enrolment link** (`/#enrol=<token>`): says whose account it recovers and that it replaces how they sign in; then a new passkey or
   a new password. The token is taken out of the address bar.
 - **Add a passkey to continue:** what an account without a passkey sees after signing in while passkeys are required.
@@ -249,9 +340,10 @@ single-user mode that does not answer 200 and nothing changes (no extra screen, 
   you" dialog (password, then code); the action is then repeated once. Cancelling leaves it undone.
 - **Not a member:** a signed-in account with no role in the served project gets a screen saying so, with a sign-out button.
 - **Account** (navigation entry "Account", server mode only): who you are (user, actor, role, project), your sessions
-  (this one is marked; sign one out, or sign out everywhere else), passkeys (add, rename, remove), change password, set up a new authenticator or turn it
+  (this one is marked; sign one out, or sign out everywhere else), passkeys (add, rename, remove), linked identity-provider accounts (link, unlink), change password, set up a new authenticator or turn it
   off (some accounts must keep one), new recovery codes, sign out.
-- **Users & invites** (server administrators and project owners): "Passkeys on this server" (the require rule; administrators), members
+- **Users & invites** (server administrators and project owners): "Passkeys on this server" (the require rule; administrators), "Identity providers"
+  (add, edit, test, delete; the secret shown masked; the redirect URI to register; administrators), members
   with roles and a recovery link (owners), users with disable, enable, reset second factor and a recovery link (administrators);
   invites with role and expiry, the link shown once with a copy button, the list and revoke.
 
@@ -266,7 +358,7 @@ state-changing call needs the CSRF headers above. Errors are `{"error": "<text>"
 
 | Endpoint | Session | What it does |
 | --- | --- | --- |
-| `GET /state` | no | `{server_mode, setup_required, setup_allowed, passkey_supported, passkey_rp_id, passkey_note, passkey_required, passkey_count?}` (`passkey_count` only with a live session cookie) |
+| `GET /state` | no | `{server_mode, setup_required, setup_allowed, passkey_supported, passkey_rp_id, passkey_note, passkey_required, passkey_count?, oidc_providers}` (`passkey_count` only with a live session cookie; `oidc_providers` is `[{id, name}]` of the enabled providers) |
 | `POST /setup` `{setup_token, username, display_name?, password, next?}` | no | First owner; answers like `login` (`enrolment_required`). |
 | `POST /login` `{username, password, next?}` | no | `{step, pending?, expires_at?, user?, recovery_codes?, next}` with `step` = `authenticated` (cookie set), `second_factor_required` or `enrolment_required`. |
 | `POST /login/second-factor` `{pending, code, next?}` | no | TOTP code or recovery code (`ABCD-EFGH-IJKL-MNOP`); `authenticated` and the cookie. |
@@ -287,6 +379,8 @@ state-changing call needs the CSRF headers above. Errors are `{"error": "<text>"
 | `GET /passkeys`; `POST /passkeys/options`, `POST /passkeys` `{name?, response}`; `PUT /passkeys/{id}` `{name}`; `DELETE /passkeys/{id}` | yes (adding and removing: fresh) | List (no key material), add, rename and remove the signed-in account's passkeys. Adding and removing give the session a new id; removing ends the other sessions. |
 | `PUT /settings/passkey-required` `{required}` | admin (+fresh) | Require a passkey of every account, or stop. |
 | `POST /users/{id}/enrolment-link` | admin or project owner (+fresh) | A one-time recovery link (an hour); ends the person's sessions and revokes their tokens. The token is returned once, with `url` = `<origin>/#enrol=<token>`. |
+
+The provider routes are in "Signing in with an identity provider (OIDC)" above.
 
 `next` is a path on this server: it must start with exactly one `/`, hold only visible ASCII and no backslash, else the answer
 says `/`.
@@ -375,4 +469,7 @@ token's: `--actor` means nothing here.
 - Step-up is "sign in again" (with a passkey or a password and code); there is no password-only re-check endpoint.
 - Passkeys: attestation is not requested or verified, there is no browser autofill for the username field, and unused enrolment links
   cannot be listed or revoked (a newer one replaces them; they expire in an hour).
+- OIDC: no SAML, SCIM or back-channel logout; no refresh tokens or userinfo calls (the ID token is the whole answer); a provider's later changes to a
+  person's groups apply at their next sign-in, not while a session lives; an email is never an identity, so a person who changes provider
+  account is a new identity; deleting a provider unlinks its identities.
 - The server's audit checkpoints (signed, hourly) are not scheduled yet.

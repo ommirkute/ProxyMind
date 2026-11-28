@@ -36,6 +36,10 @@ use crate::auth_api::{
     auth_user_disable, auth_user_enable, auth_user_reset_second_factor, auth_users,
 };
 use crate::mcp_api::{MCP_BODY_LIMIT, mcp_endpoint};
+use crate::oidc_api::{
+    oidc_callback, oidc_identities, oidc_identity_remove, oidc_invite, oidc_link, oidc_provider_create,
+    oidc_provider_delete, oidc_provider_test, oidc_provider_update, oidc_providers, oidc_start,
+};
 use crate::passkey_api::{
     PASSKEY_BODY_LIMIT, enrol_link_info, enrol_link_passkey, enrol_link_passkey_options, enrol_link_password,
     invite_passkey, invite_passkey_options, passkey_login, passkey_login_options, passkey_remove, passkey_rename,
@@ -391,6 +395,30 @@ pub fn api() -> Router<AppState> {
             axum::routing::put(passkey_required_set).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
         )
         .route("/auth/users/{id}/enrolment-link", post(user_enrolment_link))
+        // OIDC sign-in (ADR-0022 step 8).
+        .route("/auth/oidc/callback", get(oidc_callback))
+        .route("/auth/oidc/identities", get(oidc_identities))
+        .route("/auth/oidc/identities/{id}", axum::routing::delete(oidc_identity_remove))
+        .route(
+            "/auth/oidc/providers",
+            get(oidc_providers).post(oidc_provider_create).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/oidc/providers/{id}",
+            axum::routing::put(oidc_provider_update)
+                .delete(oidc_provider_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route("/auth/oidc/providers/{id}/test", post(oidc_provider_test))
+        .route("/auth/oidc/{provider}/start", get(oidc_start))
+        .route(
+            "/auth/oidc/{provider}/link",
+            post(oidc_link).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
+        .route(
+            "/auth/oidc/{provider}/invite",
+            post(oidc_invite).layer(axum::extract::DefaultBodyLimit::max(AUTH_BODY_LIMIT)),
+        )
 }
 
 #[derive(Deserialize)]

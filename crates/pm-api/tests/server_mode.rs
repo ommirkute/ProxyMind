@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+mod common;
+
 use pm_accounts::{Accounts, Clock, Config, ManualClock, ServerKey, totp};
 use pm_api::listen::{ListenInput, TlsKind, plan, serve_app};
 use pm_api::{AppState, ServerMode};
@@ -379,7 +381,7 @@ struct Signed {
 // ---- the route matrix ----------------------------------------------------------------------------------------------
 
 /// The auth endpoints that work without a session. Every other route must be 401 without one.
-const PUBLIC: [(&str, &str); 17] = [
+const PUBLIC: [(&str, &str); 20] = [
     ("get", "/api/v1/auth/state"),
     ("post", "/api/v1/auth/setup"),
     ("post", "/api/v1/auth/login"),
@@ -397,6 +399,9 @@ const PUBLIC: [(&str, &str); 17] = [
     ("post", "/api/v1/auth/enrol-link/passkey/options"),
     ("post", "/api/v1/auth/enrol-link/passkey"),
     ("post", "/api/v1/auth/enrol-link/password"),
+    ("get", "/api/v1/auth/oidc/callback"),
+    ("get", "/api/v1/auth/oidc/{provider}/start"),
+    ("post", "/api/v1/auth/oidc/{provider}/invite"),
 ];
 
 fn concrete(path: &str) -> String {
@@ -522,7 +527,7 @@ async fn before_setup_only_the_setup_endpoints_answer() {
         json!({
             "server_mode": true, "setup_required": true, "setup_allowed": true,
             "passkey_supported": true, "passkey_rp_id": "localhost", "passkey_note": null,
-            "passkey_required": false, "passkey_count": null
+            "passkey_required": false, "passkey_count": null, "oidc_providers": []
         })
     );
     for (m, p) in [
@@ -1487,6 +1492,78 @@ async fn no_password_secret_or_token_reaches_a_log_a_body_or_an_error() {
                 secrets.push(("session id", id));
             }
         }
+    }
+
+    // OIDC (step 8): configure a provider, sign in (an account is made for the listed domain), fail a sign-in with a
+    // bad token and with an unknown identity. The client secret, the codes, the PKCE verifiers and the ID tokens the
+    // provider hands out, and the state cookie's binding, appear in no answer, log line or audit entry.
+    {
+        use common::{Grant, Idp, NonceMode, Tweak as IdpTweak, browser_get};
+        use pm_accounts::oidc::{ProviderInput, SecretChange};
+        let oidc_secret = "Qx7-oidc-client-secret-for-grep";
+        secrets.push(("oidc client secret", oidc_secret.into()));
+        let redirect = format!("{}/api/v1/auth/oidc/callback", h.origin);
+        let idp = Idp::start(h.clock.clone(), &redirect, oidc_secret).await;
+        let admin = h.accounts.get_user_by_username("owner").unwrap().unwrap();
+        let provider = h
+            .accounts
+            .oidc_provider_create(
+                &admin.id,
+                ProviderInput {
+                    name: "Corp SSO".into(),
+                    issuer: idp.issuer.clone(),
+                    client_id: idp.client_id.clone(),
+                    client_secret: SecretChange::Set(pm_accounts::Secret::new(oidc_secret)),
+                    scopes: vec!["email".into()],
+                    group_claim: None,
+                    role_map: vec![],
+                    auto_create_domains: vec!["corp.example".into()],
+                    email_linking: false,
+                    required_acr: vec![],
+                    required_amr: vec![],
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        let admin_session = h.accounts.create_session(&admin.id, "password+totp", &Default::default()).unwrap();
+        let admin_cookie = admin_session.id.expose().to_string();
+        secrets.push(("session id", admin_cookie.clone()));
+        for (what, method, path) in [
+            ("providers list", "GET", "/api/v1/auth/oidc/providers".to_string()),
+            ("provider test", "POST", format!("/api/v1/auth/oidc/providers/{}/test", provider.id)),
+            ("state", "GET", "/api/v1/auth/state".to_string()),
+        ] {
+            bodies.push((what, h.api(Some(&admin_cookie), method, &path, None).await.body));
+        }
+        for (tweak, grant) in [
+            (IdpTweak::default(), Grant::new("sub-oidc").email("zoe@corp.example", true)),
+            (
+                IdpTweak { nonce: NonceMode::Wrong, ..IdpTweak::default() },
+                Grant::new("sub-oidc").email("zoe@corp.example", true),
+            ),
+            (IdpTweak::default(), Grant::new("sub-other").email("x@elsewhere.example", true)),
+        ] {
+            idp.set_tweak(tweak);
+            idp.set_grant(grant);
+            let r = h.raw("GET", &format!("/api/v1/auth/oidc/{}/start", provider.id), &[], None).await;
+            let (_, binding) = r.set_cookie("pm_oidc").expect("a state cookie");
+            secrets.push(("oidc state binding", binding.clone()));
+            let (_, back) = browser_get(r.header("location").unwrap()).await;
+            let path = back.unwrap().strip_prefix(&h.origin).unwrap().to_string();
+            let r = h.raw("GET", &path, &[("Cookie", format!("pm_oidc={binding}"))], None).await;
+            bodies.push(("oidc callback", format!("{} {}", r.body, r.header("location").unwrap_or_default())));
+            if let Some((_, id)) = r.set_cookie("pm_session") {
+                secrets.push(("session id", id));
+            }
+            secrets.extend(
+                idp.with(|i| [i.last_code.clone(), i.last_verifier.clone(), i.last_id_token.clone()])
+                    .into_iter()
+                    .flatten()
+                    .map(|v| ("oidc code, verifier or ID token", v)),
+            );
+        }
+        assert!(h.accounts.get_user_by_username("zoe@corp.example").unwrap().is_some(), "the account was made");
+        assert!(h.accounts.get_user_by_username("x@elsewhere.example").unwrap().is_none());
     }
 
     // A password change renews the session and answers without it.
