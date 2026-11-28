@@ -94,7 +94,12 @@ pub fn join_cookies(headers: &mut Vec<(String, Vec<u8>)>) {
 
 /// Renders a request in HTTP/2 text form.
 pub fn render_h2_request(r: &H2Request) -> Vec<u8> {
-    let mut out = format!("{} {} HTTP/2\r\n", r.method, r.path).into_bytes();
+    render_request(r, "HTTP/2")
+}
+
+/// Renders a request as text with `version` on the request line (`HTTP/2`, or `HTTP/3` for ADR-0021).
+pub(crate) fn render_request(r: &H2Request, version: &str) -> Vec<u8> {
+    let mut out = format!("{} {} {version}\r\n", r.method, r.path).into_bytes();
     if let Some(a) = &r.authority {
         out.extend_from_slice(format!("host: {a}\r\n").as_bytes());
     }
@@ -106,7 +111,12 @@ pub fn render_h2_request(r: &H2Request) -> Vec<u8> {
 
 /// Renders a response in HTTP/2 text form.
 pub fn render_h2_response(status: u16, headers: &[(String, Vec<u8>)], body: &[u8]) -> Vec<u8> {
-    let mut out = format!("HTTP/2 {status}\r\n").into_bytes();
+    render_response("HTTP/2", status, headers, body)
+}
+
+/// Renders a response as text with `version` on the status line.
+pub(crate) fn render_response(version: &str, status: u16, headers: &[(String, Vec<u8>)], body: &[u8]) -> Vec<u8> {
+    let mut out = format!("{version} {status}\r\n").into_bytes();
     push_headers(&mut out, headers);
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(body);

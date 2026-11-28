@@ -123,6 +123,16 @@ test("HAR, cURL, search and site map", { skip }, async () => {
   assert.ok((await pm.matchReplacePresets()).some((p) => p.id === "remove_scripts"));
   await pm.customCheckSave("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n");
   assert.equal((await pm.customScan(ex, { checks: ["products-ok"] })).findings.length, 1);
+  // Workflows: save a two-step chain, run it, read the run back.
+  await pm.workflowCreate("ts-products", [
+    { type: "send", url, raw: "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n" },
+    { type: "assert", status: "200", message: "products answer" },
+  ], "sdk test");
+  assert.ok((await pm.workflows()).some((w) => w.name === "ts-products"));
+  const wr = await pm.workflowRun("ts-products");
+  assert.deepEqual([wr.status, wr.sends], ["ok", 1]);
+  assert.equal((await pm.workflowRunGet(wr.id)).steps[1].kind, "assert");
+  assert.equal((await pm.workflowRuns({ workflow: "ts-products", limit: 5 }))[0].id, wr.id);
 });
 
 test("rules of engagement, discovery and GraphQL", { skip }, async () => {

@@ -36,6 +36,9 @@ jobs:
           - openapi_spec
           - har_curl
           - graphql_schema
+          - protobuf_decode
+          - socks5_handshake
+          - http3_text
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -112,3 +115,29 @@ jobs:
     permissions:
       contents: read
       packages: read
+
+  scale:
+    # Roadmap 1.6: the large-project benchmark (1M exchanges, 10k findings, release build). One `SCALE {json}` line
+    # goes to the job summary and an artifact, so runs can be compared week to week.
+    name: large-project benchmark (1M exchanges)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Run the benchmark
+        env:
+          PM_SCALE_EXCHANGES: "1000000"
+          PM_SCALE_FINDINGS: "10000"
+          PM_SCALE_CONCURRENT_SECS: "10"
+        run: |
+          cargo test --release -p pm-service --test scale -- --ignored --nocapture 2>&1 | tee scale.log
+          grep '^SCALE ' scale.log | sed 's/^SCALE //' > scale.json
+          { echo '### Large-project benchmark'; echo; echo '```json'; cat scale.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: scale-results
+          path: scale.json

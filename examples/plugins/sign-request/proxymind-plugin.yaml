@@ -1,0 +1,16 @@
+# A traffic hook (plugin API 2): signs requests. Install with
+#   proxymind plugin add examples/plugins/sign-request
+#   proxymind plugin accept sign-request      (or accept its permissions on the Plugins page)
+# then turn the request hook on from the Plugins page.
+name: sign-request
+version: 0.1.0
+description: Adds an X-Signature header (HMAC-SHA256 of the request body) to requests to hosts you list.
+api: 2
+permissions: [hooks.request]
+hooks:
+  request:
+    command: ["python3", "hook.py"]
+    match:
+      methods: ["POST", "PUT", "PATCH"]
+    timeout_ms: 500
+    on_error: pass

@@ -69,7 +69,7 @@ function Tasks({ profiles, bump }: { profiles: ScanProfile[]; bump: number }) {
         <select aria-label="Scan profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
           {profiles.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
         </select>
-        <button className="btn primary" disabled={!url || action.busy} onClick={start} data-testid="scan-start">Start scan</button>
+        <button data-write className="btn primary" disabled={!url || action.busy} onClick={start} data-testid="scan-start">Start scan</button>
       </div>
       <p className="small muted">
         Tasks are saved in the project after each operation. A paused task, or one that was running when ProxyMind
@@ -99,11 +99,11 @@ function Tasks({ profiles, bump }: { profiles: ScanProfile[]; bump: number }) {
                   {t.current && <div className="muted mono">{t.current}</div>}
                 </td>
                 <td style={{ whiteSpace: "nowrap" }}>
-                  {running(t) && <button className="btn" onClick={() => act(t.task_id, "pause")}>Pause</button>}{" "}
+                  {running(t) && <button data-write className="btn" onClick={() => act(t.task_id, "pause")}>Pause</button>}{" "}
                   {(t.status === "paused" || t.status === "cancelled" || t.status === "failed") && (
-                    <button className="btn primary" onClick={() => act(t.task_id, "resume")} data-testid={`resume-${t.task_id}`}>Resume</button>
+                    <button data-write className="btn primary" onClick={() => act(t.task_id, "resume")} data-testid={`resume-${t.task_id}`}>Resume</button>
                   )}{" "}
-                  {(running(t) || t.status === "paused") && <button className="btn" onClick={() => act(t.task_id, "cancel")}>Cancel</button>}{" "}
+                  {(running(t) || t.status === "paused") && <button data-write className="btn" onClick={() => act(t.task_id, "cancel")}>Cancel</button>}{" "}
                   <button className="btn" onClick={() => go("issues")}>Issues</button>
                 </td>
               </tr>
@@ -169,8 +169,8 @@ function Profiles({ profiles, reload }: { profiles: ScanProfile[]; reload: () =>
                 {p.crawl === false ? "no crawl" : `${p.max_pages ?? 30} pages`} · {p.max_targets ?? 30} operations · {p.max_requests ?? 150} req/op
               </td>
               <td style={{ whiteSpace: "nowrap" }}>
-                <button className="btn" onClick={() => edit(p)}>{p.builtin ? "Copy" : "Edit"}</button>{" "}
-                {!p.builtin && <button className="btn" onClick={() => remove(p.name)}>Delete</button>}
+                <button data-write className="btn" onClick={() => edit(p)}>{p.builtin ? "Copy" : "Edit"}</button>{" "}
+                {!p.builtin && <button data-write className="btn" onClick={() => remove(p.name)}>Delete</button>}
               </td>
             </tr>
           ))}
@@ -189,7 +189,7 @@ function Profiles({ profiles, reload }: { profiles: ScanProfile[]; reload: () =>
         <label className="small">pages <input aria-label="Profile pages" value={form.max_pages} onChange={(e) => setForm({ ...form, max_pages: e.target.value })} style={{ width: 50 }} /></label>
         <label className="small">operations <input aria-label="Profile operations" value={form.max_targets} onChange={(e) => setForm({ ...form, max_targets: e.target.value })} style={{ width: 50 }} /></label>
         <label className="small">requests/op <input aria-label="Profile requests" value={form.max_requests} onChange={(e) => setForm({ ...form, max_requests: e.target.value })} style={{ width: 60 }} /></label>
-        <button className="btn primary" disabled={!form.name.trim() || action.busy} onClick={save}>Save profile</button>
+        <button data-write className="btn primary" disabled={!form.name.trim() || action.busy} onClick={save}>Save profile</button>
       </div>
     </Panel>
   );
@@ -247,9 +247,9 @@ function Schedules({ profiles, onStarted }: { profiles: ScanProfile[]; onStarted
                   {s.last_error && <div className="error">{s.last_error}</div>}
                 </td>
                 <td style={{ whiteSpace: "nowrap" }}>
-                  <button className="btn" onClick={() => runNow(s.id)}>Run now</button>{" "}
-                  <button className="btn" onClick={() => save({ ...s, enabled: !s.enabled })}>{s.enabled ? "Turn off" : "Turn on"}</button>{" "}
-                  <button className="btn" onClick={() => remove(s.id)}>Delete</button>
+                  <button data-write className="btn" onClick={() => runNow(s.id)}>Run now</button>{" "}
+                  <button data-write className="btn" onClick={() => save({ ...s, enabled: !s.enabled })}>{s.enabled ? "Turn off" : "Turn on"}</button>{" "}
+                  <button data-write className="btn" onClick={() => remove(s.id)}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -275,7 +275,7 @@ function Schedules({ profiles, onStarted }: { profiles: ScanProfile[]; onStarted
         {form.kind !== "hourly" && (
           <input aria-label="Schedule time" type="time" value={form.at} onChange={(e) => setForm({ ...form, at: e.target.value })} />
         )}
-        <button className="btn primary" disabled={!form.name.trim() || !form.url || action.busy} onClick={add} data-testid="schedule-add">Add schedule</button>
+        <button data-write className="btn primary" disabled={!form.name.trim() || !form.url || action.busy} onClick={add} data-testid="schedule-add">Add schedule</button>
       </div>
     </Panel>
   );

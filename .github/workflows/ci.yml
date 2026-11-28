@@ -72,6 +72,8 @@ jobs:
       - run: npm run build
         working-directory: ui
       - run: cargo build -p pm-cli
+      # The browser test starts this HTTP/3 server (an example of pm-replay).
+      - run: cargo build -p pm-replay --example h3_server
       - name: Python SDK tests (against the real binary)
         run: python3 -m unittest discover -s sdk/python/tests -v
         env:

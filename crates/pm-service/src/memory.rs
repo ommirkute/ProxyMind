@@ -4,10 +4,11 @@
 //! verdicts people gave on earlier findings, a new AI scan of the host
 //! starts from this brief instead of from nothing.
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError, scan_of};
 
 pub const MEMORY_KINDS: &[&str] = &["login", "endpoint", "dead_end", "technique", "note"];
@@ -61,6 +62,7 @@ impl Service {
     /// Saves a note about a host in scope. An AI scan's agents default to
     /// the scan's target host.
     pub fn memory_save(&self, actor: &Actor, host: Option<&str>, kind: &str, text: &str) -> Result<Memory> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let host = match host.map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()) {
             Some(h) => h,
             None => scan_of(actor)
@@ -115,9 +117,7 @@ impl Service {
 
     /// Deletes a note (people only).
     pub fn memory_delete(&self, actor: &Actor, id: i64) -> Result<()> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people delete memory".into()));
-        }
+        self.require_actor(actor, Perm::MemoryDelete)?;
         if !self.store.write(|db| db.delete_row("agent_memory", id))? {
             return Err(ServiceError::NotFound(format!("memory {id}")));
         }

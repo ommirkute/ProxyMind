@@ -25,8 +25,10 @@ use time::{Duration, OffsetDateTime};
 /// Certificates kept for reuse, one per host name.
 const MAX_CACHED_CERTS: usize = 10_000;
 
+pub mod server;
+
 pub use tokio_rustls::rustls::server::Acceptor;
-pub use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, TlsConnector};
+pub use tokio_rustls::{LazyConfigAcceptor, StartHandshake, TlsAcceptor, TlsConnector};
 
 const CA_CERT_FILE: &str = "proxymind-ca.pem";
 const CA_KEY_FILE: &str = "proxymind-ca.key";
@@ -44,6 +46,17 @@ pub fn spki_sha256(pem: &str) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
     out.copy_from_slice(digest.as_ref());
     Ok(out)
+}
+
+/// SHA-256 of DER bytes as certificate viewers show it: `AB:CD:…`.
+fn fingerprint(der: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    digest.as_ref().iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
+}
+
+/// SHA-256 fingerprint of a certificate given as PEM, as `AB:CD:…` (what `CertAuthority::ca_fingerprint` returns).
+pub fn pem_fingerprint(pem: &str) -> Result<String> {
+    Ok(fingerprint(&pem_to_der(pem)?))
 }
 
 /// The local certificate authority used to intercept TLS.
@@ -93,6 +106,16 @@ impl CertAuthority {
     /// The CA certificate in PEM form, for installing in a browser or OS.
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
+    }
+
+    /// The CA certificate in DER form (what a `.crt` download carries).
+    pub fn ca_der(&self) -> &[u8] {
+        self.ca_der.as_ref()
+    }
+
+    /// SHA-256 of the CA certificate (DER) as certificate viewers show it: `AB:CD:…`.
+    pub fn ca_fingerprint(&self) -> String {
+        fingerprint(self.ca_der.as_ref())
     }
 
     pub fn ca_cert_path(&self) -> &Path {
@@ -371,6 +394,20 @@ mod tests {
             b[3..5].copy_from_slice(&((cut - 5) as u16).to_be_bytes());
             let _ = peek_client_hello(&b);
         }
+    }
+
+    #[test]
+    fn der_and_fingerprint_describe_the_pem() {
+        let dir = std::env::temp_dir().join(format!("pm-tls-der-{}", std::process::id()));
+        let ca = CertAuthority::load_or_create(&dir).unwrap();
+        assert_eq!(ca.ca_der(), pem_to_der(ca.ca_pem()).unwrap().as_slice());
+        let fp = ca.ca_fingerprint();
+        assert_eq!(pem_fingerprint(ca.ca_pem()).unwrap(), fp);
+        assert_eq!(fp.len(), 32 * 3 - 1);
+        assert!(
+            fp.split(':').all(|b| b.len() == 2 && b.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -61,8 +61,8 @@ interface MacroRun {
   variables: Record<string, string>;
 }
 
-const TOOLS = ["replay", "fuzzer", "scan", "crawl", "discover", "token_analyzer", "proof", "authz", "graphql", "openapi"];
-const TOOL_LABEL: Record<string, string> = { replay: "Replay", scan: "Scanner", discover: "Discovery" };
+const TOOLS = ["replay", "fuzzer", "scan", "crawl", "discover", "token_analyzer", "proof", "authz", "graphql", "openapi", "workflow"];
+const TOOL_LABEL: Record<string, string> = { replay: "Replay", scan: "Scanner", discover: "Discovery", workflow: "Workflows" };
 
 const NEW_RULE: Rule = {
   name: "Stay logged in",

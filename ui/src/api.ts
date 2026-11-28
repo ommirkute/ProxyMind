@@ -3,12 +3,54 @@
 // server requires.
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    /** The machine code of an `{error, code}` answer (server mode), e.g. `fresh_login_required`. */
+    public code?: string,
+    /** Seconds from `Retry-After` (throttled sign-ins). */
+    public retryAfter?: number,
+  ) {
     super(message);
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+/**
+ * Hooks the server-mode shell installs (see auth.tsx). In single-user mode nothing is installed and `call` behaves as
+ * it always did. `reauthenticate` resolves true once the person signed in again.
+ */
+export const authHooks: {
+  serverMode: boolean;
+  onUnauthenticated?: () => void;
+  onNotMember?: () => void;
+  /** A 403 `forbidden`: the role may have changed since the page last read it. */
+  onForbidden?: () => void;
+  reauthenticate?: () => Promise<boolean>;
+} = { serverMode: false };
+
+function parseError(res: Response, text: string): ApiError {
+  let msg = text;
+  let code: string | undefined;
+  try {
+    const j = JSON.parse(text);
+    msg = j.error ?? text;
+    code = typeof j.code === "string" ? j.code : undefined;
+  } catch {
+    /* plain text error */
+  }
+  const ra = Number(res.headers.get("Retry-After"));
+  return new ApiError(res.status, msg || res.statusText, code, Number.isFinite(ra) && ra > 0 ? ra : undefined);
+}
+
+/** In server mode: a lost session sends the person to the sign-in screen, a missing membership to its own screen. */
+function noteAuthFailure(e: ApiError) {
+  if (!authHooks.serverMode) return;
+  if (e.status === 401 && e.code === "unauthenticated") authHooks.onUnauthenticated?.();
+  else if (e.status === 403 && e.code === "not_a_member") authHooks.onNotMember?.();
+  else if (e.status === 403 && e.code === "forbidden") authHooks.onForbidden?.();
+}
+
+async function call<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
   const headers: Record<string, string> = {};
   if (method !== "GET") headers["X-ProxyMind"] = "1";
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -20,13 +62,14 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   });
   const text = await res.text();
   if (!res.ok) {
-    let msg = text;
-    try {
-      msg = JSON.parse(text).error ?? text;
-    } catch {
-      /* plain text error */
+    const err = parseError(res, text);
+    // A sensitive action needs a recent sign-in: ask once, then repeat it once.
+    if (authHooks.serverMode && !retried && err.status === 403 && err.code === "fresh_login_required" && authHooks.reauthenticate) {
+      if (await authHooks.reauthenticate()) return call<T>(method, path, body, true);
+      throw err;
     }
-    throw new ApiError(res.status, msg || res.statusText);
+    noteAuthFailure(err);
+    throw err;
   }
   return (text ? JSON.parse(text) : null) as T;
 }
@@ -41,7 +84,11 @@ export const api = {
   text: async (path: string): Promise<string> => {
     const res = await fetch(`/api/v1${path}`, { credentials: "same-origin" });
     const text = await res.text();
-    if (!res.ok) throw new ApiError(res.status, text || res.statusText);
+    if (!res.ok) {
+      const err = parseError(res, text);
+      noteAuthFailure(err);
+      throw err;
+    }
     return text;
   },
 };
@@ -68,8 +115,8 @@ export function qs(params: Record<string, string | number | boolean | undefined 
 // ---- types ----------------------------------------------------------------
 // Types that match the API contract come from api-types.gen.ts (cargo xtask contracts).
 
-import type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
-export type { ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, BrowserOpened, Approval };
+import type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, AuditVerification, BrowserOpened, ApprovalRow as Approval } from "./api-types.gen";
+export type { IssueLink, IntegrationView, ExchangeSummary, BodyView, WsPage, IdentityInfo, LoginRecording, LoggedOutLearned, AuthzRow, AuthzCandidate, CoverageCell, Coverage, IssueType, Retest, FindingProve, ProofResult, ReplayResult, AuditRecord, AuditVerification, BrowserOpened, Approval };
 
 // Hand-written types: narrower than the contract or shaped for the UI.
 
@@ -90,6 +137,8 @@ export interface Status {
   engagement: string | null;
   in_scope: string[];
   counters: Counters;
+  /** This installation does not trust the project file (threat model F-2): its settings are held back. */
+  safe_mode?: boolean;
 }
 
 export interface ExchangePage {
@@ -97,6 +146,18 @@ export interface ExchangePage {
   scanned?: number;
   exchanges: ExchangeSummary[];
   next_before_id?: number;
+}
+
+export interface DiffLine { op: "same" | "added" | "removed"; text: string }
+export interface LineDiff { lines: DiffLine[]; added: number; removed: number; truncated: boolean }
+
+/** One change rules or the intercept editor made to an exchange's traffic. */
+export interface TrafficChange {
+  phase: "request" | "response";
+  by: "rule" | "intercept" | "hook";
+  /** The rule (its comment, or part and match) or a label for the editor. */
+  name: string;
+  note?: string;
 }
 
 export interface ExchangeDetail {
@@ -111,6 +172,23 @@ export interface ExchangeDetail {
   /** Body as people read it: de-chunked, decompressed, markup kept (null when absent or binary). For Pretty/Render. */
   request_body?: string | null;
   response_body?: string | null;
+  /** gRPC / Protobuf message as editable text (one `@message` per gRPC message); absent for other traffic. */
+  request_protobuf?: string;
+  response_protobuf?: string;
+  /** When rules or the intercept editor changed the traffic: `request` is what went to the server and `response` is
+   *  what the server sent. `request_original` is the request as the browser sent it, `response_delivered` the response
+   *  as the browser received it. Each is absent when unchanged. */
+  request_original?: string;
+  response_delivered?: string;
+  request_original_truncated?: number;
+  response_delivered_truncated?: number;
+  request_original_b64?: string;
+  response_delivered_b64?: string;
+  /** What changed the traffic; empty when nothing did. */
+  changes: TrafficChange[];
+  /** One line diff per changed message: request from the browser's to the one sent, response from the server's to the
+   *  delivered one. */
+  diffs: { phase: "request" | "response"; from_label: string; to_label: string; lines: LineDiff }[];
   view: {
     url: string;
     request: { start_line: string; body?: BodyView };
@@ -182,6 +260,8 @@ export interface Finding {
   issue?: IssueType;
   retest?: Retest | null;
   duplicates?: number;
+  /** Issues created for it in Jira, GitHub or GitLab. */
+  issue_links?: IssueLink[];
   /** Model-written explanation and fix (Markdown), if someone asked for one. */
   explanation?: string;
 }

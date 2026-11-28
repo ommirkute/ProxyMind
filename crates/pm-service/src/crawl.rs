@@ -2,6 +2,7 @@
 //! that change state (log out, delete), within page and depth limits. Every
 //! fetched page is recorded, so it feeds History and the app model.
 
+use crate::access::Perm;
 use pm_policy::{Actor, Target, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -100,6 +101,7 @@ fn get_request(u: &Url) -> String {
 impl Service {
     /// Crawls from `url` if the policy allows it (active-safe: GETs only).
     pub async fn crawl(&self, actor: &Actor, req: CrawlRequest) -> Result<CrawlResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let start = Url::parse(&req.url).map_err(|e| ServiceError::Invalid(format!("bad url: {e}")))?;
         if !matches!(start.scheme(), "http" | "https") {
             return Err(ServiceError::Invalid("crawl needs an http(s) URL".into()));
@@ -110,8 +112,12 @@ impl Service {
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
         }
-        let out =
-            self.outgoing(crate::replay::parse_url_endpoint(start.as_str())?, get_request(&start).as_bytes(), false)?;
+        let out = self.outgoing(
+            actor,
+            crate::replay::parse_url_endpoint(start.as_str())?,
+            get_request(&start).as_bytes(),
+            false,
+        )?;
         let extra = json!({ "crawl": { "max_pages": max_pages, "max_depth": max_depth, "robots": robots } });
         match self.gate_send_with(
             actor,
@@ -179,7 +185,7 @@ impl Service {
                 skip(&url, format!("not followed: {}", reasons.join("; ")), &mut skipped);
                 continue;
             }
-            let out = self.outgoing(crate::replay::parse_url_endpoint(url.as_str())?, raw.as_bytes(), false)?;
+            let out = self.outgoing(actor, crate::replay::parse_url_endpoint(url.as_str())?, raw.as_bytes(), false)?;
             let (sent, _) = self.send_as(actor, &out, req.identity.as_deref(), false, "crawl").await?;
             let mut page = CrawledPage {
                 url: url.to_string(),
@@ -432,7 +438,8 @@ impl Service {
             skip(format!("not followed: {}", reasons.join("; ")));
             return None;
         }
-        let out = self.outgoing(crate::replay::parse_url_endpoint(url.as_str()).ok()?, raw.as_bytes(), false).ok()?;
+        let out =
+            self.outgoing(actor, crate::replay::parse_url_endpoint(url.as_str()).ok()?, raw.as_bytes(), false).ok()?;
         let sent = match self.send_as(actor, &out, identity, false, "crawl").await {
             Ok((sent, _)) => sent,
             Err(e) => {

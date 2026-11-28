@@ -149,7 +149,7 @@ function CrawlPanel() {
   return (
     <Panel
       title="Crawl"
-      actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Discover pages…"}</button>}
+      actions={<button data-write className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Discover pages…"}</button>}
     >
       {open && (
         <>
@@ -225,7 +225,7 @@ function OpenApiPanel() {
       setResult(await api.post<ImportResult>("/openapi/import", body));
     });
   return (
-    <Panel title="API description" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import OpenAPI…"}</button>}>
+    <Panel title="API description" actions={<button data-write className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import OpenAPI…"}</button>}>
       {open && (
         <>
           <div className="row">
@@ -314,7 +314,7 @@ function GraphQlPanel() {
     go("replay");
   };
   return (
-    <Panel title="GraphQL" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import GraphQL schema…"}</button>}>
+    <Panel title="GraphQL" actions={<button data-write className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Import GraphQL schema…"}</button>}>
       {open && (
         <>
           <div className="row">
@@ -384,7 +384,7 @@ function DiscoverPanel() {
       setResult(r);
     });
   return (
-    <Panel title="Content discovery" actions={<button className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Find hidden paths…"}</button>}>
+    <Panel title="Content discovery" actions={<button data-write className="btn" onClick={() => setOpen((o) => !o)}>{open ? "Hide" : "Find hidden paths…"}</button>}>
       {open && (
         <>
           <p className="small muted">GET only, in scope only. Tries common hidden files and folders (.git, .env, backups, admin, actuator…) or your words; the server's not-found page is learned first so soft 404s aren't reported.</p>
@@ -452,7 +452,7 @@ function ChangesPanel() {
       </p>
       <div className="row">
         <input aria-label="Snapshot name" placeholder="snapshot name, e.g. Q3 test" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 220 }} />
-        <button className="btn" onClick={() => void save()} disabled={action.busy || !name.trim()} data-testid="snapshot-save">Save snapshot</button>
+        <button data-write className="btn" onClick={() => void save()} disabled={action.busy || !name.trim()} data-testid="snapshot-save">Save snapshot</button>
         {snaps && snaps.length > 0 && (
           <>
             <select aria-label="Compare with" value={pick} onChange={(e) => setPick(e.target.value)}>

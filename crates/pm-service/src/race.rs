@@ -1,6 +1,7 @@
 //! Race-condition testing through the policy gate: one request sent many
 //! times so the copies reach the server together.
 
+use crate::access::Perm;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -33,6 +34,9 @@ pub struct RaceRequest {
     pub url: Option<String>,
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
+    /// Replace the request's body with these bytes (base64), as in `replay_send`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// How many copies to send at once (2 to 50, default 10).
     #[schemars(range(min = 2, max = 50))]
     pub count: Option<usize>,
@@ -90,18 +94,20 @@ impl Service {
     /// Sends `count` copies of a request so they arrive together, if the
     /// policy allows it. Racing is at least active-intrusive.
     pub async fn race_send(&self, actor: &Actor, req: RaceRequest) -> Result<RaceResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let count = req.count.unwrap_or(10);
         if !(2..=MAX_RACE).contains(&count) {
             return Err(ServiceError::Invalid(format!("count must be 2 to {MAX_RACE}")));
         }
         let base = ReplayRequest {
             raw: req.raw.clone(),
+            body_b64: req.body_b64.clone(),
             exchange_id: req.exchange_id,
             url: req.url.clone(),
             hypothesis_id: req.hypothesis_id,
             ..Default::default()
         };
-        let out = self.outgoing_from_request(&base)?;
+        let out = self.outgoing_from_request(actor, &base)?;
         let fix_cl = req.fix_content_length.unwrap_or(true);
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
@@ -145,7 +151,7 @@ impl Service {
     ) -> Result<RaceResult> {
         // One slot for the whole race: the point is to send at once.
         let _permit = self.acquire_slot(&out.endpoint.host).await?;
-        let mut wire = self.redactor.unredact(&out.raw);
+        let mut wire = self.redactor_of(actor).unredact(&out.raw);
         if let Some(name) = identity {
             wire = pm_identity::apply(&wire, &self.load_identity(name)?.auth);
         }
@@ -171,6 +177,7 @@ impl Service {
         let (mut fastest, mut slowest, mut successes) = (u64::MAX, 0u64, 0usize);
         for r in outcome.results {
             let mut record = NewExchange {
+                client_addr: None,
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 source: "race".into(),
@@ -186,6 +193,7 @@ impl Service {
                 error: None,
                 identity: identity.map(str::to_string),
                 hypothesis_id: out.hypothesis_id,
+                ..Default::default()
             };
             let key = match r {
                 Ok(resp) => {

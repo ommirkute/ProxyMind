@@ -1,6 +1,7 @@
 //! Organizer: exchanges kept aside to come back to, each with a status and
 //! a note. It only stores references; nothing is sent.
 
+use crate::access::Perm;
 use pm_core::now_ms;
 use pm_policy::Actor;
 use pm_store::{ExchangeSummary, Row};
@@ -76,6 +77,7 @@ impl Service {
 
     /// Puts an exchange in the Organizer (audited).
     pub fn organizer_add(&self, actor: &Actor, exchange_id: i64, note: &str) -> Result<OrganizerItem> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         check_note(note)?;
         if self.store.read(|db| db.get_exchange(exchange_id))?.is_none() {
             return Err(ServiceError::NotFound(format!("exchange {exchange_id}")));
@@ -99,6 +101,7 @@ impl Service {
 
     /// Items, newest first, optionally only those with `status`.
     pub fn organizer_list(&self, actor: &Actor, status: Option<&str>) -> Result<Vec<OrganizerItem>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         if let Some(s) = status {
             check_status(s)?;
         }
@@ -110,6 +113,7 @@ impl Service {
 
     /// Changes an item's status or note (audited).
     pub fn organizer_update(&self, actor: &Actor, id: i64, u: &OrganizerUpdate) -> Result<OrganizerItem> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let mut changes = Row::new();
         if let Some(s) = &u.status {
             check_status(s)?;
@@ -133,6 +137,7 @@ impl Service {
 
     /// Removes an item (the exchange stays in history; audited).
     pub fn organizer_delete(&self, actor: &Actor, id: i64) -> Result<()> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         if !self.store.write(|db| db.delete_row("organizer", id))? {
             return Err(ServiceError::NotFound(format!("organizer item {id}")));
         }

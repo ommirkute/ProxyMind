@@ -3,6 +3,7 @@
 //! server at the same moment (a race across endpoints). All go to one
 //! server; one gate decision, and one approval, covers the whole group.
 
+use crate::access::Perm;
 use std::time::Instant;
 
 use pm_policy::{Actor, Target, Tier};
@@ -37,6 +38,9 @@ pub struct GroupItem {
     pub exchange_id: Option<i64>,
     /// The request (default: the recorded one). May contain placeholders.
     pub raw: Option<String>,
+    /// Replace the request's body with these bytes (base64), as in `replay_send`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// A label for the result (e.g. the Replay tab name).
     pub name: Option<String>,
 }
@@ -101,6 +105,7 @@ pub enum GroupResult {
 impl Service {
     /// Sends a group of requests through the policy gate.
     pub async fn replay_group(&self, actor: &Actor, req: GroupRequest) -> Result<GroupResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let n = req.requests.len();
         if !(2..=MAX_GROUP).contains(&n) {
             return Err(ServiceError::Invalid(format!("a group holds 2 to {MAX_GROUP} requests")));
@@ -109,13 +114,14 @@ impl Service {
         for (i, item) in req.requests.iter().enumerate() {
             let one = ReplayRequest {
                 raw: item.raw.clone(),
+                body_b64: item.body_b64.clone(),
                 exchange_id: item.exchange_id,
                 url: item.url.clone(),
                 hypothesis_id: req.hypothesis_id,
                 ..Default::default()
             };
             let out = self
-                .outgoing_from_request(&one)
+                .outgoing_from_request(actor, &one)
                 .map_err(|e| ServiceError::Invalid(format!("request {}: {e}", i + 1)))?;
             outs.push(out);
         }
@@ -228,7 +234,7 @@ impl Service {
         let ident = identity.map(|n| self.load_identity(n)).transpose()?;
         let mut wires = Vec::with_capacity(outs.len());
         for o in outs {
-            let mut w = self.redactor.unredact(&o.raw);
+            let mut w = self.redactor_of(actor).unredact(&o.raw);
             if let Some(id) = &ident {
                 w = pm_identity::apply(&w, &id.auth);
             }
@@ -253,6 +259,7 @@ impl Service {
         for (i, r) in outcome.results.into_iter().enumerate() {
             let o = &outs[i];
             let mut record = NewExchange {
+                client_addr: None,
                 ts_ms: now_ms(),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 source: "replay".into(),
@@ -268,6 +275,7 @@ impl Service {
                 error: None,
                 identity: identity.map(str::to_string),
                 hypothesis_id: o.hypothesis_id,
+                ..Default::default()
             };
             let mut elapsed_ms = 0;
             match r {

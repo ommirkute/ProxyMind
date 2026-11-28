@@ -1,5 +1,6 @@
 //! WebSocket messages logged by the proxy.
 
+use crate::access::Perm;
 use pm_ai::{UNTRUSTED_NOTICE, prompt_injection_signals, wrap_untrusted};
 use pm_http::ws;
 use pm_policy::Actor;
@@ -57,6 +58,7 @@ impl Service {
         limit: usize,
         max_chars: usize,
     ) -> Result<WsPage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = limit.clamp(1, 500);
         let (rows, total) = self.store.read(|store| -> Result<_> {
             if store.get_exchange(exchange_id)?.is_none() {
@@ -120,6 +122,7 @@ impl Service {
         limit: usize,
         max_chars: usize,
     ) -> Result<WsHistoryPage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = limit.clamp(1, 1000);
         let rows = self.store.read(|db| db.ws_history(host, before_id, limit))?;
         let agent = actor.kind != pm_policy::ActorKind::Human;

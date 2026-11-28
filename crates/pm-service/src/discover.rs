@@ -2,6 +2,7 @@
 //! in scope only, and report what exists, telling real pages from the
 //! server's "not found" page (soft 404s).
 
+use crate::access::Perm;
 use pm_crawl::discover::{self, NotFound};
 use pm_policy::{Actor, Target, Tier};
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,7 @@ fn shape(u: &Url) -> usize {
 
 impl Service {
     pub async fn discover(&self, actor: &Actor, req: DiscoverRequest) -> Result<DiscoverResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let base = Url::parse(&req.url).map_err(|e| ServiceError::Invalid(format!("bad url: {e}")))?;
         if !matches!(base.scheme(), "http" | "https") {
             return Err(ServiceError::Invalid("discovery needs an http(s) URL".into()));
@@ -124,8 +126,12 @@ impl Service {
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
         }
-        let first =
-            self.outgoing(crate::replay::parse_url_endpoint(base.as_str())?, get_request(&base).as_bytes(), false)?;
+        let first = self.outgoing(
+            actor,
+            crate::replay::parse_url_endpoint(base.as_str())?,
+            get_request(&base).as_bytes(),
+            false,
+        )?;
         let extra = json!({ "discover": { "base": base.as_str(), "candidates": cands.len() } });
         match self.gate_send_with(
             actor,
@@ -150,8 +156,12 @@ impl Service {
 
         let identity = req.identity.as_deref();
         let send = |u: Url| async move {
-            let out =
-                self.outgoing(crate::replay::parse_url_endpoint(u.as_str())?, get_request(&u).as_bytes(), false)?;
+            let out = self.outgoing(
+                actor,
+                crate::replay::parse_url_endpoint(u.as_str())?,
+                get_request(&u).as_bytes(),
+                false,
+            )?;
             let (sent, _) = self.send_as(actor, &out, identity, false, "discover").await?;
             Ok::<_, ServiceError>(sent)
         };
@@ -219,8 +229,12 @@ impl Service {
             // bypass), so it is recorded once more as a hit.
             let mut exchange_id = sent.exchange_id;
             if matches!(status, 401 | 403) {
-                let out =
-                    self.outgoing(crate::replay::parse_url_endpoint(u.as_str())?, get_request(&u).as_bytes(), false)?;
+                let out = self.outgoing(
+                    actor,
+                    crate::replay::parse_url_endpoint(u.as_str())?,
+                    get_request(&u).as_bytes(),
+                    false,
+                )?;
                 tried += 1;
                 exchange_id = self.send_as(actor, &out, identity, false, "discover_hit").await?.0.exchange_id;
             }
@@ -240,6 +254,7 @@ impl Service {
                 let mut with = u.clone();
                 with.query_pairs_mut().append_pair(name, value);
                 let out = self.outgoing(
+                    actor,
                     crate::replay::parse_url_endpoint(with.as_str())?,
                     get_request(&with).as_bytes(),
                     false,

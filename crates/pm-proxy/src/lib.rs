@@ -9,11 +9,15 @@
 //! first: a response rule or the intercept queue. History keeps the first
 //! [`RECORD_CAP`] bytes of a response.
 
+mod capture;
 mod h2_server;
 pub mod intercept;
 pub mod listeners;
 pub mod presets;
 pub mod rewrite;
+pub mod setup_page;
+mod stream_rec;
+pub mod transparent;
 mod ws_relay;
 
 use std::net::SocketAddr;
@@ -23,17 +27,23 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use pm_core::now_ms;
 use pm_http::{BodyKind, RequestHead, ResponseHead};
+use pm_plugin::hooks::{
+    HookEngine, MAX_MESSAGE as HOOK_MAX, Target as HookTarget, content_type as message_content_type,
+};
+use pm_plugin::v2::HookKind;
 use pm_replay::{AfterResponse, Conn, Endpoint, Io, Sender};
 
+pub use capture::{HANDSHAKE_TIMEOUT as SOCKS5_HANDSHAKE_TIMEOUT, RawStats, SocksLogin};
 use intercept::{Decision, Kind};
 pub use intercept::{InterceptQueue, InterceptSettings, QueueChange, QueueObserver};
-pub use listeners::{ListenerConfig, ListenerStatus, Listeners, Redirect};
+pub use listeners::{ListenerConfig, ListenerKind, ListenerStatus, Listeners, Redirect};
 pub use pm_store::NewExchange as RecordedExchange;
-use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, WsTarget};
-use pm_tls::{CertAuthority, TlsAcceptor};
+use pm_store::{NewExchange, NewWsMessage, Store, StoreHandle, StreamOp, WsTarget};
+use pm_tls::CertAuthority;
 pub use rewrite::{Rewriter, Rule as RewriteRule};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+pub use transparent::{OriginalDst, SystemOriginalDst};
 
 /// How long the proxy waits for a response head (long polling can be slow).
 pub(crate) const HEAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -53,6 +63,8 @@ enum Record {
     Exchange(Box<NewExchange>, Option<u64>),
     Ws(u64, NewWsMessage),
     WsDone(u64),
+    /// A change to a raw stream's rows (roadmap 2.6); the key names the stream.
+    Stream(StreamOp),
 }
 
 /// Counters shared by every clone of a [`Recorder`].
@@ -92,8 +104,10 @@ impl Recorder {
             // Upgraded exchanges by key, so their WebSocket messages can be
             // linked to the row id. Records arrive in order on one thread.
             let mut ids = std::collections::HashMap::<u64, i64>::new();
+            let mut stream_ids = std::collections::HashMap::<u64, i64>::new();
             for rec in rx {
                 let r = match rec {
+                    Record::Stream(op) => store.apply_stream_ops(&mut stream_ids, vec![op]).map(drop),
                     Record::Exchange(ex, key) => store.insert_exchange(&ex).map(|id| {
                         if let Some(k) = key {
                             ids.insert(k, id);
@@ -137,6 +151,7 @@ impl Recorder {
             .name("recorder".into())
             .spawn(move || {
                 let mut ids = std::collections::HashMap::<u64, i64>::new();
+                let mut stream_ids = std::collections::HashMap::<u64, i64>::new();
                 let mut batch = Vec::with_capacity(BATCH_MAX);
                 while let Ok(first) = rx.recv() {
                     batch.push(first);
@@ -148,7 +163,7 @@ impl Recorder {
                         }
                     }
                     let n = batch.len() as u64;
-                    write_batch(&handle, &mut ids, std::mem::take(&mut batch));
+                    write_batch(&handle, &mut ids, &mut stream_ids, std::mem::take(&mut batch));
                     st.written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                     st.batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -217,15 +232,22 @@ impl Recorder {
 /// Writes drained records through the shared handle in one transaction, then updates the key -> row id map.
 /// Records are never reordered: exchanges go in arrival order, and each WebSocket message is resolved against the
 /// exchange it follows (in this batch or an earlier one).
-fn write_batch(handle: &StoreHandle, ids: &mut std::collections::HashMap<u64, i64>, records: Vec<Record>) {
+fn write_batch(
+    handle: &StoreHandle,
+    ids: &mut std::collections::HashMap<u64, i64>,
+    stream_ids: &mut std::collections::HashMap<u64, i64>,
+    records: Vec<Record>,
+) {
     use std::collections::{HashMap, HashSet};
     let mut exchanges: Vec<NewExchange> = Vec::new();
     let mut keys: Vec<Option<u64>> = Vec::new();
     let mut ws: Vec<(WsTarget, NewWsMessage)> = Vec::new();
     let mut pending = HashMap::<u64, usize>::new();
     let mut done = HashSet::<u64>::new();
+    let mut stream_ops: Vec<StreamOp> = Vec::new();
     for rec in records {
         match rec {
+            Record::Stream(op) => stream_ops.push(op),
             Record::Exchange(ex, key) => {
                 if let Some(k) = key {
                     pending.insert(k, exchanges.len());
@@ -276,6 +298,21 @@ fn write_batch(handle: &StoreHandle, ids: &mut std::collections::HashMap<u64, i6
             }
         }
     }
+    if !stream_ops.is_empty() {
+        // Stream rows are independent of exchanges; one transaction for the batch's stream changes, in order.
+        let mut work = stream_ids.clone();
+        match handle.write(|s| s.apply_stream_ops(&mut work, stream_ops.clone())) {
+            Ok(_) => *stream_ids = work,
+            Err(e) => {
+                tracing::warn!(error = %e, "batch write of streams failed; retrying its records one by one");
+                for op in stream_ops {
+                    if let Err(e) = handle.write(|s| s.apply_stream_ops(stream_ids, vec![op])) {
+                        tracing::error!(error = %e, "failed to record a stream");
+                    }
+                }
+            }
+        }
+    }
     for (key, id) in keys.iter().zip(&row_ids) {
         if let (Some(k), Some(id)) = (key, id)
             && !done.contains(k)
@@ -317,7 +354,21 @@ impl SelfAddr {
 #[derive(Clone, Default)]
 pub(crate) struct Ctx {
     me: Option<SelfAddr>,
+    /// The IP address of the client on this connection (no port).
+    peer: Option<std::net::IpAddr>,
     redirect: Option<Redirect>,
+    /// Where the client was really going, when the connection was redirected by the OS (transparent mode) or a
+    /// SOCKS5 request gave an IP address: requests are named by their Host header or TLS server name, but still
+    /// connect to this address and port.
+    orig: Option<SocketAddr>,
+    pin: Option<std::net::IpAddr>,
+}
+
+impl Ctx {
+    /// The address to connect to instead of resolving the target's name (not when a redirect picks the target).
+    pub(crate) fn pin(&self) -> Option<std::net::IpAddr> {
+        if self.redirect.is_some() { None } else { self.pin }
+    }
 }
 
 const DROPPED_MSG: &str = "Request dropped in ProxyMind's intercept queue.";
@@ -333,6 +384,8 @@ pub struct Proxy {
     sender: Sender,
     recorder: Recorder,
     hooks: Hooks,
+    /// Non-HTTP streams relayed without recording (SOCKS5 and transparent capture).
+    raw: capture::RawCounters,
 }
 
 /// Optional user controls over live traffic.
@@ -346,6 +399,8 @@ pub struct Hooks {
     pub network: Option<pm_replay::Network>,
     /// Offer HTTP/2 to browsers on intercepted TLS connections.
     pub http2: bool,
+    /// Plugin traffic hooks (ADR-0020): run after the rules and before the intercept queue.
+    pub plugin_hooks: Option<Arc<HookEngine>>,
 }
 
 impl Proxy {
@@ -363,7 +418,7 @@ impl Proxy {
         if let Some(n) = &hooks.network {
             sender = sender.with_network(n.clone());
         }
-        Ok(Arc::new(Self { ca, sender, recorder, hooks }))
+        Ok(Arc::new(Self { ca, sender, recorder, hooks, raw: capture::RawCounters::default() }))
     }
 
     /// Accepts connections until the task is cancelled.
@@ -378,19 +433,10 @@ impl Proxy {
         listener: TcpListener,
         redirect: Arc<parking_lot::RwLock<Option<Redirect>>>,
     ) -> Result<()> {
-        loop {
-            let (tcp, peer) = listener.accept().await?;
-            let this = self.clone();
-            let ctx = Ctx { me: SelfAddr::of(&tcp), redirect: redirect.read().clone() };
-            tokio::spawn(async move {
-                if let Err(e) = this.handle_client(tcp, ctx).await {
-                    tracing::debug!(%peer, error = %e, "client connection ended with error");
-                }
-            });
-        }
+        self.run_mode(listener, capture::Accept::Http, redirect).await
     }
 
-    async fn handle_client(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
+    pub(crate) async fn handle_client(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
         tcp.set_nodelay(true)?;
         // Transparent mode: a TLS handshake straight away (no CONNECT) from a
         // client sent here by DNS or a port redirect.
@@ -420,44 +466,35 @@ impl Proxy {
             return self.tunnel(tcp, &to_host, to_port, &ctx).await;
         }
 
-        // Peek at the first byte: 0x16 starts a TLS handshake. Anything else
-        // is plain HTTP inside the tunnel (e.g. WebSockets on port 80).
-        if tcp.peek(&mut first).await? == 0 {
-            return Ok(());
-        }
-        if first[0] == 0x16 {
-            let tls =
-                TlsAcceptor::from(self.tls_config(&host)?).accept(tcp).await.context("TLS handshake with client")?;
-            if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-                let (host, port) = ctx.redirect.as_ref().map_or((host, port), |r| (r.host.clone(), r.port));
-                return self.serve_h2(tls, host, port, ctx).await;
-            }
-            self.serve_http(Conn::new(tls), "https", Some((host, port)), None, ctx).await
-        } else {
-            self.serve_http(Conn::new(tcp), "http", Some((host, port)), None, ctx).await
-        }
+        // The first bytes decide: a TLS handshake is intercepted, an HTTP/1.x request (e.g. WebSockets on port 80)
+        // is read, and anything else (a protocol where the server speaks first, SSH, a database, a custom
+        // protocol) is relayed and recorded as a raw stream.
+        self.serve_flow(tcp, host, port, ctx, false).await
     }
 
     /// Whether TLS to this host is passed through without interception.
-    fn passthrough(&self, host: &str) -> bool {
-        self.sender.network().passthrough(host)
+    pub(crate) fn passthrough(&self, host: &str) -> bool {
+        // ProxyMind's own setup page is never tunnelled anywhere.
+        !setup_page::is_setup_host(host) && self.sender.network().passthrough(host)
     }
 
     /// Passes bytes both ways between the client and `host:port`, untouched
     /// and unrecorded (TLS pass-through).
-    async fn tunnel(&self, mut client: TcpStream, host: &str, port: u16, ctx: &Ctx) -> Result<()> {
+    pub(crate) async fn tunnel(&self, mut client: TcpStream, host: &str, port: u16, ctx: &Ctx) -> Result<()> {
         let guard = self.loop_guard(&ctx.me, host, port);
         let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
-        let mut upstream = self.sender.connect_tunnel(host, port, check).await?;
+        let ep = Endpoint::new("tcp", host, port).with_pin(ctx.pin());
+        let mut upstream = self.sender.connect_tunnel_to(&ep, check).await?;
         tracing::debug!(host, port, "TLS pass-through");
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         Ok(())
     }
 
     /// The certificate (and ALPN) ProxyMind presents for a host.
-    fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
+    pub(crate) fn tls_config(&self, host: &str) -> Result<Arc<pm_tls::ServerConfig>> {
         let mut cfg = self.ca.server_config(host)?;
-        if self.hooks.http2 {
+        // The setup page is answered by the HTTP/1.1 path, which is where it is looked for.
+        if self.hooks.http2 && !setup_page::is_setup_host(host) {
             let mut c = (*cfg).clone();
             c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             cfg = Arc::new(c);
@@ -468,30 +505,30 @@ impl Proxy {
     /// TLS without CONNECT: the server name (SNI) picks the certificate;
     /// requests go to their Host header (default port 443).
     async fn serve_transparent_tls(self: Arc<Self>, tcp: TcpStream, ctx: Ctx) -> Result<()> {
+        // A redirected connection knows its port; otherwise requests go to the default HTTPS port.
+        let default_port = ctx.orig.map_or(443, |o| o.port());
         // Peek at the ClientHello for pass-through hosts (the bytes stay
         // unread for the tunnel or the TLS acceptor).
         if !self.sender.network().config().tls_passthrough.is_empty()
             && let Some(sni) = peek_sni(&tcp).await
             && self.passthrough(&sni)
         {
-            let (host, port) = ctx.redirect.as_ref().map_or((sni, 443), |r| (r.host.clone(), r.port));
+            let (host, port) = ctx.redirect.as_ref().map_or((sni, default_port), |r| (r.host.clone(), r.port));
             return self.tunnel(tcp, &host, port, &ctx).await;
         }
         let start =
             pm_tls::LazyConfigAcceptor::new(pm_tls::Acceptor::default(), tcp).await.context("reading the TLS hello")?;
-        let Some(sni) = start.client_hello().server_name().map(|n| n.to_string()) else {
-            bail!("transparent HTTPS needs the client to send a server name (SNI)");
+        let sni = match (start.client_hello().server_name(), ctx.orig) {
+            (Some(n), _) => n.to_string(),
+            // No server name: a redirected connection still says where it was going.
+            (None, Some(o)) => o.ip().to_string(),
+            (None, None) => bail!("transparent HTTPS needs the client to send a server name (SNI)"),
         };
-        let tls = start.into_stream(self.tls_config(&sni)?).await.context("TLS handshake with client")?;
-        if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
-            let (host, port) = ctx.redirect.as_ref().map_or((sni, 443), |r| (r.host.clone(), r.port));
-            return self.serve_h2(tls, host, port, ctx).await;
-        }
-        self.serve_http(Conn::new(tls), "https", None, None, ctx).await
+        self.serve_tls_client(start, sni.clone(), (sni, default_port), None, ctx).await
     }
 
     /// Checks resolved addresses against ProxyMind's own (direct connections only).
-    fn loop_guard<'a>(
+    pub(crate) fn loop_guard<'a>(
         &self,
         me: &'a Option<SelfAddr>,
         host: &str,
@@ -503,7 +540,8 @@ impl Proxy {
 
     /// Match-and-replace rules, then the intercept queue, where a human may
     /// forward, edit or drop the request. Returns the request to send with
-    /// its method and path, or None if it was dropped.
+    /// its method and path, and what changed it (the request as received and
+    /// the rules or edits that changed it); None if it was dropped.
     async fn before_send(
         &self,
         scheme: &str,
@@ -512,20 +550,47 @@ impl Proxy {
         request: Vec<u8>,
         method: &str,
         path: &str,
-    ) -> Option<(Vec<u8>, String, String)> {
+    ) -> std::result::Result<(Vec<u8>, String, String, Edits), String> {
         let mut edited = None;
-        if let Some(r) = &self.hooks.rewrite {
-            edited = r.apply_request(scheme, host, port, path, &request);
+        let mut changes = Vec::new();
+        if let Some(r) = &self.hooks.rewrite
+            && let Some(done) = r.rewrite_request(scheme, host, port, path, &request)
+        {
+            changes.extend(done.names.into_iter().map(|name| change("request", "rule", name)));
+            edited = Some(done.bytes);
+        }
+        if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Request)) {
+            let t = HookTarget { scheme, host, port, method, path };
+            let run = h.run(HookKind::Request, &t, edited.as_deref().unwrap_or(&request)).await;
+            changes.extend(hook_changes("request", run.notes));
+            if let Some(b) = run.block {
+                return Err(if b.dropped {
+                    format!("Request dropped by plugin hook {}.", b.name)
+                } else {
+                    format!("Request blocked: plugin hook {} failed ({}).", b.name, b.why)
+                });
+            }
+            if let Some(bytes) = run.bytes {
+                edited = Some(bytes);
+            }
         }
         if let Some(q) = &self.hooks.intercept {
             let current = edited.as_deref().unwrap_or(&request);
             match q.hold(Kind::Request, scheme, host, port, method, path, current).await {
                 Decision::Forward(None) => {}
-                Decision::Forward(Some(e)) => edited = Some(e),
-                Decision::Drop => return None,
+                Decision::Forward(Some(e)) => {
+                    if e != current {
+                        changes.push(change("request", "intercept", INTERCEPT_LABEL.into()));
+                    }
+                    edited = Some(e);
+                }
+                Decision::Drop => return Err(DROPPED_MSG.to_string()),
             }
         }
-        let Some(edited) = edited else { return Some((request, method.to_string(), path.to_string())) };
+        let Some(edited) = edited else {
+            let edits = Edits { original: None, changes };
+            return Ok((request, method.to_string(), path.to_string(), edits));
+        };
         let (mut method, mut path) = (method.to_string(), path.to_string());
         if let Ok(Some(end)) = pm_http::find_head_end(&edited)
             && let Ok(h) = pm_http::parse_request_head(&edited[..end])
@@ -534,11 +599,19 @@ impl Proxy {
                 pm_http::split_absolute_target(&h.target).map_or_else(|| h.target.clone(), |(_, _, p)| p.to_string());
             method = h.method;
         }
-        Some((edited, method, path))
+        // Edits that end where they began (a human put it back) leave nothing to record.
+        // (a hook that was bypassed or failed still leaves its note).
+        let edits = if edited == request {
+            Edits { original: None, changes: changes.into_iter().filter(is_note).collect() }
+        } else {
+            Edits { original: Some(request), changes }
+        };
+        Ok((edited, method, path, edits))
     }
 
-    /// Rules and the intercept queue for a response. `Some(None)`: send the
-    /// original; `Some(Some(bytes))`: send these instead; None: dropped.
+    /// Rules and the intercept queue for a response. `Some(edit)`: forward
+    /// it (`edit.bytes` is what to send instead of the original, if it
+    /// changed); None: dropped.
     async fn before_respond(
         &self,
         scheme: &str,
@@ -547,20 +620,55 @@ impl Proxy {
         method: &str,
         path: &str,
         raw: &[u8],
-    ) -> Option<Option<Vec<u8>>> {
+    ) -> Option<ResponseEdit> {
         let mut to_client = None;
-        if let Some(r) = &self.hooks.rewrite {
-            to_client = r.apply_response(scheme, host, port, path, raw);
+        let mut changes = Vec::new();
+        if let Some(r) = &self.hooks.rewrite
+            && let Some(done) = r.rewrite_response(scheme, host, port, path, raw)
+        {
+            changes.extend(done.names.into_iter().map(|name| change("response", "rule", name)));
+            to_client = Some(done.bytes);
+        }
+        if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Response)) {
+            let t = HookTarget { scheme, host, port, method, path };
+            let current = to_client.as_deref().unwrap_or(raw);
+            if message_content_type(current).as_deref() == Some("text/event-stream") {
+                changes.extend(hook_changes(
+                    "response",
+                    h.skipped(HookKind::Response, &t, current, "streamed (server-sent events) responses bypass hooks"),
+                ));
+            } else {
+                let run = h.run(HookKind::Response, &t, current).await;
+                changes.extend(hook_changes("response", run.notes));
+                if let Some(b) = run.block {
+                    let why = format!("ProxyMind blocked this response: plugin hook {} failed ({}).", b.name, b.why);
+                    changes.retain(is_note);
+                    return Some(ResponseEdit { bytes: None, changes, blocked: Some(why) });
+                }
+                if let Some(bytes) = run.bytes {
+                    to_client = Some(bytes);
+                }
+            }
         }
         if let Some(q) = &self.hooks.intercept {
             let current = to_client.as_deref().unwrap_or(raw);
             match q.hold(Kind::Response, scheme, host, port, method, path, current).await {
                 Decision::Forward(None) => {}
-                Decision::Forward(Some(edited)) => to_client = Some(edited),
+                Decision::Forward(Some(edited)) => {
+                    if edited != current {
+                        changes.push(change("response", "intercept", INTERCEPT_LABEL.into()));
+                    }
+                    to_client = Some(edited);
+                }
                 Decision::Drop => return None,
             }
         }
-        Some(to_client)
+        // Edits that end where they began leave nothing to record (except a hook's bypass or failure notes).
+        if to_client.as_deref() == Some(raw) || !changes.iter().any(|c| !is_note(c)) {
+            changes.retain(is_note);
+            return Some(ResponseEdit { bytes: None, changes, blocked: None });
+        }
+        Some(ResponseEdit { bytes: to_client, changes, blocked: None })
     }
 
     /// Serves requests on one client connection until it closes.
@@ -581,7 +689,23 @@ impl Proxy {
                 },
             };
             let head = pm_http::parse_request_head(&head_raw)?;
-            let mut target = resolve_target(&head, &head_raw, scheme, tunnel_target.as_ref())?;
+            let mut target = resolve_target(&head, &head_raw, scheme, tunnel_target.as_ref(), ctx.orig)?;
+            // A request that names its own target (absolute-form) is not tied to where the client was going.
+            let pin = if pm_http::split_absolute_target(&head.target).is_some() { None } else { ctx.pin() };
+            // ProxyMind's own setup page (the reserved host, or this listener's own address): answered here,
+            // never forwarded, never recorded, and not touched by rules or the intercept queue.
+            if setup_page::is_local(&target.host, target.port, ctx.me) {
+                let kind = head.body_kind()?;
+                client.read_body(kind).await?;
+                let resp = setup_page::respond(&self.ca, &head.method, &target.path, ctx.me);
+                client.io.write_all(&resp).await?;
+                client.io.flush().await?;
+                if head.wants_close() {
+                    let _ = client.io.shutdown().await;
+                    return Ok(());
+                }
+                continue;
+            }
             if let Some(r) = &ctx.redirect {
                 target.host.clone_from(&r.host);
                 target.port = r.port;
@@ -604,13 +728,12 @@ impl Proxy {
             let mut request = target.head_raw.clone();
             request.extend_from_slice(&body);
 
-            let (mut request, method, path) = match self
+            let (mut request, method, path, edits) = match self
                 .before_send(&target.scheme, &target.host, target.port, request, &head.method, &target.path)
                 .await
             {
-                Some(r) => r,
-                None => {
-                    let msg = DROPPED_MSG;
+                Ok(r) => r,
+                Err(msg) => {
                     let resp = format!(
                         "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
                         msg.len()
@@ -640,10 +763,11 @@ impl Proxy {
             }
 
             let started = Instant::now();
-            let ep = Endpoint::new(&target.scheme, &target.host, target.port);
+            let ep = Endpoint::new(&target.scheme, &target.host, target.port).with_pin(pin);
             let guard = self.loop_guard(&ctx.me, &target.host, target.port);
             let check = guard.as_ref().map(|g| g as pm_replay::AddrCheck<'_>);
             let mut record = NewExchange {
+                client_addr: ctx.peer.map(|ip| ip.to_string()),
                 ts_ms: now_ms(),
                 duration_ms: None,
                 source: "proxy".into(),
@@ -659,9 +783,11 @@ impl Proxy {
                 error: None,
                 identity: None,
                 hypothesis_id: None,
+                ..Default::default()
             };
+            edits.note_on(&mut record);
 
-            let buffered = pm_http::h2text::is_http2_request(&record.request)
+            let buffered = pm_http::h3text::is_multiplexed_request(&record.request)
                 || self.buffers_response(&target.scheme, &target.host, target.port, &path);
             if !buffered {
                 let start =
@@ -673,7 +799,40 @@ impl Proxy {
                     record.request.clone_from(sent);
                 }
                 record.status = Some(start.head.status);
-                client.io.write_all(&start.raw_head).await?;
+                // A response hook needs the whole message: hold it back (up to 8 MB) while one matches.
+                let hook_target = HookTarget {
+                    scheme: &target.scheme,
+                    host: &target.host,
+                    port: target.port,
+                    method: &method,
+                    path: &path,
+                };
+                let mut holding = false;
+                if let Some(h) = self.hooks.plugin_hooks.as_ref().filter(|h| h.wants(HookKind::Response))
+                    && h.may_apply(HookKind::Response, &hook_target, &start.raw_head)
+                {
+                    let why = if start.head.status == 101 {
+                        Some("WebSocket and other upgraded connections bypass hooks")
+                    } else if message_content_type(&start.raw_head).as_deref() == Some("text/event-stream") {
+                        Some("streamed (server-sent events) responses bypass hooks")
+                    } else {
+                        match start.head.body_kind(&method) {
+                            Ok(BodyKind::UntilClose) => Some("streamed responses bypass hooks"),
+                            Ok(BodyKind::ContentLength(n)) if n > HOOK_MAX as u64 => Some("message over 8 MB"),
+                            _ => None,
+                        }
+                    };
+                    match why {
+                        Some(why) => record.changes.extend(hook_changes(
+                            "response",
+                            h.skipped(HookKind::Response, &hook_target, &start.raw_head, why),
+                        )),
+                        None => holding = true,
+                    }
+                }
+                if !holding {
+                    client.io.write_all(&start.raw_head).await?;
+                }
                 if start.head.status == 101 {
                     client.io.flush().await?;
                     record.duration_ms = Some(started.elapsed().as_millis() as i64);
@@ -697,10 +856,60 @@ impl Proxy {
                     let room = RECORD_CAP.saturating_sub(capture.len());
                     truncated |= piece.len() > room;
                     capture.extend_from_slice(&piece[..piece.len().min(room)]);
+                    if holding {
+                        if capture.len() <= HOOK_MAX {
+                            continue;
+                        }
+                        // Too big for a hook after all: send what was held and stream the rest.
+                        holding = false;
+                        if let Some(h) = &self.hooks.plugin_hooks {
+                            record.changes.extend(hook_changes(
+                                "response",
+                                h.skipped(HookKind::Response, &hook_target, &capture, "message over 8 MB"),
+                            ));
+                        }
+                        if client.io.write_all(&capture).await.is_err() || client.io.flush().await.is_err() {
+                            client_gone = true;
+                            break;
+                        }
+                        continue;
+                    }
                     if client.io.write_all(&piece).await.is_err() || client.io.flush().await.is_err() {
                         client_gone = true;
                         break;
                     }
+                }
+                let mut hook_edit = None;
+                if holding {
+                    let complete = !failed && !client_gone && body.is_complete();
+                    let hooks = self.hooks.plugin_hooks.as_ref().filter(|_| complete);
+                    let edit = match hooks {
+                        Some(h) => {
+                            let run = h.run(HookKind::Response, &hook_target, &capture).await;
+                            Some(ResponseEdit::from_run(run, &capture))
+                        }
+                        None => None,
+                    };
+                    if let Some(msg) = edit.as_ref().and_then(|e| e.blocked.clone()) {
+                        record.duration_ms = Some(started.elapsed().as_millis() as i64);
+                        record.response = Some(capture);
+                        if let Some(e) = edit {
+                            e.note_on(&mut record);
+                        }
+                        let resp = format!(
+                            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                            msg.len()
+                        );
+                        let _ = client.io.write_all(resp.as_bytes()).await;
+                        let _ = client.io.shutdown().await;
+                        self.recorder.record(record);
+                        return Ok(());
+                    }
+                    let out = edit.as_ref().and_then(|e| e.bytes.as_deref()).unwrap_or(&capture);
+                    if client.io.write_all(out).await.is_err() || client.io.flush().await.is_err() {
+                        client_gone = true;
+                    }
+                    hook_edit = edit;
                 }
                 if record.error.is_none() {
                     record.error = body.cut_short.clone();
@@ -718,6 +927,9 @@ impl Proxy {
                 }
                 record.duration_ms = Some(started.elapsed().as_millis() as i64);
                 record.response = Some(capture);
+                if let Some(edit) = hook_edit {
+                    edit.note_on(&mut record);
+                }
                 self.recorder.record(record);
                 // A complete response leaves the server connection reusable.
                 if !client_gone && !failed && !server_close && body.is_complete() && body.kind() != BodyKind::UntilClose
@@ -745,15 +957,33 @@ impl Proxy {
                         record.request = sent.clone();
                     }
                     // Rules and intercept apply to responses too. The project
-                    // keeps the server's original; the browser gets the edit.
+                    // keeps the server's response, and the copy the browser got beside it.
                     let upgraded = matches!(resp.conn, AfterResponse::Upgraded(_));
                     let mut to_client = None;
+                    let mut edit = None;
                     if !upgraded {
                         match self
                             .before_respond(&target.scheme, &target.host, target.port, &method, &path, &resp.raw)
                             .await
                         {
-                            Some(edited) => to_client = edited,
+                            Some(e) if e.blocked.is_some() => {
+                                let msg = e.blocked.clone().unwrap_or_default();
+                                record.status = Some(resp.head.status);
+                                record.response = Some(resp.raw);
+                                e.note_on(&mut record);
+                                self.recorder.record(record);
+                                let resp = format!(
+                                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+                                    msg.len()
+                                );
+                                let _ = client.io.write_all(resp.as_bytes()).await;
+                                let _ = client.io.shutdown().await;
+                                return Ok(());
+                            }
+                            Some(e) => {
+                                to_client.clone_from(&e.bytes);
+                                edit = Some(e);
+                            }
                             None => {
                                 record.status = Some(resp.head.status);
                                 record.response = Some(resp.raw);
@@ -763,9 +993,9 @@ impl Proxy {
                             }
                         }
                     }
-                    // An HTTP/1.1 client can't read an HTTP/2 response (the
-                    // request was edited to HTTP/2 in the intercept queue).
-                    if pm_http::h2text::is_http2_response(to_client.as_deref().unwrap_or(&resp.raw)) {
+                    // An HTTP/1.1 client can't read an HTTP/2 or HTTP/3 response (the
+                    // request was edited to that version in the intercept queue).
+                    if pm_http::h3text::is_multiplexed_response(to_client.as_deref().unwrap_or(&resp.raw)) {
                         to_client = pm_http::h2text::to_http1_response(to_client.as_deref().unwrap_or(&resp.raw));
                     }
                     client.io.write_all(to_client.as_deref().unwrap_or(&resp.raw)).await?;
@@ -776,6 +1006,9 @@ impl Proxy {
                     record.status = Some(resp.head.status);
                     record.error = resp.cut_short.clone();
                     record.response = Some(resp.raw);
+                    if let Some(edit) = edit {
+                        edit.note_on(&mut record);
+                    }
                     if let AfterResponse::Upgraded(up) = resp.conn {
                         return self.finish_upgrade(client, up, &resp.head, record, ws_hold).await;
                     }
@@ -867,6 +1100,76 @@ async fn peek_sni(tcp: &TcpStream) -> Option<String> {
     }
 }
 
+/// The label of a change made by hand in the intercept queue.
+const INTERCEPT_LABEL: &str = "intercept editor";
+
+fn change(phase: &str, by: &str, name: String) -> pm_store::Change {
+    pm_store::Change { phase: phase.into(), by: by.into(), name, note: None }
+}
+
+/// Hook notes as `changes` entries (`by: "hook"`).
+fn hook_changes(phase: &str, notes: Vec<pm_plugin::hooks::Note>) -> Vec<pm_store::Change> {
+    notes
+        .into_iter()
+        .map(|n| pm_store::Change { phase: phase.into(), by: "hook".into(), name: n.name, note: n.note })
+        .collect()
+}
+
+/// A hook entry that only says the hook was bypassed or failed: the message was not changed.
+fn is_note(c: &pm_store::Change) -> bool {
+    c.by == "hook" && c.note.as_deref().is_some_and(|n| n.starts_with("bypassed:") || n.starts_with("failed:"))
+}
+
+/// What rules or the intercept queue did to a request before it was sent.
+#[derive(Default)]
+pub(crate) struct Edits {
+    /// The request as received, when it was changed.
+    original: Option<Vec<u8>>,
+    changes: Vec<pm_store::Change>,
+}
+
+impl Edits {
+    /// Notes them on the record, which holds the request as sent to the server.
+    fn note_on(self, record: &mut NewExchange) {
+        record.request_original = self.original;
+        record.changes.extend(self.changes);
+    }
+}
+
+/// What rules or the intercept queue did to a response before the client got it.
+pub(crate) struct ResponseEdit {
+    /// What the client gets instead of the server's response; None when it is unchanged.
+    bytes: Option<Vec<u8>>,
+    changes: Vec<pm_store::Change>,
+    /// A hook failed with `on_error: drop`: answer the client with a 502 saying this instead of the response.
+    blocked: Option<String>,
+}
+
+impl ResponseEdit {
+    /// What response hooks did to `raw` (when no rule or intercept step ran before them).
+    fn from_run(run: pm_plugin::hooks::Run, raw: &[u8]) -> ResponseEdit {
+        let mut changes = hook_changes("response", run.notes);
+        let blocked = run.block.map(|b| {
+            changes.retain(is_note);
+            format!("ProxyMind blocked this response: plugin hook {} failed ({}).", b.name, b.why)
+        });
+        let bytes = run.bytes.filter(|b| b != raw && blocked.is_none());
+        if bytes.is_none() {
+            changes.retain(is_note);
+        }
+        ResponseEdit { bytes, changes, blocked }
+    }
+
+    /// Notes the change on the record, whose `response` keeps the server's bytes: the copy the client got goes
+    /// next to it.
+    fn note_on(self, record: &mut NewExchange) {
+        if let Some(sent) = self.bytes.filter(|_| self.changes.iter().any(|c| !is_note(c))) {
+            record.response_delivered = Some(sent);
+        }
+        record.changes.extend(self.changes);
+    }
+}
+
 /// Where a request goes, and the head bytes to send there.
 struct Target {
     scheme: String,
@@ -881,6 +1184,7 @@ fn resolve_target(
     head_raw: &[u8],
     tunnel_scheme: &str,
     tunnel_target: Option<&(String, u16)>,
+    orig: Option<SocketAddr>,
 ) -> Result<Target> {
     // Absolute-form (`GET http://host/path`): sent by browsers to a plain
     // HTTP proxy. Servers expect origin-form, so rewrite only the target.
@@ -901,11 +1205,20 @@ fn resolve_target(
             head_raw: head_raw.to_vec(),
         });
     }
-    // Origin-form without a tunnel (transparent proxying): use the Host header.
-    let host_hdr = pm_http::header(&head.headers, "host").ok_or_else(|| anyhow!("request has no Host header"))?;
-    let default_port = if tunnel_scheme == "https" { 443 } else { 80 };
-    let (host, port) = pm_http::split_host_port(std::str::from_utf8(host_hdr)?.trim(), default_port)
-        .ok_or_else(|| anyhow!("bad Host header"))?;
+    // Origin-form without a tunnel (transparent proxying): use the Host header. A redirected connection also
+    // knows where it was going: that port wins, and the address stands in for a missing Host header.
+    let default_port = orig.map_or(if tunnel_scheme == "https" { 443 } else { 80 }, |o| o.port());
+    let (host, port) = match pm_http::header(&head.headers, "host") {
+        Some(h) => {
+            let (host, port) = pm_http::split_host_port(std::str::from_utf8(h)?.trim(), default_port)
+                .ok_or_else(|| anyhow!("bad Host header"))?;
+            (host, orig.map_or(port, |o| o.port()))
+        }
+        None => match orig {
+            Some(o) => (o.ip().to_string(), o.port()),
+            None => bail!("request has no Host header"),
+        },
+    };
     Ok(Target { scheme: tunnel_scheme.into(), host, port, path: head.target.clone(), head_raw: head_raw.to_vec() })
 }
 
@@ -915,6 +1228,7 @@ mod recorder_tests {
 
     fn exchange(i: usize) -> NewExchange {
         NewExchange {
+            client_addr: None,
             ts_ms: i as i64,
             duration_ms: Some(1),
             source: "proxy".into(),
@@ -934,6 +1248,7 @@ mod recorder_tests {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         }
     }
 

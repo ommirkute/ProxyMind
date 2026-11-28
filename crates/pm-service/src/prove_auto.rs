@@ -6,6 +6,7 @@
 //! matrix instead (differential oracle) and reused here when a finding has the
 //! identities for it.
 
+use crate::access::Perm;
 use pm_policy::Actor;
 use pm_scan::active::{Point, PointKind, inject, inject_operator, points};
 use serde::Serialize;
@@ -66,6 +67,7 @@ impl Service {
     /// Proves every suspected, unproven finding whose class has an oracle.
     /// Bounded so an automatic pass can't run unboundedly many sends.
     pub async fn auto_prove(&self, actor: &Actor) -> Result<ProveSweep> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut sweep = ProveSweep::default();
         let findings = self.finding_list(Some("suspected"))?;
         for f in findings.into_iter().take(80) {
@@ -95,6 +97,7 @@ impl Service {
     /// points), and runs each until one proves. Returns the outcome; the proof
     /// and the finding's `proven` status are stored by `proof_run`.
     pub async fn finding_prove(&self, actor: &Actor, id: i64) -> Result<FindingProve> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let f = self.finding_get(id)?;
         let class = f["vuln_class"].as_str().unwrap_or_default().to_string();
         let mut out = FindingProve {

@@ -18,7 +18,10 @@ fn free_port() -> u16 {
 }
 
 fn cli(project: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new(BIN).arg("-p").arg(project).args(args).output().unwrap();
+    // One home folder for the whole scenario: the installation that made the project is the one that trusts it.
+    let home = project.parent().unwrap().join("home");
+    let out =
+        std::process::Command::new(BIN).arg("-p").arg(project).arg("--home").arg(home).args(args).output().unwrap();
     assert!(out.status.success(), "proxymind {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -122,6 +125,8 @@ async fn agent_finds_and_proves_access_control_bugs_over_mcp() {
     let mut child = Command::new(BIN)
         .arg("-p")
         .arg(&project)
+        .arg("--home")
+        .arg(dir.join("home"))
         .args(["mcp", "--actor", "agent:claude"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

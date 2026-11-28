@@ -2,6 +2,28 @@
 
 ProxyMind includes an MCP server, so any MCP client (Claude Code, Claude Desktop, Cursor, your own agent) can read recorded traffic and send requests, under the rules of engagement you set.
 
+## What the policy gate does and doesn't contain
+
+Read this before you connect an agent. The gate (scope, tiers, approvals, rate limits, the audit log) governs an agent that reaches ProxyMind **only through MCP**, or through a REST path scoped to the agent. It is not a sandbox around the agent.
+
+An agent that can **run shell commands or read files as the same operating-system user** as ProxyMind does not need MCP at all. It can:
+
+- read `~/.proxymind/api-token` and call the REST API as the human: change the rules of engagement, approve its own requests, start listeners, set model keys;
+- open the project file (a SQLite database) and edit the rules of engagement, approvals and the audit table, and recompute the audit chain (it is not keyed: whoever can write the file can rebuild it);
+- read the CA private key (`proxymind-ca.key`) and your saved model keys.
+
+Claude Code and most coding agents have a shell and file tools by default, so with them the gate is a guard rail for an agent that behaves, not a wall against one that has been talked into misbehaving by a hostile page. This is threat model finding F-1 (`docs/threat-model.md`).
+
+What to do about it, in order of strength:
+
+1. **Run the agent without shell and file tools.** Give it only the ProxyMind MCP server (a client that has no `Bash`, file read or write tools, or a chat client with MCP only). Then the gate holds, because MCP is the only way in.
+2. **Run ProxyMind as a different operating-system user** (or in a container or VM) from the agent, with the home folder and the project file readable by that user only, and give the agent only the MCP stdio pipe (for example `ssh other-host proxymind mcp ...`, or `sudo -u proxymind proxymind -p ... mcp --actor agent:claude` started by the client). The agent then cannot read the token, the project file or the CA key.
+3. **Treat the agent as the human** when you cannot do either: only point it at targets you would let that person test, keep the rules of engagement narrow, and keep the audit head hash (`proxymind audit verify` prints it) or an exported signed checkpoint (`proxymind audit checkpoint -o FILE`, checked with `audit verify --checkpoint FILE`) somewhere the agent cannot write. The checkpoint key is in your home folder, so an agent that can read it can sign a new one.
+
+What Phase 3 adds (ADR-0022): **per-agent tokens** (`pm3_…`, in both modes since step 5: a token carries an actor, a role ceiling and a tier cap, and a script or agent that uses one acts as `agent:name`, not as you), a **project server** that holds the project and the rules so the agent's machine does not (`proxymind serve --accounts`, with `proxymind mcp --server` as the agent's bridge: it needs no project file, home folder or install token on its machine), and a keyed audit chain with a key the agent's user cannot read. A token narrows what the *credential* can do; it does not make a shell-capable agent on the same machine as the install token safe, because that agent can still read `api-token` and the project file. For an agent that can run commands, the strong setups are a server on another host or user with only the token on the agent's side, or the list above.
+
+The gate also refuses agents in one more case: a project that this installation does not trust is in **safe mode** (a file that came from somewhere else), and in safe mode every action of an agent, plugin or AI scan that would send traffic is refused until a person has reviewed and trusted the project. `project_trust_status` tells you whether that is why a call was refused; you cannot trust a project yourself.
+
 ## 1. Record some traffic
 
 ```bash
@@ -40,6 +62,25 @@ claude mcp add proxymind -- proxymind -p /full/path/engagement.pmproj mcp --acto
 ```
 
 `--actor` is how the agent appears in history and the audit log. Use a different name per agent if you run several.
+
+**Against a project server** (`docs/server-mode.md`), the agent needs no project file and no shell on the server: make it a
+token (`proxymind token create --kind agent --name claude` on your own install, or Account → API tokens on a server), then
+
+```bash
+proxymind login https://pm.example.com --token-env PROXYMIND_TOKEN      # once; add --pin sha256:… for a self-signed server
+claude mcp add proxymind -- proxymind mcp --server https://pm.example.com
+```
+
+`proxymind mcp --server` is a stdio-to-HTTPS bridge: the server runs the tools in its service, as `agent:claude` (the name
+stored with the token, never one the client picks), with the token's role ceiling and tier cap on top of the rules of
+engagement. Everything below (approvals, redaction, untrusted content, audit) is the same as for a local agent.
+
+**Tokens in single-user mode.** A script or an agent that calls the REST API (the TypeScript and Python SDKs) can run as
+`agent:name` instead of as you: `proxymind token create --kind agent --name ci-bot --tier-cap active_safe --expires 7d`
+makes a `pm3_` token (stored hashed in `~/.proxymind/tokens.json`), sent as `Authorization: Bearer pm3_…`. A running
+`proxymind ui` picks tokens up and drops revoked ones at the next request. The install token (`api-token`) stays the full
+human credential: an agent that can read that file, or the project file, is you (see the next section), so give agents a
+token, not the install token.
 
 ## 4. Approve risky actions
 
@@ -87,6 +128,14 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `history_search` | Search recorded traffic: host, path, method, status, `status_class` (e.g. `2,3`), source, actor, `identity`, `hypothesis_id`, `text` (host, path or comment), `hide_ext` (e.g. `png,css`), `annotated`, `in_scope`, an HQL `q`, and paging (`after_id`, `before_id`, `limit`) |
 | `exchange_get` | One exchange as `summary`, `headers` or `full`, within a token budget |
 | `exchange_raw_request` | Raw request text, ready to edit and resend |
+| `stream_list` | Raw TCP and TLS streams the proxy recorded (databases, mail, custom protocols): target, client, times, bytes, TLS, how they ended. Filters: `host`, `port`, `client`, `since_ms`, `until_ms`, `tls`, paging |
+| `stream_get` | One raw stream with its chunks in order (client or server, length, text preview), redacted and tagged as untrusted; no raw bytes for agents. Page with `after` |
+| `stream_replay` | Replay a stream on a new connection to the same target (TLS with the same server name), with the recorded or replacement chunks (`text_chunks` or base64 `chunks`); the target must be in scope and sending bytes needs approval by default |
+| `project_trust_status` | Whether the person running ProxyMind trusts this project file. In safe mode (`safe_mode: true`; the project came from elsewhere or its settings changed since it was trusted) your sends are refused, and the file's listeners, schedules, triggers, upstream and rewrite rules are off. Returns what is held back and why. You cannot trust a project: tell the person to use the banner in the web UI or `proxymind project trust`. Sends nothing |
+| `workflow_list` | The project's saved workflows (chains of match, extract, transform, send and assert steps a person wrote): id, name, what it is for, the kinds of its steps, whether it runs by itself on new traffic. Sends nothing |
+| `integration_list` | The names and kinds of the project's integrations (Jira, GitHub, GitLab, Slack, webhook) and whether each is on. No address, project or secret. There is no tool to send or configure: people do that |
+| `workflow_get` | One workflow's steps. Secrets typed into request templates (a password in a login body, a token in a header) are hidden; `{{variable}}` references stay |
+| `workflow_run` | Run a workflow (`workflow` name or id) on a recorded exchange (`exchange_id`, in scope) unless its first step sends a request of its own. Every send is a gated send like `replay_send` (scope, tier, approvals, rate limits), recorded with source `workflow`. Returns the run: status (`ok`, `failed`, `stopped`, `denied`, `pending_approval`), each step, the exchanges sent, assertion results and the variables (secret-looking ones hidden, the rest marked as target content). A send that needs approval pauses the run: ask the user, then call again with identical arguments plus `approval_id`; it continues from that step without sending earlier steps again. Agents cannot create or edit workflows or switch their triggers |
 | `ws_messages` | WebSocket messages of an upgraded exchange (who sent what), redacted and tagged as untrusted |
 | `scan_active` | Active checks on one recorded request: SQL errors, unencoded reflection, open redirect, path traversal, template injection in every query/form/JSON/numeric-path value; leads with evidence and `prove_with` hints. One approval covers all probes |
 | `plugin_list` | The user's plugins (passive and/or active, on or off) and what the plugin sandbox does on this machine |
@@ -110,6 +159,7 @@ Users are `alice/alice123`, `bob/bob123` and `admin/admin123`. It contains plant
 | `import_har` | Add the exchanges of a HAR file (text) to history as `source: import`; nothing is sent, bodies are rebuilt decoded |
 | `curl_parse` | Read a curl command into a raw request and url for `replay_send`; nothing is sent, unsupported options come back as warnings |
 | `decode` | Encode/decode locally (chains or a smart decode of JWT, URL, HTML, base64, hex, unicode layers); nothing is sent |
+| `protobuf_decode` | Decode a gRPC, gRPC-Web or Protobuf body (`exchange_id` and `part`, or `body_b64` with `content_type`) into schema-less text: fields as `n: value`, nested `n { }`, `@message` per gRPC message, `@trailers` for gRPC-Web; the text is untrusted target content and secrets are replaced. Nothing is sent. Editing is for people (Replay tab) or `POST /api/v1/tools/protobuf/encode` |
 | `compare_exchanges` | Semantic response similarity and line diffs of two recorded exchanges |
 | `token_analyzer_run` | Token randomness: re-send a token-issuing request and analyse the tokens (statistics only, never the tokens) |
 | `crawl` | Discover pages from a URL: GET only, in scope only, skips links that log out or delete, reads robots.txt and sitemaps; pages feed history and the app model; forms are listed, never submitted |
@@ -215,6 +265,8 @@ The **coverage proof** (`proxymind coverage --all`, the same page, MCP `coverage
 
 ## Regression tests for CI
 
+(To scan a staging URL in a pipeline and fail on new findings, see [`proxymind ci`](ci.md).)
+
 Every proven finding can become a small test that the development team runs in CI until it is fixed: **Evidence & coverage → Regression tests** or `proxymind regress export --out tests.zip`. The ZIP holds one JSON file per finding, a README and an example GitHub Actions workflow.
 
 ```bash
@@ -241,8 +293,14 @@ With `prove`, each flag is proven with the differential oracle, and proven ones 
 
 At the end of a test, save a snapshot of the app model: **Model → Changes since the last test**, or `proxymind changes --save "Q3 test"`. Next time, compare with it (`proxymind changes`, the same panel, or MCP `model_changes`) to get new, removed and changed operations (parameters added or gone, new statuses, credentials now sent or not) and a retest list that names earlier findings on changed or removed endpoints. `proxymind changes --since last-year.pmproj` compares with another project instead. Operations are matched by method and path template, so a staging snapshot compares with production.
 
+## Workflows
+
+People save **workflows** (the Workflows page): chains of `match`, `extract`, `transform`, `send` and `assert` steps for flows such as log in, read the token from the answer, call an API with it, check the result (`docs/workflows.md`). You can list them (`workflow_list`), read one (`workflow_get`; passwords and tokens typed into request templates are hidden) and run one (`workflow_run`). Running is not a way around the rules of engagement: every send step goes through the same gate as `replay_send`, so an out-of-scope target ends the run with `status: denied` and the reason, and a send that needs a person's approval ends it with `status: pending_approval` and `pending.approval_id`. After the person approves, call `workflow_run` again with the same arguments plus `approval_id`: the run continues from that send with its variables, and the steps before it are not sent again. A value the workflow read out of a response is target content; it can turn a request destructive only if that request is then refused or approved as a destructive one. You cannot create or edit workflows or turn on their per-exchange triggers; people do that, audited.
+
 ## What the agent sees
 
 - **Secrets are hidden.** Cookies, tokens, passwords and API keys appear as placeholders such as `{{secret:cookie_session_1}}`. The agent can use placeholders in requests; ProxyMind swaps the real values in when sending. Turn this off with `data.redact_before_llm: false` in the ROE.
 - **Target content is marked as untrusted.** Response text is wrapped in `<untrusted_target_content>`, and phrases that look like prompt injection are listed in `possible_prompt_injection`.
 - **Everything is audited.** `proxymind audit list` shows each action, its decision and why; `proxymind audit verify` proves the log wasn't edited.
+
+Integrations (Jira, GitHub, GitLab, Slack, webhooks; `docs/integrations.md`) are set up and used by people only. You can list their names and kinds with `integration_list` (for example to tell a person where a finding can be filed); you cannot read their settings or secrets, test them, or send a finding, so findings and evidence cannot leave through an integration at your request.

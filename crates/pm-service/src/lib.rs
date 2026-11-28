@@ -4,19 +4,23 @@
 //! checked by the policy gate and written to the audit log, whether it is
 //! allowed, sent for approval or denied.
 
+pub mod access;
 mod ai_scan;
 pub mod api_types;
 mod approvals;
 mod assistant;
 mod attack_paths;
+mod audit_log;
 mod authz;
 mod authz_matrix;
 mod auto;
 mod browser;
 mod changes;
+mod ci;
 mod collaborator;
 mod crawl;
 mod custom_checks;
+mod devices;
 mod discover;
 mod dom_test;
 mod engage;
@@ -30,16 +34,23 @@ mod group;
 mod hidden_paths;
 mod history;
 mod identity;
+mod integration_events;
+mod integration_payload;
+mod integration_send;
+mod integrations;
 mod intercept;
 mod login_record;
 pub mod mcp_args;
 mod memory;
+mod mobile;
+pub use mobile::qr_svg;
 mod model;
 mod network;
 mod openapi;
 mod organizer;
 mod plugins;
 mod proof;
+mod protobuf;
 mod prove_auto;
 mod race;
 mod recon;
@@ -56,9 +67,13 @@ mod scan_task;
 mod search;
 mod session;
 mod skills;
+mod streams;
 mod tools;
 mod traffic;
+mod trust;
 mod update;
+mod workflow;
+mod workflow_service;
 mod write_checks;
 mod ws;
 mod ws_replay;
@@ -66,11 +81,16 @@ mod ws_replay;
 pub use ai_scan::{AiScan, AiScanLog, AiScanRequest, ai_scan_tool_definitions, scan_actor, scan_of, worker_actor};
 pub use assistant::{AssistantConfig, Chat, ChatSummary, KeyStatus, ProviderKind, ToolProfile};
 pub use attack_paths::{AttackGraph, AttackPath, AttackStep, GraphEdge, GraphNode, NewAttackPath};
+pub use audit_log::{
+    AuditCheckpointStatus, AuditSecurity, AuditVerification, AuditVerifyOptions, CHECKPOINT_KEY_FILE,
+    checkpoint_signer_public, verify_audit_report,
+};
 pub use authz::{AuthzCheckRequest, AuthzReport};
 pub use authz_matrix::{AuthzMatrix, AuthzMatrixRequest, MatrixCell, MatrixFlag, MatrixRow};
 pub use auto::{AutoProven, AutoReport, DiscoverSweep, ScanLead, ScanSweep};
 pub use browser::{BrowserOpenRequest, BrowserOpened, ProxyInfo};
 pub use changes::{ModelChanges, OpChange, OpShape, RetestItem, SnapshotInfo};
+pub use ci::{CiOptions, CiRun};
 pub use collaborator::{CollaboratorInteraction, CollaboratorPayload, CollaboratorProbe, CollaboratorStatus};
 pub use crawl::{CrawlRequest, CrawlResult};
 pub use custom_checks::{CustomFinding, CustomScanRequest, CustomScanResult, SavedCustomCheck};
@@ -86,17 +106,26 @@ pub use group::{GroupItem, GroupItemResult, GroupMode, GroupRequest, GroupResult
 pub use hidden_paths::JsSweep;
 pub use history::{ExchangePage, UI_STATE_MAX};
 pub use identity::{IdentityCheck, IdentityInfo};
+pub use integration_payload::{
+    WEBHOOK_VERSION, WebhookCount, WebhookData, WebhookFinding, WebhookIssue, WebhookLink, WebhookPayload,
+    WebhookProof, WebhookScan, WebhookSummary, WebhookTop,
+};
+pub use integrations::{
+    DEFAULT_RATE, DeliveriesQuery, HeaderInput, INTEGRATIONS_SETTING, Integration, IntegrationEnabledBody,
+    IntegrationEvent, IntegrationInput, IntegrationKind, IntegrationName, IntegrationTuning, IntegrationView,
+    IssueLink, LastError, MAX_INTEGRATIONS, MAX_RATE, SecretStatus, SendFindingBody,
+};
 pub use intercept::InterceptState;
 pub use login_record::{LoggedOutLearned, LoginRecording, RecordedStep};
 pub use memory::{FindingVerdict, MEMORY_KINDS, Memory};
 pub use model::{HypothesisUpdate, ModelFilter, NewHypothesis};
 pub use network::{
     LISTENERS_SETTING, ListenersView, NETWORK_SETTING, RECORDING_SETTING, RecordingSettings, load_listeners,
-    load_network, sync_listeners, sync_network, watch_project,
+    load_network, sync_listeners, sync_listeners_gated, sync_network, sync_network_gated, watch_project,
 };
 pub use openapi::{OpenApiImportRequest, OpenApiImportResult, SentExample};
 pub use organizer::{ORGANIZER_STATUSES, OrganizerItem, OrganizerUpdate};
-pub use plugins::{PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
+pub use plugins::{HookInfo, PluginCheckIssue, PluginCheckRequest, PluginCheckResult, PluginInfo, PluginsView};
 pub use pm_store::ApprovalRow;
 pub use proof::{ProofRequest, ProofResult};
 pub use prove_auto::{FindingProve, ProveSweep};
@@ -124,9 +153,22 @@ pub use session::{
     SessionRule, SessionView, SetValue, SetWhere, Validity,
 };
 pub use skills::Skill;
+pub use streams::{
+    StreamChunkPage, StreamChunkView, StreamDetail, StreamPage, StreamReplayRequest, StreamReplayResult,
+};
 pub use tools::{DecodeRequest, RequestTransform, TokenAnalyzerRequest, TokenAnalyzerResult};
 pub use traffic::{CurlParsed, ExportRequest, ImportRequest, ImportResult, MAX_IMPORT_BYTES};
+pub use trust::{
+    HeldBack, PROJECT_ID_SETTING, ReviewItem, TRUST_FILE, TrustConfirmRequest, TrustGate, TrustRecord, TrustReview,
+    TrustView, default_person, project_trusted_in, trust_gate_for,
+};
 pub use update::{UpdateState, UpdateStatus};
+pub use workflow::{
+    AssertionResult, Condition, DEFAULT_TRIGGER_RATE, Edit, ExtractStep, ExtractType, MAX_RUN_SECS, MAX_SENDS,
+    MAX_STEPS, MAX_TRIGGER_RATE, MAX_VALUE_LEN, MAX_VARS, MAX_WORKFLOWS, Pending, RunStatus, SendStep, Side, Step,
+    StepRun, StepStatus, TransformStep, Trigger, WORKFLOWS_SETTING, Workflow, WorkflowInput, WorkflowRun,
+};
+pub use workflow_service::{FuzzerWorkflow, KEEP_RUNS, WorkflowRunRequest, WorkflowSummary};
 pub use write_checks::WriteSweep;
 pub use ws::{WsHistoryItem, WsHistoryPage, WsMessageView, WsPage};
 pub use ws_replay::{WsOut, WsReplayRequest, WsReplayResult};
@@ -141,8 +183,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 pub use {
-    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi, pm_plugin,
-    pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tools,
+    pm_ai, pm_browser, pm_crawl, pm_diff, pm_fuzz, pm_http, pm_identity, pm_ledger, pm_model, pm_oast, pm_openapi,
+    pm_plugin, pm_policy, pm_proof, pm_proxy, pm_replay, pm_scan, pm_store, pm_tls, pm_tools,
 };
 
 #[derive(Debug, Error)]
@@ -153,6 +195,10 @@ pub enum ServiceError {
     ApprovalMismatch(String),
     #[error("{0}")]
     Invalid(String),
+    /// The principal's role does not allow this (server mode; single-user mode reports the same refusal as
+    /// `Invalid`, as it always has).
+    #[error("access denied: {0}")]
+    Forbidden(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("{0:#}")]
@@ -179,7 +225,8 @@ pub struct Service {
     store: std::sync::Arc<StoreHandle>,
     sender: Sender,
     limiter: RateLimiter,
-    redactor: Redactor,
+    /// One redactor per user (placeholders are not shared between people, ADR-0022, F-5); single-user mode has one.
+    redactors: parking_lot::Mutex<std::collections::HashMap<String, &'static Redactor>>,
     intercept: std::sync::OnceLock<std::sync::Arc<pm_proxy::InterceptQueue>>,
     rewriter: std::sync::OnceLock<std::sync::Arc<pm_proxy::Rewriter>>,
     /// The ROE text in force (to notice changes saved by other processes).
@@ -191,6 +238,10 @@ pub struct Service {
     smtp_listening: std::sync::OnceLock<std::net::SocketAddr>,
     /// The user's home directory, whose plugin registry is read when used.
     plugin_home: std::sync::OnceLock<std::path::PathBuf>,
+    /// Keyed chain and signed checkpoints (server mode); the default is neither.
+    audit_security: parking_lot::RwLock<audit_log::AuditSecurity>,
+    /// The proxy's plugin hook engine (ADR-0020), when this process runs the proxy.
+    hook_engine: std::sync::OnceLock<std::sync::Arc<pm_plugin::hooks::HookEngine>>,
     /// Recent Fuzzer attacks (running ones keep going in the background).
     attacks: parking_lot::Mutex<Vec<std::sync::Arc<fuzzer::Attack>>>,
     /// This process's proxy, for the built-in browser.
@@ -207,8 +258,22 @@ pub struct Service {
     relogins: parking_lot::Mutex<std::collections::HashMap<String, replay::Relogins>>,
     /// The proxy records only in-scope exchanges.
     record_in_scope_only: std::sync::atomic::AtomicBool,
+    /// With any entries: the proxy records only traffic from these client IPs.
+    record_devices: parking_lot::RwLock<std::collections::HashSet<String>>,
     /// Typed events published after writes commit (ADR-0018).
     bus: std::sync::Arc<events::Bus>,
+    /// Per-exchange workflow triggers: cached list, rate windows, counters.
+    workflows: parking_lot::Mutex<workflow_service::Runtime>,
+    /// Limits of a `proxymind ci` run: request and time caps, and what a project file may not change.
+    run_guard: parking_lot::Mutex<ci::RunGuard>,
+    /// Integrations (roadmap 3.5): trust without a home, rate buckets, sends in flight, the sender.
+    integrations: parking_lot::Mutex<integrations::Runtime>,
+    /// Whether this installation trusts the project file (safe mode, threat model F-2).
+    trust: TrustGate,
+    /// Server-mode access control and the registry of what is known about each actor (`access.rs`).
+    access: parking_lot::RwLock<access::AccessState>,
+    /// Which server each model key name is bound to, when there is no home folder to keep that in.
+    key_hosts_mem: parking_lot::Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 /// Keeps the full-text index current and checkpoints the WAL (ADR-0017). A project file gets one long-lived
@@ -330,9 +395,13 @@ impl Service {
             }
         }
         let limits = policy.roe().limits;
-        // Saved network settings apply from the start; a bad entry (say, a
-        // moved certificate file) is reported but doesn't stop the project opening.
-        if let Err(e) = network::sync_network(&store, sender.network()) {
+        // Every project has an id (trust is filed under it); a project this process just created is trusted.
+        trust::ensure_project_id(&mut store)?;
+        let trust = TrustGate::new(store.path().is_none());
+        trust.note_creation(&store);
+        // Saved network settings apply from the start unless the project is not trusted here (safe mode); a bad
+        // entry (say, a moved certificate file) is reported but doesn't stop the project opening.
+        if let Err(e) = network::sync_network_gated(&store, sender.network(), &trust) {
             tracing::warn!("network settings not applied: {e}");
         }
         let store = std::sync::Arc::new(StoreHandle::new(store));
@@ -351,17 +420,21 @@ impl Service {
         store.set_on_exchanges(Box::new(move |rows| observer_bus.publish_exchanges(rows)));
         let ws_bus = bus.clone();
         store.set_on_ws_messages(Box::new(move |rows| ws_bus.publish_ws(rows)));
+        let stream_bus = bus.clone();
+        store.set_on_streams(Box::new(move |rows| stream_bus.publish_streams(rows)));
         let svc = Self {
             limiter: RateLimiter::new(limits.max_rps_per_host, limits.max_concurrency),
             policy: std::sync::Arc::new(policy),
             store,
             sender,
-            redactor: Redactor::new(),
+            redactors: parking_lot::Mutex::default(),
             intercept: std::sync::OnceLock::new(),
             rewriter: std::sync::OnceLock::new(),
             roe_text: parking_lot::Mutex::new(None),
             plugins: parking_lot::RwLock::new(Vec::new()),
             plugin_home: std::sync::OnceLock::new(),
+            audit_security: parking_lot::RwLock::default(),
+            hook_engine: std::sync::OnceLock::new(),
             oast_listening: std::sync::OnceLock::new(),
             smtp_listening: std::sync::OnceLock::new(),
             attacks: parking_lot::Mutex::new(Vec::new()),
@@ -372,7 +445,14 @@ impl Service {
             session_lock: tokio::sync::Mutex::new(()),
             relogins: Default::default(),
             record_in_scope_only: std::sync::atomic::AtomicBool::new(false),
+            record_devices: parking_lot::RwLock::new(std::collections::HashSet::new()),
             bus,
+            workflows: parking_lot::Mutex::default(),
+            run_guard: parking_lot::Mutex::default(),
+            integrations: parking_lot::Mutex::default(),
+            trust,
+            access: parking_lot::RwLock::default(),
+            key_hosts_mem: parking_lot::Mutex::default(),
         };
         svc.load_scan_tasks();
         Ok(svc)
@@ -392,14 +472,38 @@ impl Service {
         *self.plugins.write() = plugins;
     }
 
-    /// Whether content shown to this actor should have secrets replaced.
-    /// Agents follow the ROE setting; humans see real values.
+    /// Whether content shown to this actor should have secrets replaced. Agents (and every other non-person) follow
+    /// the ROE setting; people with a working role see real values; a viewer always sees placeholders, as an agent
+    /// does (owner decision, ADR-0022).
     pub fn redacts_for(&self, actor: &Actor) -> bool {
-        actor.kind != pm_policy::ActorKind::Human && self.policy.roe().data.redact_before_llm
+        let p = self.principal_of(actor);
+        p.role == access::Role::Viewer
+            || (actor.kind != pm_policy::ActorKind::Human && self.policy.roe().data.redact_before_llm)
     }
 
-    fn redactor_for(&self, actor: &Actor) -> Option<&Redactor> {
-        self.redacts_for(actor).then_some(&self.redactor)
+    /// The redactor whose placeholders `actor` sees and may send back: one per user and project, so a placeholder
+    /// another user was shown means nothing to this one. A token shares its owner's; single-user mode shares one.
+    ///
+    /// The redactors are made once per user and kept for the life of the process (the leak is one small map per
+    /// account, which the map would hold anyway), so callers can keep a plain `&Redactor` across a request.
+    pub(crate) fn redactor_of(&self, actor: &Actor) -> &'static Redactor {
+        let p = self.principal_of(actor);
+        let key = match (&p.user_id, self.access_control()) {
+            (Some(u), _) => format!("user:{u}"),
+            (None, true) => format!("actor:{}", actor.id()),
+            (None, false) => "local".to_string(),
+        };
+        self.redactors.lock().entry(key).or_insert_with(|| Box::leak(Box::default()))
+    }
+
+    pub(crate) fn redactor_for(&self, actor: &Actor) -> Option<&'static Redactor> {
+        self.redacts_for(actor).then(|| self.redactor_of(actor))
+    }
+
+    /// A redactor for work that is not one user's (what is written to an integration's payload): its placeholders are
+    /// never sent back, so it is shared by the process.
+    pub(crate) fn redactor_scope(&self, key: &str) -> &'static Redactor {
+        self.redactors.lock().entry(format!("scope:{key}")).or_insert_with(|| Box::leak(Box::default()))
     }
 
     /// A stored result (finding, proof) as `actor` may see it: for agents,
@@ -436,17 +540,10 @@ impl Service {
         self.policy.evaluate(req, jiff::Timestamp::now())
     }
 
+    /// Appends one audit record with the single-user context (`local`, this project). See
+    /// [`Service::audit_with`] for a record that names a user, token, session or address.
     fn audit(&self, actor: &str, action: &str, detail: Value, decision: &str) -> Result<()> {
-        // One write closure: the read of the last record and the append must not interleave with another audit.
-        // Published after the write returned, i.e. after COMMIT.
-        let seq = self.store.write(|store| {
-            let prev = store.last_audit()?;
-            let rec = audit::next_record(prev.as_ref(), now_ms(), actor, action, &detail, decision);
-            store.append_audit(&rec)?;
-            Ok::<u64, anyhow::Error>(rec.seq as u64)
-        })?;
-        self.publish(Event::AuditAppended { seq });
-        Ok(())
+        self.audit_with(None, actor, action, detail, decision)
     }
 
     fn detail(req: &ActionRequest, params: &Value, verdict: &Verdict) -> Value {
@@ -472,6 +569,13 @@ impl Service {
 
     /// Asks to run an action with these exact parameters. Always audited.
     pub fn authorize(&self, req: ActionRequest, params: &Value) -> Result<Authorization> {
+        // Safe mode: the rules of engagement of a project this installation does not trust are the file's own, so
+        // nothing but a person acts on them (threat model F-2).
+        if let Some(reason) = self.safe_mode_refusal(&req.actor) {
+            let detail = json!({ "tier": req.tier, "summary": req.summary, "reasons": [reason] });
+            self.audit(&req.actor.id(), &req.action, detail, "deny")?;
+            return Ok(Authorization::Denied { reasons: vec![reason] });
+        }
         let verdict = self.policy.evaluate(&req, jiff::Timestamp::now());
         let detail = Self::detail(&req, params, &verdict);
         let actor = req.actor.id();
@@ -532,8 +636,14 @@ impl Service {
         Ok(r)
     }
 
+    /// Checks the whole audit log (chain, key when one is set, stored checkpoints); the number of records.
     pub fn audit_verify(&self) -> Result<usize> {
-        self.store.read(verify_audit)
+        let v = self.audit_verify_report(Vec::new(), None);
+        if v.intact {
+            Ok(v.records)
+        } else {
+            Err(ServiceError::Store(anyhow::anyhow!(v.error.unwrap_or_else(|| "audit log failed verification".into()))))
+        }
     }
 
     /// The raw bytes of an exchange as text, for humans (no redaction).

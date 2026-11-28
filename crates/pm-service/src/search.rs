@@ -1,6 +1,7 @@
 //! Searching the contents of history, and history as a site map. Both only
 //! read the project; nothing is sent.
 
+use crate::access::Perm;
 use pm_ai::{Redactor, wrap_untrusted};
 use pm_policy::{Actor, Target};
 use pm_store::{ExchangeSummary, HistoryFilter};
@@ -236,6 +237,7 @@ impl Service {
     /// The filters (including `in_scope` and an HQL `q`) pick the exchanges;
     /// `part` picks what is searched; `invert` lists exchanges without a match.
     pub fn history_search_text(&self, actor: &Actor, req: &SearchRequest) -> Result<SearchResult> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let matcher = Matcher::new(&req.query, req.regex, req.case_sensitive).map_err(ServiceError::Invalid)?;
         let (want_req, want_resp) = parse_part(req.part.as_deref())?;
         let max_hits = req.filter.limit.unwrap_or(50).clamp(1, 500);
@@ -333,6 +335,7 @@ impl Service {
     /// Finds text in recorded WebSocket messages (a read; not audited).
     /// Compressed or binary payloads are searched as bytes.
     pub fn ws_search_text(&self, actor: &Actor, req: &WsSearchRequest) -> Result<WsSearchResult> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let matcher = Matcher::new(&req.query, req.regex, req.case_sensitive).map_err(ServiceError::Invalid)?;
         let dir = match req.direction.as_deref().unwrap_or("both") {
             "both" => None,
@@ -420,6 +423,7 @@ impl Service {
 
     /// History as a tree per origin (a read; not audited).
     pub fn site_map(&self, actor: &Actor, host: Option<&str>) -> Result<Vec<SiteView>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let mut rows = self.store.read(|db| db.site_rows(host, MAX_SITE_ROWS))?;
         if let Some(r) = self.redactor_for(actor) {
             for row in &mut rows {

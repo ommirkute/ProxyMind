@@ -3,6 +3,7 @@
 //! Only for hosts in scope (and, for DNS, their parent domains, where SPF
 //! and DMARC records live); every lookup is audited.
 
+use crate::access::Perm;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -130,6 +131,7 @@ impl Service {
     /// MX, TXT, NS, SOA, CAA, plus `_dmarc` TXT. Asks `resolver` (default:
     /// the system's, else 1.1.1.1); sends nothing to the target.
     pub async fn recon_dns(&self, actor: &Actor, host: &str, resolver: Option<SocketAddr>) -> Result<DnsReport> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
         if !self.dns_allowed(&host) {
             return Err(ServiceError::Invalid(format!(
@@ -221,6 +223,7 @@ impl Service {
         limit: usize,
         archive: Option<&str>,
     ) -> Result<WaybackReport> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
         if !self.scope_hosts().iter().any(|(s, wild)| *s == host || (*wild && host.ends_with(&format!(".{s}")))) {
             return Err(ServiceError::Invalid(format!("{host} isn't in scope")));

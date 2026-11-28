@@ -2,11 +2,12 @@
 //! `custom_checks`, the YAML as written) and run against a recorded request
 //! through the policy gate, with one approval for the whole run.
 
-use pm_policy::{Actor, ActorKind, Tier};
+use pm_policy::{Actor, Tier};
 use pm_scan::custom::{self, CustomCheck};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::{Authorization, Result, Service, ServiceError};
 
 const SETTING: &str = "custom_checks";
@@ -95,9 +96,7 @@ impl Service {
 
     /// Adds or replaces (by id) a check. Humans only: checks decide what scans send.
     pub fn custom_check_save(&self, actor: &Actor, yaml: &str) -> Result<SavedCustomCheck> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can save custom checks".into()));
-        }
+        self.require_actor_with(actor, Perm::ScanConfigWrite, Denial::message("only people can save custom checks"))?;
         let check = custom::parse(yaml).map_err(ServiceError::Invalid)?;
         self.store.write(|store| -> Result<()> {
             let mut saved = load(store)?;
@@ -115,9 +114,7 @@ impl Service {
     }
 
     pub fn custom_check_delete(&self, actor: &Actor, id: &str) -> Result<bool> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can delete custom checks".into()));
-        }
+        self.require_actor_with(actor, Perm::ScanConfigWrite, Denial::message("only people can delete custom checks"))?;
         let removed = self.store.write(|store| -> Result<bool> {
             let mut saved = load(store)?;
             let before = saved.len();
@@ -132,6 +129,7 @@ impl Service {
 
     /// Runs custom checks on a recorded request.
     pub async fn custom_scan(&self, actor: &Actor, req: CustomScanRequest) -> Result<CustomScanResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut checks: Vec<CustomCheck> = match &req.yaml {
             Some(y) => vec![custom::parse(y).map_err(ServiceError::Invalid)?],
             None => {
@@ -154,12 +152,12 @@ impl Service {
             .store
             .read(|db| db.get_exchange(req.exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {}", req.exchange_id)))?;
-        if pm_http::h2text::is_http2_request(&ex.request) {
+        if pm_http::h3text::is_multiplexed_request(&ex.request) {
             return Err(ServiceError::Invalid("custom checks run on HTTP/1.1 requests; resend it as HTTP/1.1".into()));
         }
         let endpoint = pm_replay::Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
         // Work on what the actor may see: secrets stay placeholders until sent.
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
         let limit = req.max_requests.unwrap_or(200).clamp(1, 2000);
         let mut planned = Vec::new();
         for c in &checks {
@@ -170,12 +168,12 @@ impl Service {
                 planned.push((c, p));
             }
         }
-        let mut baseline = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let mut baseline = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         baseline.hypothesis_id = req.hypothesis_id;
         let mut outs = Vec::with_capacity(planned.len());
         let mut tier = Tier::ActiveSafe;
         for (c, p) in planned {
-            let mut out = self.outgoing(endpoint.clone(), &p.raw, true)?;
+            let mut out = self.outgoing(actor, endpoint.clone(), &p.raw, true)?;
             out.hypothesis_id = req.hypothesis_id;
             tier = tier.max(Tier::for_http_request(&out.raw).0).max(Tier::for_http_method(&out.method));
             outs.push((c, p, out));

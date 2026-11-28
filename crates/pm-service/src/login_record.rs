@@ -14,10 +14,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use pm_identity::{AuthMaterial, HealthCheck, Identity, LoggedOut, LoginExtract, LoginRecipe, LoginStep};
-use pm_policy::{Actor, ActorKind, Target, Tier};
+use pm_policy::{Actor, Target, Tier};
 use serde::Serialize;
 use serde_json::json;
 
+use crate::access::{Denial, Perm};
 use crate::replay::parse_url_endpoint;
 use crate::{Authorization, Result, Service, ServiceError};
 
@@ -279,9 +280,11 @@ impl Service {
         from: i64,
         to: Option<i64>,
     ) -> Result<LoginRecording> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can record logins (they contain passwords)".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::IdentitiesWrite,
+            Denial::message("only humans can record logins (they contain passwords)"),
+        )?;
         if !pm_identity::valid_name(name) || name == pm_identity::ANONYMOUS {
             return Err(ServiceError::Invalid(format!("bad identity name {name:?}")));
         }
@@ -447,11 +450,12 @@ impl Service {
     /// keeps what tells them apart. Scans then notice expired sessions that
     /// don't show up as a 401 or a redirect to a login page.
     pub async fn identity_learn_logged_out(&self, actor: &Actor, name: &str) -> Result<LoggedOutLearned> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut ident = self.load_identity(name)?;
         let health = ident.health.clone().ok_or_else(|| {
             ServiceError::Invalid(format!("{name} needs a health check first (record a login, or set one)"))
         })?;
-        let out = self.outgoing(parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
+        let out = self.outgoing(actor, parse_url_endpoint(&health.url)?, health.request.as_bytes(), true)?;
         if Tier::for_http_method(&out.method) != Tier::ActiveSafe {
             return Err(ServiceError::Invalid("health checks must use GET, HEAD or OPTIONS".into()));
         }

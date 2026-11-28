@@ -15,6 +15,10 @@
 //!   responses back to the plugin, which reports issues. They never touch
 //!   the network themselves.
 //!
+//! - **Hooks and plugin API v2** ([`v2`], [`frames`], [`hooks`], ADR-0020): a manifest with `api: 2` declares
+//!   permissions, and may declare request and response hooks, long-lived workers that see traffic in flight and
+//!   may replace it. They fail open and are paused after repeated failures.
+//!
 //! Every plugin process runs in a [`sandbox`]: a clean environment, no
 //! network where the OS allows it (Linux user namespaces), memory and CPU
 //! limits, a timeout and capped output.
@@ -24,9 +28,12 @@
 //! else must not decide what runs on your machine.
 
 pub mod active;
+pub mod frames;
+pub mod hooks;
 pub mod panel;
 pub mod sandbox;
 pub mod sign;
+pub mod v2;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -61,6 +68,15 @@ pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
+    /// Plugin API version: absent or 1 (as before), or 2 (declared permissions and hooks, see [`v2`]).
+    #[serde(default)]
+    pub api: Option<u32>,
+    /// What a v2 plugin may do (see [`v2::PERMISSIONS`]).
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// Traffic hooks (v2 only).
+    #[serde(default)]
+    pub hooks: Option<v2::Hooks>,
     #[serde(default)]
     pub passive: Option<Passive>,
     #[serde(default)]
@@ -82,6 +98,9 @@ impl Manifest {
         }
         if !self.panels.is_empty() {
             k.push("panels");
+        }
+        if self.hooks.as_ref().is_some_and(|h| h.request.is_some() || h.response.is_some()) {
+            k.push("hooks");
         }
         k
     }
@@ -117,6 +136,10 @@ fn yes() -> bool {
     true
 }
 
+fn missing(name: &str) -> PluginError {
+    PluginError::Invalid(format!("no plugin named {name}"))
+}
+
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
@@ -134,11 +157,14 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
             m.name
         )));
     }
-    if m.passive.is_none() && m.active.is_none() && m.panels.is_empty() {
+    let has_hooks = m.hooks.as_ref().is_some_and(|h| h.request.is_some() || h.response.is_some());
+    if m.passive.is_none() && m.active.is_none() && m.panels.is_empty() && !has_hooks {
         return Err(PluginError::Invalid(
-            "the plugin declares nothing to run (add `passive:`, `active:` or `panels:`)".into(),
+            "the plugin declares nothing to run (add `passive:`, `active:`, `panels:` or, with `api: 2`, `hooks:`)"
+                .into(),
         ));
     }
+    v2::validate(&m)?;
     panel::validate(&m.panels)?;
     if m.passive.as_ref().is_some_and(|p| p.command.is_empty()) {
         return Err(PluginError::Invalid("passive.command is empty".into()));
@@ -158,6 +184,8 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest> {
 pub struct Registry {
     path: PathBuf,
     pub plugins: Vec<Installed>,
+    /// Accepted permissions and hook settings (see [`v2`]).
+    pub state: v2::State,
 }
 
 impl Registry {
@@ -168,7 +196,8 @@ impl Registry {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        Ok(Registry { path, plugins })
+        let state = v2::State::load(&path.with_file_name(v2::STATE_FILE))?;
+        Ok(Registry { path, plugins, state })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -177,6 +206,7 @@ impl Registry {
         }
         let text = serde_json::to_string_pretty(&self.plugins).map_err(|e| PluginError::Invalid(e.to_string()))?;
         std::fs::write(&self.path, text)?;
+        self.state.save(&self.path.with_file_name(v2::STATE_FILE))?;
         Ok(())
     }
 
@@ -200,8 +230,21 @@ impl Registry {
             ));
         }
         let name = manifest.name.clone();
+        let previous = self.plugins.iter().find(|p| p.manifest.name == name).map(|p| p.enabled);
+        // Version 1 plugins start on, as always. A v2 plugin starts on only if it is an update that asks for exactly
+        // the permissions a person already accepted; otherwise it waits for `accept_permissions`.
+        let enabled = if manifest.is_v2() {
+            let same = self.state.accepted.get(&name).is_some_and(|a| *a == manifest.declared_permissions());
+            if !same {
+                self.state.accepted.remove(&name);
+            }
+            same && previous.unwrap_or(false)
+        } else {
+            self.state.forget(&name);
+            true
+        };
         self.plugins.retain(|p| p.manifest.name != manifest.name);
-        self.plugins.push(Installed { dir, manifest, enabled: true, signature, files });
+        self.plugins.push(Installed { dir, manifest, enabled, signature, files });
         self.plugins.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
         self.plugins
             .iter()
@@ -212,7 +255,132 @@ impl Registry {
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.plugins.len();
         self.plugins.retain(|p| p.manifest.name != name);
+        self.state.forget(name);
         before != self.plugins.len()
+    }
+
+    pub fn find(&self, name: &str) -> Option<&Installed> {
+        self.plugins.iter().find(|p| p.manifest.name == name)
+    }
+
+    /// The permissions a person accepted for a v2 plugin (empty for others).
+    pub fn accepted(&self, name: &str) -> Vec<String> {
+        self.state.accepted.get(name).cloned().unwrap_or_default()
+    }
+
+    /// A v2 plugin whose declared permissions differ from the accepted list.
+    pub fn needs_review(&self, name: &str) -> bool {
+        self.find(name).is_some_and(|p| p.manifest.is_v2() && self.accepted(name) != p.manifest.declared_permissions())
+    }
+
+    /// The permissions the plugin may use now: those it declares and a person accepted. None for version 1
+    /// plugins, which have no permissions to check.
+    pub fn effective_permissions(&self, name: &str) -> Option<Vec<String>> {
+        let p = self.find(name)?;
+        if !p.manifest.is_v2() {
+            return None;
+        }
+        let accepted = self.accepted(name);
+        Some(p.manifest.declared_permissions().into_iter().filter(|d| accepted.contains(d)).collect())
+    }
+
+    /// Records that a person accepted the plugin's declared permissions, and turns the plugin on.
+    pub fn accept_permissions(&mut self, name: &str) -> Result<Vec<String>> {
+        let p = self.plugins.iter_mut().find(|p| p.manifest.name == name).ok_or_else(|| missing(name))?;
+        if !p.manifest.is_v2() {
+            return Err(PluginError::Invalid(format!("{name} is a version 1 plugin: it declares no permissions")));
+        }
+        let perms = p.manifest.declared_permissions();
+        p.enabled = true;
+        self.state.accepted.insert(name.to_string(), perms.clone());
+        Ok(perms)
+    }
+
+    /// Like [`Registry::set_enabled`], but refuses to turn on a plugin whose permissions weren't accepted.
+    pub fn set_enabled_checked(&mut self, name: &str, enabled: bool) -> Result<()> {
+        if enabled && self.needs_review(name) {
+            return Err(PluginError::Invalid(format!(
+                "{name} asks for permissions nobody accepted yet: review and accept them first"
+            )));
+        }
+        if self.set_enabled(name, enabled) { Ok(()) } else { Err(missing(name)) }
+    }
+
+    /// Every hook the installed plugins declare, in the order a person set (unlisted ones after, by plugin name).
+    pub fn hooks_in_order(&self) -> Vec<(String, v2::HookKind)> {
+        let mut all: Vec<(String, v2::HookKind)> = self
+            .plugins
+            .iter()
+            .flat_map(|p| {
+                v2::HookKind::ALL
+                    .into_iter()
+                    .filter(|k| p.manifest.hook(*k).is_some())
+                    .map(|k| (p.manifest.name.clone(), k))
+            })
+            .collect();
+        let rank = |h: &(String, v2::HookKind)| {
+            let id = v2::hook_id(&h.0, h.1);
+            self.state.hook_order.iter().position(|x| *x == id).unwrap_or(usize::MAX)
+        };
+        all.sort_by_key(rank); // stable: unlisted keep registry order
+        all
+    }
+
+    /// Moves a hook one place earlier (`delta` -1) or later (+1) among the hooks of its kind.
+    pub fn move_hook(&mut self, name: &str, kind: v2::HookKind, delta: i32) -> Result<()> {
+        let all = self.hooks_in_order();
+        let same: Vec<usize> = all.iter().enumerate().filter(|(_, h)| h.1 == kind).map(|(i, _)| i).collect();
+        let at = all.iter().position(|h| h.0 == name && h.1 == kind).ok_or_else(|| missing(name))?;
+        let pos = same.iter().position(|i| *i == at).unwrap_or(0) as i32 + delta;
+        let mut ids: Vec<String> = all.iter().map(|h| v2::hook_id(&h.0, h.1)).collect();
+        if let Some(&other) = usize::try_from(pos).ok().and_then(|p| same.get(p)) {
+            ids.swap(at, other);
+        }
+        self.state.hook_order = ids;
+        Ok(())
+    }
+
+    /// Whether a person turned this hook on.
+    pub fn hook_on(&self, name: &str, kind: v2::HookKind) -> bool {
+        let id = v2::hook_id(name, kind);
+        self.state.hooks_on.contains(&id)
+    }
+
+    /// Turns a hook on or off (the caller checks it may be turned on).
+    pub fn set_hook_on(&mut self, name: &str, kind: v2::HookKind, on: bool) {
+        let id = v2::hook_id(name, kind);
+        self.state.hooks_on.retain(|h| *h != id);
+        if on {
+            self.state.hooks_on.push(id);
+        }
+    }
+
+    /// Why a hook can't run right now (None: it can, once turned on).
+    pub fn hook_blocker(&self, name: &str, kind: v2::HookKind) -> Option<String> {
+        let Some(p) = self.find(name) else { return Some(format!("no plugin named {name}")) };
+        if p.manifest.hook(kind).is_none() {
+            return Some(format!("{name} has no {} hook", kind.as_str()));
+        }
+        if self.needs_review(name) {
+            return Some("its permissions haven't been accepted".into());
+        }
+        let granted = self.effective_permissions(name).unwrap_or_default();
+        if !granted.iter().any(|g| g == kind.permission()) {
+            return Some(format!("the {} permission isn't accepted", kind.permission()));
+        }
+        if !p.enabled {
+            return Some("the plugin is off".into());
+        }
+        None
+    }
+
+    /// The hooks that should run: turned on, declared, permitted and the plugin on, in order.
+    pub fn active_hooks(&self) -> Vec<(Installed, v2::HookKind)> {
+        self.hooks_in_order()
+            .into_iter()
+            .filter(|(n, k)| self.hook_on(n, *k) && self.hook_blocker(n, *k).is_none())
+            .filter_map(|(n, k)| self.find(&n).map(|p| (p.clone(), k)))
+            .collect()
     }
 
     pub fn enabled(&self) -> Vec<Installed> {

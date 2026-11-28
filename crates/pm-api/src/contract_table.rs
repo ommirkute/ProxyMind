@@ -10,8 +10,25 @@ use pm_service::api_types::*;
 use pm_service::pm_store::HistoryFilter;
 use pm_service::*;
 
+use crate::auth_api::{
+    EnrolBeginBody, EnrolConfirmBody, InviteAcceptBody, InviteCreateBody, InviteCreated, InviteView, LoginBody,
+    LoginResponse, MeResponse, MemberRoleBody, MemberView, OkResponse, PasswordBody, RecoveryCodesResponse,
+    RevokeAllBody, RevokedResponse, SecondFactorBody, SessionView, SetupBody, StateResponse, TotpConfirmBody,
+    TotpEnrolmentResponse, UserView,
+};
 use crate::contracts::{Operation, op};
+use crate::oidc_api::{
+    OidcCallbackQuery, OidcIdentityView, OidcInviteBody, OidcLinkBody, OidcProviderBody, OidcProviderView,
+    OidcStartQuery, OidcStartResponse, OidcTestResponse,
+};
+use crate::passkey_api::{
+    EnrolLinkBody, EnrolLinkInfo, EnrolLinkPasskeyBody, EnrolLinkPasswordBody, EnrolmentLinkCreated,
+    InvitePasskeyOptionsBody, LoginOptionsBody, NewAccountPasskeyBody, PasskeyAddBody, PasskeyAdded, PasskeyLoginBody,
+    PasskeyOptionsResponse, PasskeyRenameBody, PasskeyRequiredBody, PasskeyRequiredResponse, PasskeyView,
+    SetupPasskeyOptionsBody,
+};
 use crate::routes::{BytesQuery, EventsQuery};
+use crate::tokens_api::{TokenCreateBody, TokenCreated, TokenView, TokensQuery};
 
 const ZIP: &str = "application/zip";
 
@@ -20,11 +37,13 @@ const ZIP: &str = "application/zip";
 pub fn operations() -> Vec<Operation> {
     vec![
         op("get", "/status", "status", "Version, project, who you are, the engagement and its counters.")
-            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns) and `counters`."),
+            .json("Object with `version`, `project`, `you_are`, `engagement`, `in_scope` (list of patterns), `counters` and `safe_mode` (true while this installation does not trust the project)."),
         op("get", "/roe", "roe_get", "The rules of engagement as text and as parsed.").out::<RoeView>(),
         op("put", "/roe", "roe_put", "Replace the rules of engagement.").body::<RoeBody>().out::<RoeView>(),
         op("get", "/setup", "setup", "How to point a browser at the proxy: address, CA availability and fingerprint.")
             .json("Object with `proxy`, `ca_available`, `ca_sha256` and `browser_available`."),
+        op("get", "/setup/mobile", "setup_mobile", "How a phone or tablet reaches ProxyMind's setup page: URLs on the LAN, a QR code (SVG) of the first, and the CA fingerprint.")
+            .out::<MobileSetup>(),
         op("get", "/ca.pem", "ca_pem", "The proxy's CA certificate (PEM) as a download.")
             .download("application/x-pem-file", "The CA certificate."),
         op("post", "/browser/open", "browser_open", "Open the built-in browser through the proxy.")
@@ -36,7 +55,7 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/exchanges", "exchanges", "Search recorded exchanges, newest first.").query::<HistoryFilter>().out::<ExchangePage>(),
         op("get", "/exchanges/{id}", "exchange", "One exchange: summary, request and response text, and a model-safe view.")
             .query::<BytesQuery>()
-            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`."),
+            .json("Object with `summary`, `request`, `response`, `request_body` / `response_body` (the decoded body text: de-chunked, decompressed, markup kept; null when absent or binary), `view`, `request_protobuf` / `response_protobuf` (gRPC and Protobuf bodies as editable text, one `@message` per gRPC message, with `grpc-status` / `grpc-message` when present; absent for other traffic), plus `request_truncated` / `response_truncated` when cut and `request_b64` / `response_b64` with `bytes=1`. When rules or an edit in the intercept queue changed the traffic, `request` is what was sent to the server and `response` is what the server sent, as always; `request_original` is the request as the client sent it and `response_delivered` is the response as delivered to the client (text, cut by `max` like the others, with `*_truncated`; also `request_original_b64` / `response_delivered_b64` with `bytes=1`; each absent when unchanged). `changes` lists what changed them (`phase`, `by` rule, intercept or hook, `name`, optional `note`; empty when nothing did). `diffs` has one line diff per changed message (`phase`, `from_label`, `to_label`, `lines` in the shape of `/tools/compare`): the request from the client's to the one sent, the response from the server's to the delivered one. The `view` carries `request_original` and `response_delivered` too, redacted and marked untrusted for agents."),
         op("post", "/search", "search", "Search recorded traffic for text or a regular expression.")
             .body::<SearchRequest>().out::<SearchResult>(),
         op("post", "/search/ws", "search_ws", "Search recorded WebSocket messages.").body::<WsSearchRequest>().out::<WsSearchResult>(),
@@ -58,6 +77,14 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/tools/curl", "tools_curl", "Turn a cURL command into a raw request.").body::<CurlBody>().out::<CurlParsed>(),
         op("post", "/ws/replay", "ws_replay", "Replay a recorded WebSocket session with edited messages.")
             .body::<WsReplayRequest>().out::<WsReplayResult>(),
+        op("get", "/streams", "streams_list", "Raw TCP and TLS streams the proxy relayed and recorded, newest first.")
+            .query::<pm_service::pm_store::StreamFilter>().out::<StreamPage>(),
+        op("get", "/streams/{id}", "stream_get", "One recorded stream with its first chunks (base64 plus a text preview each).")
+            .query::<StreamChunksQuery>().out::<StreamDetail>(),
+        op("get", "/streams/{id}/chunks", "stream_chunks", "A page of one stream's chunks, oldest first.")
+            .query::<StreamChunksQuery>().out::<StreamChunkPage>(),
+        op("post", "/streams/{id}/replay", "stream_replay", "Replay a stream to the same target (optionally with edited chunks) and record the result as a new stream.")
+            .body::<StreamReplayRequest>().out::<StreamReplayResult>(),
         op("post", "/race", "race", "Send the same request several times at once.").body::<RaceRequest>().out::<RaceResult>(),
         op("post", "/replay/group", "replay_group", "Send a group of requests in order or in parallel.").body::<GroupRequest>().out::<GroupResult>(),
         op("post", "/fuzzer", "fuzzer", "Run a fuzzer attack and wait for the result.").body::<FuzzerRequest>().out::<FuzzerResult>(),
@@ -71,6 +98,10 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/discover", "discover", "Look for files and folders by trying words.").body::<DiscoverRequest>().out::<DiscoverResult>(),
         op("post", "/tools/decode", "tools_decode", "Encode or decode text locally.").body::<DecodeRequest>()
             .json("Object with `steps` (each decoding step) and `ops` (the available operations)."),
+        op("post", "/tools/protobuf/decode", "tools_protobuf_decode", "Decode a gRPC or Protobuf body into editable text, without a schema.")
+            .body::<ProtobufDecodeRequest>().out::<ProtobufDecoded>(),
+        op("post", "/tools/protobuf/encode", "tools_protobuf_encode", "Encode edited Protobuf text back into body bytes (framed for gRPC if asked).")
+            .body::<ProtobufEncodeRequest>().out::<ProtobufEncoded>(),
         op("post", "/tools/request-transform", "tools_request_transform", "Change the method or body encoding of a request text.")
             .body::<RequestTransform>().json("Object with `raw` (the rewritten request)."),
         op("post", "/tools/compare", "tools_compare", "Compare two recorded exchanges.").body::<CompareBody>()
@@ -155,6 +186,8 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/plugins", "plugins", "Installed plugins and their state.").out::<PluginsView>(),
         op("post", "/plugins/check", "plugin_check", "Run a plugin check on a recorded exchange.").body::<PluginCheckRequest>().out::<PluginCheckResult>(),
         op("put", "/plugins/{name}", "plugin_set", "Turn a plugin on or off.").body::<PluginSet>().out::<PluginsView>(),
+        op("post", "/plugins/{name}/accept", "plugin_accept", "A person accepts the permissions a version 2 plugin declares (and the plugin turns on).").out::<PluginsView>(),
+        op("put", "/plugins/{name}/hooks/{kind}", "plugin_hook_set", "Turn a plugin's request or response hook on or off, reorder it, pause or resume it.").body::<PluginHookSet>().out::<PluginsView>(),
         op("get", "/plugins/{name}/panels/{panel}", "plugin_panel", "The data of a plugin panel.").query::<PanelQuery>().out::<pm_service::pm_plugin::panel::PanelData>(),
         op("get", "/scan/profiles", "scan_profiles", "Scan profiles, built-in and saved.").out::<Vec<ScanProfile>>(),
         op("post", "/scan/profiles", "scan_profile_save", "Save a scan profile.").body::<ScanProfile>().out::<Vec<ScanProfile>>(),
@@ -185,8 +218,12 @@ pub fn operations() -> Vec<Operation> {
         op("get", "/proofs/{id}", "proof", "A stored proof result.").json("The stored proof as an object."),
         op("post", "/proofs/{id}/rerun", "proof_rerun", "Run a stored proof again.").out::<ProofResult>(),
         op("get", "/audit", "audit", "The audit log, newest first.").query::<LimitQuery>().out::<Vec<pm_service::pm_store::AuditRecord>>(),
-        op("get", "/audit/verify", "audit_verify", "Check the audit log's hash chain.")
-            .json("Object with `intact` and either `records` (how many were checked) or `error`."),
+        op("get", "/audit/verify", "audit_verify", "Check the audit log: hash chain (versions 1 and 2), the keyed chain when a key is set, stored checkpoints.")
+            .out::<AuditVerification>(),
+        op("post", "/audit/checkpoint", "audit_checkpoint", "Write a signed checkpoint of the audit log (head hash, count, time); people only. Export it and keep it elsewhere.")
+            .out::<pm_service::pm_policy::checkpoint::Checkpoint>(),
+        op("get", "/audit/checkpoints", "audit_checkpoints", "The signed checkpoints stored in the project, oldest first.")
+            .out::<Vec<pm_service::pm_policy::checkpoint::Checkpoint>>(),
         op("get", "/report", "report", "Render the report; always a download.").query::<ReportQuery>()
             .download("text/markdown, text/html", "The rendered report; the content type follows `format`."),
         op("get", "/evidence/pack", "evidence_pack", "A signed evidence pack (ZIP); its fingerprint is in the `X-Evidence-Fingerprint` header.")
@@ -205,17 +242,41 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/intercept/{id}/drop", "intercept_drop", "Drop one held message.").json("Object with `dropped` (the id)."),
         op("get", "/match-replace", "rules_get", "Match-and-replace rules.").json("Object with `rules` (list of rules)."),
         op("put", "/match-replace", "rules_put", "Replace all match-and-replace rules.").body::<RulesBody>().json("Object with `rules` (the stored list)."),
-        op("get", "/network", "network_get", "Outgoing network settings (upstream proxy, client certificates, host overrides).").out::<pm_service::pm_replay::NetConfig>(),
+        op("get", "/network", "network_get", "Outgoing network settings (ordered upstream rules, client certificates, host overrides). Proxy passwords show as `********`.").out::<pm_service::pm_replay::NetConfig>(),
         op("put", "/network", "network_put", "Change the outgoing network settings.").body::<pm_service::pm_replay::NetConfig>().out::<pm_service::pm_replay::NetConfig>(),
+        op("post", "/network/upstream/resolve", "network_resolve", "Which upstream rule decides how a host is reached (saved rules, or a draft passed in `rules`). Sends nothing.")
+            .body::<UpstreamResolveRequest>().out::<UpstreamResolution>(),
         op("get", "/proxy/listeners", "listeners_get", "Proxy listeners and their state.").out::<ListenersView>(),
         op("put", "/proxy/listeners", "listeners_put", "Replace the proxy listeners.").body::<ListenersBody>().out::<ListenersView>(),
         op("get", "/history/recording", "recording_get", "What the proxy records.").out::<RecordingSettings>(),
         op("put", "/history/recording", "recording_put", "Change what the proxy records.").body::<RecordingSettings>().out::<RecordingSettings>(),
+        op("get", "/devices", "devices_get", "Client addresses (phones, tablets) seen in history, with their names and counts.").out::<DevicesView>(),
+        op("put", "/devices/{addr}", "device_put", "Give a client address a name, e.g. Pixel 8.").body::<DeviceNameBody>().out::<DeviceView>(),
+        op("delete", "/devices/{addr}", "device_delete", "Remove a device's name.").json("Object with `deleted` (the address)."),
         op("get", "/session", "session_get", "Session handling: cookie jar, macros and rules.").out::<SessionView>(),
         op("put", "/session", "session_put", "Change session handling.").body::<SessionConfig>().out::<SessionView>(),
         op("get", "/session/jar", "session_jar", "Cookies in the jar.").json("Object with `cookies` (list of cookies)."),
         op("delete", "/session/jar", "session_jar_clear", "Empty the cookie jar.").json("Object with `cleared`."),
         op("post", "/session/macros/{name}/run", "session_macro_run", "Run a session macro.").out::<MacroRun>(),
+        op("get", "/project/trust", "project_trust", "Whether this installation trusts the project file (`trusted` or `safe_mode`), what safe mode holds back and why, and everything the file would switch on (listeners, upstream and rewrite rules, schedules, triggers, session macros, the assistant URL, the rules of engagement) for a person to review. Anyone may read it.").out::<TrustView>(),
+        op("post", "/project/trust", "project_trust_confirm", "Trust the project's current settings in this installation: listeners start, schedules and triggers run (as the person confirming), rules and network settings apply. Pass the `digest` from the review to confirm exactly what was read. People only; audited, a refusal too.").body::<TrustConfirmRequest>().out::<TrustView>(),
+        op("get", "/integrations", "integrations_list", "Configured integrations (Jira, GitHub, GitLab, Slack, webhooks) with the state of their secrets, whether they came with a project file and need review, and the last error. Secrets are never returned. People only.").out::<Vec<IntegrationView>>(),
+        op("get", "/integrations/{name}", "integration_get", "One integration. People only.").id_is_string().out::<IntegrationView>(),
+        op("put", "/integrations/{name}", "integration_put", "Create or replace an integration; secrets (token, webhook_url, signing_secret, header values) are write-only and go to the user's private secrets file or an `env:NAME` reference, never the project. Saving it enabled here is what lets it send in this installation. People only; audited.").id_is_string().body::<IntegrationInput>().out::<IntegrationView>(),
+        op("delete", "/integrations/{name}", "integration_delete", "Delete an integration with its saved secrets, trust and delivery log. People only; audited.").id_is_string().json("Object with `deleted` (the name)."),
+        op("put", "/integrations/{name}/enabled", "integration_enabled", "Turn an integration on or off. Turning it on here, as a person, is what makes an integration that came with a project file send. People only; audited.").id_is_string().body::<IntegrationEnabledBody>().out::<IntegrationView>(),
+        op("post", "/integrations/{name}/test", "integration_test", "Test an integration: read the tracker's project, post a test message to Slack, or send a `test` event to a webhook. Recorded in the delivery log. People only.").id_is_string().out::<pm_service::pm_store::DeliveryRow>(),
+        op("get", "/integrations/{name}/deliveries", "integration_deliveries", "The last deliveries of an integration (status, HTTP status, attempts, host; never bodies or secrets), newest first. People only.").id_is_string().query::<DeliveriesQuery>().out::<Vec<pm_service::pm_store::DeliveryRow>>(),
+        op("post", "/findings/{id}/issue", "finding_issue", "Create (or with `update`, refresh) the finding's issue in a Jira, GitHub or GitLab integration, with redacted text and reproduction. The issue's key and URL are kept on the finding as `issue_links`. People only; audited.").body::<SendFindingBody>().out::<IssueLink>(),
+        op("get", "/workflows", "workflows_list", "Saved workflows (chains of match, extract, transform, send and assert steps).").out::<Vec<Workflow>>(),
+        op("post", "/workflows", "workflow_create", "Save a new workflow. People only; audited.").body::<WorkflowInput>().out::<Workflow>(),
+        op("get", "/workflows/runs", "workflow_runs", "Recent workflow runs, newest first.").query::<WorkflowRunsQuery>().out::<Vec<WorkflowRun>>(),
+        op("get", "/workflows/runs/{id}", "workflow_run_get", "One workflow run: its steps, variables, sent exchanges and assertions.").out::<WorkflowRun>(),
+        op("get", "/workflows/{id}", "workflow_get", "One workflow, by id or name.").id_is_string().out::<Workflow>(),
+        op("put", "/workflows/{id}", "workflow_update", "Replace a workflow's name, description and steps. Turns its trigger off when the steps change. People only; audited.").id_is_string().body::<WorkflowInput>().out::<Workflow>(),
+        op("delete", "/workflows/{id}", "workflow_delete", "Delete a workflow and its runs. People only; audited.").id_is_string().json("Object with `deleted` (the id or name given)."),
+        op("put", "/workflows/{id}/trigger", "workflow_trigger", "Turn the per-exchange trigger on or off, with its per-minute cap. People only; audited.").id_is_string().body::<WorkflowTriggerBody>().out::<Workflow>(),
+        op("post", "/workflows/{id}/run", "workflow_run", "Run a workflow on a recorded exchange, or continue a run that waits for an approval. Every send goes through the policy gate.").id_is_string().body::<WorkflowRunBody>().out::<WorkflowRun>(),
         op("get", "/assistant", "assistant_state", "Assistant settings, key status and recent chats.")
             .json("Object with `config`, `local`, `cloud_models_allowed`, `problem`, `acts_as`, `key` and `chats`."),
         op("put", "/assistant/config", "assistant_config", "Change the assistant's settings.").body::<AssistantConfig>().out::<AssistantConfig>(),
@@ -236,5 +297,66 @@ pub fn operations() -> Vec<Operation> {
         op("post", "/attack-paths", "attack_path_create", "Record an attack path.").body::<NewAttackPath>().out::<AttackPath>(),
         op("delete", "/attack-paths/{id}", "attack_path_delete", "Delete an attack path.").json("Object with `deleted` (the id)."),
         op("get", "/attack-graph", "attack_graph", "Attack paths merged into a graph.").query::<ScanQuery>().out::<AttackGraph>(),
+        // Tokens (ADR-0022 step 5): both modes; people only, a token cannot manage tokens.
+        op("get", "/tokens", "tokens_list", "Your `pm3_` tokens (never their secrets); in server mode owners may pass `all=true` for everyone's. A token cannot call this.").query::<TokensQuery>().out::<Vec<TokenView>>(),
+        op("post", "/tokens", "token_create", "Make a `pm3_` token for an agent, CI job or plugin. The secret is in the answer once. In server mode owners may make one for another user (`for_user`), which needs a fresh sign-in. A token cannot call this.").body::<TokenCreateBody>().out::<TokenCreated>(),
+        op("delete", "/tokens/{id}", "token_revoke", "Revoke a token: it stops working at its next request. In server mode revoking someone else's needs an owner and a fresh sign-in. A token cannot call this.").id_is_string().json("Object with `ok`."),
+        op("post", "/mcp", "mcp_endpoint", "MCP over HTTP: one JSON-RPC message (or a batch) in, the response out, 204 for a notification. Runs the same tools as `proxymind mcp` as the request's actor (a token's `agent:<name>`), never an actor named in the message. This is what `proxymind mcp --server` talks to.").any_body("A JSON-RPC 2.0 request or notification, or an array of them.").json_any("The JSON-RPC response (or an array of responses); no body (204) for a notification."),
+        // Server mode (ADR-0022): these answer 404 unless the server runs with accounts. The first seven work without a session.
+        op("get", "/auth/state", "auth_state", "Server mode: whether the server still waits for its first owner, and whether setup is served here.").out::<StateResponse>(),
+        op("post", "/auth/setup", "auth_setup", "Server mode: claim the first owner account with the one-time setup token. Answers like the password step (`enrolment_required`).").body::<SetupBody>().out::<LoginResponse>(),
+        op("post", "/auth/login", "auth_login", "Server mode: the password step. Answers `authenticated` (session cookie set), `second_factor_required` or `enrolment_required` with a pending token.").body::<LoginBody>().out::<LoginResponse>(),
+        op("post", "/auth/login/second-factor", "auth_login_second_factor", "Server mode: finish signing in with a TOTP code or a recovery code.").body::<SecondFactorBody>().out::<LoginResponse>(),
+        op("post", "/auth/login/enrol", "auth_login_enrol", "Server mode: start the first TOTP enrolment of an account that must have a second factor. Returns the secret once.").body::<EnrolBeginBody>().out::<TotpEnrolmentResponse>(),
+        op("post", "/auth/login/enrol/confirm", "auth_login_enrol_confirm", "Server mode: confirm the first enrolment with a code. Signs in and returns the recovery codes once.").body::<EnrolConfirmBody>().out::<LoginResponse>(),
+        op("post", "/auth/invite/accept", "auth_invite_accept", "Server mode: accept an invite (choose a username and password); continues like the password step.").body::<InviteAcceptBody>().out::<LoginResponse>(),
+        op("get", "/auth/me", "auth_me", "Server mode: the signed-in account, its role on this project and its session.").out::<MeResponse>(),
+        op("post", "/auth/logout", "auth_logout", "Server mode: end this session.").out::<OkResponse>(),
+        op("get", "/auth/sessions", "auth_sessions", "Server mode: the signed-in user's live sessions.").out::<Vec<SessionView>>(),
+        op("post", "/auth/sessions/revoke-all", "auth_sessions_revoke_all", "Server mode: sign out everywhere (optionally keeping this session).").body::<RevokeAllBody>().out::<RevokedResponse>(),
+        op("delete", "/auth/sessions/{reference}", "auth_session_revoke", "Server mode: end one of the user's sessions by its reference.").out::<OkResponse>(),
+        op("post", "/auth/password", "auth_password", "Server mode: change the password. Needs a fresh sign-in; ends the other sessions and renews this one.").body::<PasswordBody>().out::<OkResponse>(),
+        op("post", "/auth/totp/begin", "auth_totp_begin", "Server mode: start enrolling an authenticator (TOTP). Needs a fresh sign-in. Returns the secret once.").out::<TotpEnrolmentResponse>(),
+        op("post", "/auth/totp/confirm", "auth_totp_confirm", "Server mode: confirm the enrolment with a code; returns new recovery codes once. Needs a fresh sign-in.").body::<TotpConfirmBody>().out::<RecoveryCodesResponse>(),
+        op("post", "/auth/totp/disable", "auth_totp_disable", "Server mode: turn the authenticator off (refused for accounts that must keep one) and end all sessions. Needs a fresh sign-in.").out::<OkResponse>(),
+        op("post", "/auth/recovery-codes", "auth_recovery_codes", "Server mode: make ten new recovery codes; the old ones stop working. Needs a fresh sign-in.").out::<RecoveryCodesResponse>(),
+        op("get", "/auth/users", "auth_users", "Server mode, server admins: every account with its role on this project.").out::<Vec<UserView>>(),
+        op("post", "/auth/users/{id}/disable", "auth_user_disable", "Server mode, server admins: disable an account and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/users/{id}/enable", "auth_user_enable", "Server mode, server admins: enable an account again. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/users/{id}/reset-second-factor", "auth_user_reset_second_factor", "Server mode, server admins: remove an account's second factor and end its sessions. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("get", "/auth/members", "auth_members", "Server mode, owners of the project: its members with their roles.").out::<Vec<MemberView>>(),
+        op("put", "/auth/members/{user_id}", "auth_member_set", "Server mode, owners of the project: give a member a role. A demotion ends their sessions and narrows their tokens; the last owner cannot be demoted. Needs a fresh sign-in.").body::<MemberRoleBody>().out::<OkResponse>(),
+        op("delete", "/auth/members/{user_id}", "auth_member_remove", "Server mode, owners of the project: remove a member, ending their sessions and revoking their tokens; the last owner cannot be removed. Needs a fresh sign-in.").out::<OkResponse>(),
+        op("get", "/auth/invites", "auth_invites", "Server mode: invites (all for server admins, this project's for its owners).").out::<Vec<InviteView>>(),
+        op("post", "/auth/invites", "auth_invite_create", "Server mode: invite someone to this project with a role. Needs a fresh sign-in. The token is shown once.").body::<InviteCreateBody>().out::<InviteCreated>(),
+        op("delete", "/auth/invites/{id}", "auth_invite_revoke", "Server mode: revoke an unused invite. Needs a fresh sign-in.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/passkey/login/options", "passkey_login_options", "Server mode: the options for signing in with a passkey. With a username they list that account's passkeys (decoys for a name that has none); without, the authenticator offers its own.").body::<LoginOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/passkey/login", "passkey_login", "Server mode: sign in with a passkey (user verification required). Throttled and audited like a password sign-in; sets the session cookie.").body::<PasskeyLoginBody>().out::<LoginResponse>(),
+        op("post", "/auth/setup/passkey/options", "setup_passkey_options", "Server mode: first step of setup with a passkey: the options. Nothing is made and the setup token is not used yet.").body::<SetupPasskeyOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/setup/passkey", "setup_passkey", "Server mode: finish setup with a passkey: creates the first owner (no password) and signs in.").body::<NewAccountPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/invite/passkey/options", "invite_passkey_options", "Server mode: first step of accepting an invite with a passkey: the options.").body::<InvitePasskeyOptionsBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/invite/passkey", "invite_passkey", "Server mode: finish accepting an invite with a passkey (no password) and sign in.").body::<NewAccountPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/enrol-link/info", "enrol_link_info", "Server mode: whom a one-time enrolment link is for, if it is still valid.").body::<EnrolLinkBody>().out::<EnrolLinkInfo>(),
+        op("post", "/auth/enrol-link/passkey/options", "enrol_link_passkey_options", "Server mode: first step of redeeming an enrolment link with a passkey: the options.").body::<EnrolLinkBody>().out::<PasskeyOptionsResponse>(),
+        op("post", "/auth/enrol-link/passkey", "enrol_link_passkey", "Server mode: redeem an enrolment link with a passkey. Every earlier way to sign in is removed; signs in.").body::<EnrolLinkPasskeyBody>().out::<LoginResponse>(),
+        op("post", "/auth/enrol-link/password", "enrol_link_password", "Server mode: redeem an enrolment link with a new password. Every earlier way to sign in is removed; answers `enrolment_required` (an authenticator follows).").body::<EnrolLinkPasswordBody>().out::<LoginResponse>(),
+        op("get", "/auth/passkeys", "passkeys_list", "Server mode: the signed-in account's passkeys (name, created, last used; no key material).").out::<Vec<PasskeyView>>(),
+        op("post", "/auth/passkeys", "passkeys_add", "Server mode: add a passkey (finish an enrolment). Needs a fresh sign-in; gives the session a new id.").body::<PasskeyAddBody>().out::<PasskeyAdded>(),
+        op("post", "/auth/passkeys/options", "passkeys_options", "Server mode: the options for adding a passkey, bound to this account and session. Needs a fresh sign-in.").out::<PasskeyOptionsResponse>(),
+        op("put", "/auth/passkeys/{id}", "passkey_rename", "Server mode: rename a passkey.").body::<PasskeyRenameBody>().id_is_string().out::<OkResponse>(),
+        op("delete", "/auth/passkeys/{id}", "passkey_remove", "Server mode: remove a passkey and end the account's other sessions. Needs a fresh sign-in; refused for the last second factor of an account that needs one, or the last passkey while the server requires one.").id_is_string().out::<OkResponse>(),
+        op("put", "/auth/settings/passkey-required", "passkey_required_set", "Server mode, server admins: require every account to have a passkey, or stop requiring it. Needs a fresh sign-in and, to turn it on, a passkey on the administrator's own account.").body::<PasskeyRequiredBody>().out::<PasskeyRequiredResponse>(),
+        op("post", "/auth/users/{id}/enrolment-link", "user_enrolment_link", "Server mode, server admins and project owners: a one-time link (an hour) that replaces how someone signs in; ends their sessions and revokes their tokens. Needs a fresh sign-in. The token is shown once.").id_is_string().out::<EnrolmentLinkCreated>(),
+        op("get", "/auth/oidc/callback", "oidc_callback", "Server mode: where an identity provider sends the browser back. Checks the state cookie and the `state`, the `iss` parameter, the code exchange (PKCE) and the ID token, then signs in, links or refuses; answers a redirect, to `next` (with a session cookie) or with `oidc_error=<code>`. Public.").query::<OidcCallbackQuery>().json("A 302 redirect; no body."),
+        op("get", "/auth/oidc/identities", "oidc_identities", "Server mode: the identities linked to the signed-in account (provider, email as shown, when linked and last used).").out::<Vec<OidcIdentityView>>(),
+        op("delete", "/auth/oidc/identities/{id}", "oidc_identity_remove", "Server mode: unlink an identity. Needs a fresh sign-in; refused for the last way to sign in; ends the other sessions.").id_is_string().out::<OkResponse>(),
+        op("get", "/auth/oidc/providers", "oidc_providers", "Server mode, server admins: the configured identity providers. The client secret is shown as `********`, never returned.").out::<Vec<OidcProviderView>>(),
+        op("post", "/auth/oidc/providers", "oidc_provider_create", "Server mode, server admins: add an identity provider. Needs a fresh sign-in that was not made through a provider. A group may map to tester or viewer, never owner.").body::<OidcProviderBody>().out::<OidcProviderView>(),
+        op("put", "/auth/oidc/providers/{id}", "oidc_provider_update", "Server mode, server admins: change an identity provider (leave the secret out or send `********` to keep it). Needs a fresh sign-in that was not made through a provider.").body::<OidcProviderBody>().id_is_string().out::<OidcProviderView>(),
+        op("delete", "/auth/oidc/providers/{id}", "oidc_provider_delete", "Server mode, server admins: delete an identity provider and unlink the identities made through it. Needs a fresh sign-in that was not made through a provider.").id_is_string().out::<OkResponse>(),
+        op("post", "/auth/oidc/providers/{id}/test", "oidc_provider_test", "Server mode, server admins: fetch the provider's discovery document and keys now and say what was found (endpoints, keys, `iss` parameter support). Audited.").id_is_string().out::<OidcTestResponse>(),
+        op("get", "/auth/oidc/{provider}/start", "oidc_start", "Server mode: begin signing in with an identity provider (authorization code with PKCE S256): sets the short-lived state cookie and redirects to the provider. Public.").query::<OidcStartQuery>().json("A 302 redirect to the provider; no body."),
+        op("post", "/auth/oidc/{provider}/link", "oidc_link", "Server mode: begin linking an identity to the signed-in account. Needs a fresh sign-in. Sets the state cookie; answers the provider's URL.").body::<OidcLinkBody>().out::<OidcStartResponse>(),
+        op("post", "/auth/oidc/{provider}/invite", "oidc_invite", "Server mode: begin redeeming an invite by signing in with an identity provider (not for an owner invite). Sets the state cookie; answers the provider's URL. Public.").body::<OidcInviteBody>().out::<OidcStartResponse>(),
     ]
 }

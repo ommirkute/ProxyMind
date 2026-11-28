@@ -28,6 +28,17 @@ pub enum Part {
 }
 
 impl Part {
+    fn words(self) -> &'static str {
+        match self {
+            Part::RequestFirstLine => "request first line",
+            Part::RequestHeader => "request header",
+            Part::RequestBody => "request body",
+            Part::ResponseFirstLine => "response first line",
+            Part::ResponseHeader => "response header",
+            Part::ResponseBody => "response body",
+        }
+    }
+
     fn is_request(self) -> bool {
         matches!(self, Part::RequestFirstLine | Part::RequestHeader | Part::RequestBody)
     }
@@ -63,6 +74,32 @@ impl Default for Rule {
             comment: String::new(),
         }
     }
+}
+
+impl Rule {
+    /// What History shows for a change this rule made: the comment, or a short description of the rule.
+    pub fn label(&self) -> String {
+        let comment = self.comment.trim();
+        if !comment.is_empty() {
+            return comment.chars().take(80).collect();
+        }
+        if self.pattern.is_empty() {
+            // Only the header name: the value may be a credential.
+            let name = self.replace.split(':').next().unwrap_or_default().trim();
+            return format!("add {} {name}", self.part.words());
+        }
+        let shown: String = self.pattern.chars().take(60).collect();
+        let more = if self.pattern.chars().count() > 60 { "..." } else { "" };
+        format!("{} matching {shown}{more}", self.part.words())
+    }
+}
+
+/// A message the rules changed, and which rules did it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rewritten {
+    pub bytes: Vec<u8>,
+    /// The labels of the rules that changed it, in the order they ran.
+    pub names: Vec<String>,
 }
 
 struct Compiled {
@@ -147,15 +184,26 @@ impl Rewriter {
 
     /// Applies request rules; `None` when nothing changed.
     pub fn apply_request(&self, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Vec<u8>> {
-        self.apply(true, scheme, host, port, path, raw)
+        self.apply(true, scheme, host, port, path, raw).map(|r| r.bytes)
     }
 
     /// Applies response rules; `None` when nothing changed. `path` is the request's.
     pub fn apply_response(&self, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Vec<u8>> {
+        self.apply(false, scheme, host, port, path, raw).map(|r| r.bytes)
+    }
+
+    /// Like [`Rewriter::apply_request`], and says which rules changed the request.
+    pub fn rewrite_request(&self, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Rewritten> {
+        self.apply(true, scheme, host, port, path, raw)
+    }
+
+    /// Like [`Rewriter::apply_response`], and says which rules changed the response.
+    pub fn rewrite_response(&self, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Rewritten> {
         self.apply(false, scheme, host, port, path, raw)
     }
 
-    fn apply(&self, request: bool, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Vec<u8>> {
+    /// `None` when no rule changed the message, or the rules left it byte for byte as it was.
+    fn apply(&self, request: bool, scheme: &str, host: &str, port: u16, path: &str, raw: &[u8]) -> Option<Rewritten> {
         let rules = self.rules.read().clone();
         let mut active = rules.iter().filter(|c| c.rule.enabled && c.rule.part.is_request() == request).peekable();
         active.peek()?;
@@ -163,14 +211,20 @@ impl Rewriter {
         let scope =
             || *in_scope.get_or_init(|| self.scope.read().as_ref().is_some_and(|f| f(scheme, host, port, path)));
         let mut msg = Message::parse(raw)?;
-        let mut changed = false;
+        let mut names = Vec::new();
         for c in active {
             if c.rule.in_scope_only && !scope() {
                 continue;
             }
-            changed |= msg.apply(c);
+            if msg.apply(c) {
+                names.push(c.rule.label());
+            }
         }
-        changed.then(|| msg.into_bytes())
+        if names.is_empty() {
+            return None;
+        }
+        let bytes = msg.into_bytes();
+        (bytes != raw).then_some(Rewritten { bytes, names })
     }
 }
 
@@ -383,6 +437,42 @@ mod tests {
         ]);
         let out = req(&r, "in.test", "GET /v1/disabled HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!(out, "GET /v2/$1/disabled HTTP/1.1\r\n\r\n");
+    }
+
+    #[test]
+    fn rewrites_name_the_rules_that_changed_the_message() {
+        let r = rw(vec![
+            Rule { replace: "X-Test: secret".into(), ..Default::default() },
+            Rule { pattern: "nothing-matches".into(), replace: "x".into(), ..Default::default() },
+            Rule {
+                part: Part::RequestFirstLine,
+                pattern: "/v1/".into(),
+                replace: "/v2/".into(),
+                comment: "api version".into(),
+                ..Default::default()
+            },
+        ]);
+        let raw = "GET /v1/a HTTP/1.1\r\nHost: in.test\r\n\r\n";
+        let done = r.rewrite_request("http", "in.test", 80, "/", raw.as_bytes()).unwrap();
+        assert_eq!(done.names, ["add request header X-Test", "api version"], "never the header value");
+        assert_eq!(done.bytes, r.apply_request("http", "in.test", 80, "/", raw.as_bytes()).unwrap());
+        assert!(r.rewrite_response("http", "in.test", 80, "/", raw.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn a_rule_that_changes_nothing_or_is_undone_counts_as_no_change() {
+        let same = rw(vec![Rule {
+            part: Part::RequestFirstLine,
+            pattern: "GET".into(),
+            replace: "GET".into(),
+            ..Default::default()
+        }]);
+        assert!(same.rewrite_request("http", "in.test", 80, "/", b"GET / HTTP/1.1\r\n\r\n").is_none());
+        let undone = rw(vec![
+            Rule { part: Part::RequestFirstLine, pattern: "GET".into(), replace: "PUT".into(), ..Default::default() },
+            Rule { part: Part::RequestFirstLine, pattern: "PUT".into(), replace: "GET".into(), ..Default::default() },
+        ]);
+        assert!(undone.rewrite_request("http", "in.test", 80, "/", b"GET / HTTP/1.1\r\n\r\n").is_none());
     }
 
     #[test]

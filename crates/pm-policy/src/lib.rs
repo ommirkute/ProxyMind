@@ -6,6 +6,7 @@
 //! cannot positively place in scope is refused.
 
 pub mod audit;
+pub mod checkpoint;
 pub mod payload;
 pub mod ratelimit;
 pub mod roe;
@@ -31,6 +32,10 @@ pub enum PolicyError {
     Actor(String),
     #[error("audit log is broken at record {seq}: {why}")]
     AuditBroken { seq: i64, why: &'static str },
+    #[error("audit checkpoint: {0}")]
+    Checkpoint(String),
+    #[error("audit key: {0}")]
+    AuditKey(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -63,6 +68,9 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// Every tier, lowest first.
+    pub const ALL: [Tier; 5] = [Tier::Read, Tier::Passive, Tier::ActiveSafe, Tier::ActiveIntrusive, Tier::Destructive];
+
     /// Whether the action sends traffic to a target.
     pub fn is_active(self) -> bool {
         self >= Tier::ActiveSafe
@@ -87,6 +95,17 @@ impl Tier {
         }
     }
 
+    /// The name used in the rules file, the API and tokens (`active_safe`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Tier::Read => "read",
+            Tier::Passive => "passive",
+            Tier::ActiveSafe => "active_safe",
+            Tier::ActiveIntrusive => "active_intrusive",
+            Tier::Destructive => "destructive",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Tier> {
         Some(match s {
             "read" => Tier::Read,
@@ -106,9 +125,12 @@ pub enum ActorKind {
     Agent,
     Plugin,
     Scanner,
+    /// `ci:<name>`: an unattended pipeline run (`proxymind ci`). Nobody is there to approve anything, so what the
+    /// rules leave at `approve` is skipped and reported, never granted.
+    Ci,
 }
 
-/// Who is acting, e.g. `agent:claude-1`. Set by the client adapter from its
+/// Who is acting, e.g. `agent:claude-1` or `ci:pipeline`. Set by the client adapter from its
 /// credentials, never from request content.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Actor {
@@ -124,6 +146,7 @@ impl Actor {
             "agent" => ActorKind::Agent,
             "plugin" => ActorKind::Plugin,
             "scanner" => ActorKind::Scanner,
+            "ci" => ActorKind::Ci,
             _ => return Err(PolicyError::Actor(id.into())),
         };
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c)) {
@@ -138,6 +161,7 @@ impl Actor {
             ActorKind::Agent => "agent",
             ActorKind::Plugin => "plugin",
             ActorKind::Scanner => "scanner",
+            ActorKind::Ci => "ci",
         };
         format!("{kind}:{}", self.name)
     }
@@ -174,11 +198,37 @@ impl Verdict {
 pub struct Policy {
     /// Swapped as a whole when the rules change, so a decision always sees one version.
     roe: parking_lot::RwLock<std::sync::Arc<Roe>>,
+    /// The highest tier an actor may reach, by actor id (`agent:claude`): set by whoever authenticated a credential that
+    /// carries a cap (a `pm3_` token, ADR-0022). The rules of engagement can only narrow it further, never widen it:
+    /// [`Policy::evaluate`] checks the cap first, so it holds for approvals, every API, MCP and the CLI alike.
+    caps: parking_lot::RwLock<std::collections::HashMap<String, Tier>>,
 }
 
 impl Policy {
     pub fn new(roe: Roe) -> Self {
-        Self { roe: parking_lot::RwLock::new(std::sync::Arc::new(roe)) }
+        Self { roe: parking_lot::RwLock::new(std::sync::Arc::new(roe)), caps: Default::default() }
+    }
+
+    /// Caps `actor` at `cap` (or removes the cap with `None`). Credentials set this when they authenticate; a person
+    /// is never capped (a cap on `human:` is ignored).
+    pub fn set_tier_cap(&self, actor: &Actor, cap: Option<Tier>) {
+        if actor.kind == ActorKind::Human {
+            return;
+        }
+        let id = actor.id();
+        if self.caps.read().get(&id).copied() == cap {
+            return;
+        }
+        let mut caps = self.caps.write();
+        match cap {
+            Some(c) => caps.insert(id, c),
+            None => caps.remove(&id),
+        };
+    }
+
+    /// The cap on `actor`, if a credential set one.
+    pub fn tier_cap(&self, actor: &Actor) -> Option<Tier> {
+        self.caps.read().get(&actor.id()).copied()
     }
 
     /// The rules in force now.
@@ -248,6 +298,16 @@ impl Policy {
 
     /// Decides whether an action may run now.
     pub fn evaluate(&self, req: &ActionRequest, now: jiff::Timestamp) -> Verdict {
+        // A credential's tier cap comes before everything else, so nothing (not scope, not an approval) lifts it.
+        if let Some(cap) = self.tier_cap(&req.actor)
+            && req.tier > cap
+        {
+            return Verdict::deny(format!(
+                "this credential is limited to {} actions; {} actions are not allowed for it",
+                cap.name(),
+                req.tier.name()
+            ));
+        }
         if req.tier.is_active() {
             let Some(target) = &req.target else {
                 return Verdict::deny("active actions must name a target");

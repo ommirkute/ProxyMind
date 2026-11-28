@@ -189,6 +189,7 @@ async fn a_recorded_login_runs_again_with_fresh_tokens_and_expiry_is_noticed() {
         ids.push(
             store
                 .insert_exchange(&NewExchange {
+                    client_addr: None,
                     ts_ms: 0,
                     duration_ms: None,
                     source: "proxy".into(),
@@ -204,6 +205,7 @@ async fn a_recorded_login_runs_again_with_fresh_tokens_and_expiry_is_noticed() {
                     error: None,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 })
                 .unwrap(),
         );

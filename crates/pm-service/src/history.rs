@@ -6,6 +6,7 @@ use pm_store::{ExchangeSummary, HistoryFilter};
 use pm_tools::hql;
 use serde::Serialize;
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// One page of history search results.
@@ -71,7 +72,7 @@ impl hql::Fetch for Lazy<'_> {
     }
 }
 
-fn meta(r: &ExchangeSummary) -> hql::Meta<'_> {
+pub(crate) fn meta<'a>(r: &'a ExchangeSummary, names: &'a std::collections::BTreeMap<String, String>) -> hql::Meta<'a> {
     hql::Meta {
         id: r.id,
         scheme: &r.scheme,
@@ -86,16 +87,29 @@ fn meta(r: &ExchangeSummary) -> hql::Meta<'_> {
         source: &r.source,
         actor: &r.actor_id,
         identity: r.identity.as_deref(),
+        client: r.client_addr.as_deref(),
+        client_name: r.client_addr.as_ref().and_then(|a| names.get(a)).map(String::as_str),
         comment: r.comment.as_deref(),
         highlight: r.highlight.as_deref(),
         error: r.error.as_deref(),
+        modified: r.modified,
     }
 }
 
 impl Service {
     /// Searches history (a `read` action: always allowed, not audited).
     pub fn history_search(&self, actor: &Actor, filter: &HistoryFilter) -> Result<ExchangePage> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let limit = filter.limit.unwrap_or(50).clamp(1, 500);
+        let resolved;
+        let filter = match filter.client.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => {
+                // A device name means the addresses it was given to; an address means itself.
+                resolved = HistoryFilter { clients: Some(self.clients_matching(c)?), ..filter.clone() };
+                &resolved
+            }
+            None => filter,
+        };
         if let Some(q) = filter.q.as_deref().filter(|q| !q.trim().is_empty()) {
             let query = hql::Query::parse(q).map_err(|e| ServiceError::Invalid(format!("query: {e}")))?;
             return self.query_rows(actor, filter, &query, limit);
@@ -128,6 +142,8 @@ impl Service {
         limit: usize,
     ) -> Result<ExchangePage> {
         let deadline = std::time::Instant::now() + QUERY_BUDGET;
+        // Device names, so `client:` can match the name a person gave an address.
+        let names = self.device_names()?;
         let mut f = filter.clone();
         f.q = None;
         f.limit = Some(500);
@@ -135,7 +151,8 @@ impl Service {
         let (mut out, mut scanned, mut last, mut more) = (Vec::new(), 0usize, None, true);
         let eval = |row: &ExchangeSummary| {
             let mut lazy = Lazy { svc: self, actor, row, loaded: None, scope: None };
-            (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy)) && query.matches(&meta(row), &mut lazy)
+            (filter.in_scope != Some(true) || hql::Fetch::in_scope(&mut lazy))
+                && query.matches(&meta(row, &names), &mut lazy)
         };
         match candidates {
             // Paging back: fetch the candidates' summaries, 500 at a time, newest first.
@@ -250,6 +267,7 @@ impl Service {
         highlight: Option<&str>,
         comment: Option<&str>,
     ) -> Result<ExchangeSummary> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let mut row = self.store.write(|store| -> Result<_> {
             if !store.annotate(id, highlight, comment).map_err(|e| ServiceError::Invalid(format!("{e:#}")))? {
                 return Err(ServiceError::NotFound(format!("exchange {id}")));
@@ -264,6 +282,7 @@ impl Service {
 
     /// One exchange as a view sized for a model or a UI.
     pub fn exchange_get(&self, actor: &Actor, id: i64, view: View, max_tokens: usize) -> Result<ExchangeView> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?
@@ -273,6 +292,7 @@ impl Service {
 
     /// Raw bytes of an exchange's request, with secrets replaced for agents.
     pub fn exchange_raw_request(&self, actor: &Actor, id: i64) -> Result<String> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(id))?
@@ -302,9 +322,7 @@ impl Service {
     /// Saves UI state for this project. People only: it's their workspace.
     pub fn ui_state_put(&self, actor: &Actor, key: &str, value: &serde_json::Value) -> Result<()> {
         check_ui_key(key)?;
-        if actor.kind != pm_policy::ActorKind::Human {
-            return Err(ServiceError::Invalid("only people have UI state".into()));
-        }
+        self.require_actor(actor, Perm::UiStateWrite)?;
         let text = value.to_string();
         if text.len() > UI_STATE_MAX {
             return Err(ServiceError::Invalid(format!("UI state larger than {} MB", UI_STATE_MAX / 1024 / 1024)));

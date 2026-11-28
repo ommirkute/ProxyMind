@@ -6,6 +6,7 @@
 //! destructive tier covers the whole step: it needs a person's approval
 //! unless the rules of engagement allow destructive actions.
 
+use crate::access::Perm;
 use std::time::Instant;
 
 use pm_policy::{Actor, Tier};
@@ -132,7 +133,7 @@ fn pm_tools_encode(s: &str) -> String {
 }
 
 impl Service {
-    fn write_targets(&self) -> Result<(Vec<Target>, Option<String>, Vec<String>)> {
+    fn write_targets(&self, actor: &Actor) -> Result<(Vec<Target>, Option<String>, Vec<String>)> {
         let mut notes = Vec::new();
         let spec = self.openapi_get()?;
         let base = spec["base_url"].as_str().map(str::to_string);
@@ -187,7 +188,7 @@ impl Service {
                 let e = self.store.read(|db| db.get_exchange(id)).ok().flatten()?;
                 (e.summary.method == "GET"
                     && e.summary.path.split('?').next() == Some(&fill_path(&read.template, &e.summary.path, &obj.id)))
-                .then(|| self.redactor.redact(&String::from_utf8_lossy(&e.request)))
+                .then(|| self.redactor_of(actor).redact(&String::from_utf8_lossy(&e.request)))
             });
             out.push(Target {
                 method: method.into(),
@@ -207,7 +208,8 @@ impl Service {
 
     /// Runs the write checks (see the module docs).
     pub async fn auto_write_checks(&self, actor: &Actor) -> Result<WriteSweep> {
-        let (targets, base, mut notes) = self.write_targets()?;
+        self.require_actor(actor, Perm::SendTraffic)?;
+        let (targets, base, mut notes) = self.write_targets(actor)?;
         let (races, race_notes) = self.race_targets()?;
         notes.extend(race_notes);
         let mut sweep = WriteSweep { tried: targets.len() + races.len(), notes, ..Default::default() };
@@ -220,7 +222,7 @@ impl Service {
             return Ok(sweep);
         };
         let endpoint = parse_url_endpoint(&base)?;
-        let first_out = self.outgoing(endpoint.clone(), first.as_bytes(), true)?;
+        let first_out = self.outgoing(actor, endpoint.clone(), first.as_bytes(), true)?;
         let extra = json!({
             "write_checks": targets.iter().map(|t| format!("{} {} ({})", t.method, t.template, t.object)).collect::<Vec<_>>(),
             "race_checks": races.iter().map(|r| format!("POST {}", r.path)).collect::<Vec<_>>(),
@@ -305,7 +307,7 @@ impl Service {
         r: &RaceTarget,
         sweep: &mut WriteSweep,
     ) -> Result<()> {
-        let out = self.outgoing(endpoint.clone(), r.raw.as_bytes(), true)?;
+        let out = self.outgoing(actor, endpoint.clone(), r.raw.as_bytes(), true)?;
         let (sent, _) = self.send_as(actor, &out, Some(&r.first), true, "scan").await?;
         sweep.requests += 1;
         if !sent.status.is_some_and(|s| (200..300).contains(&s)) {
@@ -355,7 +357,7 @@ impl Service {
             for n in REDOS_LENGTHS {
                 let value = format!("{}!", "a".repeat(n));
                 let Some(raw) = with_field(&t.raw, &field, &value) else { break };
-                let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+                let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
                 let (sent, ms) = self.timed(actor, &out, &t.owner).await?;
                 sweep.requests += 1;
                 times.push(ms);
@@ -371,7 +373,7 @@ impl Service {
             {
                 // Confirm: the long probe is slow again (not a one-off stall).
                 let raw = with_field(&t.raw, &field, &format!("{}!", "a".repeat(REDOS_LENGTHS[2]))).unwrap_or_default();
-                let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+                let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
                 let (_, again) = self.timed(actor, &out, &t.owner).await?;
                 sweep.requests += 1;
                 if again < REDOS_MIN_MS {
@@ -409,7 +411,7 @@ impl Service {
         // Unique values, so a read-back can tell whose object changed.
         let marker = format!("pm{}", &pm_oast::new_token()[..6]);
         let raw = marked(&t.raw, &marker).unwrap_or_else(|| t.raw.clone());
-        let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+        let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
         // Anonymous first: a write anyone may make isn't an authorization bug between users.
         let (anon, _) = self.timed(actor, &out, pm_identity::ANONYMOUS).await?;
         sweep.requests += 1;
@@ -424,7 +426,7 @@ impl Service {
         // own account); fields reads never show (passwords) can't be checked.
         let mut verified = false;
         if let Some(read) = &t.read {
-            let out = self.outgoing(endpoint.clone(), read.as_bytes(), true)?;
+            let out = self.outgoing(actor, endpoint.clone(), read.as_bytes(), true)?;
             let (back, _) = self.timed(actor, &out, &t.owner).await?;
             sweep.requests += 1;
             let body = back

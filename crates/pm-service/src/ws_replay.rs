@@ -2,6 +2,7 @@
 //! upgrade request, send messages, and record everything, through the
 //! policy gate.
 
+use crate::access::Perm;
 use std::time::{Duration, Instant};
 
 use pm_http::ws::{self, Decoder};
@@ -155,6 +156,7 @@ impl Service {
     /// the session, if the policy allows it. Opening alone is active-safe;
     /// sending messages is active-intrusive (they can change state).
     pub async fn ws_replay(&self, actor: &Actor, req: WsReplayRequest) -> Result<WsReplayResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         if req.messages.len() > MAX_MESSAGES {
             return Err(ServiceError::Invalid(format!("at most {MAX_MESSAGES} messages per replay")));
         }
@@ -171,7 +173,7 @@ impl Service {
             return Err(ServiceError::Invalid("messages are larger than 1 MB in total".into()));
         }
         for (_, p) in &payloads {
-            let unknown = self.redactor.unknown_placeholders(p);
+            let unknown = self.redactor_of(actor).unknown_placeholders(p);
             if !unknown.is_empty() {
                 return Err(ServiceError::Invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
             }
@@ -188,13 +190,13 @@ impl Service {
             )));
         }
         let raw = req.raw.as_ref().map_or_else(|| ex.request.clone(), |r| r.as_bytes().to_vec());
-        if pm_http::h2text::is_http2_request(&raw) {
+        if pm_http::h3text::is_multiplexed_request(&raw) {
             return Err(ServiceError::Invalid(
-                "WebSockets over HTTP/2 aren't supported; write HTTP/1.1 in the request line".into(),
+                "WebSockets over HTTP/2 or HTTP/3 aren't supported; write HTTP/1.1 in the request line".into(),
             ));
         }
         let ep = Endpoint::new(&ex.summary.scheme, &ex.summary.host, ex.summary.port);
-        let mut out = self.outgoing(ep, &raw, true)?;
+        let mut out = self.outgoing(actor, ep, &raw, true)?;
         out.hypothesis_id = req.hypothesis_id;
         if let Some(name) = &req.identity {
             self.load_identity(name)?;
@@ -238,7 +240,7 @@ impl Service {
         let _permit = self.acquire_slot(&out.endpoint.host).await?;
         let rng = SystemRandom::new();
         let key = pm_core::base64(&random::<16>(&rng)?);
-        let mut wire = self.redactor.unredact(&out.raw);
+        let mut wire = self.redactor_of(actor).unredact(&out.raw);
         if let Some(name) = identity {
             wire = pm_identity::apply(&wire, &self.load_identity(name)?.auth);
         }
@@ -247,6 +249,7 @@ impl Service {
         let started = Instant::now();
         let result = self.sender.send(&out.endpoint, &wire, "GET", Some(&check)).await;
         let mut record = NewExchange {
+            client_addr: None,
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: "ws_replay".into(),
@@ -262,6 +265,7 @@ impl Service {
             error: None,
             identity: identity.map(str::to_string),
             hypothesis_id: out.hypothesis_id,
+            ..Default::default()
         };
         let resp = match result {
             Ok(r) => r,
@@ -347,7 +351,7 @@ impl Service {
                 break;
             }
             let Some((opcode, payload)) = queue.next() else { break };
-            let real = self.redactor.unredact(&payload);
+            let real = self.redactor_of(actor).unredact(&payload);
             let mask = random::<4>(&rng)?;
             if let Err(e) = conn.io.write_all(&ws::encode_frame(opcode, &real, Some(mask))).await {
                 note = Some(format!("the connection broke while sending: {e}"));

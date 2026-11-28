@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use pm_policy::{Actor, ActorKind, Target};
+use pm_policy::{Actor, Target};
 use pm_proxy::Rewriter;
 use pm_proxy::rewrite::{self, Rule};
 use pm_store::Store;
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::{Result, Service, ServiceError};
 
 /// Project setting that holds the rules as JSON.
@@ -33,6 +34,18 @@ pub fn sync_rules(store: &Store, r: &Rewriter) -> Result<bool> {
     Ok(true)
 }
 
+/// Like [`sync_rules`], but a project that is not trusted in this installation gets no rules (safe mode).
+pub(crate) fn sync_rules_gated(store: &Store, r: &Rewriter, gate: &crate::TrustGate) -> Result<bool> {
+    if gate.is_trusted(store) {
+        return sync_rules(store, r);
+    }
+    if r.rules().is_empty() {
+        return Ok(false);
+    }
+    r.set_rules(vec![]).map_err(ServiceError::Invalid)?;
+    Ok(true)
+}
+
 impl Service {
     /// Connects the proxy's rewriter: in-scope-only rules use this
     /// project's rules of engagement, and saved rules are loaded now.
@@ -41,7 +54,7 @@ impl Service {
         r.set_scope(Arc::new(move |scheme, host, port, path| {
             Target::from_parts(scheme, host, port, path).is_ok_and(|t| policy.scope_check(&t).is_ok())
         }));
-        self.store.read(|db| sync_rules(db, &r))?;
+        self.store.read(|db| sync_rules_gated(db, &r, &self.trust))?;
         let _ = self.rewriter.set(r);
         Ok(())
     }
@@ -58,16 +71,15 @@ impl Service {
     /// Replaces the rules. Humans only: rules change every request the
     /// browser sends, which is not an agent's call to make.
     pub fn set_match_replace_rules(&self, actor: &Actor, rules: Vec<Rule>) -> Result<Vec<Rule>> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only humans can change match-and-replace rules".into()));
-        }
+        self.require_actor(actor, Perm::RulesWrite)?;
         rewrite::validate(&rules).map_err(ServiceError::Invalid)?;
         let text = serde_json::to_string(&rules).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(RULES_SETTING, &text))?;
         self.audit(&actor.id(), "match_replace_rules", json!({ "rules": rules }), "allow")?;
-        if let Some(r) = self.rewriter.get() {
-            r.set_rules(rules.clone()).map_err(ServiceError::Invalid)?;
-        }
+        // Applies at once when the project is trusted (it was, and a person just edited it); in safe mode the
+        // proxy keeps running without the file's rules.
+        self.trust_after(actor, was_trusted);
         Ok(rules)
     }
 }

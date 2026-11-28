@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::Perm;
 use crate::findings::SEVERITIES;
 use crate::{Result, Service, ServiceError, scan_of};
 
@@ -117,6 +118,7 @@ impl Service {
     /// Records an attack path (2 to 12 steps). Steps that name a finding
     /// must name one that exists.
     pub fn attack_path_create(&self, actor: &Actor, p: NewAttackPath) -> Result<AttackPath> {
+        self.require_actor(actor, Perm::NotesWrite)?;
         let severity = p.severity.trim().to_ascii_lowercase();
         if !SEVERITIES.contains(&severity.as_str()) {
             return Err(ServiceError::Invalid(format!("severity must be one of {}", SEVERITIES.join(", "))));
@@ -169,9 +171,7 @@ impl Service {
 
     /// Deletes a path (people only).
     pub fn attack_path_delete(&self, actor: &Actor, id: i64) -> Result<()> {
-        if actor.kind != ActorKind::Human {
-            return Err(ServiceError::Invalid("only people delete attack paths".into()));
-        }
+        self.require_actor(actor, Perm::AttackPathsDelete)?;
         if !self.store.write(|db| db.delete_row("attack_paths", id))? {
             return Err(ServiceError::NotFound(format!("attack path {id}")));
         }

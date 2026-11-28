@@ -6,6 +6,7 @@
 //! quick first sweep for humans. Everything goes through the same gated
 //! service calls an agent would use.
 
+use crate::access::Perm;
 use pm_policy::{Actor, Tier};
 use serde_json::json;
 
@@ -222,6 +223,7 @@ impl Service {
     /// exposure findings, and imports an API description if one turns up,
     /// sending its GET examples so later passes can test those endpoints.
     pub async fn auto_discover(&self, actor: &Actor) -> Result<DiscoverSweep> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut sweep = DiscoverSweep::default();
         let origins: std::collections::BTreeSet<String> =
             self.model()?.operations.iter().map(|o| o.origin.clone()).collect();
@@ -366,7 +368,7 @@ impl Service {
                 sweep.skipped.push(format!("sign-up {}: not a JSON body", op.path));
                 continue;
             };
-            let out = self.outgoing(endpoint.clone(), &raw, true)?;
+            let out = self.outgoing(actor, endpoint.clone(), &raw, true)?;
             let extra = json!({ "openapi_signup": op.path });
             match self.gate_send_with(
                 actor,
@@ -404,6 +406,7 @@ impl Service {
     /// submissions get only the stored XSS and CSRF checks, which re-send
     /// them (as a browser would); everything goes through the gate.
     pub async fn auto_active_sweep(&self, actor: &Actor) -> Result<ScanSweep> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut sweep = ScanSweep::default();
         let mut seen_jwt = std::collections::BTreeSet::new();
         for t in self.scan_targets(None, SWEEP_MAX_OPERATIONS, SWEEP_MAX_PLAIN, SWEEP_MAX_SUBMITS)? {
@@ -514,7 +517,7 @@ impl Service {
         let Some(with) = pm_scan::active::with_params(&raw, &refs, "pm") else { return Ok((0, Vec::new())) };
         let s = &ex.summary;
         let endpoint = crate::replay::parse_url_endpoint(&pm_core::url(&s.scheme, &s.host, s.port, "/"))?;
-        let out = self.outgoing(endpoint, &with, true)?;
+        let out = self.outgoing(actor, endpoint, &with, true)?;
         let extra = json!({ "hidden_params": names, "operation": t.operation });
         match self.gate_send_with(actor, "scan_hidden_params", &out, None, true, None, None, extra)? {
             Authorization::Allowed { .. } => {}
@@ -706,6 +709,7 @@ impl Service {
     /// Checks every authorization candidate and proves the leaks it finds.
     /// One finding per operation; later leaks on it add nothing.
     pub async fn auto_access_control(&self, actor: &Actor) -> Result<AutoReport> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let candidates = self.authz_candidates()?;
         let roles: std::collections::BTreeMap<String, String> =
             self.identity_list()?.into_iter().map(|i| (i.name, i.role.to_ascii_lowercase())).collect();
@@ -1015,6 +1019,7 @@ mod tests {
         s.store
             .write(|db| {
                 db.insert_exchange(&NewExchange {
+                    client_addr: None,
                     ts_ms: 1,
                     duration_ms: None,
                     source: source.into(),
@@ -1030,6 +1035,7 @@ mod tests {
                     error: None,
                     identity: None,
                     hypothesis_id: None,
+                    ..Default::default()
                 })
             })
             .unwrap();

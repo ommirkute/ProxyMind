@@ -2,6 +2,7 @@
 //! or fetched through the policy gate) and list its operations with
 //! example requests.
 
+use crate::access::Perm;
 use pm_policy::{Actor, Tier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -70,6 +71,7 @@ fn decoded_body(resp: &[u8]) -> Result<String> {
 
 impl Service {
     pub async fn graphql_import(&self, actor: &Actor, req: GraphQlImportRequest) -> Result<GraphQlImportResult> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let mut url = req.url.clone();
         let mut exchange_id = None;
         let text = match (&req.schema, req.exchange_id, req.fetch) {
@@ -98,7 +100,7 @@ impl Service {
                 }
                 let host = pm_core::authority(&endpoint.scheme, &endpoint.host, endpoint.port);
                 let raw = pm_graphql::request(&host, &path, pm_graphql::INTROSPECTION_QUERY, &json!({}));
-                let out = self.outgoing(endpoint, raw.as_bytes(), false)?;
+                let out = self.outgoing(actor, endpoint, raw.as_bytes(), false)?;
                 match self.gate_send_with(
                     actor,
                     "graphql_introspection",

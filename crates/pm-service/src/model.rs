@@ -1,5 +1,6 @@
 //! The application model and the ledger, built from the project's traffic.
 
+use crate::access::Perm;
 use std::collections::BTreeMap;
 
 use pm_identity::Identity;
@@ -148,6 +149,7 @@ impl Service {
     }
 
     pub fn hypothesis_create(&self, actor: &Actor, h: NewHypothesis) -> Result<Hypothesis> {
+        self.require_actor(actor, Perm::ModelWrite)?;
         if h.operation.trim().is_empty() || h.vuln_class.trim().is_empty() {
             return Err(ServiceError::Invalid("operation and vuln_class are required".into()));
         }
@@ -183,6 +185,7 @@ impl Service {
     }
 
     pub fn hypothesis_update(&self, actor: &Actor, u: HypothesisUpdate) -> Result<Hypothesis> {
+        self.require_actor(actor, Perm::ModelWrite)?;
         let mut h = self.hypothesis_get(u.id)?;
         let mut changes = serde_json::Map::new();
         if let Some(st) = &u.status {

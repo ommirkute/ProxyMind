@@ -1,6 +1,7 @@
 //! Authorization checks: replay one recorded request as several identities
 //! and classify each response against the original owner's.
 
+use crate::access::Perm;
 use pm_diff::{NoiseMask, diff, learn_noise};
 use pm_identity::ANONYMOUS;
 use pm_policy::{Actor, Tier};
@@ -62,6 +63,7 @@ fn classify(status: Option<u16>, similarity: Option<f64>) -> &'static str {
 
 impl Service {
     pub async fn authz_check(&self, actor: &Actor, req: AuthzCheckRequest) -> Result<AuthzReport> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(req.exchange_id))?
@@ -76,8 +78,8 @@ impl Service {
         }
         // Work with the redacted form so audit records hold placeholders,
         // not secrets; real values go back in when sending.
-        let raw = self.redactor.redact(&String::from_utf8_lossy(&ex.request));
-        let out = self.outgoing(Endpoint::new(&s.scheme, &s.host, s.port), raw.as_bytes(), false)?;
+        let raw = self.redactor_of(actor).redact(&String::from_utf8_lossy(&ex.request));
+        let out = self.outgoing(actor, Endpoint::new(&s.scheme, &s.host, s.port), raw.as_bytes(), false)?;
         let url = out.url();
 
         let mut names: Vec<String> = Vec::new();

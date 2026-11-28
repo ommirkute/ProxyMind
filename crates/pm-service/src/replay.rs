@@ -1,6 +1,7 @@
 //! Sending requests (replays) through the policy gate, as
 //! recorded or as any test identity.
 
+use crate::access::Perm;
 use std::time::{Duration, Instant};
 
 use pm_ai::{ExchangeView, View, render_exchange};
@@ -21,9 +22,14 @@ const MAX_LIMIT_WAIT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReplayRequest {
-    /// Raw HTTP/1.1 request text. May contain `{{secret:...}}` placeholders.
+    /// Raw request text: HTTP/1.1, or HTTP/2 or HTTP/3 text (that version on the request line, `host:` for
+    /// `:authority`; HTTP/3 needs an https target and a direct route). May contain `{{secret:...}}` placeholders.
     /// If omitted, the request of `exchange_id` is resent unchanged.
     pub raw: Option<String>,
+    /// Replace the body of the request (everything after the head of `raw`, or of the recorded request) with these
+    /// bytes, base64. For bodies text cannot carry, such as Protobuf. Content-Length follows `fix_content_length`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
     /// Recorded exchange to base this on (its target is used).
     pub exchange_id: Option<i64>,
     /// Target as scheme://host[:port], used when there is no `exchange_id`.
@@ -138,9 +144,9 @@ pub(crate) struct Relogins {
 }
 
 impl Service {
-    pub(crate) fn outgoing(&self, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
+    pub(crate) fn outgoing(&self, actor: &Actor, endpoint: Endpoint, raw: &[u8], normalize: bool) -> Result<Outgoing> {
         let raw = if normalize { crlf_head(raw) } else { raw.to_vec() };
-        let unknown = self.redactor.unknown_placeholders(&raw);
+        let unknown = self.redactor_of(actor).unknown_placeholders(&raw);
         if !unknown.is_empty() {
             return Err(ServiceError::Invalid(format!("unknown secret placeholders: {}", unknown.join(", "))));
         }
@@ -154,7 +160,7 @@ impl Service {
         Ok(Outgoing { endpoint, raw, method: head.method, path, hypothesis_id: None })
     }
 
-    pub(crate) fn outgoing_from_request(&self, req: &ReplayRequest) -> Result<Outgoing> {
+    pub(crate) fn outgoing_from_request(&self, actor: &Actor, req: &ReplayRequest) -> Result<Outgoing> {
         let (endpoint, base_raw) = match req.exchange_id {
             Some(id) => {
                 let ex = self
@@ -172,11 +178,21 @@ impl Service {
                 (parse_url_endpoint(url)?, raw.as_bytes().to_vec())
             }
         };
-        let raw = match &req.raw {
+        let mut raw = match &req.raw {
             Some(r) => r.as_bytes().to_vec(),
             None => base_raw,
         };
-        let mut out = self.outgoing(endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
+        if let Some(b64) = &req.body_b64 {
+            let body = pm_http::protobuf::base64_decode(b64.as_bytes())
+                .map_err(|_| ServiceError::Invalid("body_b64 is not valid base64".into()))?;
+            let end = pm_http::find_head_end(&raw)
+                .ok()
+                .flatten()
+                .ok_or_else(|| ServiceError::Invalid("body_b64 needs a request with a complete head".into()))?;
+            raw.truncate(end);
+            raw.extend_from_slice(&body);
+        }
+        let mut out = self.outgoing(actor, endpoint, &raw, req.normalize_newlines.unwrap_or(true))?;
         out.hypothesis_id = req.hypothesis_id;
         Ok(out)
     }
@@ -254,7 +270,7 @@ impl Service {
         {
             return Ok(sent);
         }
-        let mut wire = self.redactor.unredact(&out.raw);
+        let mut wire = self.redactor_of(actor).unredact(&out.raw);
         if let Some(id) = identity {
             wire = pm_identity::apply(&wire, &id.auth);
         }
@@ -288,10 +304,14 @@ impl Service {
         let check = |ips: &[std::net::IpAddr]| self.policy.check_resolved(ips);
         let started = Instant::now();
         let result = match &in_scope {
-            Ok(()) => self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await,
+            Ok(()) => match self.spend_request() {
+                Ok(()) => self.sender.send(&out.endpoint, &wire, &out.method, Some(&check)).await,
+                Err(why) => Err(anyhow::anyhow!("not sent: {why}")),
+            },
             Err(why) => Err(anyhow::anyhow!("refused before sending: out of scope ({why})")),
         };
         let mut record = NewExchange {
+            client_addr: None,
             ts_ms: now_ms(),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             source: source.into(),
@@ -307,6 +327,7 @@ impl Service {
             error: None,
             identity: identity.map(|i| i.name.clone()),
             hypothesis_id: out.hypothesis_id,
+            ..Default::default()
         };
         let (status, error, elapsed_ms) = match result {
             Ok(resp) => {
@@ -379,7 +400,8 @@ impl Service {
 
     /// Sends a request on behalf of `actor`, if the policy allows it.
     pub async fn replay_send(&self, actor: &Actor, req: ReplayRequest) -> Result<ReplayResult> {
-        let out = self.outgoing_from_request(&req)?;
+        self.require_actor(actor, Perm::SendTraffic)?;
+        let out = self.outgoing_from_request(actor, &req)?;
         let fix_cl = req.fix_content_length.unwrap_or(true);
         if let Some(name) = &req.identity {
             self.load_identity(name)?; // fail early on unknown identities

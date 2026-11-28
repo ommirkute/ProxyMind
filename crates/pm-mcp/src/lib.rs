@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-pub use tools::{call as call_tool, tool_definitions};
+pub use tools::{call as call_tool, tool_definitions, tool_perm};
 
 /// Protocol versions this server can speak, newest first.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -92,6 +92,11 @@ impl McpServer {
                 "mimeType": "application/json",
             }]})),
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
+                Some("proxymind://roe")
+                    if self.service.require_actor(&self.actor, pm_service::access::Perm::RoeRead).is_err() =>
+                {
+                    Err((-32001, "access denied: your role may not read the rules of engagement".to_string()))
+                }
                 Some("proxymind://roe") => Ok(json!({ "contents": [{
                     "uri": "proxymind://roe",
                     "mimeType": "application/json",
@@ -324,6 +329,135 @@ mod tests {
             let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params});
             let r = s.handle(call).await.unwrap();
             assert_eq!(r["result"]["isError"], false, "{params}: {r}");
+        }
+    }
+
+    /// `protobuf_decode` decodes a gRPC frame without a schema, and hands the text to the agent as untrusted target
+    /// content; bad input is a tool error, not a crash.
+    #[tokio::test]
+    async fn protobuf_decode_returns_wrapped_text() {
+        let s = server();
+        let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"protobuf_decode","arguments":args}});
+        // One gRPC frame holding `1: 150`.
+        let r = s.handle(call(json!({"body_b64": "AAAAAAMIlgE=", "content_type": "application/grpc"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let out: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let text = out["text"].as_str().unwrap();
+        assert!(text.starts_with("<untrusted_target_content>\n@message\n1: 150"), "{text}");
+        assert_eq!(out["kind"], "grpc");
+        assert_eq!(out["exact"], true);
+        assert!(out["notice"].as_str().unwrap().contains("untrusted_target_content"));
+        // Not framed as gRPC, and no body at all.
+        let r = s.handle(call(json!({"body_b64": "AAAAAAMIlgE=", "content_type": "text/html"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        let r = s.handle(call(json!({"content_type": "application/grpc"}))).await.unwrap();
+        assert_eq!(r["result"]["isError"], true);
+    }
+
+    /// Agents list, read and run workflows, every send is gated like `replay_send`, a login body's password stays
+    /// hidden, and nothing offers them a way to create or change one.
+    #[tokio::test]
+    async fn workflows_are_listed_read_and_run_by_agents_inside_the_gate() {
+        use pm_service::{Condition, SendStep, Step, WorkflowInput};
+        let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://app.example.com/\"]\n").unwrap();
+        let svc = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(roe)).unwrap());
+        let person = Actor::parse("human:omkar").unwrap();
+        let login = "POST /login HTTP/1.1\r\nHost: app.example.com\r\nContent-Type: application/json\r\n\r\n{\"password\":\"hunter2\"}";
+        let send = |url: &str, raw: &str| {
+            Step::Send(SendStep { url: Some(url.into()), raw: Some(raw.into()), ..Default::default() })
+        };
+        svc.workflow_create(
+            &person,
+            WorkflowInput {
+                name: "login".into(),
+                description: "log in".into(),
+                steps: vec![
+                    send("https://app.example.com", login),
+                    Step::Assert(Condition { status: Some("200".into()), ..Default::default() }),
+                ],
+            },
+        )
+        .unwrap();
+        svc.workflow_create(
+            &person,
+            WorkflowInput {
+                name: "wander".into(),
+                steps: vec![send("https://evil.com", "GET / HTTP/1.1\r\nHost: evil.com\r\n\r\n")],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let s = McpServer::new(svc.clone(), Actor::parse("agent:test").unwrap());
+        let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let text = |r: Value| {
+            (r["result"]["isError"].as_bool().unwrap(), r["result"]["content"][0]["text"].as_str().unwrap().to_string())
+        };
+
+        let (err, list) = text(s.handle(call("workflow_list", json!({}))).await.unwrap());
+        assert!(!err, "{list}");
+        let list: Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(list[0]["name"], "login");
+        assert_eq!(list[0]["steps"], json!(["send", "assert"]));
+        assert_eq!(list[0]["trigger_enabled"], false);
+
+        let (err, got) = text(s.handle(call("workflow_get", json!({"workflow": "login"}))).await.unwrap());
+        assert!(!err && !got.contains("hunter2") && got.contains("[body hidden"), "{got}");
+        assert!(text(s.handle(call("workflow_get", json!({"workflow": "nope"}))).await.unwrap()).0);
+
+        // A POST needs a person's approval for an agent: the run pauses before anything is sent.
+        let (err, run) = text(s.handle(call("workflow_run", json!({"workflow": "login"}))).await.unwrap());
+        assert!(!err, "{run}");
+        let run: Value = serde_json::from_str(&run).unwrap();
+        assert_eq!(run["status"], "pending_approval", "{run}");
+        assert_eq!(run["sends"], 0);
+        let approval = run["pending"]["approval_id"].as_str().unwrap().to_string();
+        assert!(!run.to_string().contains("hunter2"));
+        let (_, st) = text(s.handle(call("approval_status", json!({"approval_id": approval}))).await.unwrap());
+        assert!(st.contains("pending"), "{st}");
+        // Out of scope is denied, and says so.
+        let (_, run) = text(s.handle(call("workflow_run", json!({"workflow": "wander"}))).await.unwrap());
+        let run: Value = serde_json::from_str(&run).unwrap();
+        assert_eq!(run["status"], "denied", "{run}");
+        assert!(run["reason"].as_str().unwrap().to_lowercase().contains("scope"));
+        assert_eq!(svc.counters().unwrap().exchanges, 0, "nothing reached a network");
+        // There is no tool to create or change one, and the arguments are checked.
+        for name in ["workflow_create", "workflow_update", "workflow_save", "workflow_trigger"] {
+            let (err, t) = text(s.handle(call(name, json!({"name": "x"}))).await.unwrap());
+            assert!(err && t.contains("unknown tool"), "{name}: {t}");
+        }
+        assert!(text(s.handle(call("workflow_run", json!({"workflow": "login", "steps": []}))).await.unwrap()).0);
+        // The agent's own runs only.
+        assert_eq!(svc.workflow_runs(&Actor::parse("agent:test").unwrap(), None, 10).unwrap().len(), 2);
+        assert!(svc.workflow_runs(&Actor::parse("agent:other").unwrap(), None, 10).unwrap().is_empty());
+    }
+
+    /// Agents learn integration names and kinds only, and no tool lets them configure, test or send.
+    #[tokio::test]
+    async fn agents_list_integration_names_but_cannot_use_them() {
+        use pm_service::{IntegrationInput, IntegrationKind};
+        let roe = Roe::parse("version: 1\nscope:\n  include: [\"https://app.example.com/\"]\n").unwrap();
+        let svc = Arc::new(Service::new(Store::open_in_memory().unwrap(), Policy::new(roe)).unwrap());
+        svc.integration_set(
+            &Actor::parse("human:omkar").unwrap(),
+            "hook",
+            IntegrationInput {
+                name: "hook".into(),
+                kind: IntegrationKind::Webhook,
+                base_url: "https://hooks.internal.example/secret-path".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let s = McpServer::new(svc, Actor::parse("agent:test").unwrap());
+        let call =
+            |name: &str| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}});
+        let r = s.handle(call("integration_list")).await.unwrap();
+        let t = r["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(r["result"]["isError"] == false && t.contains("\"hook\"") && t.contains("webhook"), "{t}");
+        assert!(!t.contains("hooks.internal") && !t.contains("secret-path"), "{t}");
+        for name in ["integration_set", "integration_test", "integration_send", "finding_issue"] {
+            let r = s.handle(call(name)).await.unwrap();
+            assert_eq!(r["result"]["isError"], true, "{name}");
         }
     }
 

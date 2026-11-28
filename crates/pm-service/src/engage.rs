@@ -2,6 +2,7 @@
 //! scripts in responses, what links to a page, the parameters a target
 //! uses, and CSRF / clickjacking proof-of-concept pages.
 
+use crate::access::Perm;
 use std::collections::{BTreeMap, HashMap};
 
 use pm_policy::Actor;
@@ -169,7 +170,7 @@ impl Service {
             let Some(ex) = self.store.read(|db| db.get_exchange(id))? else { continue };
             let response = ex.response.as_deref().and_then(|raw| {
                 let converted;
-                let raw = if pm_http::h2text::is_http2_response(raw) {
+                let raw = if pm_http::h3text::is_multiplexed_response(raw) {
                     converted = pm_http::h2text::to_http1_response(raw)?;
                     &converted[..]
                 } else {
@@ -187,6 +188,7 @@ impl Service {
 
     /// Comments left in HTML, JavaScript and CSS responses, de-duplicated.
     pub fn engage_comments(&self, actor: &Actor, f: &EngageFilter) -> Result<Vec<FoundComment>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let mut found: Vec<FoundComment> = Vec::new();
         let mut at: HashMap<(&'static str, String), usize> = HashMap::new();
         for s in self.recorded(actor, f)? {
@@ -215,6 +217,7 @@ impl Service {
 
     /// Scripts in recorded HTML pages: external (by URL), inline and handlers.
     pub fn engage_scripts(&self, actor: &Actor, f: &EngageFilter) -> Result<Vec<FoundScript>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let mut found: Vec<FoundScript> = Vec::new();
         let mut at: HashMap<String, usize> = HashMap::new();
         for s in self.recorded(actor, f)? {
@@ -261,6 +264,7 @@ impl Service {
     /// scripts of pages) mention, newest-first sources, new ones first.
     /// Nothing is sent.
     pub fn engage_js_endpoints(&self, actor: &Actor, f: &EngageFilter) -> Result<Vec<FoundEndpoint>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let model = self.model()?;
         let mut found: Vec<FoundEndpoint> = Vec::new();
         let mut at: HashMap<(String, Option<&'static str>), usize> = HashMap::new();
@@ -321,6 +325,7 @@ impl Service {
 
     /// Recorded responses that link to or mention the page of `exchange_id`.
     pub fn engage_references(&self, actor: &Actor, exchange_id: i64, f: &EngageFilter) -> Result<Vec<ExchangeSummary>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(exchange_id))?
@@ -345,6 +350,7 @@ impl Service {
     /// What a target is made of: URLs, methods, statuses, content types and
     /// every parameter seen (where, how often, example values).
     pub fn engage_analyze(&self, actor: &Actor, f: &EngageFilter) -> Result<TargetAnalysis> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let seen = self.recorded(actor, f)?;
         let mut urls = std::collections::BTreeSet::new();
         let mut dynamic = std::collections::BTreeSet::new();
@@ -389,6 +395,7 @@ impl Service {
     /// with what to try. One entry per method and path shape (ids folded),
     /// at most `limit`. Sends nothing.
     pub fn traffic_triage(&self, actor: &Actor, f: &EngageFilter, limit: usize) -> Result<Vec<TriageItem>> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let seen = self.recorded(actor, f)?;
         let mut by_shape: BTreeMap<String, TriageItem> = BTreeMap::new();
         for s in &seen {
@@ -454,6 +461,7 @@ impl Service {
     /// workflow state, with abuse cases to try, plus paths that look like
     /// steps of a flow (cart, checkout, transfer…). Sends nothing.
     pub fn engage_logic(&self, actor: &Actor, f: &EngageFilter) -> Result<LogicReport> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let a = self.engage_analyze(actor, f)?;
         let paths: Vec<&str> = a.dynamic_urls.iter().filter_map(|u| u.split_once(' ').map(|(_, rest)| rest)).collect();
         let flows = pm_tools::logic::flow_paths(
@@ -472,12 +480,13 @@ impl Service {
         technique: CsrfTechnique,
         auto_submit: bool,
     ) -> Result<String> {
+        self.require_actor(actor, Perm::HistoryRead)?;
         let ex = self
             .store
             .read(|db| db.get_exchange(exchange_id))?
             .ok_or_else(|| ServiceError::NotFound(format!("exchange {exchange_id}")))?;
         let s = &ex.summary;
-        if pm_http::h2text::is_http2_request(&ex.request) {
+        if pm_http::h3text::is_multiplexed_request(&ex.request) {
             return Err(ServiceError::Invalid(
                 "CSRF proofs are built from HTTP/1.1 requests; resend it as HTTP/1.1".into(),
             ));
@@ -498,7 +507,7 @@ impl Service {
         let resp =
             ex.response.ok_or_else(|| ServiceError::Invalid(format!("exchange {exchange_id} has no response")))?;
         let converted;
-        let raw = if pm_http::h2text::is_http2_response(&resp) {
+        let raw = if pm_http::h3text::is_multiplexed_response(&resp) {
             converted = pm_http::h2text::to_http1_response(&resp).unwrap_or_default();
             &converted[..]
         } else {

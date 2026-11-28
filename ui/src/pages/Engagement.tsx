@@ -61,7 +61,7 @@ export default function Engagement() {
           actions={
             <>
               <button className="btn" disabled={!text || action.busy} onClick={check} data-testid="roe-check">Validate</button>
-              <button className="btn primary" disabled={!changed || action.busy} onClick={save} data-testid="roe-save">Save</button>
+              <button data-write className="btn primary" disabled={!changed || action.busy} onClick={save} data-testid="roe-save">Save</button>
             </>
           }
         >

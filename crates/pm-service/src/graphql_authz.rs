@@ -4,6 +4,7 @@
 //! when an anonymous caller doesn't, is broken object-level authorization
 //! (the REST endpoint for the same object may well check ownership).
 
+use crate::access::Perm;
 use pm_policy::{Actor, Tier};
 use serde_json::{Value, json};
 
@@ -47,6 +48,7 @@ impl Service {
     /// on objects the app model knows owners for. Returns the leaks, each
     /// recorded as a suspected IDOR finding.
     pub async fn graphql_object_access(&self, actor: &Actor) -> Result<Vec<ScanLead>> {
+        self.require_actor(actor, Perm::SendTraffic)?;
         let Some(url) = self.graphql_endpoint()? else { return Ok(Vec::new()) };
         let ids = self.identity_list()?;
         let users: Vec<String> = ids.iter().map(|i| i.name.clone()).collect();
@@ -86,7 +88,7 @@ impl Service {
             let head: Vec<&str> =
                 head.lines().filter(|l| !l.to_ascii_lowercase().starts_with("content-length:")).collect();
             let raw = format!("{}\r\nContent-Length: {}\r\n\r\n{body}", head.join("\r\n"), body.len());
-            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+            let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), true)?;
             if !gated {
                 let extra = json!({ "graphql_object_access": url });
                 match self.gate_send_with(

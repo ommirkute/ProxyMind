@@ -79,7 +79,7 @@ impl Service {
             let with_path = |path: &str| pm_http::replace_request_target(&ex.request, path);
             // One gate decision per known path (its siblings are the same request elsewhere).
             let Some(first) = with_path(siblings[0]) else { continue };
-            let out = self.outgoing(endpoint.clone(), &first, true)?;
+            let out = self.outgoing(actor, endpoint.clone(), &first, true)?;
             let tier = if op.method == "GET" { Tier::ActiveSafe } else { Tier::ActiveIntrusive };
             let extra = json!({ "version_siblings": { "known": known, "siblings": siblings } });
             match self.gate_send_with(actor, "version_siblings", &out, None, true, None, Some(tier), extra)? {
@@ -89,7 +89,7 @@ impl Service {
             let send = |raw: Vec<u8>| {
                 let endpoint = endpoint.clone();
                 async move {
-                    let out = self.outgoing(endpoint, &raw, true)?;
+                    let out = self.outgoing(actor, endpoint, &raw, true)?;
                     Ok::<_, crate::ServiceError>(self.send_as(actor, &out, None, true, "discover").await?.0)
                 }
             };
@@ -105,7 +105,7 @@ impl Service {
                 }
                 // Discovery's 4xx answers stay out of the app model unless marked as hits.
                 if status >= 400 {
-                    let out = self.outgoing(endpoint.clone(), &raw, true)?;
+                    let out = self.outgoing(actor, endpoint.clone(), &raw, true)?;
                     self.send_as(actor, &out, None, true, "discover_hit").await?;
                 }
                 hits.push(format!("{} {s} → {status}", op.method));
@@ -135,7 +135,7 @@ impl Service {
             .filter(|o| !crate::auto::changes_state(&o.path))
             .filter(xml);
         for op in candidates.take(2) {
-            let out = self.outgoing(endpoint.clone(), op.example_request.as_bytes(), true)?;
+            let out = self.outgoing(actor, endpoint.clone(), op.example_request.as_bytes(), true)?;
             let extra = json!({ "openapi_xml_example": op.path });
             if let Authorization::Allowed { .. } = self.gate_send_with(
                 actor,
@@ -230,7 +230,7 @@ impl Service {
             let target = format!("{}?{}", &f.url[origin.len()..], query.join("&"));
             let host = url::Url::parse(origin).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
             let raw = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\n\r\n");
-            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), false)?;
+            let out = self.outgoing(actor, endpoint.clone(), raw.as_bytes(), false)?;
             if !gated {
                 let extra = json!({ "js_endpoints": origin });
                 match self.gate_send_with(

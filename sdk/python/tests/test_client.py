@@ -157,6 +157,16 @@ class ClientTest(unittest.TestCase):
         self.assertTrue(any(p["id"] == "unhide_fields" for p in self.pm.match_replace_presets()))
         self.pm.custom_check_save("id: products-ok\ntitle: Products answer\nseverity: info\nrun: per_request\nrequest:\n  add_query: {x: \"1\"}\nmatch:\n  status: [200]\n")
         self.assertEqual(len(self.pm.custom_scan(ex, checks=["products-ok"])["findings"]), 1)
+        # Workflows: save a two-step chain, run it, read the run back.
+        self.pm.workflow_create("py-products", [
+            {"type": "send", "url": self.url, "raw": "GET /api/products HTTP/1.1\r\nHost: shop\r\n\r\n"},
+            {"type": "assert", "status": "200", "message": "products answer"},
+        ], description="sdk test")
+        self.assertIn("py-products", [w["name"] for w in self.pm.workflows()])
+        run = self.pm.workflow_run("py-products")
+        self.assertEqual((run["status"], run["sends"]), ("ok", 1))
+        self.assertEqual(self.pm.workflow_run_get(run["id"])["steps"][1]["kind"], "assert")
+        self.assertEqual(self.pm.workflow_runs(workflow="py-products", limit=5)[0]["id"], run["id"])
 
     def test_pending_approval_flow(self):
         # Destructive payloads need a human's approval even for a human actor.

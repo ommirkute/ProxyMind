@@ -4,6 +4,7 @@
 //! tests in `tests/wire_contract.rs` pin them.
 
 use pm_proxy::{ListenerConfig, RewriteRule as Rule};
+use pm_replay::UpstreamRule;
 use pm_tools::codegen::Lang;
 use pm_tools::engage::CsrfTechnique;
 use schemars::JsonSchema;
@@ -215,6 +216,31 @@ pub struct PluginSet {
     pub enabled: bool,
 }
 
+/// What to do with a plugin hook (`PUT /plugins/{name}/hooks/{kind}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAction {
+    /// Turn the hook on (needs the plugin's permissions accepted and the plugin on).
+    Enable,
+    /// Turn the hook off.
+    Disable,
+    /// Stop sending messages to it for now.
+    Pause,
+    /// Start again after a pause (or after it paused itself) and forget its recent failures.
+    Resume,
+    /// Run earlier among the hooks of its kind.
+    Up,
+    /// Run later among the hooks of its kind.
+    Down,
+}
+
+/// Body of `PUT /plugins/{name}/hooks/{kind}`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHookSet {
+    pub action: HookAction,
+}
+
 /// Query of `GET /plugins/{name}/panels/{panel}`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct PanelQuery {
@@ -277,6 +303,15 @@ pub struct WsQuery {
     /// Only messages after this message id.
     pub after_id: Option<i64>,
     /// Most messages to return (default 200).
+    pub limit: Option<usize>,
+}
+
+/// Query of `GET /streams/{id}` and `GET /streams/{id}/chunks`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct StreamChunksQuery {
+    /// Only chunks after this chunk id (`next_after_id` of the previous page); default: from the first chunk.
+    pub after: Option<i64>,
+    /// Most chunks to return (default 100, at most 500).
     pub limit: Option<usize>,
 }
 
@@ -415,9 +450,208 @@ pub struct ListenersBody {
     pub listeners: Vec<ListenerConfig>,
 }
 
+/// Body of `POST /network/upstream/resolve`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamResolveRequest {
+    /// The target host: a name or an IP address.
+    pub host: String,
+    /// Try these rules instead of the saved ones (a draft that is not saved yet). Omit to use the saved rules.
+    pub rules: Option<Vec<UpstreamRule>>,
+}
+
+/// Answer of `POST /network/upstream/resolve`: how a host would be reached.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct UpstreamResolution {
+    /// The first rule that covers the host (0 is the first), or null when none does.
+    pub rule_index: Option<usize>,
+    /// The match pattern that covered it (null for a rule with an empty `match` or when no rule matched).
+    pub pattern: Option<String>,
+    /// Connected directly (the rule says `direct`, or no rule matched).
+    pub direct: bool,
+    /// What the rule says: `direct`, `http://host:port` or `socks5://host:port` (never a login).
+    pub via: String,
+    /// The rule lets the proxy resolve names.
+    pub remote_dns: bool,
+}
+
 /// Body of `PUT /match-replace`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct RulesBody {
     /// The complete list of match-and-replace rules.
     pub rules: Vec<Rule>,
+}
+
+/// Which message of an exchange `POST /tools/protobuf/decode` reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProtobufPart {
+    /// The request.
+    Request,
+    /// The response (the default).
+    #[default]
+    Response,
+}
+
+/// Body of `POST /tools/protobuf/decode` and arguments of the MCP tool `protobuf_decode`: decode a gRPC, gRPC-Web or
+/// Protobuf body into editable text, without a schema (nothing is sent). Give either `exchange_id` or a body.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProtobufDecodeRequest {
+    /// Decode the body of this recorded exchange (its content type says how the body is framed).
+    pub exchange_id: Option<i64>,
+    /// With `exchange_id`: the `request` or the `response` (default).
+    pub part: Option<ProtobufPart>,
+    /// The body bytes, base64 (what is on the wire after any HTTP content encoding). Instead of `exchange_id`.
+    pub body_b64: Option<String>,
+    /// The body as text, for a body that is text (such as grpc-web-text). Instead of `exchange_id` or `body_b64`.
+    pub body_text: Option<String>,
+    /// The `Content-Type` of the body, to tell how it is framed (`application/grpc`, `application/grpc-web-text`,
+    /// `application/x-protobuf`, …). Needed with `body_b64` or `body_text` unless `kind` is given.
+    pub content_type: Option<String>,
+    /// How the body is framed, instead of a content type: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    pub kind: Option<String>,
+    /// How single gRPC messages are compressed (the `grpc-encoding` header): `gzip`, `deflate` or `identity`.
+    pub grpc_encoding: Option<String>,
+    /// Add comments with other readings of numbers (zigzag, signed, float). Default true.
+    pub annotate: Option<bool>,
+}
+
+/// Response of `POST /tools/protobuf/decode`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProtobufDecoded {
+    /// How the body is framed: `grpc`, `grpc-web`, `grpc-web-text` or `protobuf`.
+    pub kind: String,
+    /// The editable text: one field per line, `@message` / `@trailers` lines between gRPC messages. For an agent it
+    /// is redacted and wrapped as untrusted target content.
+    pub text: String,
+    /// Encoding `text` again gives exactly the original bytes. When false, keep the original bytes unless the text
+    /// is edited (see `notes`).
+    pub exact: bool,
+    /// Messages decoded (gRPC trailers not counted).
+    pub messages: usize,
+    /// `grpc-status` from the trailers, when present.
+    pub grpc_status: Option<String>,
+    /// `grpc-message` from the trailers, when present.
+    pub grpc_message: Option<String>,
+    /// What could not be decoded or will not round-trip.
+    pub notes: Vec<String>,
+    /// Present for agents: how to treat `text`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// Body of `POST /tools/protobuf/encode`: text in the Protobuf text format back to body bytes (nothing is sent).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProtobufEncodeRequest {
+    /// The text, as returned by the decode route (with edits).
+    pub text: String,
+    /// How to frame the bytes: `protobuf` (default), `grpc`, `grpc-web` or `grpc-web-text`. gRPC kinds write every
+    /// message uncompressed.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Response of `POST /tools/protobuf/encode`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProtobufEncoded {
+    /// The framing used.
+    pub kind: String,
+    /// The body bytes, base64.
+    pub body_b64: String,
+    /// Length of the body in bytes.
+    pub length: usize,
+}
+
+/// Response of `GET /setup/mobile`: how a phone or tablet reaches ProxyMind's setup page.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct MobileSetup {
+    /// Whether this process runs the proxy at all (false with `--no-proxy`).
+    pub proxy_running: bool,
+    /// Whether some proxy listener can be reached from another device: it listens on a LAN address or on every
+    /// interface. False when the proxy listens only on loopback (a phone cannot reach that).
+    pub listener_reachable: bool,
+    /// Pages a phone on the same network can open without any setup, e.g. `http://192.168.1.5:8080/`, best guess
+    /// first. Empty when no listener is reachable or no LAN address was found.
+    pub urls: Vec<String>,
+    /// The proxy address (`host:port`) to enter as the phone's Wi-Fi proxy, one per URL.
+    pub proxy_addresses: Vec<String>,
+    /// The same page by its reserved name, which works once the phone's proxy is set: `http://proxymind.setup/`.
+    pub setup_host_url: String,
+    /// The proxy listeners considered (`ip:port`), including ones that cannot be reached from a phone.
+    pub listeners: Vec<String>,
+    /// SVG image (a QR code) of the first URL, with no scripts. Absent when there is no URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_svg: Option<String>,
+    /// The URL the QR code holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_url: Option<String>,
+    /// SHA-256 fingerprint of the CA certificate (`AB:CD:…`), to compare with what the phone shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_fingerprint: Option<String>,
+}
+
+/// A client address seen in history, possibly with a name.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeviceView {
+    /// The client's IP address (no port).
+    pub addr: String,
+    /// The name a person gave it, e.g. `Pixel 8`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Exchanges recorded from it.
+    pub exchanges: i64,
+    /// When the latest one was recorded (milliseconds since the epoch); absent if none is in history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<i64>,
+    /// Whether it is one of the devices history is limited to (`record_devices` of `/history/recording`).
+    pub record_only: bool,
+}
+
+/// Response of `GET /devices`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct DevicesView {
+    /// Devices seen in history (most recent first), then named or selected ones not seen yet.
+    pub devices: Vec<DeviceView>,
+}
+
+/// Body of `PUT /devices/{addr}`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceNameBody {
+    /// The name to show for this address (1 to 60 characters).
+    pub name: String,
+}
+
+/// Body of `POST /workflows/{id}/run`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowRunBody {
+    /// Run it on this recorded exchange. Leave it out only when the first step is a send with its own url and request.
+    pub exchange_id: Option<i64>,
+    /// Continue a run that waits for this approval (give the same `exchange_id` as before).
+    pub approval_id: Option<String>,
+}
+
+/// Body of `PUT /workflows/{id}/trigger`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowTriggerBody {
+    /// Run the workflow on each new proxied exchange that fits its first `match` step. Off by default; only a person
+    /// can turn it on (audited), and editing the workflow's steps turns it off again.
+    pub enabled: bool,
+    /// At most this many automatic runs per minute (1 to 60, default 6); more exchanges are skipped, not queued.
+    #[serde(default)]
+    pub max_per_minute: Option<u32>,
+}
+
+/// Query of `GET /workflows/runs`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkflowRunsQuery {
+    /// Only runs of this workflow (name or id).
+    pub workflow: Option<String>,
+    /// How many runs (default 50, at most 200).
+    pub limit: Option<usize>,
 }

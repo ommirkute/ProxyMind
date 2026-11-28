@@ -1,0 +1,26 @@
+[package]
+name = "pm-accounts"
+description = "Accounts of ProxyMind's own users: passwords, TOTP, sessions, invites, throttling (server.db)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
+parking_lot = "0.12.5"
+ring = "0.17.14"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+url = "2.5.9"
+
+[features]
+# The software authenticator (`webauthn::soft`) for tests of crates that sit on top of this one.
+test-support = []
+
+[lints]
+workspace = true

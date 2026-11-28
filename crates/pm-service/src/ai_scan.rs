@@ -9,6 +9,7 @@ use pm_policy::Actor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::access::{Denial, Perm};
 use crate::{Result, Service, ServiceError};
 
 /// The built-in system prompt. A user's `<home>/ai-scan-prompt.md` replaces it.
@@ -172,9 +173,7 @@ impl Service {
 
     /// Creates a scan (status `running`). People only: it starts an agent.
     pub fn ai_scan_create(&self, actor: &Actor, req: &AiScanRequest, model: &str) -> Result<AiScan> {
-        if actor.kind != pm_policy::ActorKind::Human {
-            return Err(ServiceError::Invalid("only people can start an AI scan".into()));
-        }
+        self.require_actor(actor, Perm::AiScanControl)?;
         let roe = self.policy.roe();
         let target = match req.target.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             Some(t) => t.to_string(),
@@ -216,6 +215,8 @@ impl Service {
             row.insert(k.into(), v);
         }
         let id = self.store.write(|db| db.insert_row("ai_scans", &row))?;
+        // The scan's agent acts with what the person who started it has, never more than a tester.
+        self.inherit_principal(actor, &scan_actor(id));
         self.ai_scan_event(id);
         self.audit(
             &actor.id(),
@@ -335,6 +336,7 @@ impl Service {
 
     /// Asks a running scan to stop after its current step.
     pub fn ai_scan_stop(&self, actor: &Actor, id: i64) -> Result<AiScan> {
+        self.require_actor(actor, Perm::AiScanControl)?;
         let sc = self.ai_scan_get(id)?;
         if sc.status == "running" {
             self.ai_update(id, vec![("status", json!("stopping"))])?;
@@ -347,9 +349,11 @@ impl Service {
     /// A message from a person to a running scan ("focus on checkout", "why
     /// did you try that?"). It reaches the agent with its next step.
     pub fn ai_scan_message(&self, actor: &Actor, id: i64, text: &str) -> Result<AiScan> {
-        if actor.kind != pm_policy::ActorKind::Human {
-            return Err(ServiceError::Invalid("only people send messages to an AI scan".into()));
-        }
+        self.require_actor_with(
+            actor,
+            Perm::AiScanControl,
+            Denial::message("only people send messages to an AI scan"),
+        )?;
         let text = text.trim();
         if text.is_empty() {
             return Err(ServiceError::Invalid("the message is empty".into()));

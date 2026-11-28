@@ -103,6 +103,8 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
     pm_service::watch_roe(service.clone());
     // Scheduled scans start while the app is open.
     tauri::async_runtime::spawn(service.clone().run_scheduler());
+    tauri::async_runtime::spawn(service.clone().run_workflow_triggers());
+    tauri::async_runtime::spawn(service.clone().run_integration_notifier());
     let token = pm_api::load_or_create_token(&home.join("api-token"))?;
 
     // The proxy, as in `proxymind ui`; the UI still works if 8080 is taken.
@@ -122,16 +124,26 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
             service.attach_intercept(queue.clone());
             let rewriter = Arc::new(pm_proxy::Rewriter::new());
             service.attach_rewriter(rewriter.clone())?;
+            // Plugin traffic hooks (ADR-0020), as in `proxymind proxy`: the service turns them on and off.
+            let plugin_hooks = Arc::new(pm_service::pm_plugin::hooks::HookEngine::new());
+            service.attach_hooks(plugin_hooks.clone());
             let hooks = pm_proxy::Hooks {
                 rewrite: Some(rewriter.clone()),
                 intercept: Some(queue),
                 network: Some(service.network().clone()),
                 http2: true,
+                plugin_hooks: Some(plugin_hooks),
             };
             let p = Proxy::with_hooks(ca.clone(), recorder, false, hooks)?;
             let extra = pm_proxy::Listeners::new(p.clone(), Some(proxy_addr));
             service.attach_listeners(extra.clone())?;
-            pm_service::watch_project(project, Some(rewriter), service.network().clone(), Some(extra))?;
+            pm_service::watch_project(
+                project,
+                Some(rewriter),
+                service.network().clone(),
+                Some(extra),
+                service.trust_gate(),
+            )?;
             tokio::spawn(p.run(l));
             // The built-in browser (Proxy → Open browser) uses this proxy.
             service.attach_proxy_info(pm_service::ProxyInfo {
@@ -143,7 +155,7 @@ async fn start(project: &Path, home: &Path) -> Result<Started> {
         }
         Err(e) => {
             eprintln!("proxy not started on {proxy_addr}: {e}");
-            pm_service::watch_project(project, None, service.network().clone(), None)?;
+            pm_service::watch_project(project, None, service.network().clone(), None, service.trust_gate())?;
             None
         }
     };
@@ -270,6 +282,9 @@ fn create_project(app: tauri::AppHandle, path: String, name: String, scope: Vec<
         let text = new_roe(&name, &scope)?;
         let mut store = Store::open(&path)?;
         store.set_setting(pm_service::ROE_SETTING, &text)?;
+        // A project made here is trusted here (safe mode is for files that came from elsewhere): record it in the
+        // home folder now, because the app restarts on it as a new process.
+        pm_service::trust_gate_for(&mut store, Some(home()))?;
         drop(store);
         switch(&app, path)
     };

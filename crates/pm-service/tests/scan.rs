@@ -47,6 +47,7 @@ fn plugins_add_issues_to_the_passive_scan() {
     let jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhbGljZSJ9.";
     let id = store
         .insert_exchange(&NewExchange {
+            client_addr: None,
             ts_ms: 0,
             duration_ms: None,
             source: "proxy".into(),
@@ -65,6 +66,7 @@ fn plugins_add_issues_to_the_passive_scan() {
             error: None,
             identity: None,
             hypothesis_id: None,
+            ..Default::default()
         })
         .unwrap();
     let roe = "version: 1\nscope:\n  include: [\"https://api.example/\"]\n";

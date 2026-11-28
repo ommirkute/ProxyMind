@@ -24,6 +24,8 @@ struct RawRoe {
     tiers: RawTiers,
     #[serde(default)]
     data: DataRules,
+    #[serde(default)]
+    approvals: ApprovalRules,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -84,6 +86,8 @@ struct RawTiers {
     human: Option<TierPolicy>,
     agent: Option<TierPolicy>,
     plugin: Option<TierPolicy>,
+    /// `proxymind ci` runs (actor kind `ci`).
+    ci: Option<TierPolicy>,
 }
 
 /// What an actor kind may do in each tier. Missing entries use the defaults
@@ -125,6 +129,20 @@ fn yes() -> bool {
     true
 }
 
+/// Who may decide pending approvals on a project server (ADR-0022 step 6). Both options only matter when several
+/// people share a project (server mode); a single-user install has one person, who approves everything.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalRules {
+    /// Four eyes: an owner cannot decide an approval that was asked by themselves or by their own tokens; a
+    /// different owner must.
+    #[serde(default)]
+    pub require_other_person: bool,
+    /// A tester may also decide approvals asked by other testers' tokens (by default: only by their own tokens).
+    #[serde(default)]
+    pub testers_decide_team: bool,
+}
+
 impl Default for DataRules {
     fn default() -> Self {
         Self { redact_before_llm: true, allow_cloud_models: true }
@@ -142,6 +160,7 @@ pub struct Roe {
     pub windows: Vec<TimeWindow>,
     pub limits: Limits,
     pub data: DataRules,
+    pub approvals: ApprovalRules,
     tiers: RawTiers,
 }
 
@@ -200,6 +219,7 @@ impl Roe {
             windows,
             limits: raw.limits,
             data: raw.data,
+            approvals: raw.approvals,
             tiers: raw.tiers,
         })
     }
@@ -210,12 +230,13 @@ impl Roe {
             ActorKind::Human => self.tiers.human,
             ActorKind::Agent => self.tiers.agent,
             ActorKind::Plugin | ActorKind::Scanner => self.tiers.plugin,
+            ActorKind::Ci => self.tiers.ci,
         };
         configured.and_then(|p| p.get(tier)).unwrap_or_else(|| default_decision(actor, tier))
     }
 }
 
-/// Defaults from RFC 0001. Unknown or automated actors get the strictest set.
+/// Defaults from RFC 0001. Unknown or automated actors get the strictest set (`ci` is described below).
 pub fn default_decision(actor: ActorKind, tier: Tier) -> Decision {
     use Decision::*;
     match (actor, tier) {
@@ -225,6 +246,11 @@ pub fn default_decision(actor: ActorKind, tier: Tier) -> Decision {
         (ActorKind::Agent, Tier::ActiveSafe) => Allow,
         (ActorKind::Agent, Tier::ActiveIntrusive) => Approve,
         (ActorKind::Agent, Tier::Destructive) => Deny,
+        // A pipeline cannot be asked: reads and safe requests run, anything riskier is skipped unless the ROE's
+        // `tiers.ci` allows it (the default for destructive is a refusal).
+        (ActorKind::Ci, Tier::ActiveSafe) => Allow,
+        (ActorKind::Ci, Tier::ActiveIntrusive) => Approve,
+        (ActorKind::Ci, Tier::Destructive) => Deny,
         (ActorKind::Plugin | ActorKind::Scanner, Tier::ActiveSafe) => Approve,
         (ActorKind::Plugin | ActorKind::Scanner, _) => Deny,
     }

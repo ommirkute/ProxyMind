@@ -16,6 +16,8 @@ import Approvals from "./pages/Approvals";
 import Assistant from "./pages/Assistant";
 import Authz from "./pages/Authz";
 import Model from "./pages/Model";
+import Integrations from "./pages/Integrations";
+import Trust from "./pages/Trust";
 import Network from "./pages/Network";
 import About, { type UpdateStatus } from "./pages/About";
 import Findings from "./pages/Findings";
@@ -35,6 +37,10 @@ import Organizer from "./pages/Organizer";
 import CustomChecks from "./pages/CustomChecks";
 import AiScan from "./pages/AiScan";
 import Evidence from "./pages/Evidence";
+import Streams from "./pages/Streams";
+import Workflows from "./pages/Workflows";
+import Account, { Admin } from "./pages/Account";
+import { useAuth } from "./authparts";
 
 interface Group {
   id: string;
@@ -67,33 +73,66 @@ const GROUPS: Group[] = [
     { id: "intercept", label: "Intercept" },
     { id: "history", label: "HTTP history" },
     { id: "wshistory", label: "WebSockets history" },
+    { id: "streams", label: "Streams" },
     { id: "rules", label: "Match & replace" },
     { id: "setup", label: "Proxy setup" },
   ] },
   { id: "aiscan", label: "AI scan", icon: "scan", section: "Testing", pages: [{ id: "aiscan", label: "AI scan" }] },
   { id: "replay", label: "Replay", icon: "replay", section: "Testing", pages: [{ id: "replay", label: "Replay" }] },
   { id: "fuzzer", label: "Fuzzer", icon: "fuzzer", section: "Testing", pages: [{ id: "fuzzer", label: "Fuzzer" }] },
+  { id: "workflows", label: "Workflows", icon: "activity", section: "Testing", pages: [{ id: "workflows", label: "Workflows" }] },
   { id: "authz", label: "Authz", icon: "authz", section: "Testing", pages: [{ id: "authz", label: "Identities & Authz" }] },
   { id: "collaborator", label: "Collaborator", icon: "collab", section: "Testing", pages: [{ id: "collaborator", label: "Collaborator" }] },
   { id: "organizer", label: "Organizer", icon: "list", section: "Testing", pages: [{ id: "organizer", label: "Organizer" }] },
   { id: "tools", label: "Tools", icon: "tools", section: "Utilities", pages: [{ id: "tools", label: "Codec, Diff, Token analyzer" }, { id: "checks", label: "Custom checks" }, { id: "plugins", label: "Plugins" }, { id: "library", label: "Issue library" }] },
   { id: "assistant", label: "Assistant", icon: "assistant", section: "Utilities", pages: [{ id: "assistant", label: "Assistant" }] },
-  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "about", label: "About & updates" }] },
+  { id: "settings", label: "Settings", icon: "settings", section: "Utilities", pages: [{ id: "sessions", label: "Sessions" }, { id: "network", label: "Network" }, { id: "integrations", label: "Integrations" }, { id: "trust", label: "Project trust" }, { id: "about", label: "About & updates" }] },
 ];
 
-const PAGES = GROUPS.flatMap((g) => g.pages);
-const groupOf = (p: Page) => GROUPS.find((g) => g.pages.some((x) => x.id === p)) ?? GROUPS[2];
+/** Server mode only: who I am, my sessions, and (for administrators and project owners) users and invites. */
+function accountGroup(admin: boolean): Group {
+  return {
+    id: "account",
+    label: "Account",
+    icon: "authz",
+    section: "Account",
+    pages: [{ id: "account", label: "My account" }, ...(admin ? [{ id: "admin" as Page, label: "Users & invites" }] : [])],
+  };
+}
+
+/** What a viewer's role reaches (docs/access.md): reading. The server is the authority; this only avoids dead pages. */
+const VIEWER_PAGES = new Set<Page>([
+  "overview", "search", "findings", "evidence", "issues", "scans", "sitemap", "model", "engagement", "history",
+  "wshistory", "streams", "library", "about", "tools", "account",
+]);
+
+const groupOf = (groups: Group[], p: Page) => groups.find((g) => g.pages.some((x) => x.id === p)) ?? GROUPS[2];
 /** The sub-tab last opened in each group, so a top tab returns to it. */
 const lastIn: Record<string, Page> = {};
 
-function parseHash(): { page: Page; arg?: string } {
+function parseHash(groups: Group[]): { page: Page; arg?: string } {
   const [p, arg] = window.location.hash.replace(/^#\/?/, "").split("/");
-  const page = (PAGES.find((x) => x.id === p)?.id ?? "history") as Page;
+  const page = (groups.flatMap((g) => g.pages).find((x) => x.id === p)?.id ?? "history") as Page;
   return { page, arg: arg ? decodeURIComponent(arg) : undefined };
 }
 
 export default function App() {
-  const [route, setRoute] = useState(parseHash);
+  const auth = useAuth();
+  const admin = !!auth && (auth.me.user.server_admin || auth.me.role === "owner");
+  const viewer = auth?.me.role === "viewer";
+  const groups = useMemo(() => {
+    const all = auth ? [...GROUPS, accountGroup(admin)] : GROUPS;
+    if (!viewer) return all;
+    return all
+      .map((g) => ({ ...g, pages: g.pages.filter((p) => VIEWER_PAGES.has(p.id)) }))
+      .filter((g) => g.pages.length > 0);
+  }, [!!auth, admin, viewer]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Controls that change the project carry `data-write`; a viewer does not see them (the server refuses them anyway).
+  useEffect(() => {
+    document.body.classList.toggle("viewer", viewer);
+    return () => document.body.classList.remove("viewer");
+  }, [viewer]);
+  const [route, setRoute] = useState(() => parseHash(groups));
   const [status, setStatus] = useState<Status | null>(null);
   const [counters, setCounters] = useState<Counters | null>(null);
   const [live, setLive] = useState(false);
@@ -142,10 +181,10 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    const onHash = () => setRoute(parseHash());
+    const onHash = () => setRoute(parseHash(groups));
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+  }, [groups]);
 
   useEffect(() => {
     const load = () =>
@@ -162,6 +201,13 @@ export default function App() {
     window.addEventListener("pm-status-changed", load);
     return () => window.removeEventListener("pm-status-changed", load);
   }, []);
+
+  // While in safe mode, a trust given elsewhere (the CLI, another window) shows up as an audit record: look again.
+  const safe = status?.safe_mode ?? false;
+  const audits = counters?.audit_records;
+  useEffect(() => {
+    if (safe) window.dispatchEvent(new Event("pm-status-changed"));
+  }, [safe, audits]);
 
   // Live updates: one event stream feeds the nav counters here and the pages' refetches (see live.ts).
   const signedIn = status != null;
@@ -223,11 +269,15 @@ export default function App() {
     engagement: Engagement,
     setup: Setup,
     wshistory: WsHistory,
+    streams: Streams,
+    workflows: Workflows,
     sessions: Sessions,
     findings: Findings,
     evidence: Evidence,
     audit: Audit,
     network: Network,
+    integrations: Integrations,
+    trust: Trust,
     collaborator: Collaborator,
     engage: Engage,
     search: Search,
@@ -235,15 +285,17 @@ export default function App() {
     checks: CustomChecks,
     about: About,
     aiscan: AiScan,
+    account: Account,
+    admin: Admin,
   }[route.page];
 
-  const group = groupOf(route.page);
+  const group = groupOf(groups, route.page);
   lastIn[group.id] = route.page;
   const badge = (id: Page) =>
     id === "intercept" ? counters?.intercepted ?? 0 : id === "approvals" ? counters?.pending_approvals ?? 0 : 0;
   const groupBadge = (g: Group) => g.pages.reduce((n, p) => n + badge(p.id), 0);
 
-  const sections = [...new Set(GROUPS.map((g) => g.section))];
+  const sections = [...new Set(groups.map((g) => g.section))];
   const nextTheme = { system: "light", light: "dark", dark: "system" } as const;
   const scope = status?.in_scope.join(", ") ?? "";
 
@@ -259,7 +311,7 @@ export default function App() {
             {sections.map((sec) => (
               <div key={sec} style={{ display: "contents" }}>
                 <div className="nav-section">{sec}</div>
-                {GROUPS.filter((g) => g.section === sec).map((g) => (
+                {groups.filter((g) => g.section === sec).map((g) => (
                   <button
                     key={g.id}
                     className={`maintab ${group.id === g.id ? "active" : ""}`}
@@ -384,6 +436,18 @@ export default function App() {
             </div>
           </header>
           <main className="main">
+            {status?.safe_mode && (
+              <div className="safe-banner" role="alert" data-testid="safe-banner">
+                <Icon name="alert" size={15} />
+                <span>
+                  <b>Safe mode.</b> This project did not come from this installation, or its settings changed since you trusted
+                  it. Its listeners, schedules, triggers, rewrite and upstream rules are off, and agents cannot send.
+                </span>
+                <button className="btn sm primary" data-testid="safe-banner-review" onClick={() => nav.go("trust")}>
+                  Review and trust this project
+                </button>
+              </div>
+            )}
             <PageBoundary resetKey={route.page}>
               <PageView />
             </PageBoundary>
@@ -397,7 +461,7 @@ export default function App() {
           <CommandPalette
             open={palette}
             onClose={() => setPalette(false)}
-            items={GROUPS.flatMap((g) =>
+            items={groups.flatMap((g) =>
               g.pages.map((p) => ({
                 id: p.id,
                 label: p.label,

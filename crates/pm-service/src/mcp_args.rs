@@ -66,6 +66,22 @@ pub struct WsMessagesArgs {
     pub max_chars: Option<usize>,
 }
 
+/// `stream_get`
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamGetArgs {
+    /// Id of the recorded stream (see stream_list).
+    pub id: i64,
+    /// Continue after this chunk id (next_after_id of the previous page).
+    pub after: Option<i64>,
+    /// Most chunks to return (default 50, max 200).
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<usize>,
+    /// Longest text preview per chunk (default 2000, from 100 to 20000).
+    #[schemars(range(min = 100, max = 20000))]
+    pub max_chars: Option<usize>,
+}
+
 /// `curl_parse`
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -319,4 +335,12 @@ pub struct FindingListArgs {
 pub struct ApprovalStatusArgs {
     /// Id of the approval (approval_id of a pending_approval result).
     pub approval_id: String,
+}
+
+/// `workflow_get`
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRefArgs {
+    /// The workflow's name or id (from workflow_list).
+    pub workflow: String,
 }

@@ -19,11 +19,12 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use pm_policy::{Actor, ActorKind};
+use pm_policy::Actor;
 use pm_replay::net::host_matches;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::access::Perm;
 use crate::replay::{Outgoing, Sent, parse_url_endpoint};
 use crate::{Authorization, Result, Service, ServiceError};
 
@@ -147,7 +148,7 @@ pub struct SessionRule {
     pub name: String,
     pub enabled: bool,
     /// Tools (exchange sources) covered: replay, fuzzer, scan, crawl,
-    /// discover, token_analyzer, proof, authz, graphql, openapi. Empty: all.
+    /// discover, token_analyzer, proof, authz, graphql, openapi, workflow. Empty: all.
     /// Older names (repeater, intruder, sequencer) still match.
     pub tools: Vec<String>,
     /// Host patterns (`api.example.com`, `*.example.com`). Empty: all.
@@ -383,7 +384,7 @@ pub fn substitute(text: &str, vars: &HashMap<String, String>) -> String {
 /// Head lines (without line endings), the line ending, and the body.
 type Split<'a> = (Vec<Vec<u8>>, &'static [u8], &'a [u8]);
 
-fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
+pub(crate) fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
     let end = pm_http::find_head_end(raw).ok().flatten()?;
     let (head, body) = raw.split_at(end);
     let eol: &'static [u8] = if head.windows(2).any(|w| w == b"\r\n") { b"\r\n" } else { b"\n" };
@@ -395,7 +396,7 @@ fn split_lines(raw: &[u8]) -> Option<Split<'_>> {
     Some((lines, eol, body))
 }
 
-fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
+pub(crate) fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + lines.iter().map(|l| l.len() + 2).sum::<usize>() + 2);
     for l in lines {
         out.extend_from_slice(l);
@@ -406,7 +407,7 @@ fn join_lines(lines: &[Vec<u8>], eol: &[u8], body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn header_name(line: &[u8]) -> Option<&[u8]> {
+pub(crate) fn header_name(line: &[u8]) -> Option<&[u8]> {
     let c = line.iter().position(|&b| b == b':')?;
     Some(line[..c].trim_ascii())
 }
@@ -471,7 +472,7 @@ pub fn set_cookies(raw: &[u8], cookies: &[(String, String)]) -> Vec<u8> {
     join_lines(&lines, eol, body)
 }
 
-fn form_encode(v: &str) -> String {
+pub(crate) fn form_encode(v: &str) -> String {
     url::form_urlencoded::byte_serialize(v.as_bytes()).collect()
 }
 
@@ -588,6 +589,10 @@ pub fn is_invalid(v: &Validity, response: &[u8]) -> bool {
 
 // ---- service --------------------------------------------------------------
 
+pub(crate) fn load_config(store: &pm_store::Store) -> Result<SessionConfig> {
+    load(store)
+}
+
 fn load(store: &pm_store::Store) -> Result<SessionConfig> {
     match store.get_setting(SESSION_SETTING)? {
         Some(t) => serde_json::from_str(&t)
@@ -596,42 +601,35 @@ fn load(store: &pm_store::Store) -> Result<SessionConfig> {
     }
 }
 
-fn humans_only(actor: &Actor) -> Result<()> {
-    if actor.kind != ActorKind::Human {
-        return Err(ServiceError::Invalid(
-            "only humans can see or change session handling (macros hold passwords)".into(),
-        ));
-    }
-    Ok(())
-}
-
 impl Service {
     pub fn session_get(&self, actor: &Actor) -> Result<SessionView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         let config = self.store.read(load)?;
         Ok(SessionView { config, variables: self.session.lock().vars.clone() })
     }
 
     pub fn session_set(&self, actor: &Actor, mut cfg: SessionConfig) -> Result<SessionView> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         cfg.validate().map_err(ServiceError::Invalid)?;
         cfg.saved_by = actor.id();
         let text = serde_json::to_string(&cfg).map_err(|e| ServiceError::Invalid(e.to_string()))?;
+        let was_trusted = self.trust_before();
         self.store.write(|db| db.set_setting(SESSION_SETTING, &text))?;
         self.audit(&actor.id(), "session_handling", cfg.for_audit(), "allow")?;
+        self.trust_after(actor, was_trusted);
         self.session_get(actor)
     }
 
     /// The cookie jar, brought up to date with history.
     pub fn session_jar(&self, actor: &Actor) -> Result<Vec<JarCookie>> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         self.refresh_jar()?;
         Ok(self.session.lock().jar.cookies.clone())
     }
 
     /// Empties the jar; it fills again from responses recorded from now on.
     pub fn session_jar_clear(&self, actor: &Actor) -> Result<()> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         self.refresh_jar()?;
         self.session.lock().jar.cookies.clear();
         self.audit(&actor.id(), "session_jar_clear", json!({}), "allow")?;
@@ -640,7 +638,7 @@ impl Service {
 
     /// Runs a macro now (to test it). Humans only.
     pub async fn session_macro_run(&self, actor: &Actor, name: &str) -> Result<MacroRun> {
-        humans_only(actor)?;
+        self.require_actor(actor, Perm::SessionHandling)?;
         let cfg = self.store.read(load)?;
         let m = cfg
             .macros
@@ -731,7 +729,7 @@ impl Service {
             let vars = self.session.lock().vars.clone();
             let endpoint = parse_url_endpoint(&step.url)?;
             let raw = substitute(&step.request, &vars);
-            let out = self.outgoing(endpoint.clone(), raw.as_bytes(), true)?;
+            let out = self.outgoing(&owner, endpoint.clone(), raw.as_bytes(), true)?;
             match self.gate_send(&owner, "session_macro", &out, None, true, None)? {
                 Authorization::Allowed { .. } => {}
                 other => {
@@ -752,7 +750,7 @@ impl Service {
                 cookies.retain(|(n, _)| n != &k);
                 cookies.push((k, v));
             }
-            let wire = set_cookies(&self.redactor.unredact(&out.raw), &cookies);
+            let wire = set_cookies(&self.redactor_of(&owner).unredact(&out.raw), &cookies);
             let sent = self.transmit(&owner, &out, wire, None, true, "macro").await?;
             run.exchange_ids.push(sent.exchange_id);
             let resp = sent.response.ok_or_else(|| {
@@ -809,7 +807,9 @@ impl Service {
         fix_cl: bool,
         source: &str,
     ) -> Result<Option<Sent>> {
-        if EXEMPT.contains(&source) {
+        // A CI run ignores the project's session rules and macros: a macro is gated as the person who saved it.
+        // Safe mode ignores them too: they send credentials on their own, on the file's say-so.
+        if EXEMPT.contains(&source) || self.run_guard.lock().isolated || self.safe_mode() {
             return Ok(None);
         }
         let cfg = self.store.read(load)?;
@@ -820,7 +820,7 @@ impl Service {
         if !plan.always.is_empty() {
             self.run_macros(&cfg, &plan.always, None, actor).await;
         }
-        let base = self.redactor.unredact(&out.raw);
+        let base = self.redactor_of(actor).unredact(&out.raw);
         let prepare = |wire: Vec<u8>| if fix_cl { pm_http::fix_content_length(&wire) } else { wire };
         let started = Instant::now();
         let wire = prepare(self.session_apply(&plan, &base, &out.endpoint.host)?);

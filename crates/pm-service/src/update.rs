@@ -5,6 +5,7 @@
 //! sent; the only request is a GET of the public releases list, through the
 //! user's upstream proxy settings. Every check is audited.
 
+use crate::access::Perm;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,7 @@ impl Service {
 
     /// Turns the daily check on or off.
     pub fn update_set(&self, actor: &pm_policy::Actor, enabled: bool) -> Result<UpdateStatus> {
+        self.require_actor(actor, Perm::UpdateSettings)?;
         let mut s = self.update_state()?;
         s.enabled = enabled;
         self.save_update_state(&s)?;
@@ -111,6 +113,7 @@ impl Service {
     /// Checks for a newer release. `force` asks now; otherwise it asks only
     /// when the daily check is on and the last answer is older than a day.
     pub async fn update_check(&self, actor: &pm_policy::Actor, force: bool) -> Result<UpdateStatus> {
+        self.require_actor(actor, Perm::UpdateSettings)?;
         let mut s = self.update_state()?;
         let fresh = s.checked_at.is_some_and(|t| now().saturating_sub(t) < MAX_AGE.as_secs());
         if !force && (!s.enabled || fresh) {

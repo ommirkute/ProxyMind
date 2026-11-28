@@ -12,14 +12,17 @@ Short records of decisions that are hard to reverse. Each one says what was deci
 | [0006](0006-ui-tauri.md) | Tauri 2 + React + TypeScript for the UI | Amended by 0008 |
 | [0007](0007-license.md) | AGPL-3.0 core, Apache-2.0 SDKs | Accepted |
 | [0008](0008-web-ui-first.md) | Web UI served by the binary first; Tauri shell later | Accepted |
-| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Accepted |
+| [0009](0009-http2-as-text.md) | HTTP/2 as text, sent with the h2 crate | Extended by 0021 |
 | [0010](0010-assistant-is-an-agent.md) | The built-in assistant is an agent like any other | Accepted |
 | [0011](0011-xss-proofs-offline-browser.md) | XSS proofs render the recorded response in an offline headless browser | Accepted |
 | [0012](0012-desktop-shell.md) | The desktop app runs the local stack in-process and shows the web UI | Accepted |
 | [0013](0013-sealed-projects.md) | Projects are encrypted at rest by sealing, before transparent encryption | Accepted |
 | [0014](0014-plugins.md) | Plugins act through the gate or analyse recordings, and are installed per user | Extended by 0015 |
 | [0015](0015-active-plugins-and-sandbox.md) | Active-check plugins propose requests that ProxyMind sends; plugin processes run sandboxed | Extended by 0016 |
-| [0016](0016-signed-plugins-and-panels.md) | Signed plugins, install-time integrity checks, and data-only plugin panels; no WASM runtime yet | Accepted |
+| [0016](0016-signed-plugins-and-panels.md) | Signed plugins, install-time integrity checks, and data-only plugin panels; no WASM runtime yet | Extended by 0020 |
 | [0017](0017-store-concurrency.md) | Store concurrency: a read pool and one writer | Accepted |
 | [0018](0018-event-bus.md) | Typed events from the service layer | Accepted |
 | [0019](0019-typed-api-contracts.md) | One source of truth for API contracts | Accepted |
+| [0020](0020-traffic-hooks-and-plugin-api-v2.md) | Traffic hooks run in long-lived sandboxed plugin processes; plugin API v2 declares permissions | Accepted |
+| [0021](0021-http3.md) | HTTP/3 as text, sent over QUIC with quinn and h3; Alt-Svc handling; no client QUIC listener yet | Accepted |
+| [0022](0022-identity-and-access.md) | Identity and access: local accounts first and OIDC second, server-side sessions, scoped tokens, roles enforced in `pm-service`, TLS for the project server | Accepted |

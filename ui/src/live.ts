@@ -19,7 +19,10 @@ export type LiveTopic =
   | "scans"
   | "proofs"
   | "fuzzer"
-  | "ai_scan";
+  | "ai_scan"
+  | "plugins"
+  | "streams"
+  | "workflows";
 
 const TOPICS: LiveTopic[] = [
   "exchanges",
@@ -33,6 +36,9 @@ const TOPICS: LiveTopic[] = [
   "proofs",
   "fuzzer",
   "ai_scan",
+  "plugins",
+  "streams",
+  "workflows",
 ];
 
 /** What a subscriber gets: a typed event with its parsed JSON, or `resync` (refetch everything you show). */
@@ -63,7 +69,7 @@ function dispatch(e: LiveEvent) {
  * counts as a resync, since events published while it was down are not replayed.
  */
 export function connectLive(onCounters: (c: Counters) => void, onState: (up: boolean) => void): () => void {
-  const es = new EventSource(`/api/v1/events?topics=counters,${TOPICS.join(",")}`);
+  const es = new EventSource("/api/v1/events?topics=counters,all");
   let opened = false;
   es.addEventListener("counters", (e) => onCounters(JSON.parse((e as MessageEvent).data)));
   for (const topic of TOPICS) {
@@ -89,7 +95,13 @@ export function connectLive(onCounters: (c: Counters) => void, onState: (up: boo
     if (opened) dispatch({ topic: "resync", data: {} });
     opened = true;
   };
-  es.onerror = () => onState(false);
+  // Server mode: the server sends `role` when this account's role changed and closes the stream when the session
+  // or membership ended; the app then reads who it is again (a lost session shows the sign-in).
+  es.addEventListener("role", () => window.dispatchEvent(new Event("pm-role-changed")));
+  es.onerror = () => {
+    onState(false);
+    window.dispatchEvent(new Event("pm-role-changed"));
+  };
   return () => es.close();
 }
 

@@ -68,3 +68,12 @@ data:
   # project data, with secrets replaced as above. Set false when the data
   # must stay on this machine: only local models (e.g. Ollama) are used then.
   allow_cloud_models: true
+
+approvals:
+  # Only matters on a project server with several people (ADR-0022).
+  # true = an owner cannot decide an approval that they, or their own tokens,
+  # asked for: a different owner must (four eyes).
+  require_other_person: false
+  # true = a tester may also decide approvals asked by other testers' tokens,
+  # not only by their own.
+  testers_decide_team: false

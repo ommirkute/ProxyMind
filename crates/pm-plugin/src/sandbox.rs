@@ -100,6 +100,16 @@ pub fn status() -> Status {
 /// The command that runs `command` (program and arguments) for a plugin
 /// in `dir`, inside the sandbox. A program starting with `./` is in `dir`.
 pub fn command(dir: &Path, command: &[String], timeout: Duration) -> Result<Command, String> {
+    command_with(dir, command, timeout.as_secs() + 5, 4 << 30)
+}
+
+/// Like [`command`] for a long-lived hook worker: the same sandbox with a CPU allowance of an hour (the worker is
+/// restarted when it ends) and 1 GiB of writable memory.
+pub fn worker_command(dir: &Path, command: &[String]) -> Result<Command, String> {
+    command_with(dir, command, 3600, 1 << 30)
+}
+
+fn command_with(dir: &Path, command: &[String], cpu_seconds: u64, data_bytes: u64) -> Result<Command, String> {
     let (first, rest) = command.split_first().ok_or("the plugin's command is empty")?;
     let program = match first.strip_prefix("./") {
         Some(local) => {
@@ -120,8 +130,8 @@ pub fn command(dir: &Path, command: &[String], timeout: Duration) -> Result<Comm
     if t.prlimit {
         argv.extend([
             "prlimit".to_string(),
-            format!("--cpu={}", timeout.as_secs() + 5),
-            "--data=4294967296".into(),  // 4 GiB of writable memory
+            format!("--cpu={cpu_seconds}"),
+            format!("--data={data_bytes}"),
             "--fsize=1073741824".into(), // 1 GiB per file written
             "--nofile=512".into(),
             "--".into(),
